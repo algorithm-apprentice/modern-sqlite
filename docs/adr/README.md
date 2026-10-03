@@ -1,7 +1,8 @@
 # Architecture Decision Records
 
-All listed decisions were accepted on 2026-10-03 before the first
-implementation node began.
+ADRs 0001 through 0025 were accepted on 2026-10-03 before the first
+implementation node began. Later node-specific decisions are accepted before
+their corresponding implementation begins.
 
 1. [ADR-0001: Ground-Up C++23 Reimplementation](0001-ground-up-cpp23-reimplementation.md)
 2. [ADR-0002: SQLite Compatibility Contract](0002-sqlite-compatibility-contract.md)
@@ -28,3 +29,4 @@ implementation node began.
 23. [ADR-0023: B-Tree Page Decoding](0023-btree-page-decoding.md)
 24. [ADR-0024: Read-Only B-Tree Cursors](0024-read-only-btree-cursors.md)
 25. [ADR-0025: Read-Only Storage Diagnostics](0025-storage-diagnostics.md)
+26. [ADR-0026: SQLite-Compatible SQL Lexer](0026-sql-lexer.md)

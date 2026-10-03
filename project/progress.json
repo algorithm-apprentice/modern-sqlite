@@ -17,8 +17,9 @@
     "implement-page-cache",
     "implement-read-pager",
     "implement-btree-page",
-    "implement-btree-read"
+    "implement-btree-read",
+    "implement-storage-diagnostics"
   ],
-  "activeNode": "implement-storage-diagnostics",
+  "activeNode": "implement-lexer",
   "activeNodeState": "review_pending"
 }
