@@ -42,6 +42,51 @@ gtest_discover_tests(
     TIMEOUT 10
 )
 
+add_executable(
+  modern_sqlite_instrumentation_tests
+  unit/instrumentation/counters_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_instrumentation_tests
+  PRIVATE
+    modern_sqlite::instrumentation
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_instrumentation_tests PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_instrumentation_tests)
+gtest_discover_tests(
+  modern_sqlite_instrumentation_tests
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_instrumentation_disabled_tests
+  unit/instrumentation/disabled_test.cpp
+)
+target_include_directories(
+  modern_sqlite_instrumentation_disabled_tests
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  modern_sqlite_instrumentation_disabled_tests
+  PRIVATE
+    modern_sqlite_project_options
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_instrumentation_disabled_tests PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_instrumentation_disabled_tests)
+gtest_discover_tests(
+  modern_sqlite_instrumentation_disabled_tests
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 add_test(
   NAME project.graph

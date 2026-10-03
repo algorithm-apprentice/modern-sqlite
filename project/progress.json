@@ -3,8 +3,9 @@
   "completedNodes": [
     "document-architecture",
     "bootstrap-build",
-    "implement-bytes"
+    "implement-bytes",
+    "implement-error-result"
   ],
-  "activeNode": "implement-error-result",
+  "activeNode": "implement-instrumentation",
   "activeNodeState": "review_pending"
 }
