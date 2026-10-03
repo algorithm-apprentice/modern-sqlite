@@ -16,3 +16,4 @@ implementation node began.
 11. [ADR-0011: Typed Errors and Results](0011-typed-errors-and-results.md)
 12. [ADR-0012: Optional Instrumentation](0012-optional-instrumentation.md)
 13. [ADR-0013: Binary Coding Primitives](0013-binary-coding-primitives.md)
+14. [ADR-0014: Text and UTF-8 Primitives](0014-text-and-utf8-primitives.md)

@@ -5,8 +5,9 @@
     "bootstrap-build",
     "implement-bytes",
     "implement-error-result",
-    "implement-instrumentation"
+    "implement-instrumentation",
+    "implement-coding"
   ],
-  "activeNode": "implement-coding",
+  "activeNode": "implement-text",
   "activeNodeState": "review_pending"
 }

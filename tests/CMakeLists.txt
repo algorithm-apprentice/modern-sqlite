@@ -24,6 +24,7 @@ add_executable(
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
+  unit/text/text_test.cpp
 )
 target_link_libraries(
   modern_sqlite_unit_tests
