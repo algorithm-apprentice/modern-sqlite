@@ -10,8 +10,9 @@
     "implement-text",
     "implement-sql-value",
     "implement-collation",
-    "implement-function-registry"
+    "implement-function-registry",
+    "implement-record-codec"
   ],
-  "activeNode": "implement-record-codec",
+  "activeNode": "implement-vfs-contracts",
   "activeNodeState": "review_pending"
 }

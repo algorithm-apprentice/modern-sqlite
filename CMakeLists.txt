@@ -73,6 +73,7 @@ add_library(
     src/base/coding.cpp
     src/base/result.cpp
     src/format/record_codec.cpp
+    src/platform/vfs.cpp
     src/runtime/collation.cpp
     src/runtime/function_registry.cpp
     src/runtime/sqlite_float.cpp
@@ -121,6 +122,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/collation.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/function_registry.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/sql_value.hpp"
@@ -130,6 +132,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
   "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
+  "${PROJECT_SOURCE_DIR}/src/platform/vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/collation.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/function_registry.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/sqlite_float.cpp"
@@ -143,6 +146,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/platform/vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/collation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/function_registry_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/sql_value_test.cpp"
