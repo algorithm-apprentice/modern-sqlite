@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "modern-sqlite",
+    "status": "architecture-review",
+    "implementationLanguage": "C++23",
+    "artifactLanguage": "English"
+  },
+  "reference": {
+    "name": "SQLite",
+    "version": "3.54.0",
+    "fossilCheckIn": "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+    "gitMirrorCommit": "cb547ab3e931c7766e24834af5ef6c4578863e3d",
+    "date": "2026-10-02"
+  },
+  "workflow": {
+    "documentationFirst": true,
+    "testDrivenDevelopment": true,
+    "sequentialNodes": true,
+    "onePullRequestPerNode": true,
+    "designReviewRequired": true,
+    "codeReviewRequired": true,
+    "performanceBaselineRequiredForSensitiveNodes": true
+  },
+  "aiNativeCapabilities": [
+    "agent-contracts",
+    "machine-task-graph",
+    "tests-as-specifications",
+    "context-engineering",
+    "agent-automation",
+    "traceability"
+  ],
+  "entryPoints": [
+    "AGENTS.md",
+    "docs/architecture.md",
+    "docs/dependency-dag.md",
+    "docs/adr/README.md",
+    "project/module-graph.json"
+  ],
+  "currentNode": "document-architecture",
+  "currentNodeState": "review-pending"
+}
