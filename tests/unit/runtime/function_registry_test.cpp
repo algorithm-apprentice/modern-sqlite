@@ -162,12 +162,42 @@ TEST(FunctionRegistryTest, ExposesDeterminismCollationAndArityMetadata) {
     bool uses_collation;
   };
   constexpr std::array expected{
-      ExpectedFunction{.name = "typeof", .argument_count = 1, .exact = true},
-      ExpectedFunction{.name = "length", .argument_count = 1, .exact = true},
-      ExpectedFunction{.name = "abs", .argument_count = 1, .exact = true},
-      ExpectedFunction{.name = "lower", .argument_count = 1, .exact = true},
-      ExpectedFunction{.name = "upper", .argument_count = 1, .exact = true},
-      ExpectedFunction{.name = "sign", .argument_count = 1, .exact = true},
+      ExpectedFunction{
+          .name = "typeof",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
+      ExpectedFunction{
+          .name = "length",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
+      ExpectedFunction{
+          .name = "abs",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
+      ExpectedFunction{
+          .name = "lower",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
+      ExpectedFunction{
+          .name = "upper",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
+      ExpectedFunction{
+          .name = "sign",
+          .argument_count = 1,
+          .exact = true,
+          .uses_collation = false,
+      },
       ExpectedFunction{
           .name = "nullif",
           .argument_count = 2,
