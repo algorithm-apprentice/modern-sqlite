@@ -1645,22 +1645,17 @@ TEST(SyntaxTree, BuildsAndDestroysVeryDeepTreesWithoutRecursion) {
   source.push_back('1');
   source.append(kDepth, ')');
 
-  std::vector<Expression> expressions;
-  expressions.reserve(kDepth + 1U);
+  std::vector<Expression> expressions(kDepth + 1U);
   const SourceSpan literal = Span(kDepth, kDepth + 1U);
-  expressions.push_back(Expression{
-      .span = literal,
-      .payload =
-          LiteralExpression{
-              .kind = LiteralKind::kInteger,
-              .token = literal,
-          },
+  expressions[0].span = literal;
+  expressions[0].payload.emplace<LiteralExpression>(LiteralExpression{
+      .kind = LiteralKind::kInteger,
+      .token = literal,
   });
   for (std::size_t level = 1; level <= kDepth; ++level) {
-    expressions.push_back(Expression{
-        .span = Span(kDepth - level, kDepth + 1U + level),
-        .payload = ParenthesizedExpression{.inner = ExpressionId{level - 1U}},
-    });
+    expressions[level].span = Span(kDepth - level, kDepth + 1U + level);
+    expressions[level].payload.emplace<ParenthesizedExpression>(
+        ParenthesizedExpression{.inner = ExpressionId{level - 1U}});
   }
 
   const SourceSpan statement_span = Span(0, source.size());
