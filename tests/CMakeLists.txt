@@ -21,6 +21,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(
   modern_sqlite_unit_tests
   bootstrap/toolchain_test.cpp
+  unit/base/bytes_test.cpp
 )
 target_link_libraries(
   modern_sqlite_unit_tests
@@ -28,6 +29,7 @@ target_link_libraries(
     modern_sqlite::modern_sqlite
     GTest::gtest_main
 )
+modern_sqlite_set_project_warnings(modern_sqlite_unit_tests PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_unit_tests)
 
 include(GoogleTest)

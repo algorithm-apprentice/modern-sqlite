@@ -34,20 +34,26 @@ modern_sqlite_enable_sanitizers(modern_sqlite_project_options)
 add_library(modern_sqlite_project_warnings INTERFACE)
 modern_sqlite_set_project_warnings(modern_sqlite_project_warnings INTERFACE)
 
-add_library(modern_sqlite INTERFACE)
+add_library(
+  modern_sqlite
+  STATIC
+    src/base/bytes.cpp
+)
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
 target_include_directories(
   modern_sqlite
-  INTERFACE
+  PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
 )
 target_link_libraries(
   modern_sqlite
-  INTERFACE
+  PUBLIC
     modern_sqlite_project_options
+  PRIVATE
     modern_sqlite_project_warnings
 )
+modern_sqlite_enable_clang_tidy(modern_sqlite)
 
 if(MODERN_SQLITE_BUILD_TESTS)
   include(CTest)
@@ -57,5 +63,8 @@ if(MODERN_SQLITE_BUILD_TESTS)
 endif()
 
 modern_sqlite_add_format_targets(
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/bytes.hpp"
+  "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
 )

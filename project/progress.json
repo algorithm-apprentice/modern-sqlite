@@ -1,8 +1,9 @@
 {
   "schemaVersion": 1,
   "completedNodes": [
-    "document-architecture"
+    "document-architecture",
+    "bootstrap-build"
   ],
-  "activeNode": "bootstrap-build",
+  "activeNode": "implement-bytes",
   "activeNodeState": "review_pending"
 }
