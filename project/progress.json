@@ -9,8 +9,9 @@
     "implement-coding",
     "implement-text",
     "implement-sql-value",
-    "implement-collation"
+    "implement-collation",
+    "implement-function-registry"
   ],
-  "activeNode": "implement-function-registry",
+  "activeNode": "implement-record-codec",
   "activeNodeState": "review_pending"
 }

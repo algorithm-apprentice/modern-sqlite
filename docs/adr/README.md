@@ -20,3 +20,4 @@ implementation node began.
 15. [ADR-0015: SQL Values, Affinity, and Comparison](0015-sql-values-affinity-and-comparison.md)
 16. [ADR-0016: Collation Contracts and Built-ins](0016-collation-contracts-and-builtins.md)
 17. [ADR-0017: Scalar Function Registry](0017-scalar-function-registry.md)
+18. [ADR-0018: SQLite Record Codec](0018-record-codec.md)
