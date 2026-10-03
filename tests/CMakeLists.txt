@@ -34,6 +34,7 @@ add_executable(
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/cache/page_cache_test.cpp
+  unit/syntax/lexer_test.cpp
   unit/text/text_test.cpp
   format/record_codec_golden_test.cpp
 )
@@ -72,6 +73,28 @@ add_test(
 )
 set_tests_properties(
   diagnostics.storage_inspector_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_lexer_allocation_test
+  unit/syntax/lexer_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_lexer_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_lexer_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_lexer_allocation_test)
+add_test(
+  NAME syntax.lexer_allocation
+  COMMAND modern_sqlite_lexer_allocation_test
+)
+set_tests_properties(
+  syntax.lexer_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10
