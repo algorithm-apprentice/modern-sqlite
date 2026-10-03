@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "page-cache-review",
+    "status": "read-pager-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -45,6 +45,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "implement-page-cache",
+  "currentNode": "implement-read-pager",
   "currentNodeState": "review_pending"
 }
