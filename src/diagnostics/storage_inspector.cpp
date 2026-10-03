@@ -326,7 +326,9 @@ class Inspector final {
     report_.header = MakeHeaderReport(header, pager.page_count(), schema_format, std::uint8_t{1});
     report_.pages.reserve(pager.page_count());
     for (std::uint32_t page = 1; page <= pager.page_count(); ++page) {
-      report_.pages.push_back(StoragePageReport{.page_number = PageNumber{page}});
+      StoragePageReport page_report;
+      page_report.page_number = PageNumber{page};
+      report_.pages.push_back(std::move(page_report));
     }
     report_.summary.snapshot_page_count = pager.page_count();
   }
@@ -652,13 +654,12 @@ class Inspector final {
           .end = offset->value() + cell->encoded_size().value(),
       });
 
-      StorageCellReport cell_report{
-          .index = index,
-          .left_child = cell->left_child(),
-          .rowid = cell->rowid(),
-          .payload_bytes = cell->payload_size(),
-          .local_payload_bytes = ByteCount{cell->local_payload().size()},
-      };
+      StorageCellReport cell_report;
+      cell_report.index = index;
+      cell_report.left_child = cell->left_child();
+      cell_report.rowid = cell->rowid();
+      cell_report.payload_bytes = cell->payload_size();
+      cell_report.local_payload_bytes = ByteCount{cell->local_payload().size()};
 
       if (is_table) {
         if (!cell->rowid().has_value()) {
