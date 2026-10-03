@@ -587,7 +587,7 @@ TEST(PosixVfs, DetectsCrossProcessReservedPendingAndExclusiveLocks) {
   auto opened = vfs.Open(path, CreateMainDatabaseOptions());
   ASSERT_TRUE(opened.has_value());
 
-  for (const auto [start, length] : std::array<std::pair<off_t, off_t>, 3>{{
+  for (const auto& [start, length] : std::array<std::pair<off_t, off_t>, 3>{{
            {kReservedByte, 1},
            {kPendingByte, 1},
            {kSharedFirst, kSharedSize},
