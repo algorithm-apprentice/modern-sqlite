@@ -30,3 +30,4 @@ their corresponding implementation begins.
 24. [ADR-0024: Read-Only B-Tree Cursors](0024-read-only-btree-cursors.md)
 25. [ADR-0025: Read-Only Storage Diagnostics](0025-storage-diagnostics.md)
 26. [ADR-0026: SQLite-Compatible SQL Lexer](0026-sql-lexer.md)
+27. [ADR-0027: Immutable Source-Preserving Syntax Trees](0027-immutable-syntax-trees.md)

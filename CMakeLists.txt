@@ -84,6 +84,7 @@ add_library(
     src/storage/btree/cursor.cpp
     src/storage/btree/page.cpp
     src/storage/cache/page_cache.cpp
+    src/syntax/ast.cpp
     src/syntax/lexer.cpp
     src/text/text.cpp
 )
@@ -152,6 +153,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/page.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/cache/page_cache.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/page_number.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/ast.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
@@ -171,6 +173,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/page.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/cache/page_cache.cpp"
+  "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
@@ -191,6 +194,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/cursor_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/page_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/syntax/ast_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
