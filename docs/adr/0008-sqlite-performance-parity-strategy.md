@@ -1,6 +1,6 @@
 # ADR-0008: SQLite Performance Parity Strategy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context

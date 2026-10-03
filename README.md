@@ -5,7 +5,7 @@ preserves SQLite's durable file-format and observable database semantics while
 rebuilding the implementation around explicit ownership, testable durability
 boundaries, strict dependency direction, and an AI-native development model.
 
-The project is currently in architecture discovery. It contains no production
+The project is currently in build-system bootstrap. It contains no production
 database code and must not be used with production data.
 
 ## Reference snapshot
@@ -54,5 +54,23 @@ source-level coupling.
 - [AI project manifest](project/manifest.json)
 - [Machine-readable module graph](project/module-graph.json)
 
-All architecture decisions are currently **Proposed** and require review before
-implementation begins.
+## Build
+
+The supported local bootstrap requires CMake 3.25 or newer, Ninja, Python 3.10
+or newer, and a C++23 compiler:
+
+```sh
+cmake --preset dev-debug
+cmake --build --preset dev-debug
+ctest --preset dev-debug
+```
+
+Validate the project graph or query the single active/next-ready node with:
+
+```sh
+python3 tools/project_graph.py validate
+python3 tools/project_graph.py next-ready --json
+```
+
+The architecture ADRs are accepted. Implementation proceeds one reviewed DAG
+node at a time.

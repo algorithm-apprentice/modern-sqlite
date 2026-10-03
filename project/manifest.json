@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "architecture-review",
+    "status": "bootstrap-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -35,8 +35,16 @@
     "docs/architecture.md",
     "docs/dependency-dag.md",
     "docs/adr/README.md",
-    "project/module-graph.json"
+    "project/module-graph.json",
+    "project/progress.json"
   ],
-  "currentNode": "document-architecture",
-  "currentNodeState": "review-pending"
+  "automation": {
+    "validateProject": "python3 tools/project_graph.py validate",
+    "nextReadyNode": "python3 tools/project_graph.py next-ready --json",
+    "configure": "cmake --preset dev-debug",
+    "build": "cmake --build --preset dev-debug",
+    "test": "ctest --preset dev-debug"
+  },
+  "currentNode": "bootstrap-build",
+  "currentNodeState": "review_pending"
 }

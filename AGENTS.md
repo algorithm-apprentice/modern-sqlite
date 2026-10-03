@@ -12,8 +12,12 @@ Read these files before changing production code:
 3. `docs/dependency-dag.md`
 4. Applicable files under `docs/adr/`
 5. The selected node in `project/module-graph.json`
+6. `project/progress.json`
 
 Do not begin a node whose prerequisites are incomplete.
+
+Use `python3 tools/project_graph.py validate` before committing project metadata
+and `python3 tools/project_graph.py next-ready --json` to select work.
 
 ## Language
 

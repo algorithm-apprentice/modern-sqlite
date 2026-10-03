@@ -1,6 +1,6 @@
 # ADR-0001: Ground-Up C++23 Reimplementation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context
