@@ -26,6 +26,6 @@ function(modern_sqlite_set_project_warnings target scope)
       list(APPEND warnings -Werror)
     endif()
   endif()
+
   target_compile_options("${target}" "${scope}" ${warnings})
-endfunction()
 endfunction()
