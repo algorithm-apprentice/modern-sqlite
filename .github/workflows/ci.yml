@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        preset:
+          - dev-debug
+          - release
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Ninja on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Install Ninja on macOS
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}"
+      - name: Build
+        run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
+      - name: Test
+        run: ctest --preset "${{ matrix.preset }}"
+
+  sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Configure
+        run: cmake --preset asan-ubsan
+      - name: Build
+        run: cmake --build --preset asan-ubsan --parallel 2
+      - name: Test
+        run: ctest --preset asan-ubsan
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install quality tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-format clang-tidy ninja-build
+      - name: Configure
+        run: cmake --preset clang-tidy
+      - name: Build with clang-tidy
+        run: cmake --build --preset clang-tidy --parallel 2
+      - name: Check formatting
+        run: cmake --build --preset clang-tidy --target check-format
+      - name: Test
+        run: ctest --preset clang-tidy

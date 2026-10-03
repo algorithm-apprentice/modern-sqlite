@@ -1,6 +1,6 @@
 # ADR-0005: Test-Driven Development
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0002: SQLite Compatibility Contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context

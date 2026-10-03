@@ -1,6 +1,6 @@
 # ADR-0006: AI-Native Sequential Workflow
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context

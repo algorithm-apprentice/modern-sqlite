@@ -1,6 +1,6 @@
 # ADR-0009: Build and Toolchain Baseline
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 
 ## Context

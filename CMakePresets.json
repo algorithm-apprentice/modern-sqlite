@@ -1,0 +1,132 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "MODERN_SQLITE_BUILD_TESTS": "ON",
+        "MODERN_SQLITE_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "displayName": "Development Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Address and Undefined Behavior Sanitizers",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "MODERN_SQLITE_ENABLE_ASAN": "ON",
+        "MODERN_SQLITE_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Thread Sanitizer",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "MODERN_SQLITE_ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "clang-tidy",
+      "displayName": "Clang-Tidy",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "MODERN_SQLITE_ENABLE_CLANG_TIDY": "ON"
+      }
+    },
+    {
+      "name": "benchmark",
+      "displayName": "Optimized Benchmark Build",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build/benchmark"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "clang-tidy",
+      "configurePreset": "clang-tidy"
+    },
+    {
+      "name": "benchmark",
+      "configurePreset": "benchmark"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "required-tests",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "dev-debug",
+      "inherits": "required-tests",
+      "configurePreset": "dev-debug"
+    },
+    {
+      "name": "release",
+      "inherits": "required-tests",
+      "configurePreset": "release"
+    },
+    {
+      "name": "asan-ubsan",
+      "inherits": "required-tests",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "inherits": "required-tests",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "clang-tidy",
+      "inherits": "required-tests",
+      "configurePreset": "clang-tidy"
+    }
+  ]
+}

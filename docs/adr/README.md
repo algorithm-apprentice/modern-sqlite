@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
-All current decisions are **Proposed** and require review before the first
-implementation pull request.
+All listed decisions were accepted on 2026-10-03 before the first
+implementation node began.
 
 1. [ADR-0001: Ground-Up C++23 Reimplementation](0001-ground-up-cpp23-reimplementation.md)
 2. [ADR-0002: SQLite Compatibility Contract](0002-sqlite-compatibility-contract.md)
