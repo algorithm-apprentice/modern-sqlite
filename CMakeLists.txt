@@ -79,6 +79,7 @@ add_library(
     src/runtime/function_registry.cpp
     src/runtime/sqlite_float.cpp
     src/runtime/sql_value.cpp
+    src/storage/cache/page_cache.cpp
     src/text/text.cpp
 )
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
@@ -128,6 +129,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/collation.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/function_registry.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/sql_value.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/cache/page_cache.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
@@ -141,6 +143,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/runtime/sqlite_float.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/sqlite_float.hpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/sql_value.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/cache/page_cache.cpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
@@ -154,6 +157,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/collation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/function_registry_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/sql_value_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
 )
