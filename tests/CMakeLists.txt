@@ -22,6 +22,7 @@ add_executable(
   modern_sqlite_unit_tests
   bootstrap/toolchain_test.cpp
   unit/base/bytes_test.cpp
+  unit/base/coding_test.cpp
   unit/base/result_test.cpp
 )
 target_link_libraries(
