@@ -93,7 +93,7 @@ struct IdentifierExpression {
 
 struct WildcardExpression {
   SourceSpan asterisk;
-  std::optional<QualifiedName> qualifier;
+  std::optional<QualifiedName> qualifier{};
 };
 
 struct UnaryExpression {
@@ -111,7 +111,7 @@ struct BinaryExpression {
 
 struct FunctionCallExpression {
   QualifiedName name;
-  std::vector<ExpressionId> arguments;
+  std::vector<ExpressionId> arguments{};
   bool distinct = false;
 };
 
@@ -165,19 +165,19 @@ enum class LimitSyntax : std::uint8_t {
 struct ResultColumn {
   SourceSpan span;
   ExpressionId expression;
-  std::optional<SourceSpan> alias;
+  std::optional<SourceSpan> alias{};
 };
 
 struct TableSource {
   SourceSpan span;
   QualifiedName name;
-  std::optional<SourceSpan> alias;
+  std::optional<SourceSpan> alias{};
 };
 
 struct LimitClause {
   SourceSpan span;
   ExpressionId limit;
-  std::optional<ExpressionId> offset;
+  std::optional<ExpressionId> offset{};
   LimitSyntax syntax = LimitSyntax::kLimitOnly;
 };
 
@@ -185,15 +185,15 @@ struct SelectStatement {
   SourceSpan span;
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
   std::vector<ResultColumn> result_columns;
-  std::optional<TableSource> from;
-  std::optional<ExpressionId> where;
-  std::optional<LimitClause> limit;
+  std::optional<TableSource> from{};
+  std::optional<ExpressionId> where{};
+  std::optional<LimitClause> limit{};
 };
 
 struct IndexedTerm {
   SourceSpan span;
   ExpressionId expression;
-  std::optional<SourceSpan> collation;
+  std::optional<SourceSpan> collation{};
   SortOrder order = SortOrder::kDefault;
 };
 
@@ -234,15 +234,15 @@ using ColumnConstraintPayload =
 
 struct ColumnConstraint {
   SourceSpan span;
-  std::optional<SourceSpan> name;
+  std::optional<SourceSpan> name{};
   ColumnConstraintPayload payload;
 };
 
 struct ColumnDefinition {
   SourceSpan span;
   SourceSpan name;
-  std::optional<SourceSpan> type_name;
-  std::vector<ColumnConstraint> constraints;
+  std::optional<SourceSpan> type_name{};
+  std::vector<ColumnConstraint> constraints{};
 };
 
 struct PrimaryKeyTableConstraint {
@@ -265,7 +265,7 @@ using TableConstraintPayload =
 
 struct TableConstraint {
   SourceSpan span;
-  std::optional<SourceSpan> name;
+  std::optional<SourceSpan> name{};
   TableConstraintPayload payload;
 };
 
@@ -275,7 +275,7 @@ struct CreateTableStatement {
   bool if_not_exists = false;
   QualifiedName name;
   std::vector<ColumnDefinition> columns;
-  std::vector<TableConstraint> constraints;
+  std::vector<TableConstraint> constraints{};
   bool without_rowid = false;
   bool strict = false;
 };
@@ -287,7 +287,7 @@ struct CreateIndexStatement {
   QualifiedName name;
   QualifiedName table;
   std::vector<IndexedTerm> terms;
-  std::optional<ExpressionId> where;
+  std::optional<ExpressionId> where{};
 };
 
 using Statement = std::variant<SelectStatement, CreateTableStatement, CreateIndexStatement>;

@@ -1139,7 +1139,11 @@ TEST(SyntaxTree, RejectsInvalidSpansAndQualifiedNames) {
             .span = identifier,
             .payload =
                 IdentifierExpression{
-                    .name = QualifiedName{.span = identifier},
+                    .name =
+                        QualifiedName{
+                            .span = identifier,
+                            .parts = {},
+                        },
                 },
         },
     };
@@ -1473,13 +1477,17 @@ TEST(SyntaxTree, RejectsQualifiedFormsForbiddenBySQLiteGrammar) {
 
 TEST(SyntaxTree, RejectsInvalidStatementShapes) {
   {
-    Statement statement = SelectStatement{.span = Span(0, 8)};
+    Statement statement = SelectStatement{
+        .span = Span(0, 8),
+        .result_columns = {},
+    };
     ExpectMisuse(SyntaxTree::Create("SELECT 1", {}, std::move(statement)));
   }
   {
     Statement statement = CreateTableStatement{
         .span = Span(0, 16),
         .name = Name(Span(13, 14), {Span(13, 14)}),
+        .columns = {},
     };
     ExpectMisuse(SyntaxTree::Create("CREATE TABLE t()", {}, std::move(statement)));
   }
@@ -1488,6 +1496,7 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
         .span = Span(0, 21),
         .name = Name(Span(13, 14), {Span(13, 14)}),
         .table = Name(Span(18, 19), {Span(18, 19)}),
+        .terms = {},
     };
     ExpectMisuse(SyntaxTree::Create("CREATE INDEX i ON t()", {}, std::move(statement)));
   }
