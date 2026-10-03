@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-record-codec",
+  "currentNode": "implement-vfs-contracts",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
