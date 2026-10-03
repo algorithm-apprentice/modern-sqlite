@@ -7,8 +7,9 @@
     "implement-error-result",
     "implement-instrumentation",
     "implement-coding",
-    "implement-text"
+    "implement-text",
+    "implement-sql-value"
   ],
-  "activeNode": "implement-sql-value",
+  "activeNode": "implement-collation",
   "activeNodeState": "review_pending"
 }

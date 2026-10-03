@@ -18,3 +18,4 @@ implementation node began.
 13. [ADR-0013: Binary Coding Primitives](0013-binary-coding-primitives.md)
 14. [ADR-0014: Text and UTF-8 Primitives](0014-text-and-utf8-primitives.md)
 15. [ADR-0015: SQL Values, Affinity, and Comparison](0015-sql-values-affinity-and-comparison.md)
+16. [ADR-0016: Collation Contracts and Built-ins](0016-collation-contracts-and-builtins.md)

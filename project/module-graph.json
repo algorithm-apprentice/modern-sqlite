@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-sql-value",
+  "currentNode": "implement-collation",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
