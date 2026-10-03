@@ -13,3 +13,4 @@ implementation node began.
 8. [ADR-0008: SQLite Performance Parity Strategy](0008-sqlite-performance-parity-strategy.md)
 9. [ADR-0009: Build and Toolchain Baseline](0009-build-and-toolchain-baseline.md)
 10. [ADR-0010: Byte and Buffer Primitives](0010-byte-and-buffer-primitives.md)
+11. [ADR-0011: Typed Errors and Results](0011-typed-errors-and-results.md)
