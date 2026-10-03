@@ -72,6 +72,7 @@ add_library(
     src/base/bytes.cpp
     src/base/coding.cpp
     src/base/result.cpp
+    src/format/record_codec.cpp
     src/runtime/collation.cpp
     src/runtime/function_registry.cpp
     src/runtime/sqlite_float.cpp
@@ -118,6 +119,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/bytes.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/collation.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/function_registry.hpp"
@@ -126,6 +128,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
+  "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/collation.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/function_registry.cpp"
@@ -137,10 +140,12 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/collation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/function_registry_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/sql_value_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
 )
