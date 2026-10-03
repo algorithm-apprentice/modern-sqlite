@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-btree-read",
+  "currentNode": "implement-storage-diagnostics",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

@@ -94,6 +94,15 @@ Error Error::Create(ErrorCode code, std::string message, std::source_location lo
   };
 }
 
+Error Error::OutOfMemory(std::source_location location) noexcept {
+  return Error{
+      ErrorCode::kOutOfMemory,
+      ToSqlitePrimaryCode(ErrorCode::kOutOfMemory),
+      {},
+      location,
+  };
+}
+
 std::expected<Error, SqliteCodeMappingError> Error::FromSqliteCode(int sqlite_code,
                                                                    std::string message,
                                                                    std::source_location location) {

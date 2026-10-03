@@ -111,6 +111,8 @@ class Error final {
   [[nodiscard]] static Error Create(
       ErrorCode code, std::string message,
       std::source_location location = std::source_location::current());
+  [[nodiscard]] static Error OutOfMemory(
+      std::source_location location = std::source_location::current()) noexcept;
 
   [[nodiscard]] static std::expected<Error, SqliteCodeMappingError> FromSqliteCode(
       int sqlite_code, std::string message,
@@ -125,7 +127,8 @@ class Error final {
   [[nodiscard]] std::string ToString() const;
 
  private:
-  Error(ErrorCode code, int sqlite_code, std::string message, std::source_location location)
+  Error(ErrorCode code, int sqlite_code, std::string message,
+        std::source_location location) noexcept
       : code_(code), sqlite_code_(sqlite_code), message_(std::move(message)), location_(location) {}
 
   ErrorCode code_;

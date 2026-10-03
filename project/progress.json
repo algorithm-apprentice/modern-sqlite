@@ -16,8 +16,9 @@
     "implement-posix-vfs",
     "implement-page-cache",
     "implement-read-pager",
-    "implement-btree-page"
+    "implement-btree-page",
+    "implement-btree-read"
   ],
-  "activeNode": "implement-btree-read",
+  "activeNode": "implement-storage-diagnostics",
   "activeNodeState": "review_pending"
 }
