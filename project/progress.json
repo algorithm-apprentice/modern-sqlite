@@ -11,8 +11,9 @@
     "implement-sql-value",
     "implement-collation",
     "implement-function-registry",
-    "implement-record-codec"
+    "implement-record-codec",
+    "implement-vfs-contracts"
   ],
-  "activeNode": "implement-vfs-contracts",
+  "activeNode": "implement-posix-vfs",
   "activeNodeState": "review_pending"
 }

@@ -22,3 +22,4 @@ implementation node began.
 17. [ADR-0017: Scalar Function Registry](0017-scalar-function-registry.md)
 18. [ADR-0018: SQLite Record Codec](0018-record-codec.md)
 19. [ADR-0019: Virtual File System Contracts](0019-vfs-contracts.md)
+20. [ADR-0020: POSIX Virtual File System](0020-posix-vfs.md)

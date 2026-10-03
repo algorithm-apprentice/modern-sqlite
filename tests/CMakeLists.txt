@@ -51,6 +51,26 @@ gtest_discover_tests(
 )
 
 add_executable(
+  modern_sqlite_posix_tests
+  platform/posix_vfs_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_posix_tests
+  PRIVATE
+    modern_sqlite::modern_sqlite
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_posix_tests PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_posix_tests)
+gtest_discover_tests(
+  modern_sqlite_posix_tests
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS platform
+    TIMEOUT 10
+)
+
+add_executable(
   modern_sqlite_instrumentation_tests
   unit/instrumentation/counters_test.cpp
 )
