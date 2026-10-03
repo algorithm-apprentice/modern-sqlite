@@ -25,3 +25,4 @@ implementation node began.
 20. [ADR-0020: POSIX Virtual File System](0020-posix-vfs.md)
 21. [ADR-0021: Page Cache](0021-page-cache.md)
 22. [ADR-0022: Read-Only Pager](0022-read-pager.md)
+23. [ADR-0023: B-Tree Page Decoding](0023-btree-page-decoding.md)

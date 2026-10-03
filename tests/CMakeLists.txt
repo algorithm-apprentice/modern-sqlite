@@ -30,6 +30,7 @@ add_executable(
   unit/runtime/collation_test.cpp
   unit/runtime/function_registry_test.cpp
   unit/runtime/sql_value_test.cpp
+  unit/storage/btree/page_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/text/text_test.cpp
   format/record_codec_golden_test.cpp

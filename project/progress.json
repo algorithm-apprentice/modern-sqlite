@@ -14,8 +14,9 @@
     "implement-record-codec",
     "implement-vfs-contracts",
     "implement-posix-vfs",
-    "implement-page-cache"
+    "implement-page-cache",
+    "implement-read-pager"
   ],
-  "activeNode": "implement-read-pager",
+  "activeNode": "implement-btree-page",
   "activeNodeState": "review_pending"
 }
