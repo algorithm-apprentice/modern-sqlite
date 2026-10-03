@@ -72,6 +72,8 @@ add_library(
     src/base/bytes.cpp
     src/base/coding.cpp
     src/base/result.cpp
+    src/runtime/sqlite_float.cpp
+    src/runtime/sql_value.cpp
     src/text/text.cpp
 )
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
@@ -115,11 +117,15 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/sql_value.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
+  "${PROJECT_SOURCE_DIR}/src/runtime/sqlite_float.cpp"
+  "${PROJECT_SOURCE_DIR}/src/runtime/sqlite_float.hpp"
+  "${PROJECT_SOURCE_DIR}/src/runtime/sql_value.cpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
@@ -127,5 +133,6 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/runtime/sql_value_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
 )

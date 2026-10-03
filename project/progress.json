@@ -6,8 +6,9 @@
     "implement-bytes",
     "implement-error-result",
     "implement-instrumentation",
-    "implement-coding"
+    "implement-coding",
+    "implement-text"
   ],
-  "activeNode": "implement-text",
+  "activeNode": "implement-sql-value",
   "activeNodeState": "review_pending"
 }
