@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-read-pager",
+  "currentNode": "implement-btree-page",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

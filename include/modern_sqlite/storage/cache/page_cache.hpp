@@ -1,9 +1,7 @@
 #ifndef MODERN_SQLITE_STORAGE_CACHE_PAGE_CACHE_HPP_
 #define MODERN_SQLITE_STORAGE_CACHE_PAGE_CACHE_HPP_
 
-#include <compare>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -11,21 +9,9 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/storage/page_number.hpp"
 
 namespace modern_sqlite {
-
-class PageNumber final {
- public:
-  constexpr PageNumber() noexcept = default;
-  constexpr explicit PageNumber(std::uint32_t value) noexcept : value_(value) {}
-
-  [[nodiscard]] constexpr std::uint32_t value() const noexcept { return value_; }
-
-  constexpr auto operator<=>(const PageNumber&) const noexcept = default;
-
- private:
-  std::uint32_t value_ = 0;
-};
 
 class PageCache;
 
