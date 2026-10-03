@@ -18,8 +18,9 @@
     "implement-read-pager",
     "implement-btree-page",
     "implement-btree-read",
-    "implement-storage-diagnostics"
+    "implement-storage-diagnostics",
+    "implement-lexer"
   ],
-  "activeNode": "implement-lexer",
+  "activeNode": "implement-ast",
   "activeNodeState": "review_pending"
 }
