@@ -8,8 +8,9 @@
     "implement-instrumentation",
     "implement-coding",
     "implement-text",
-    "implement-sql-value"
+    "implement-sql-value",
+    "implement-collation"
   ],
-  "activeNode": "implement-collation",
+  "activeNode": "implement-function-registry",
   "activeNodeState": "review_pending"
 }

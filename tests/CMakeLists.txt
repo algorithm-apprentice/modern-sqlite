@@ -25,6 +25,7 @@ add_executable(
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
   unit/runtime/collation_test.cpp
+  unit/runtime/function_registry_test.cpp
   unit/runtime/sql_value_test.cpp
   unit/text/text_test.cpp
 )
