@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-page-cache",
+  "currentNode": "implement-read-pager",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
