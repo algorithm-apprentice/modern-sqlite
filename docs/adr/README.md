@@ -15,3 +15,4 @@ implementation node began.
 10. [ADR-0010: Byte and Buffer Primitives](0010-byte-and-buffer-primitives.md)
 11. [ADR-0011: Typed Errors and Results](0011-typed-errors-and-results.md)
 12. [ADR-0012: Optional Instrumentation](0012-optional-instrumentation.md)
+13. [ADR-0013: Binary Coding Primitives](0013-binary-coding-primitives.md)

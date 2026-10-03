@@ -70,6 +70,7 @@ add_library(
   modern_sqlite
   STATIC
     src/base/bytes.cpp
+    src/base/coding.cpp
     src/base/result.cpp
 )
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
@@ -110,13 +111,16 @@ endif()
 
 modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/bytes.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
+  "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"

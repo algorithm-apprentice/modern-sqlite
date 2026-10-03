@@ -4,8 +4,9 @@
     "document-architecture",
     "bootstrap-build",
     "implement-bytes",
-    "implement-error-result"
+    "implement-error-result",
+    "implement-instrumentation"
   ],
-  "activeNode": "implement-instrumentation",
+  "activeNode": "implement-coding",
   "activeNodeState": "review_pending"
 }
