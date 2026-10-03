@@ -1,0 +1,393 @@
+{
+  "schemaVersion": 1,
+  "edgeDirection": "node-to-prerequisite",
+  "currentNode": "document-architecture",
+  "canonicalOrder": [
+    "document-architecture",
+    "bootstrap-build",
+    "implement-bytes",
+    "implement-error-result",
+    "implement-instrumentation",
+    "implement-coding",
+    "implement-text",
+    "implement-sql-value",
+    "implement-collation",
+    "implement-function-registry",
+    "implement-record-codec",
+    "implement-vfs-contracts",
+    "implement-posix-vfs",
+    "implement-page-cache",
+    "implement-read-pager",
+    "implement-btree-page",
+    "implement-btree-read",
+    "implement-storage-diagnostics",
+    "implement-lexer",
+    "implement-ast",
+    "implement-parser",
+    "implement-catalog-model",
+    "implement-catalog-loader",
+    "implement-bytecode",
+    "implement-read-vm",
+    "implement-binder",
+    "implement-logical-plan",
+    "implement-basic-optimizer",
+    "implement-read-lowering",
+    "implement-read-session-api",
+    "build-read-compatibility-harness",
+    "build-read-performance-baseline",
+    "implement-journal-contracts",
+    "implement-rollback-journal",
+    "implement-write-pager",
+    "implement-btree-write",
+    "implement-transaction-coordinator",
+    "implement-dml-ddl",
+    "build-writable-mvp-harness",
+    "establish-write-performance-baseline",
+    "implement-index-planning",
+    "implement-advanced-sql",
+    "implement-concurrency-locking",
+    "implement-wal",
+    "implement-c-api-compatibility",
+    "implement-extensions",
+    "harden-engine"
+  ],
+  "nodes": {
+    "document-architecture": {
+      "layer": "documentation",
+      "dependsOn": [],
+      "deliverable": "Reviewed source analysis, target architecture, ADRs, AI manifest, and canonical dependency graph.",
+      "acceptance": [
+        "Reference claims are traceable to the pinned SQLite source.",
+        "The graph is acyclic and the canonical order is valid.",
+        "All architecture decisions are reviewed before implementation."
+      ],
+      "performanceSensitive": false
+    },
+    "bootstrap-build": {
+      "layer": "build",
+      "dependsOn": ["document-architecture"],
+      "deliverable": "C++23 CMake, Ninja, CTest, GoogleTest, formatting, static analysis, presets, and graph automation.",
+      "acceptance": [
+        "Configure, build, and unit-test smoke paths work on macOS and Linux.",
+        "Zero selected tests is a failure.",
+        "Graph validation and ready-node selection are automated."
+      ],
+      "performanceSensitive": false
+    },
+    "implement-bytes": {
+      "layer": "base",
+      "dependsOn": ["bootstrap-build"],
+      "deliverable": "Byte views, owned byte buffers, checked slicing, and strong byte-count types.",
+      "acceptance": ["Focused tests cover empty, boundary, overlap, and out-of-range behavior."],
+      "performanceSensitive": true
+    },
+    "implement-error-result": {
+      "layer": "base",
+      "dependsOn": ["bootstrap-build"],
+      "deliverable": "Typed error categories, SQLite code mapping, and Result aliases.",
+      "acceptance": ["Tests prove value/error propagation and no success-shaped fallback."],
+      "performanceSensitive": false
+    },
+    "implement-instrumentation": {
+      "layer": "instrumentation",
+      "dependsOn": ["bootstrap-build", "implement-error-result"],
+      "deliverable": "Optional standard-library-only counters and scoped collection with zero ordinary-build cost.",
+      "acceptance": ["Tests prove disabled hooks compile out and scoped counters cannot leak across operations."],
+      "performanceSensitive": false
+    },
+    "implement-coding": {
+      "layer": "base",
+      "dependsOn": ["implement-bytes", "implement-error-result"],
+      "deliverable": "Endian coding, SQLite varints, checked arithmetic, and checksums needed by early formats.",
+      "acceptance": ["Independent SQLite golden vectors cover valid, boundary, overlong, and truncated inputs."],
+      "performanceSensitive": true
+    },
+    "implement-text": {
+      "layer": "text",
+      "dependsOn": ["implement-bytes", "implement-error-result"],
+      "deliverable": "UTF-8 views, source spans, SQLite lexical character classes, and case helpers.",
+      "acceptance": ["Tests cover ASCII, UTF-8 boundaries, invalid sequences where relevant, and source offsets."],
+      "performanceSensitive": true
+    },
+    "implement-sql-value": {
+      "layer": "runtime",
+      "dependsOn": ["implement-text", "implement-error-result"],
+      "deliverable": "NULL, integer, real, text, blob, affinity, numeric conversion, and comparison primitives.",
+      "acceptance": ["Differential value tests match SQLite conversion and NULL behavior for the supported surface."],
+      "performanceSensitive": true
+    },
+    "implement-collation": {
+      "layer": "runtime",
+      "dependsOn": ["implement-sql-value", "implement-text"],
+      "deliverable": "BINARY, NOCASE, RTRIM, and custom collation contracts.",
+      "acceptance": ["Ordering and equality vectors match pinned SQLite."],
+      "performanceSensitive": true
+    },
+    "implement-function-registry": {
+      "layer": "runtime",
+      "dependsOn": ["implement-sql-value", "implement-collation"],
+      "deliverable": "Function signatures, scalar invocation, determinism flags, and initial core functions.",
+      "acceptance": ["Tests cover arity, NULL propagation, errors, and deterministic metadata."],
+      "performanceSensitive": true
+    },
+    "implement-record-codec": {
+      "layer": "format",
+      "dependsOn": ["implement-coding", "implement-sql-value", "implement-collation"],
+      "deliverable": "SQLite record headers, serial types, field decoding, encoding, and index-key comparison.",
+      "acceptance": ["Bidirectional and independent SQLite golden vectors cover malformed and boundary records."],
+      "performanceSensitive": true
+    },
+    "implement-vfs-contracts": {
+      "layer": "platform",
+      "dependsOn": ["implement-bytes", "implement-error-result"],
+      "deliverable": "File, locking, shared-memory, clock, randomness, and durability interfaces.",
+      "acceptance": ["Contract tests use deterministic fake files and expose every failure explicitly."],
+      "performanceSensitive": true
+    },
+    "implement-posix-vfs": {
+      "layer": "platform",
+      "dependsOn": ["implement-vfs-contracts"],
+      "deliverable": "Linux/macOS POSIX VFS with positioned I/O, sync, truncation, deletion, and locking.",
+      "acceptance": ["Filesystem tests cover short I/O, sync ordering, lock conflicts, and cleanup."],
+      "performanceSensitive": true
+    },
+    "implement-page-cache": {
+      "layer": "storage-cache",
+      "dependsOn": ["implement-bytes", "implement-error-result"],
+      "deliverable": "Typed page frames, pin handles, dirty state, replacement, and memory-pressure contracts.",
+      "acceptance": ["Tests cover pinning, eviction, dirty-page exclusion, capacity, and deterministic writeback requests."],
+      "performanceSensitive": true
+    },
+    "implement-read-pager": {
+      "layer": "pager",
+      "dependsOn": ["implement-coding", "implement-vfs-contracts", "implement-posix-vfs", "implement-page-cache"],
+      "deliverable": "Read-only page service, database-header validation, read transactions, and cache invalidation.",
+      "acceptance": ["SQLite-created databases of supported page sizes are read consistently and corrupt headers fail explicitly."],
+      "performanceSensitive": true
+    },
+    "implement-btree-page": {
+      "layer": "btree",
+      "dependsOn": ["implement-coding", "implement-record-codec"],
+      "deliverable": "Pure B-tree page, cell, overflow, freelist, and pointer-map decoders.",
+      "acceptance": ["Golden and fuzz tests cover every page kind, malformed offset, overflow, and fragmentation boundary."],
+      "performanceSensitive": true
+    },
+    "implement-btree-read": {
+      "layer": "btree",
+      "dependsOn": ["implement-read-pager", "implement-btree-page", "implement-record-codec", "implement-collation"],
+      "deliverable": "Read-only table and index cursors with seek, first, last, next, previous, and payload access.",
+      "acceptance": ["Traversal and seek results match SQLite across generated rowid and index databases."],
+      "performanceSensitive": true
+    },
+    "implement-storage-diagnostics": {
+      "layer": "diagnostics",
+      "dependsOn": ["implement-btree-read", "implement-btree-page", "implement-record-codec"],
+      "deliverable": "Read-only database-header, page, B-tree, record, freelist, and corruption inspection command.",
+      "acceptance": ["Diagnostics use production decoders, never mutate the database, and produce stable machine-readable output for golden databases."],
+      "performanceSensitive": false
+    },
+    "implement-lexer": {
+      "layer": "syntax",
+      "dependsOn": ["implement-text", "implement-error-result"],
+      "deliverable": "SQLite-compatible tokenization with precise spans and diagnostics.",
+      "acceptance": ["Token streams match pinned SQLite for the supported grammar corpus and malformed input."],
+      "performanceSensitive": true
+    },
+    "implement-ast": {
+      "layer": "syntax",
+      "dependsOn": ["implement-text", "implement-error-result"],
+      "deliverable": "Immutable syntax nodes that preserve literal syntax and contain no runtime value, catalog, cursor, register, or bytecode state.",
+      "acceptance": ["Ownership and source-span tests prove safe construction and destruction of deep trees."],
+      "performanceSensitive": false
+    },
+    "implement-parser": {
+      "layer": "syntax",
+      "dependsOn": ["implement-lexer", "implement-ast"],
+      "deliverable": "Pure parser for the initial SQL subset with deterministic diagnostics.",
+      "acceptance": ["Positive and negative parser corpora cover precedence, limits, malformed SQL, and full input consumption."],
+      "performanceSensitive": true
+    },
+    "implement-catalog-model": {
+      "layer": "catalog",
+      "dependsOn": ["implement-ast", "implement-collation", "implement-function-registry"],
+      "deliverable": "Immutable schemas, tables, columns, indexes, root-page IDs, and statistics metadata.",
+      "acceptance": ["Tests cover identity, lookup, versioning, and schema snapshot ownership."],
+      "performanceSensitive": true
+    },
+    "implement-catalog-loader": {
+      "layer": "catalog",
+      "dependsOn": ["implement-catalog-model", "implement-parser", "implement-btree-read", "implement-record-codec"],
+      "deliverable": "Read `sqlite_schema`, parse stored DDL, build catalog snapshots, and detect schema changes.",
+      "acceptance": ["Catalogs from SQLite-created databases match expected objects and corrupt schema fails explicitly."],
+      "performanceSensitive": true
+    },
+    "implement-bytecode": {
+      "layer": "bytecode",
+      "dependsOn": ["implement-sql-value", "implement-catalog-model", "implement-error-result"],
+      "deliverable": "Typed opcodes, operands, registers, cursors, labels, immutable programs, and verifier.",
+      "acceptance": ["Verifier tests reject invalid register, cursor, jump, and resource lifetimes."],
+      "performanceSensitive": true
+    },
+    "implement-read-vm": {
+      "layer": "vm",
+      "dependsOn": ["implement-bytecode", "implement-btree-read", "implement-record-codec", "implement-function-registry"],
+      "deliverable": "Hand-authored read programs, registers, B-tree cursors, comparisons, projection, and row suspension.",
+      "acceptance": ["VM tests execute hand-built programs and match expected rows, errors, and reset behavior."],
+      "performanceSensitive": true
+    },
+    "implement-binder": {
+      "layer": "binder",
+      "dependsOn": ["implement-parser", "implement-catalog-model", "implement-function-registry", "implement-collation"],
+      "deliverable": "Name, column, function, affinity, and collation resolution into bound identifiers.",
+      "acceptance": ["Differential tests cover ambiguity, missing names, aliases, and supported coercion rules."],
+      "performanceSensitive": true
+    },
+    "implement-logical-plan": {
+      "layer": "planner",
+      "dependsOn": ["implement-binder", "implement-catalog-model"],
+      "deliverable": "Logical scans, filters, projections, limits, and statement plans.",
+      "acceptance": ["Plan tests assert semantics without depending on bytecode addresses."],
+      "performanceSensitive": false
+    },
+    "implement-basic-optimizer": {
+      "layer": "planner",
+      "dependsOn": ["implement-logical-plan", "implement-catalog-model"],
+      "deliverable": "Deterministic table-scan and rowid access selection with explicit cost data.",
+      "acceptance": ["Plan-choice tests cover full scans, rowid equality, impossible predicates, and stable explain output."],
+      "performanceSensitive": true
+    },
+    "implement-read-lowering": {
+      "layer": "lowering",
+      "dependsOn": ["implement-basic-optimizer", "implement-bytecode"],
+      "deliverable": "Physical read plans lowered into verified bytecode.",
+      "acceptance": ["End-to-end compiler tests compare verified programs and execution results."],
+      "performanceSensitive": true
+    },
+    "implement-read-session-api": {
+      "layer": "session",
+      "dependsOn": ["implement-catalog-loader", "implement-parser", "implement-binder", "implement-read-lowering", "implement-read-vm", "implement-posix-vfs"],
+      "deliverable": "RAII database and prepared-statement API for open, prepare, bind, step, reset, and finalize.",
+      "acceptance": ["Read-only SQL results and errors match pinned SQLite for the supported matrix."],
+      "performanceSensitive": true
+    },
+    "build-read-compatibility-harness": {
+      "layer": "verification",
+      "dependsOn": ["implement-read-session-api"],
+      "deliverable": "Golden databases, differential SQL traces, model tests, fuzz targets, and offline diagnostics.",
+      "acceptance": ["SQLite-write/Modern-read compatibility runs reproducibly with pinned provenance."],
+      "performanceSensitive": false
+    },
+    "build-read-performance-baseline": {
+      "layer": "performance",
+      "dependsOn": ["build-read-compatibility-harness", "implement-instrumentation"],
+      "deliverable": "Matched SQLite read benchmark, strict report schema, provenance, counters, and profiling workflow.",
+      "acceptance": ["Every benchmark verifies correctness and rejects empty, malformed, skipped, or non-finite results."],
+      "performanceSensitive": true
+    },
+    "implement-journal-contracts": {
+      "layer": "journal",
+      "dependsOn": ["implement-coding", "implement-vfs-contracts", "implement-error-result"],
+      "deliverable": "Journal backend, page-image, savepoint, recovery, and commit-order contracts.",
+      "acceptance": ["Fake-backend tests prove state transitions and ordering without real storage."],
+      "performanceSensitive": true
+    },
+    "implement-rollback-journal": {
+      "layer": "journal",
+      "dependsOn": ["implement-journal-contracts", "implement-posix-vfs", "implement-coding"],
+      "deliverable": "SQLite-compatible rollback-journal DELETE mode and hot-journal recovery.",
+      "acceptance": ["Golden journals and deterministic torn-write/power-loss cases recover to SQLite-equivalent states."],
+      "performanceSensitive": true
+    },
+    "implement-write-pager": {
+      "layer": "pager",
+      "dependsOn": ["implement-read-pager", "implement-rollback-journal", "implement-journal-contracts"],
+      "deliverable": "Writable pages, pager state machine, commit, rollback, savepoints, and spill ordering.",
+      "acceptance": ["Every mutating I/O boundary has a deterministic failure and recovery test."],
+      "performanceSensitive": true
+    },
+    "implement-btree-write": {
+      "layer": "btree",
+      "dependsOn": ["implement-btree-read", "implement-write-pager", "implement-btree-page"],
+      "deliverable": "Insert, delete, balancing, page allocation, overflow mutation, root creation, and clear/drop.",
+      "acceptance": ["SQLite reads generated files, integrity_check passes, and model operations match a reference map."],
+      "performanceSensitive": true
+    },
+    "implement-transaction-coordinator": {
+      "layer": "transaction",
+      "dependsOn": ["implement-btree-write", "implement-write-pager"],
+      "deliverable": "Single-database implicit/explicit transactions, statement rollback, and savepoints.",
+      "acceptance": ["State-machine and crash tests prove atomic visibility and rollback behavior."],
+      "performanceSensitive": true
+    },
+    "implement-dml-ddl": {
+      "layer": "sql",
+      "dependsOn": ["implement-transaction-coordinator", "implement-read-session-api", "implement-parser", "implement-binder", "implement-bytecode", "implement-basic-optimizer", "implement-btree-write"],
+      "deliverable": "Basic CREATE TABLE, INSERT, UPDATE, DELETE, and catalog mutation lowering.",
+      "acceptance": ["Differential SQL traces match rows, types, errors, changes, and database contents."],
+      "performanceSensitive": true
+    },
+    "build-writable-mvp-harness": {
+      "layer": "verification",
+      "dependsOn": ["implement-dml-ddl", "implement-read-session-api", "implement-transaction-coordinator"],
+      "deliverable": "Bidirectional format, crash, model, sanitizer, fuzz, and integrity-check harness for the writable MVP.",
+      "acceptance": ["Modern-write/SQLite-read and SQLite-write/Modern-read matrices pass reproducibly."],
+      "performanceSensitive": false
+    },
+    "establish-write-performance-baseline": {
+      "layer": "performance",
+      "dependsOn": ["build-writable-mvp-harness", "build-read-performance-baseline"],
+      "deliverable": "Matched insert, update, delete, commit, rollback, allocation, I/O, and work-count baselines.",
+      "acceptance": ["Reports separate default and matched durability configurations and verify final contents."],
+      "performanceSensitive": true
+    },
+    "implement-index-planning": {
+      "layer": "planner",
+      "dependsOn": ["implement-btree-write", "implement-basic-optimizer", "implement-catalog-loader", "build-writable-mvp-harness"],
+      "deliverable": "Index creation, index scans, covering scans, selectivity estimates, and ANALYZE/statistics support.",
+      "acceptance": ["Plan and result tests match SQLite for supported index cases and retain scan fallbacks."],
+      "performanceSensitive": true
+    },
+    "implement-advanced-sql": {
+      "layer": "sql",
+      "dependsOn": ["implement-index-planning", "implement-dml-ddl"],
+      "deliverable": "Joins, sorting, aggregates, subqueries, CTEs, views, constraints, triggers, and remaining core SQL in reviewed slices.",
+      "acceptance": ["Each feature slice adds its own differential, malformed, and performance tests."],
+      "performanceSensitive": true
+    },
+    "implement-concurrency-locking": {
+      "layer": "transaction",
+      "dependsOn": ["implement-write-pager", "implement-transaction-coordinator", "build-writable-mvp-harness"],
+      "deliverable": "Multi-connection rollback-mode locking, busy handling, interruption, and deadlock-aware contracts.",
+      "acceptance": ["Deterministic multi-process tests cover legal lock transitions, busy outcomes, and crash release."],
+      "performanceSensitive": true
+    },
+    "implement-wal": {
+      "layer": "journal",
+      "dependsOn": ["implement-journal-contracts", "implement-concurrency-locking", "implement-page-cache", "implement-posix-vfs", "implement-coding"],
+      "deliverable": "WAL frames, checksums, wal-index, snapshots, read marks, checkpoints, and recovery.",
+      "acceptance": ["Bidirectional WAL interoperability, lock-state, checkpoint, snapshot, and crash matrices pass."],
+      "performanceSensitive": true
+    },
+    "implement-c-api-compatibility": {
+      "layer": "api",
+      "dependsOn": ["implement-advanced-sql", "implement-concurrency-locking", "implement-wal", "implement-read-session-api"],
+      "deliverable": "Reviewed SQLite-compatible C API subset over the native C++ session layer.",
+      "acceptance": ["API ownership, callback, error-code, reentrancy, and ABI tests cover the declared compatibility matrix."],
+      "performanceSensitive": true
+    },
+    "implement-extensions": {
+      "layer": "extensions",
+      "dependsOn": ["implement-c-api-compatibility", "implement-index-planning", "implement-advanced-sql"],
+      "deliverable": "Virtual tables and selected extensions through explicit extension contracts.",
+      "acceptance": ["Each extension is separately scoped, tested, benchmarked, and documented."],
+      "performanceSensitive": true
+    },
+    "harden-engine": {
+      "layer": "verification",
+      "dependsOn": ["implement-extensions", "establish-write-performance-baseline", "build-read-performance-baseline", "implement-wal"],
+      "deliverable": "Integrated compatibility, crash, sanitizer, fuzz, compiler, concurrency, and performance gates.",
+      "acceptance": ["The complete declared compatibility matrix passes with reproducible artifacts and no unresolved review finding."],
+      "performanceSensitive": true
+    }
+  }
+}
