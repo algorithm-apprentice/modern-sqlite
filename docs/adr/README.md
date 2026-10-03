@@ -27,3 +27,4 @@ implementation node began.
 22. [ADR-0022: Read-Only Pager](0022-read-pager.md)
 23. [ADR-0023: B-Tree Page Decoding](0023-btree-page-decoding.md)
 24. [ADR-0024: Read-Only B-Tree Cursors](0024-read-only-btree-cursors.md)
+25. [ADR-0025: Read-Only Storage Diagnostics](0025-storage-diagnostics.md)

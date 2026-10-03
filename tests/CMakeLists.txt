@@ -24,6 +24,7 @@ add_executable(
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
+  unit/diagnostics/storage_inspector_test.cpp
   unit/format/record_codec_test.cpp
   unit/pager/read_pager_test.cpp
   unit/platform/vfs_test.cpp
@@ -49,6 +50,28 @@ include(GoogleTest)
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_storage_inspector_oom_test
+  unit/diagnostics/storage_inspector_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_storage_inspector_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_storage_inspector_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_storage_inspector_oom_test)
+add_test(
+  NAME diagnostics.storage_inspector_oom
+  COMMAND modern_sqlite_storage_inspector_oom_test
+)
+set_tests_properties(
+  diagnostics.storage_inspector_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10
@@ -150,4 +173,22 @@ set_tests_properties(
     LABELS cmake
     TIMEOUT 10
     WILL_FAIL TRUE
+)
+
+add_test(
+  NAME cli.storage_inspector
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/cli/storage_inspector_cli_test.py"
+    --binary "$<TARGET_FILE:modern_sqlite_inspect>"
+    --fixture
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/storage_diagnostics/sqlite-3.54.0-storage.db"
+    --golden
+      "${PROJECT_SOURCE_DIR}/tests/golden/storage_inspector.json"
+)
+set_tests_properties(
+  cli.storage_inspector
+  PROPERTIES
+    LABELS cli
+    TIMEOUT 10
 )
