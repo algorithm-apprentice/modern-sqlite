@@ -7,6 +7,7 @@ Checks: >
   cppcoreguidelines-init-variables,
   misc-const-correctness,
   modernize-*,
+  -modernize-use-trailing-return-type,
   performance-*,
   readability-avoid-const-params-in-decls,
   readability-container-size-empty,

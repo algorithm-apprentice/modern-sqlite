@@ -12,3 +12,4 @@ implementation node began.
 7. [ADR-0007: Rollback Journal Before WAL](0007-rollback-journal-before-wal.md)
 8. [ADR-0008: SQLite Performance Parity Strategy](0008-sqlite-performance-parity-strategy.md)
 9. [ADR-0009: Build and Toolchain Baseline](0009-build-and-toolchain-baseline.md)
+10. [ADR-0010: Byte and Buffer Primitives](0010-byte-and-buffer-primitives.md)
