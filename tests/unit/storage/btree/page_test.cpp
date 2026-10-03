@@ -223,7 +223,7 @@ TEST(BtreePageGeometry, RejectsInvalidPageAndUsableSizes) {
       {512, 513},
       {512, 256},
   }};
-  for (const auto [page_size, usable_size] : kInvalid) {
+  for (const auto& [page_size, usable_size] : kInvalid) {
     SCOPED_TRACE(page_size);
     SCOPED_TRACE(usable_size);
     const auto geometry = BtreePageGeometry::Create(ByteCount{page_size}, ByteCount{usable_size});
