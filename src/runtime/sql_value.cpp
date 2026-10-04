@@ -450,6 +450,16 @@ std::optional<ByteView> SqlValue::blob_value() const noexcept {
   return std::nullopt;
 }
 
+std::size_t SqlValue::owned_capacity_bytes() const noexcept {
+  if (const auto* text = std::get_if<std::string>(&storage_); text != nullptr) {
+    return text->capacity();
+  }
+  if (const auto* blob = std::get_if<ByteBuffer>(&storage_); blob != nullptr) {
+    return blob->capacity().value();
+  }
+  return 0;
+}
+
 SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity) {
   if (affinity == TypeAffinity::kNone || affinity == TypeAffinity::kBlob ||
       value.type() == SqlValueType::kNull || value.type() == SqlValueType::kBlob) {

@@ -93,6 +93,18 @@ TEST(SqlValue, ClonesTextAndBlobOnlyWhenExplicitlyRequested) {
   EXPECT_NE(blob_view->data(), cloned_blob_view->data());
 }
 
+TEST(SqlValue, ReportsRetainedDynamicStorageCapacity) {
+  std::string text;
+  text.reserve(1024);
+  text = "payload";
+  const SqlValue text_value = SqlValue::Text(std::move(text));
+  const SqlValue blob_value = BlobValue("blob");
+
+  EXPECT_GE(text_value.owned_capacity_bytes(), 1024U);
+  EXPECT_GE(blob_value.owned_capacity_bytes(), 4U);
+  EXPECT_EQ(SqlValue::Integer(1).owned_capacity_bytes(), 0U);
+}
+
 TEST(SqlValue, NormalizesNaNToNullAndPreservesInfinityAndSignedZero) {
   const SqlValue nan = SqlValue::Real(std::numeric_limits<double>::quiet_NaN());
   const SqlValue positive_infinity = SqlValue::Real(std::numeric_limits<double>::infinity());

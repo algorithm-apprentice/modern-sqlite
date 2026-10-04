@@ -22,8 +22,9 @@
     "implement-lexer",
     "implement-ast",
     "implement-parser",
-    "implement-catalog-model"
+    "implement-catalog-model",
+    "implement-catalog-loader"
   ],
-  "activeNode": "implement-catalog-loader",
+  "activeNode": "implement-bytecode",
   "activeNodeState": "review_pending"
 }

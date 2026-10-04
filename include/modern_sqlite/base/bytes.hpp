@@ -99,6 +99,7 @@ class ByteBuffer {
   [[nodiscard]] ByteBuffer Clone() const;
 
   [[nodiscard]] ByteCount size() const noexcept { return ByteCount{storage_.size()}; }
+  [[nodiscard]] ByteCount capacity() const noexcept { return ByteCount{storage_.capacity()}; }
   [[nodiscard]] bool empty() const noexcept { return storage_.empty(); }
   [[nodiscard]] ByteView view() const noexcept { return ByteView{storage_}; }
   [[nodiscard]] MutableByteView mutable_view() noexcept { return MutableByteView{storage_}; }
