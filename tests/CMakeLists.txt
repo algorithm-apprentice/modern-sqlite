@@ -30,6 +30,7 @@ add_executable(
   unit/catalog/catalog_loader_test.cpp
   unit/diagnostics/storage_inspector_test.cpp
   unit/format/record_codec_test.cpp
+  unit/optimizer/physical_plan_test.cpp
   unit/pager/read_pager_test.cpp
   unit/planner/logical_plan_test.cpp
   unit/platform/vfs_test.cpp
@@ -170,6 +171,50 @@ add_test(
 )
 set_tests_properties(
   planner.logical_plan_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_optimizer_oom_test
+  unit/optimizer/physical_plan_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_optimizer_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_optimizer_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_optimizer_oom_test)
+add_test(
+  NAME optimizer.physical_plan_oom
+  COMMAND modern_sqlite_optimizer_oom_test
+)
+set_tests_properties(
+  optimizer.physical_plan_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_optimizer_allocation_test
+  unit/optimizer/physical_plan_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_optimizer_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_optimizer_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_optimizer_allocation_test)
+add_test(
+  NAME optimizer.physical_plan_allocation
+  COMMAND modern_sqlite_optimizer_allocation_test
+)
+set_tests_properties(
+  optimizer.physical_plan_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10
