@@ -464,6 +464,12 @@ class CatalogBuilder final {
             return status;
           }
         }
+        if (column.missing_record_value != nullptr && !column.default_expression.has_value()) {
+          return Failure(ValidationError(CatalogValidationCode::kInvalidTableShape,
+                                         CatalogObjectKind::kTable, table_index,
+                                         "missing-record value requires a default expression",
+                                         CatalogMemberKind::kColumn, column_index));
+        }
 
         TypeAffinity affinity = DetermineTypeAffinity(
             column.declared_type ? std::optional<std::string_view>{*column.declared_type}
@@ -489,6 +495,12 @@ class CatalogBuilder final {
           effective_not_null = ConflictAction::kAbort;
         }
 
+        std::shared_ptr<const SqlValue> missing_record_value;
+        if (column.missing_record_value != nullptr) {
+          missing_record_value = std::make_shared<const SqlValue>(
+              ApplyAffinity(column.missing_record_value->Clone(), affinity));
+        }
+
         columns.push_back(CatalogColumn{
             .name = std::move(column.name),
             .declared_type = std::move(column.declared_type),
@@ -498,6 +510,7 @@ class CatalogBuilder final {
             .effective_not_null_conflict = effective_not_null,
             .primary_key = column.primary_key,
             .default_expression = column.default_expression,
+            .missing_record_value = std::move(missing_record_value),
         });
       }
 

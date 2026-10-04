@@ -193,6 +193,8 @@ Columns remain in declaration order. For each column the loader derives:
 - the last declared collation, defaulting to `BINARY`;
 - the last NOT NULL conflict action;
 - the last DEFAULT expression;
+- an affinity-applied missing-record value when the DEFAULT has an
+  ALTER-compatible literal form;
 - primary-key participation; and
 - every column CHECK expression in parse order.
 
@@ -306,8 +308,20 @@ partial predicates require known functions to be deterministic. DEFAULT
 follows SQLite's constant-or-function shape within the parser's supported
 expression subset but defers function lookup and arity, matching schema
 initialization. Unresolved double-quoted identifiers do not fall back to
-strings: the pinned DQS-DDL policy is disabled. This pass performs no value
-evaluation and stores no registry pointers.
+strings: the pinned DQS-DDL policy is disabled.
+
+ADR-0036 narrows one exception to the otherwise non-evaluating loader. It
+materializes literal DEFAULT forms that SQLite permits for an ALTER-added
+column, then applies the derived column affinity. NULL, signed numeric, text,
+blob, and unquoted TRUE/FALSE literals are supported. Quoted identifiers never
+materialize as boolean literals. The immutable `SqlValue` is owned by a
+nullable `std::shared_ptr<const SqlValue>` named
+`CatalogColumn::missing_record_value`; shared immutable ownership keeps
+catalog input aggregates copyable. The value is used only when a record is
+physically shorter than the requested field. A default expression outside
+that safe literal subset remains retained but has no materialized value, so
+the later VM returns `ErrorCode::kGeneric` only if a short record actually
+needs it. No function is invoked and no registry pointer is stored.
 
 ### `sqlite_stat1`
 
@@ -420,8 +434,9 @@ Red-first tests cover:
   normalization, legacy single-quoted column terms, automatic ascending
   suffixes, explicit descending suffixes, expression terms, and partial
   predicates;
-- DEFAULT variable normalization plus CHECK, index-expression, and
-  partial-predicate identifier/context validation;
+- DEFAULT variable normalization and missing-record literal materialization,
+  plus CHECK, index-expression, and partial-predicate identifier/context
+  validation;
 - automatic-root attachment in rowid order and rowless WITHOUT ROWID primary
   indexes;
 - shared raw-header normalization and locking-page root rejection;

@@ -310,6 +310,46 @@ struct BoundExpression {
 };
 ```
 
+ADR-0036 adds one bound expression hint needed to preserve SQLite's narrow
+scalar AND/OR dead-side simplification:
+
+```cpp
+enum class BoundTruthHint : std::uint8_t {
+  kNone,
+  kAlwaysFalse,
+  kAlwaysTrue,
+};
+
+struct BoundExpressionProperties {
+  TypeAffinity affinity;
+  std::optional<BoundCollationId> collation;
+  bool has_explicit_collation;
+  BoundTruthHint truth_hint;
+};
+```
+
+The hint is not general constant folding. It is set only for unresolved
+unquoted TRUE/FALSE or a direct underscore-free decimal/hexadecimal INTEGER
+token whose materialized value is nonnegative and no greater than
+`INT32_MAX`, matching SQLite's signed-32-bit literal test. Zero is always
+false; other eligible values are always true. High-bit hexadecimal tokens
+retain their signed 64-bit SQL value but do not receive a hint.
+
+The binder also records the exact parser-generated constants for a non-NULL
+literal tested with `IS NULL` or `IS NOT NULL`. SQLite marks those expressions
+always false or always true before scalar AND/OR code generation. The
+eligibility matrix follows the parser rather than general value evaluation:
+INTEGER, REAL, TEXT, and BLOB literals qualify, including the parser's
+permitted unary numeric wrappers; a NULL left operand, column, function,
+COLLATE wrapper, or other computed expression does not.
+
+Parentheses remain transparent because they bind to the same expression.
+Alias references copy the target properties and therefore the hint. COLLATE
+explicitly clears the hint because SQLite's COLLATE node does not propagate
+the parser truth flags. Unary plus/minus, likelihood, REAL, NULL, TEXT, BLOB,
+underscored integer, and larger integer expressions otherwise retain
+`kNone`.
+
 An absent property collation means that the expression has no defined
 collation. `BoundCollationId` indexes an owned case-insensitive name pool; an
 entry may remain unresolved when no operation consumes it. Comparison and
@@ -729,6 +769,9 @@ Red-first unit and differential tests cover:
 - literal materialization at signed integer, transparent signed-minimum,
   leading-zero signed-minimum, hexadecimal, REAL, string, and blob
   boundaries, plus malformed public-AST literal rejection;
+- literal truth-hint boundaries for TRUE/FALSE, direct signed-32-bit unsigned
+  tokens, high-bit hexadecimal values, underscores, large integers, COLLATE,
+  and unary wrappers;
 - anonymous, explicit, named, repeated, sparse, source-order, first-spelling,
   and over-limit variables;
 - `WHERE`, `LIMIT`, and `OFFSET` scope;

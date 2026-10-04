@@ -112,7 +112,7 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   static_assert(!std::is_convertible_v<RegisterId, CursorId>);
   static_assert(sizeof(Instruction) <= 32);
 
-  const std::array<Instruction, 20> instructions = {
+  const std::array<Instruction, 22> instructions = {
       HaltInstruction{},
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
@@ -133,6 +133,8 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
           .affinity = TypeAffinity::kNumeric,
           .output = Reg(1),
       },
+      MustBeIntegerInstruction{.input = Reg(0), .output = Reg(1)},
+      RealAffinityInstruction{.input = Reg(0), .output = Reg(1)},
       CastInstruction{
           .input = Reg(0),
           .target = CastTarget::kText,
@@ -176,11 +178,12 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
       },
       ResultRowInstruction{.first = Reg(0), .count = 1},
   };
-  const std::array<std::string_view, 20> names = {
-      "halt",    "load_constant",  "load_parameter", "copy",       "unary",
-      "binary",  "apply_affinity", "cast",           "open_read",  "close",
-      "rewind",  "next",           "seek_rowid",     "read_field", "read_rowid",
-      "compare", "call_scalar",    "jump",           "jump_if",    "result_row",
+  const std::array<std::string_view, 22> names = {
+      "halt",       "load_constant",  "load_parameter",  "copy",          "unary",
+      "binary",     "apply_affinity", "must_be_integer", "real_affinity", "cast",
+      "open_read",  "close",          "rewind",          "next",          "seek_rowid",
+      "read_field", "read_rowid",     "compare",         "call_scalar",   "jump",
+      "jump_if",    "result_row",
   };
 
   for (std::size_t index = 0; index < instructions.size(); ++index) {
@@ -472,6 +475,18 @@ TEST(BytecodeProgramTest, RejectsInvalidDescriptorAndStorageSpecificOperations) 
   descriptor.index_columns.pop_back();
   bad_descriptor.cursors.push_back(std::move(descriptor));
   EXPECT_EQ(VerifyError(bad_descriptor), ProgramErrorCode::kInvalidCursorDescriptor);
+
+  ProgramInput missing_constant = ScalarProgramInput();
+  auto constant_descriptor = RowIdCursorDescriptor();
+  constant_descriptor.fields[0].missing_value_kind = MissingFieldValueKind::kConstant;
+  missing_constant.cursors.push_back(std::move(constant_descriptor));
+  EXPECT_EQ(VerifyError(missing_constant), ProgramErrorCode::kInvalidCursorDescriptor);
+
+  ProgramInput forbidden_rowid_default = ScalarProgramInput();
+  auto rowid_descriptor = RowIdCursorDescriptor();
+  rowid_descriptor.fields[1].missing_value_kind = MissingFieldValueKind::kUnsupported;
+  forbidden_rowid_default.cursors.push_back(std::move(rowid_descriptor));
+  EXPECT_EQ(VerifyError(forbidden_rowid_default), ProgramErrorCode::kInvalidCursorDescriptor);
 
   ProgramInput bad_seek;
   bad_seek.register_count = 1;

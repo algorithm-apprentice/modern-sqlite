@@ -411,6 +411,22 @@ template <typename Visitor>
   terms.reserve(CountConjuncts(bound_select, *where));
   CollectConjuncts(bound_select, *where, &terms);
 
+  if (source.single_row) {
+    analysis.guards.reserve(terms.size());
+    for (const BoundExpressionId term : terms) {
+      const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, term);
+      if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
+        continue;
+      }
+      if (truth.has_value()) {
+        analysis.empty = true;
+        break;
+      }
+      analysis.guards.push_back(term);
+    }
+    return analysis;
+  }
+
   std::size_t cutoff = terms.size();
   std::size_t guard_count = 0;
   std::size_t unknown_count = 0;
@@ -605,6 +621,14 @@ template <typename Visitor>
       known_false = true;
       return false;
     }
+    if (source.single_row) {
+      if (guard_index >= guard_predicates.size() || guard_predicates[guard_index] != predicate) {
+        invalid = true;
+        return false;
+      }
+      ++guard_index;
+      return true;
+    }
     if (IsStatementGuard(bound_select, predicate)) {
       if (guard_index >= guard_predicates.size() || guard_predicates[guard_index] != predicate) {
         invalid = true;
@@ -706,7 +730,8 @@ template <typename Visitor>
     }
     for (const BoundExpressionId predicate : guard.predicates) {
       if (!IsValidExpressionId(bound_select, predicate) ||
-          !IsStatementGuard(bound_select, predicate)) {
+          (source.single_row ? ExpressionDependsOnSource(bound_select, predicate)
+                             : !IsStatementGuard(bound_select, predicate))) {
         return std::unexpected{InvariantFailure("physical guard predicate is invalid")};
       }
     }

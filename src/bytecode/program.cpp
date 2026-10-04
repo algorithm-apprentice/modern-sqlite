@@ -125,6 +125,16 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(MissingFieldValueKind kind) noexcept {
+  switch (kind) {
+    case MissingFieldValueKind::kNull:
+    case MissingFieldValueKind::kConstant:
+    case MissingFieldValueKind::kUnsupported:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(BytecodeSortOrder order) noexcept {
   switch (order) {
     case BytecodeSortOrder::kAscending:
@@ -372,16 +382,26 @@ template <typename T>
     }
 
     for (const auto& field : cursor.fields) {
-      if (!IsValid(field.kind)) {
+      if (!IsValid(field.kind) || !IsValid(field.missing_value_kind)) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                        ProgramError::kNoInstruction, cursor_index));
       }
       if (field.kind == CursorFieldSourceKind::kRecordField) {
-        if (field.record_field >= cursor.record_field_count) {
+        const bool constant_is_valid =
+            field.missing_value_kind == MissingFieldValueKind::kConstant &&
+            field.missing_value.has_value() &&
+            field.missing_value->value() < input.constants.size();
+        const bool no_constant_is_valid =
+            field.missing_value_kind != MissingFieldValueKind::kConstant &&
+            !field.missing_value.has_value();
+        if (field.record_field >= cursor.record_field_count ||
+            (!constant_is_valid && !no_constant_is_valid)) {
           return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                          ProgramError::kNoInstruction, cursor_index));
         }
-      } else if (cursor.storage != CursorStorageKind::kRowIdTable || field.record_field != 0) {
+      } else if (cursor.storage != CursorStorageKind::kRowIdTable || field.record_field != 0 ||
+                 field.missing_value_kind != MissingFieldValueKind::kNull ||
+                 field.missing_value.has_value()) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                        ProgramError::kNoInstruction, cursor_index));
       }
@@ -502,6 +522,12 @@ template <typename T>
             if (!IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
             }
+            if (auto result = check_register(operation.input, index); !result) {
+              return result;
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, MustBeIntegerInstruction> ||
+                               std::is_same_v<Operation, RealAffinityInstruction>) {
             if (auto result = check_register(operation.input, index); !result) {
               return result;
             }
@@ -802,6 +828,8 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
           } else if constexpr (std::is_same_v<Operation, CopyInstruction> ||
                                std::is_same_v<Operation, UnaryInstruction> ||
                                std::is_same_v<Operation, ApplyAffinityInstruction> ||
+                               std::is_same_v<Operation, MustBeIntegerInstruction> ||
+                               std::is_same_v<Operation, RealAffinityInstruction> ||
                                std::is_same_v<Operation, CastInstruction>) {
             if (auto result = require_initialized(operation.input); !result) {
               return result;
@@ -969,6 +997,10 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "binary";
     case InstructionKind::kApplyAffinity:
       return "apply_affinity";
+    case InstructionKind::kMustBeInteger:
+      return "must_be_integer";
+    case InstructionKind::kRealAffinity:
+      return "real_affinity";
     case InstructionKind::kCast:
       return "cast";
     case InstructionKind::kOpenRead:

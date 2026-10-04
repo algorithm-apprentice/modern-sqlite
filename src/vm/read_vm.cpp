@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -191,7 +192,7 @@ struct ShiftArguments {
     return numeric.integer_value();
   }
   const auto real = numeric.real_value();
-  if (!real.has_value()) {
+  if (!real.has_value() || !std::isfinite(*real)) {
     return std::nullopt;
   }
   const auto minimum = static_cast<double>(std::numeric_limits<std::int64_t>::min());
@@ -741,6 +742,22 @@ struct ReadVm::Impl {
     return SetRegister(operation.output, std::move(output));
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const MustBeIntegerInstruction& operation) {
+    const std::optional<std::int64_t> integer = LosslessRowId(Register(operation.input));
+    if (!integer.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    return SetRegister(operation.output, SqlValue::Integer(*integer));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RealAffinityInstruction& operation) {
+    const SqlValue& input = Register(operation.input);
+    SqlValue output = input.type() == SqlValueType::kInteger
+                          ? SqlValue::Real(static_cast<double>(input.integer_value().value_or(0)))
+                          : input.Clone();
+    return SetRegister(operation.output, std::move(output));
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CastInstruction& operation) {
     SqlValue output = CastValue(Register(operation.input).Clone(), operation.target);
     return SetRegister(operation.output, std::move(output));
@@ -972,7 +989,26 @@ struct ReadVm::Impl {
       if (!field.has_value()) {
         return std::unexpected(std::move(field.error()));
       }
-      value = std::move(*field);
+      const bool physically_missing =
+          runtime.record.has_value() && source.record_field >= runtime.record->field_count();
+      if (!physically_missing) {
+        value = std::move(*field);
+      } else {
+        switch (source.missing_value_kind) {
+          case MissingFieldValueKind::kNull:
+            break;
+          case MissingFieldValueKind::kConstant:
+            if (!source.missing_value.has_value()) {
+              return std::unexpected(VmError(ErrorCode::kInternal,
+                                             "missing-field constant descriptor has no constant"));
+            }
+            value = program_->constant(*source.missing_value).Clone();
+            break;
+          case MissingFieldValueKind::kUnsupported:
+            return std::unexpected(VmError(
+                ErrorCode::kGeneric, "unsupported default for physically missing record field"));
+        }
+      }
     }
     return SetRegister(operation.output, std::move(value));
   }

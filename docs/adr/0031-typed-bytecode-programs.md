@@ -148,9 +148,18 @@ enum class CursorFieldSourceKind : std::uint8_t {
   kRowId,
 };
 
+enum class MissingFieldValueKind : std::uint8_t {
+  kNull,
+  kConstant,
+  kUnsupported,
+};
+
 struct CursorFieldSource {
   CursorFieldSourceKind kind = CursorFieldSourceKind::kRecordField;
   std::uint32_t record_field = 0;
+  MissingFieldValueKind missing_value_kind =
+      MissingFieldValueKind::kNull;
+  std::optional<ConstantId> missing_value{};
 };
 
 enum class BytecodeSortOrder : std::uint8_t {
@@ -183,6 +192,12 @@ PRIMARY KEY alias to `kRowId`; for a WITHOUT ROWID table it maps logical
 columns to their reordered physical fields; for an index it exposes physical
 key and suffix fields. `ReadFieldInstruction` therefore does not need table,
 index, column, AST, or catalog types.
+
+ADR-0036 adds the missing-field policy to distinguish a physically absent
+field from a stored NULL. A record field may return NULL, clone a referenced
+program constant, or fail explicitly when its catalog default could not be
+materialized. Rowid-backed fields carry no missing value. The verifier checks
+the enum, optional constant, and legal combinations.
 
 The later prepared statement retains the immutable catalog snapshot
 separately from the bytecode program. Lowering copies only the schema version
@@ -384,6 +399,28 @@ bitwise operations, concatenation, SQL AND/OR, affinity, CAST, comparisons,
 COLLATE, and registered scalar functions. Registers are mutable, so
 `LIMIT`/`OFFSET` lower to integer constants, arithmetic, comparison, and
 branches without a dedicated counter opcode.
+
+ADR-0036 extends this instruction set with:
+
+```cpp
+struct MustBeIntegerInstruction {
+  RegisterId input;
+  RegisterId output;
+};
+
+struct RealAffinityInstruction {
+  RegisterId input;
+  RegisterId output;
+};
+```
+
+`MustBeIntegerInstruction` performs SQLite's strict lossless INTEGER
+requirement for LIMIT/OFFSET and can fail at runtime with type mismatch.
+`RealAffinityInstruction` performs only the INTEGER-to-REAL conversion that
+SQLite emits after reading a REAL-affinity column; it does not parse TEXT.
+Both instructions follow the existing input/output aliasing, register
+validation, definite-initialization, and 32-byte instruction-variant
+contracts.
 
 Pattern operators, aggregates, sorting, joins, subprograms, coroutines,
 writes, transactions, virtual tables, triggers, and schema mutation remain
