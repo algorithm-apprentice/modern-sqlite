@@ -31,3 +31,4 @@ their corresponding implementation begins.
 25. [ADR-0025: Read-Only Storage Diagnostics](0025-storage-diagnostics.md)
 26. [ADR-0026: SQLite-Compatible SQL Lexer](0026-sql-lexer.md)
 27. [ADR-0027: Immutable Source-Preserving Syntax Trees](0027-immutable-syntax-trees.md)
+28. [ADR-0028: Pure SQLite-Compatible SQL Parser](0028-pure-sql-parser.md)

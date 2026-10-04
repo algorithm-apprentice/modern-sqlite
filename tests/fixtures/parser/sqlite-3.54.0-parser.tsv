@@ -1,0 +1,66 @@
+# SQLite 3.54.0 parser differential corpus
+# Fossil check-in: 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2
+# Git mirror commit: cb547ab3e931c7766e24834af5ef6c4578863e3d
+# Generated sqlite3.c SHA-256: 4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6
+# Oracle build: mkdir build && cd build && /path/to/sqlite/configure --disable-shared --enable-static --disable-readline && make sqlite3.c
+# Oracle probe: cc -O2 -I build sqlite_parser_corpus_probe.c build/sqlite3.c -lpthread -ldl -lm -o sqlite_parser_corpus_probe && ./sqlite_parser_corpus_probe
+# Format: case-name<TAB>sqlite-outcome<TAB>modern-outcome<TAB>SQL
+# sqlite-outcome: ok, semantic_error, or syntax_error from sqlite3_prepare_v3
+# modern-outcome: ok, unsupported, unexpected, or illegal
+literal_select	ok	ok	SELECT NULL, 1, 1_2.5, 'x', x'CAFE', CURRENT_DATE, ?1;
+hexadecimal_quoted_number	ok	ok	SELECT 0xDE_AD;
+precedence_select	ok	ok	SELECT NOT 1 = 2 OR 3 AND 4 + 5 * 6;
+like_and_collate	ok	ok	SELECT 1 NOT LIKE 2, 'a' || 'b' COLLATE nocase;
+select_alias_limit	ok	ok	SELECT DISTINCT 1 AS x LIMIT 10 OFFSET 2;
+select_comma_limit	ok	ok	SELECT ALL 1 LIMIT 2, 3;
+defaults	ok	ok	CREATE TABLE x(a DEFAULT true, b DEFAULT false, c DEFAULT word, d DEFAULT -1, e DEFAULT (1 + 2));
+column_constraints	semantic_error	ok	CREATE TABLE x(id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(10, 2) NOT NULL UNIQUE COLLATE nocase DEFAULT 'x', CHECK(id > 0)) STRICT;
+expression_index	semantic_error	ok	CREATE INDEX idx ON t(lower(a) COLLATE nocase DESC, b + 1 ASC) WHERE a = true;
+fallback_identifier	semantic_error	ok	SELECT abort;
+join_keyword_identifier	semantic_error	ok	SELECT left;
+indexed_expression	semantic_error	ok	SELECT indexed;
+quoted_qualified_name	semantic_error	ok	SELECT 'x'.y;
+function_all	semantic_error	ok	SELECT f(ALL);
+function_all_star	syntax_error	unexpected	SELECT f(ALL *);
+function_order_by	semantic_error	unsupported	SELECT f(ORDER BY 1);
+malformed_function_order	syntax_error	unexpected	SELECT f(ORDER);
+adjacent_table_constraints	ok	ok	CREATE TABLE x(a, CONSTRAINT c PRIMARY KEY(a) CONSTRAINT d UNIQUE(a));
+deferrable_constraint	ok	unsupported	CREATE TABLE x(a DEFERRABLE);
+not_deferrable_constraint	ok	unsupported	CREATE TABLE x(a NOT DEFERRABLE);
+table_options	ok	ok	CREATE TABLE x(a INT PRIMARY KEY) STRICT, WITHOUT ROWID;
+empty_statements	ok	ok	 ; ; SELECT 1; SELECT 2;
+trailing_comment	ok	ok	SELECT 1 /* trailing */
+indexed_alias	syntax_error	unexpected	SELECT 1 INDEXED;
+indexed_type	syntax_error	unexpected	CREATE TABLE x(a INDEXED);
+invalid_wildcard_operator	syntax_error	unexpected	SELECT * + 1;
+invalid_wildcard_alias	syntax_error	unexpected	SELECT * AS x;
+invalid_qualified_wildcard_alias	syntax_error	unexpected	SELECT t.* x FROM t;
+invalid_incomplete_create	syntax_error	unexpected	CREATE;
+invalid_ddl_order_by	syntax_error	unexpected	CREATE TABLE x(a) ORDER BY a;
+invalid_without_option	syntax_error	unexpected	CREATE TABLE x(a) WITHOUT;
+current_time_call	syntax_error	unexpected	SELECT current_date();
+qualified_current_time	syntax_error	unexpected	SELECT CURRENT_DATE.x;
+bare_cast	syntax_error	unexpected	SELECT cast;
+leading_table_option_comma	ok	ok	CREATE TABLE x(a INT) , STRICT;
+unterminated_parenthesis	syntax_error	unexpected	SELECT (1;
+cast_expression	ok	unsupported	SELECT CAST(1 AS TEXT);
+order_by	ok	unsupported	SELECT 1 ORDER BY 1;
+compound_select	ok	unsupported	SELECT 1 UNION SELECT 2;
+common_table_expression	ok	unsupported	WITH x AS (SELECT 1) SELECT * FROM x;
+join	ok	unsupported	SELECT * FROM (SELECT 1) a JOIN (SELECT 2) b;
+window_expression	ok	unsupported	SELECT sum(1) OVER ();
+filter_expression	ok	unsupported	SELECT sum(1) FILTER (WHERE 1);
+window_clause	ok	unsupported	SELECT 1 WINDOW w AS ();
+create_table_as	ok	unsupported	CREATE TABLE x AS SELECT 1;
+generated_column	ok	unsupported	CREATE TABLE x(a INT, b INT GENERATED ALWAYS AS (a + 1));
+references_constraint	ok	unsupported	CREATE TABLE x(a REFERENCES y);
+indexed_nested_collation	ok	ok	CREATE INDEX idx ON t(a COLLATE nocase + b);
+indexed_repeated_collation	ok	ok	CREATE INDEX idx ON t(a COLLATE nocase COLLATE binary);
+is_distinct_from	semantic_error	unsupported	SELECT a IS DISTINCT FROM b;
+not_null_operator	ok	unsupported	SELECT 1 NOT NULL;
+isnull_operator	ok	unsupported	SELECT 1 ISNULL;
+between_operator	ok	unsupported	SELECT 1 BETWEEN 0 AND 2;
+in_operator	ok	unsupported	SELECT 1 IN (1);
+json_pointer	ok	unsupported	SELECT '{}' -> 'x';
+vector_expression	semantic_error	unsupported	SELECT (1, 2);
+illegal_token	syntax_error	illegal	SELECT @;
