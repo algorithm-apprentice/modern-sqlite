@@ -779,13 +779,13 @@ The reviewed implementation's final Apple Clang 21 arm64 benchmark produced:
 
 | Workload | Modern median | SQLite median | Ratio | Modern allocations | SQLite allocations | Instructions | Registers |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Constant row | 2466.26 ns | 902.83 ns | 2.731704 | 36 | 18 | 4 | 4 |
-| Full scan | 1807.46 ns | 840.79 ns | 2.149716 | 55 | 21 | 8 | 4 |
-| Direct rowid | 1838.67 ns | 762.96 ns | 2.409915 | 58 | 19 | 7 | 5 |
-| Residual rowid | 2421.58 ns | 1102.67 ns | 2.196104 | 65 | 26 | 12 | 9 |
-| LIMIT/OFFSET | 3224.78 ns | 1262.59 ns | 2.554104 | 75 | 31 | 33 | 15 |
+| Constant row | 2171.33 ns | 984.95 ns | 2.204518 | 36 | 18 | 4 | 4 |
+| Full scan | 1956.91 ns | 854.80 ns | 2.289335 | 55 | 21 | 8 | 4 |
+| Direct rowid | 1794.38 ns | 747.33 ns | 2.401050 | 58 | 19 | 7 | 5 |
+| Residual rowid | 2392.71 ns | 1068.28 ns | 2.239792 | 65 | 26 | 12 | 9 |
+| LIMIT/OFFSET | 3177.51 ns | 1239.88 ns | 2.562763 | 75 | 31 | 33 | 15 |
 
-The maximum ratio is 2.731704, so every workload passes the 10x
+The maximum ratio is 2.562763, so every workload passes the 10x
 severe-regression gate. Raw samples, verifier metrics, source hashes, and
 provenance are stored in the session artifacts
 `read_lowering_benchmark.cpp`, `read_lowering_benchmark-results.json`, and

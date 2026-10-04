@@ -945,6 +945,9 @@ class SelectBinder final {
               .boolean_keyword = true,
           },
           ExpressionProperties{
+              .affinity = TypeAffinity::kNone,
+              .collation = std::nullopt,
+              .explicit_collation = false,
               .truth_hint = literal.kind == LiteralKind::kTrue ? BoundTruthHint::kAlwaysTrue
                                                                : BoundTruthHint::kAlwaysFalse,
           });
@@ -1128,6 +1131,9 @@ class SelectBinder final {
                 .boolean_keyword = true,
             },
             ExpressionProperties{
+                .affinity = TypeAffinity::kNone,
+                .collation = std::nullopt,
+                .explicit_collation = false,
                 .truth_hint = NamesEqual(parts->front(), "true") ? BoundTruthHint::kAlwaysTrue
                                                                  : BoundTruthHint::kAlwaysFalse,
             });
