@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -1033,7 +1034,11 @@ OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan) {
 }
 
 std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
-  const PhysicalNode& access = plan.nodes().front();
+  const std::span<const PhysicalNode> nodes = plan.nodes();
+  if (nodes.empty()) {
+    std::terminate();
+  }
+  const PhysicalNode& access = nodes[0];
   if (std::holds_alternative<PhysicalSingleRowNode>(access.payload)) {
     return "SCAN CONSTANT ROW";
   }

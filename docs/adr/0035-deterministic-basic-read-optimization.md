@@ -649,12 +649,12 @@ The reviewed implementation's final Apple Clang 21 arm64 benchmark produced:
 
 | Workload | Modern median | SQLite median | Ratio | Modern allocations | SQLite allocations |
 |---|---:|---:|---:|---:|---:|
-| Full scan | 1297.71 ns | 1015.59 ns | 1.277793 | 19 | 18 |
-| Direct rowid | 1175.66 ns | 801.54 ns | 1.466745 | 30 | 20 |
-| Residual rowid | 1332.27 ns | 1065.07 ns | 1.250875 | 36 | 27 |
-| False predicate | 762.30 ns | 698.93 ns | 1.090674 | 24 | 19 |
+| Full scan | 780.80 ns | 731.42 ns | 1.067515 | 19 | 18 |
+| Direct rowid | 999.78 ns | 778.31 ns | 1.284549 | 30 | 20 |
+| Residual rowid | 1363.53 ns | 1084.79 ns | 1.256955 | 36 | 27 |
+| False predicate | 778.73 ns | 715.09 ns | 1.088992 | 24 | 19 |
 
-The maximum ratio is 1.466745, so every workload passes the 10x
+The maximum ratio is 1.284549, so every workload passes the 10x
 severe-regression gate. The source, raw result, and provenance records are the
 session artifacts `optimizer_benchmark.cpp`,
 `optimizer_benchmark-results.json`, and
