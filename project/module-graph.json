@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-parser",
+  "currentNode": "implement-catalog-model",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
@@ -209,7 +209,7 @@
     },
     "implement-catalog-model": {
       "layer": "catalog",
-      "dependsOn": ["implement-ast", "implement-collation", "implement-function-registry"],
+      "dependsOn": ["implement-ast", "implement-sql-value"],
       "deliverable": "Immutable schemas, tables, columns, indexes, root-page IDs, and statistics metadata.",
       "acceptance": ["Tests cover identity, lookup, versioning, and schema snapshot ownership."],
       "performanceSensitive": true

@@ -20,8 +20,9 @@
     "implement-btree-read",
     "implement-storage-diagnostics",
     "implement-lexer",
-    "implement-ast"
+    "implement-ast",
+    "implement-parser"
   ],
-  "activeNode": "implement-parser",
+  "activeNode": "implement-catalog-model",
   "activeNodeState": "review_pending"
 }

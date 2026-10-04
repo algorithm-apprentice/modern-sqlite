@@ -24,6 +24,7 @@ add_executable(
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
+  unit/catalog/catalog_test.cpp
   unit/diagnostics/storage_inspector_test.cpp
   unit/format/record_codec_test.cpp
   unit/pager/read_pager_test.cpp
@@ -97,6 +98,28 @@ add_test(
 )
 set_tests_properties(
   syntax.lexer_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_catalog_allocation_test
+  unit/catalog/catalog_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_catalog_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_catalog_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_catalog_allocation_test)
+add_test(
+  NAME catalog.lookup_allocation
+  COMMAND modern_sqlite_catalog_allocation_test
+)
+set_tests_properties(
+  catalog.lookup_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10
