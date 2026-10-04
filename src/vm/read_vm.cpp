@@ -351,15 +351,20 @@ struct ReadVm::Impl {
       if (!schema.has_value()) {
         return Fail(std::move(schema.error()));
       }
-      execution_data_version_ = pager_->data_version();
+      if (program_->requires_read_transaction()) {
+        execution_data_version_ = pager_->data_version();
+      } else {
+        execution_data_version_.reset();
+      }
     } else {
       ClearRow();
-      if (!pager_->in_read_transaction()) {
+      if (program_->requires_read_transaction() && !pager_->in_read_transaction()) {
         return Fail(
             VmError(ErrorCode::kMisuse, "the read transaction ended while the VM was suspended"));
       }
-      if (!execution_data_version_.has_value() ||
-          pager_->data_version() != *execution_data_version_) {
+      if (program_->requires_read_transaction() &&
+          (!execution_data_version_.has_value() ||
+           pager_->data_version() != *execution_data_version_)) {
         return Fail(VmError(ErrorCode::kSchemaChanged,
                             "the database snapshot changed while the VM was suspended"));
       }
@@ -409,6 +414,8 @@ struct ReadVm::Impl {
     return std::span<const SqlValue>{registers_}.subspan(row_first_, row_count_);
   }
 
+  [[nodiscard]] std::span<const SqlValue> bindings() const noexcept { return parameters_; }
+
   [[nodiscard]] Result<ReadVmStep> Fail(Error error) noexcept {
     CloseAllCursors();
     ClearRow();
@@ -425,13 +432,20 @@ struct ReadVm::Impl {
   }
 
   [[nodiscard]] Status ValidateSchema() {
-    if (!pager_->in_read_transaction()) {
+    const SchemaVersionRequirement expected = program_->schema_version();
+    if (!pager_->in_read_transaction() && program_->requires_read_transaction()) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "an active read transaction is required"));
+    }
+    if (catalog_generation_ != expected.generation) {
+      return std::unexpected(
+          VmError(ErrorCode::kSchemaChanged, "the bytecode catalog generation is stale"));
+    }
+    if (!pager_->in_read_transaction()) {
+      return {};
     }
     const DatabaseHeader* header = pager_->header();
     const std::uint32_t schema_cookie = header == nullptr ? 0U : header->schema_cookie();
-    const SchemaVersionRequirement expected = program_->schema_version();
-    if (schema_cookie != expected.schema_cookie || catalog_generation_ != expected.generation) {
+    if (schema_cookie != expected.schema_cookie) {
       return std::unexpected(
           VmError(ErrorCode::kSchemaChanged, "the bytecode schema version is stale"));
     }
@@ -1250,6 +1264,10 @@ ReadVmState ReadVm::state() const noexcept {
 
 std::span<const SqlValue> ReadVm::row() const noexcept {
   return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->row();
+}
+
+std::span<const SqlValue> ReadVm::bindings() const noexcept {
+  return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->bindings();
 }
 
 std::uint64_t ReadVm::executed_instruction_count() const noexcept {

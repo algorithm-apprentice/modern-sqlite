@@ -38,6 +38,7 @@ add_executable(
   unit/runtime/collation_test.cpp
   unit/runtime/function_registry_test.cpp
   unit/runtime/sql_value_test.cpp
+  unit/session/read_session_test.cpp
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/cache/page_cache_test.cpp
@@ -48,6 +49,11 @@ add_executable(
   unit/text/text_test.cpp
   unit/vm/read_vm_test.cpp
   format/record_codec_golden_test.cpp
+)
+target_include_directories(
+  modern_sqlite_unit_tests
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
 )
 target_link_libraries(
   modern_sqlite_unit_tests
@@ -304,6 +310,50 @@ add_test(
 )
 set_tests_properties(
   vm.read_vm_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_session_oom_test
+  unit/session/read_session_oom_test.cpp
+)
+
+add_executable(
+  modern_sqlite_read_session_allocation_test
+  unit/session/read_session_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_session_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_session_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_allocation_test)
+add_test(
+  NAME session.read_session_allocation
+  COMMAND modern_sqlite_read_session_allocation_test
+)
+set_tests_properties(
+  session.read_session_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+target_link_libraries(
+  modern_sqlite_read_session_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_session_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_oom_test)
+add_test(
+  NAME session.read_session_oom
+  COMMAND modern_sqlite_read_session_oom_test
+)
+set_tests_properties(
+  session.read_session_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10

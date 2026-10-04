@@ -304,6 +304,7 @@ struct ProgramInput {
   SchemaVersionRequirement schema_version;
   std::uint32_t register_count = 0;
   std::uint32_t parameter_count = 0;
+  bool requires_read_transaction = false;
   std::vector<SqlValue> constants;
   std::vector<std::string> symbols;
   std::vector<ReadCursorDescriptor> cursors;
@@ -412,6 +413,9 @@ class BytecodeProgram final {
   }
   [[nodiscard]] std::uint32_t register_count() const noexcept { return input_.register_count; }
   [[nodiscard]] std::uint32_t parameter_count() const noexcept { return input_.parameter_count; }
+  [[nodiscard]] bool requires_read_transaction() const noexcept {
+    return input_.requires_read_transaction;
+  }
   [[nodiscard]] std::span<const SqlValue> constants() const noexcept { return input_.constants; }
   [[nodiscard]] std::span<const std::string> symbols() const noexcept { return input_.symbols; }
   [[nodiscard]] std::span<const ReadCursorDescriptor> cursors() const noexcept {
@@ -469,6 +473,7 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<ConstantId> AddConstant(SqlValue value);
   [[nodiscard]] ProgramResult<SymbolId> AddSymbol(std::string symbol);
   [[nodiscard]] ProgramResult<CursorId> AddCursor(ReadCursorDescriptor cursor);
+  [[nodiscard]] ProgramResult<void> RequireReadTransaction();
 
   [[nodiscard]] ProgramResult<Label> CreateLabel();
   [[nodiscard]] ProgramResult<void> BindLabel(Label label);

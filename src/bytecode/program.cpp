@@ -286,6 +286,7 @@ template <typename T>
   clone.schema_version = input.schema_version;
   clone.register_count = input.register_count;
   clone.parameter_count = input.parameter_count;
+  clone.requires_read_transaction = input.requires_read_transaction || !input.cursors.empty();
 
   clone.constants.reserve(input.constants.size());
   for (const auto& value : input.constants) {
@@ -1268,11 +1269,20 @@ ProgramResult<CursorId> ProgramBuilder::AddCursor(ReadCursorDescriptor cursor) {
   }
   try {
     input_.cursors.push_back(std::move(cursor));
+    input_.requires_read_transaction = true;
   } catch (...) {
     owned_bytes_ -= bytes;
     throw;
   }
   return CursorId(static_cast<std::uint32_t>(input_.cursors.size() - 1));
+}
+
+ProgramResult<void> ProgramBuilder::RequireReadTransaction() {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  input_.requires_read_transaction = true;
+  return {};
 }
 
 ProgramResult<Label> ProgramBuilder::CreateLabel() {

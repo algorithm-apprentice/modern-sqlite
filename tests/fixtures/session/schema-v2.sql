@@ -1,0 +1,1 @@
+ALTER TABLE items ADD COLUMN added TEXT DEFAULT 'added';
