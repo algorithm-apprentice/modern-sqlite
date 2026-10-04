@@ -25,6 +25,7 @@ add_executable(
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
   unit/catalog/catalog_test.cpp
+  unit/catalog/catalog_loader_test.cpp
   unit/diagnostics/storage_inspector_test.cpp
   unit/format/record_codec_test.cpp
   unit/pager/read_pager_test.cpp
@@ -35,6 +36,7 @@ add_executable(
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/cache/page_cache_test.cpp
+  unit/storage/database_format_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
@@ -120,6 +122,28 @@ add_test(
 )
 set_tests_properties(
   catalog.lookup_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_catalog_loader_oom_test
+  unit/catalog/catalog_loader_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_catalog_loader_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_catalog_loader_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_catalog_loader_oom_test)
+add_test(
+  NAME catalog.loader_oom
+  COMMAND modern_sqlite_catalog_loader_oom_test
+)
+set_tests_properties(
+  catalog.loader_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10

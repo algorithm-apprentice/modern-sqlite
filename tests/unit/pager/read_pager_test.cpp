@@ -621,13 +621,24 @@ TEST(ReadPager, RejectsInvalidAndLockingPageNumbers) {
   const auto zero = (*opened)->ReadPage(PageNumber{0});
   const auto too_large = (*opened)->ReadPage(PageNumber{locking_page + 1U});
   const auto locking = (*opened)->ReadPage(PageNumber{locking_page});
+  const Status valid_page = (*opened)->ValidatePageNumber(PageNumber{1});
+  const Status invalid_zero = (*opened)->ValidatePageNumber(PageNumber{0});
+  const Status invalid_large = (*opened)->ValidatePageNumber(PageNumber{locking_page + 1U});
+  const Status invalid_locking = (*opened)->ValidatePageNumber(PageNumber{locking_page});
 
   ASSERT_FALSE(zero.has_value());
   ASSERT_FALSE(too_large.has_value());
   ASSERT_FALSE(locking.has_value());
+  EXPECT_TRUE(valid_page.has_value());
+  ASSERT_FALSE(invalid_zero.has_value());
+  ASSERT_FALSE(invalid_large.has_value());
+  ASSERT_FALSE(invalid_locking.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, zero.error().code());
   EXPECT_EQ(ErrorCode::kCorruption, too_large.error().code());
   EXPECT_EQ(ErrorCode::kCorruption, locking.error().code());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid_zero.error().code());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid_large.error().code());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid_locking.error().code());
   EXPECT_EQ(0U, CountReads(*environment.main_file,
                            static_cast<std::uint64_t>(locking_page - 1U) * kPageSize, kPageSize));
   EXPECT_TRUE((*opened)->EndRead().has_value());

@@ -91,10 +91,16 @@ struct ParseOutput {
 
 using ParseResult = std::expected<ParseOutput, ParseError>;
 
+struct ParseOptions {
+  std::size_t maximum_source_bytes = 1'000'000'000;
+  std::size_t maximum_columns = 2'000;
+};
+
 inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
 inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
 
-[[nodiscard]] ParseResult ParseOne(Utf8View source);
+[[nodiscard]] ParseResult ParseOne(
+    Utf8View source, ParseOptions options = {});
 [[nodiscard]] constexpr std::string_view ParseErrorCodeName(
     ParseErrorCode code) noexcept;
 [[nodiscard]] constexpr std::string_view ParseExpectationName(
@@ -119,6 +125,7 @@ available when parsing fails, matching the shape of SQLite's prepare API.
 - unexpected end: `incomplete input`;
 - other unexpected token: `syntax error`;
 - unsupported syntax: `unsupported syntax`;
+- configurable source or list limit: `resource limit exceeded`;
 - resource limits: `expression depth exceeded` or `parser depth exceeded`;
 - invariant failure: `internal parser invariant failed`.
 
@@ -131,6 +138,7 @@ contract. They are normalized as follows:
 | Unexpected token | Effective parser token | Exact grammar expectation from the table below | End of a non-end token |
 | Unexpected end | Empty end span and `kEndOfInput` | Exact grammar expectation from the table below | Logical end |
 | Unsupported syntax | First effective token that proves the unsupported production | `kNone` | End of that token |
+| Configurable resource limit | Rejected source or first list token beyond the limit | `kNone` | End of the rejected span or token |
 | Expression depth | Operator, function name, qualified-name start, wildcard qualifier, or `COLLATE` token that creates the rejected depth | `kNone` | Furthest consumed offset |
 | Parser depth | Current effective token, not yet consumed | `kExpression` | Start of that token |
 | Internal invariant | Terminator token, or logical end | `kNone` | Already determined statement tail |
@@ -277,6 +285,13 @@ fixed 100-entry parser stack without claiming equivalence to the current
 `kParserDepthExceeded`. The boundary is validated under ASan before merge.
 AST ownership and destruction remain nonrecursive. A future iterative parser
 may raise this limit without changing the AST.
+
+`ParseOptions` adds preparation-boundary limits without changing default
+language acceptance. `maximum_source_bytes` is checked before tokenization.
+`maximum_columns` is checked before appending SELECT result columns, CREATE
+TABLE columns, table-constraint indexed terms, or CREATE INDEX terms.
+Exceeding either option reports `kResourceLimitExceeded`. The defaults match
+the catalog loader's SQLite-derived source and column limits.
 
 The Pratt binding order, from lowest to highest, is exactly:
 

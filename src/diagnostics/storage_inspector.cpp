@@ -23,6 +23,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
+#include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
 namespace modern_sqlite {
@@ -57,36 +58,8 @@ struct ByteRange {
   return MakeError(ErrorCode::kMisuse, std::move(message));
 }
 
-[[nodiscard]] Error NotDatabase(std::string message) {
-  return MakeError(ErrorCode::kNotDatabase, std::move(message));
-}
-
 [[nodiscard]] Error Protocol(std::string message) {
   return MakeError(ErrorCode::kProtocol, std::move(message));
-}
-
-[[nodiscard]] Result<RecordSchemaFormat> EffectiveSchemaFormat(std::uint32_t raw) {
-  if (raw == 0 || raw == 1) {
-    return RecordSchemaFormat::kOne;
-  }
-  if (raw == 2) {
-    return RecordSchemaFormat::kTwo;
-  }
-  if (raw == 3) {
-    return RecordSchemaFormat::kThree;
-  }
-  if (raw == 4) {
-    return RecordSchemaFormat::kFour;
-  }
-  return std::unexpected(NotDatabase("database schema format is unsupported"));
-}
-
-[[nodiscard]] Result<std::uint8_t> EffectiveTextEncoding(std::uint32_t raw) {
-  const auto effective = static_cast<std::uint8_t>(raw & 3U);
-  if (effective == 0 || effective == 1) {
-    return std::uint8_t{1};
-  }
-  return std::unexpected(Protocol("UTF-16 storage inspection is not implemented"));
 }
 
 [[nodiscard]] bool IsContinuation(std::uint8_t value) noexcept {
@@ -1555,13 +1528,16 @@ Result<StorageInspectionReport> InspectDatabase(Vfs& vfs, std::string_view path,
           return std::unexpected(
               MakeError(ErrorCode::kInternal, "nonempty snapshot has no database header"));
         }
-        auto schema_format = EffectiveSchemaFormat(header->schema_format());
+        auto schema_format = NormalizeSchemaFormat(header->schema_format());
         if (!schema_format.has_value()) {
           return std::unexpected(std::move(schema_format.error()));
         }
-        auto text_encoding = EffectiveTextEncoding(header->text_encoding());
+        auto text_encoding = NormalizeTextEncoding(header->text_encoding());
         if (!text_encoding.has_value()) {
           return std::unexpected(std::move(text_encoding.error()));
+        }
+        if (*text_encoding != DatabaseTextEncoding::kUtf8) {
+          return std::unexpected(Protocol("UTF-16 storage inspection is not implemented"));
         }
         auto geometry = BtreePageGeometry::Create(header->page_size(), header->usable_size());
         if (!geometry.has_value()) {

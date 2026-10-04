@@ -21,8 +21,9 @@
     "implement-storage-diagnostics",
     "implement-lexer",
     "implement-ast",
-    "implement-parser"
+    "implement-parser",
+    "implement-catalog-model"
   ],
-  "activeNode": "implement-catalog-model",
+  "activeNode": "implement-catalog-loader",
   "activeNodeState": "review_pending"
 }

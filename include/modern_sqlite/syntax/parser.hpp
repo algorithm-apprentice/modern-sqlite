@@ -16,6 +16,7 @@ enum class ParseErrorCode : std::uint8_t {
   kIllegalToken,
   kUnexpectedToken,
   kUnsupportedSyntax,
+  kResourceLimitExceeded,
   kExpressionDepthExceeded,
   kParserDepthExceeded,
   kInternalInvariant,
@@ -51,6 +52,11 @@ struct ParseOutput {
 
 using ParseResult = std::expected<ParseOutput, ParseError>;
 
+struct ParseOptions {
+  std::size_t maximum_source_bytes = 1'000'000'000;
+  std::size_t maximum_columns = 2'000;
+};
+
 inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
 inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
 
@@ -62,6 +68,8 @@ inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
       return "unexpected_token";
     case ParseErrorCode::kUnsupportedSyntax:
       return "unsupported_syntax";
+    case ParseErrorCode::kResourceLimitExceeded:
+      return "resource_limit_exceeded";
     case ParseErrorCode::kExpressionDepthExceeded:
       return "expression_depth_exceeded";
     case ParseErrorCode::kParserDepthExceeded:
@@ -107,6 +115,8 @@ inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
       return error.actual == TokenKind::kEndOfInput ? "incomplete input" : "syntax error";
     case ParseErrorCode::kUnsupportedSyntax:
       return "unsupported syntax";
+    case ParseErrorCode::kResourceLimitExceeded:
+      return "resource limit exceeded";
     case ParseErrorCode::kExpressionDepthExceeded:
       return "expression depth exceeded";
     case ParseErrorCode::kParserDepthExceeded:
@@ -117,7 +127,7 @@ inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
   return "unknown parser error";
 }
 
-[[nodiscard]] ParseResult ParseOne(Utf8View source);
+[[nodiscard]] ParseResult ParseOne(Utf8View source, ParseOptions options = {});
 
 }  // namespace modern_sqlite
 

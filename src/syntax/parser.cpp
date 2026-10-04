@@ -181,8 +181,8 @@ using StatementResult = std::expected<Statement, ParseError>;
 
 class Parser final {
  public:
-  Parser(Utf8View source, ByteOffset base_offset) noexcept
-      : source_(source), base_offset_(base_offset), lexer_(source) {}
+  Parser(Utf8View source, ByteOffset base_offset, ParseOptions options) noexcept
+      : source_(source), base_offset_(base_offset), lexer_(source), options_(options) {}
 
   [[nodiscard]] ParseResult Parse() {
     StatementResult statement = ParseStatement();
@@ -288,6 +288,18 @@ class Parser final {
         token.kind == TokenKind::kEndOfInput ? token.span.begin() : token.span.end();
     return ParseError{
         .code = ParseErrorCode::kUnsupportedSyntax,
+        .span = AbsoluteSpan(token.span),
+        .actual = token.kind,
+        .expected = ParseExpectation::kNone,
+        .next_offset = AbsoluteOffset(next),
+    };
+  }
+
+  [[nodiscard]] ParseError ResourceLimit(Token token) const noexcept {
+    const ByteOffset next =
+        token.kind == TokenKind::kEndOfInput ? token.span.begin() : token.span.end();
+    return ParseError{
+        .code = ParseErrorCode::kResourceLimitExceeded,
         .span = AbsoluteSpan(token.span),
         .actual = token.kind,
         .expected = ParseExpectation::kNone,
@@ -1122,12 +1134,18 @@ class Parser final {
     }
 
     std::vector<ResultColumn> columns;
+    if (options_.maximum_columns == 0) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
     auto first_column = ParseResultColumn();
     if (!first_column.has_value()) {
       return std::unexpected(first_column.error());
     }
     columns.push_back(*first_column);
     while (ConsumeIf(TokenKind::kComma)) {
+      if (columns.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
       auto column = ParseResultColumn();
       if (!column.has_value()) {
         return std::unexpected(column.error());
@@ -1532,12 +1550,18 @@ class Parser final {
 
   [[nodiscard]] std::expected<std::vector<IndexedTerm>, ParseError> ParseIndexedTerms() {
     std::vector<IndexedTerm> terms;
+    if (options_.maximum_columns == 0) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
     auto first = ParseIndexedTerm();
     if (!first.has_value()) {
       return std::unexpected(first.error());
     }
     terms.push_back(*first);
     while (ConsumeIf(TokenKind::kComma)) {
+      if (terms.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
       auto term = ParseIndexedTerm();
       if (!term.has_value()) {
         return std::unexpected(term.error());
@@ -1712,6 +1736,9 @@ class Parser final {
     }
 
     std::vector<ColumnDefinition> columns;
+    if (options_.maximum_columns == 0) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
     auto first_column = ParseColumnDefinition();
     if (!first_column.has_value()) {
       return std::unexpected(first_column.error());
@@ -1747,6 +1774,9 @@ class Parser final {
       } else if (parsing_constraints) {
         return std::unexpected(Unexpected(Peek(), ParseExpectation::kConstraint));
       } else {
+        if (columns.size() >= options_.maximum_columns) {
+          return std::unexpected(ResourceLimit(Peek()));
+        }
         auto column = ParseColumnDefinition();
         if (!column.has_value()) {
           return std::unexpected(column.error());
@@ -1914,6 +1944,7 @@ class Parser final {
   ByteOffset last_consumed_end_;
   std::vector<Expression> expressions_;
   std::vector<std::size_t> expression_depths_;
+  ParseOptions options_;
 };
 
 [[nodiscard]] ParseError PrefixIllegal(Token token) noexcept {
@@ -1928,7 +1959,17 @@ class Parser final {
 
 }  // namespace
 
-ParseResult ParseOne(Utf8View source) {
+ParseResult ParseOne(Utf8View source, ParseOptions options) {
+  if (source.size_bytes() > options.maximum_source_bytes) {
+    const SourceSpan span = MakeSpan(ByteOffset{0}, ByteOffset{source.size_bytes()});
+    return std::unexpected(ParseError{
+        .code = ParseErrorCode::kResourceLimitExceeded,
+        .span = span,
+        .actual = TokenKind::kEndOfInput,
+        .expected = ParseExpectation::kNone,
+        .next_offset = span.end(),
+    });
+  }
   Lexer lexer{source};
   while (true) {
     const Token token = ReadRawSignificant(lexer);
@@ -1949,7 +1990,7 @@ ParseResult ParseOne(Utf8View source) {
     const Utf8View statement_source{
         source.bytes().substr(statement_begin),
     };
-    return Parser{statement_source, token.span.begin()}.Parse();
+    return Parser{statement_source, token.span.begin(), options}.Parse();
   }
 }
 

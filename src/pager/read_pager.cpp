@@ -214,21 +214,28 @@ Status ReadPager::EndRead() {
   return {};
 }
 
-Result<ReadPagePin> ReadPager::ReadPage(PageNumber page_number) {
+Status ReadPager::ValidatePageNumber(PageNumber page_number) const {
   if (!transaction_active_) {
-    return std::unexpected(Misuse("page reads require an active read transaction"));
+    return std::unexpected(Misuse("page validation requires an active read transaction"));
   }
-  assert(cache_ != nullptr);
-
   if (page_number.value() == 0 || page_number.value() > current_page_count_) {
     return std::unexpected(Corruption("database page number is outside the current snapshot"));
   }
 
-  const std::uint64_t page_size_value = static_cast<std::uint64_t>(cache_->page_size().value());
+  const std::uint64_t page_size_value = static_cast<std::uint64_t>(page_size().value());
   const std::uint64_t locking_page = (kPendingByte / page_size_value) + 1;
   if (page_number.value() == locking_page) {
     return std::unexpected(Corruption("database references the reserved locking page"));
   }
+  return {};
+}
+
+Result<ReadPagePin> ReadPager::ReadPage(PageNumber page_number) {
+  auto valid = ValidatePageNumber(page_number);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  assert(cache_ != nullptr);
 
   auto found = cache_->Lookup(page_number);
   if (!found.has_value()) {
@@ -238,6 +245,7 @@ Result<ReadPagePin> ReadPager::ReadPage(PageNumber page_number) {
     return ReadPagePin{std::move(found->value())};
   }
 
+  const std::uint64_t page_size_value = static_cast<std::uint64_t>(cache_->page_size().value());
   const auto page_index = static_cast<std::uint64_t>(page_number.value() - 1U);
   if (page_index > std::numeric_limits<std::uint64_t>::max() / page_size_value) {
     return std::unexpected(TooLarge("database page offset is not representable"));

@@ -109,6 +109,9 @@ class FunctionRegistry final {
 
   [[nodiscard]] Result<const ScalarFunction*> Resolve(std::string_view name,
                                                       std::size_t argument_count) const;
+  [[nodiscard]] constexpr std::span<const ScalarFunction> functions() const noexcept {
+    return functions_;
+  }
 
  private:
   std::span<const ScalarFunction> functions_;

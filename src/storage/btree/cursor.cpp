@@ -25,6 +25,7 @@
 #include "modern_sqlite/pager/read_pager.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
+#include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
 namespace modern_sqlite {
@@ -48,10 +49,6 @@ namespace {
 
 [[nodiscard]] Error SchemaChanged(std::string_view message) {
   return MakeError(ErrorCode::kSchemaChanged, message);
-}
-
-[[nodiscard]] Error NotDatabase(std::string_view message) {
-  return MakeError(ErrorCode::kNotDatabase, message);
 }
 
 [[nodiscard]] Error Protocol(std::string_view message) {
@@ -80,35 +77,20 @@ namespace {
 }
 
 [[nodiscard]] Result<RecordCodecOptions> RecordOptionsFor(const DatabaseHeader& header) {
-  RecordSchemaFormat schema_format = RecordSchemaFormat::kFour;
-  switch (header.schema_format()) {
-    case 1:
-      schema_format = RecordSchemaFormat::kOne;
-      break;
-    case 2:
-      schema_format = RecordSchemaFormat::kTwo;
-      break;
-    case 3:
-      schema_format = RecordSchemaFormat::kThree;
-      break;
-    case 4:
-      schema_format = RecordSchemaFormat::kFour;
-      break;
-    default:
-      return std::unexpected(NotDatabase("database has an invalid schema format"));
+  auto schema_format = NormalizeSchemaFormat(header.schema_format());
+  if (!schema_format.has_value()) {
+    return std::unexpected(std::move(schema_format.error()));
   }
 
-  switch (header.text_encoding()) {
-    case 1:
-      break;
-    case 2:
-    case 3:
-      return std::unexpected(Protocol("UTF-16 index comparison is not implemented"));
-    default:
-      return std::unexpected(NotDatabase("database has an invalid text encoding"));
+  auto text_encoding = NormalizeTextEncoding(header.text_encoding());
+  if (!text_encoding.has_value()) {
+    return std::unexpected(std::move(text_encoding.error()));
+  }
+  if (*text_encoding != DatabaseTextEncoding::kUtf8) {
+    return std::unexpected(Protocol("UTF-16 index comparison is not implemented"));
   }
 
-  return RecordCodecOptions{.schema_format = schema_format};
+  return RecordCodecOptions{.schema_format = *schema_format};
 }
 
 [[nodiscard]] EqualPrefixResult PrefixResultFor(BtreeSeekMode mode) {

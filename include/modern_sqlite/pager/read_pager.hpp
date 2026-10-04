@@ -123,6 +123,7 @@ class ReadPager final {
 
   [[nodiscard]] Status BeginRead();
   [[nodiscard]] Status EndRead();
+  [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
   [[nodiscard]] Result<ReadPagePin> ReadPage(PageNumber page_number);
 
   [[nodiscard]] bool in_read_transaction() const noexcept { return transaction_active_; }

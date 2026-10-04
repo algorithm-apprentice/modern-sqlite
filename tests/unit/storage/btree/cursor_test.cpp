@@ -960,10 +960,26 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     EXPECT_EQ(expected, cursor.error().code());
     RequireStatus(pager->EndRead());
   };
+  const auto expect_open_success = [&fixture](std::size_t offset, std::uint32_t value) {
+    std::vector<std::byte> bytes = fixture;
+    Write32(bytes, offset, value);
+    const TemporaryDatabase database(std::move(bytes));
+    PosixVfs vfs;
+    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    RequireStatus(pager->BeginRead());
+    const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
+    {
+      const auto cursor = IndexBtreeCursor::Open(*pager, PageNumber{76}, columns);
+      EXPECT_TRUE(cursor.has_value());
+    }
+    RequireStatus(pager->EndRead());
+  };
 
+  expect_open_success(44, 0);
   expect_open_error(44, 5, ErrorCode::kNotDatabase);
   expect_open_error(56, 2, ErrorCode::kProtocol);
-  expect_open_error(56, 4, ErrorCode::kNotDatabase);
+  expect_open_success(56, 4);
+  expect_open_success(56, 5);
 }
 
 TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
