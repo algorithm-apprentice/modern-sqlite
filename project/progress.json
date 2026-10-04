@@ -26,8 +26,9 @@
     "implement-catalog-loader",
     "implement-bytecode",
     "implement-read-vm",
-    "implement-binder"
+    "implement-binder",
+    "implement-logical-plan"
   ],
-  "activeNode": "implement-logical-plan",
+  "activeNode": "implement-basic-optimizer",
   "activeNodeState": "review_pending"
 }
