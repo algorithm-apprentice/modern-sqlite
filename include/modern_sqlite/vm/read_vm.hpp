@@ -79,6 +79,7 @@ class ReadVm final {
 
   [[nodiscard]] ReadVmState state() const noexcept;
   [[nodiscard]] std::span<const SqlValue> row() const noexcept;
+  [[nodiscard]] std::span<const SqlValue> bindings() const noexcept;
   [[nodiscard]] std::uint64_t executed_instruction_count() const noexcept;
 
  private:

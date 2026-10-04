@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "read-lowering-review",
+    "status": "read-session-api-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -45,6 +45,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "implement-read-lowering",
+  "currentNode": "implement-read-session-api",
   "currentNodeState": "review_pending"
 }

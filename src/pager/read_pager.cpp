@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -181,13 +182,17 @@ Status ReadPager::BeginRead() {
   }
   shared_lock_held_ = true;
 
-  auto snapshot = ReadSnapshot();
-  if (!snapshot.has_value()) {
-    return FailBegin(std::move(snapshot.error()));
-  }
-  auto applied = ApplySnapshot(*snapshot);
-  if (!applied.has_value()) {
-    return FailBegin(std::move(applied.error()));
+  try {
+    auto snapshot = ReadSnapshot();
+    if (!snapshot.has_value()) {
+      return FailBegin(std::move(snapshot.error()));
+    }
+    auto applied = ApplySnapshot(*snapshot);
+    if (!applied.has_value()) {
+      return FailBegin(std::move(applied.error()));
+    }
+  } catch (const std::bad_alloc&) {
+    return FailBegin(Error::OutOfMemory());
   }
 
   transaction_active_ = true;
@@ -201,6 +206,17 @@ Status ReadPager::EndRead() {
   assert(cache_ != nullptr);
   if (cache_->pin_count() != 0) {
     return std::unexpected(Busy("cannot end a read transaction with pinned pages"));
+  }
+
+  return CleanupReadState();
+}
+
+Status ReadPager::CleanupReadState() {
+  if (!shared_lock_held_) {
+    return {};
+  }
+  if (cache_ != nullptr && cache_->pin_count() != 0) {
+    return std::unexpected(Busy("cannot clean up read state with pinned pages"));
   }
 
   auto unlocked = file_->Unlock(DatabaseLock::kNone);
@@ -451,6 +467,9 @@ Status ReadPager::FailBegin(Error setup_error) {
     shared_lock_held_ = false;
     return std::unexpected(std::move(setup_error));
   }
+  if (setup_error.code() == ErrorCode::kOutOfMemory) {
+    return std::unexpected(std::move(unlocked.error()));
+  }
 
   std::string message{"read transaction setup failed with "};
   message.append(setup_error.ToString());
@@ -460,16 +479,8 @@ Status ReadPager::FailBegin(Error setup_error) {
 }
 
 Status ReadPager::ReleaseRetainedLock() {
-  if (!shared_lock_held_) {
-    return {};
-  }
   assert(!transaction_active_);
-  auto unlocked = file_->Unlock(DatabaseLock::kNone);
-  if (!unlocked.has_value()) {
-    return std::unexpected(std::move(unlocked.error()));
-  }
-  shared_lock_held_ = false;
-  return {};
+  return CleanupReadState();
 }
 
 }  // namespace modern_sqlite

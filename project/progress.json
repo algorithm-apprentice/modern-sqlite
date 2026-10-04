@@ -28,8 +28,9 @@
     "implement-read-vm",
     "implement-binder",
     "implement-logical-plan",
-    "implement-basic-optimizer"
+    "implement-basic-optimizer",
+    "implement-read-lowering"
   ],
-  "activeNode": "implement-read-lowering",
+  "activeNode": "implement-read-session-api",
   "activeNodeState": "review_pending"
 }

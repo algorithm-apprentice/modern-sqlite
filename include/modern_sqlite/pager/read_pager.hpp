@@ -123,6 +123,7 @@ class ReadPager final {
 
   [[nodiscard]] Status BeginRead();
   [[nodiscard]] Status EndRead();
+  [[nodiscard]] Status CleanupReadState();
   [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
   [[nodiscard]] Result<ReadPagePin> ReadPage(PageNumber page_number);
 

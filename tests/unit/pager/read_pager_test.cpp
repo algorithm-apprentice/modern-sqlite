@@ -801,7 +801,7 @@ TEST(ReadPager, LeavesTheTransactionActiveWhenUnlockFailsSoItCanBeRetried) {
   EXPECT_EQ(ErrorCode::kIo, first_end.error().code());
   EXPECT_TRUE((*opened)->in_read_transaction());
   EXPECT_NE(nullptr, (*opened)->header());
-  EXPECT_TRUE((*opened)->EndRead().has_value());
+  EXPECT_TRUE((*opened)->CleanupReadState().has_value());
   EXPECT_FALSE((*opened)->in_read_transaction());
   EXPECT_EQ(2U, environment.main_file->unlock_requests.size());
 }
@@ -822,10 +822,20 @@ TEST(ReadPager, RetriesRetainedLockCleanupBeforeTheNextTransaction) {
   EXPECT_FALSE((*opened)->in_read_transaction());
   environment.main_file->bytes[0] = std::byte{0x53};
 
+  ASSERT_TRUE((*opened)->CleanupReadState().has_value());
   ASSERT_TRUE((*opened)->BeginRead().has_value());
   EXPECT_TRUE((*opened)->EndRead().has_value());
   EXPECT_EQ(2U, environment.main_file->lock_requests.size());
   EXPECT_EQ(3U, environment.main_file->unlock_requests.size());
+}
+
+TEST(ReadPager, CleanupReadStateIsIdempotentWhenNoReadLockIsHeld) {
+  FakeEnvironment environment{MakeDatabaseImage()};
+  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  ASSERT_TRUE(opened.has_value());
+
+  EXPECT_TRUE((*opened)->CleanupReadState().has_value());
+  EXPECT_TRUE(environment.main_file->unlock_requests.empty());
 }
 
 TEST(ReadPager, RejectsHotJournalsButAllowsActiveAndZeroHeaderJournals) {

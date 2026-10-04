@@ -103,6 +103,13 @@ class ReadPlanLowerer final {
     }
     builder_.emplace(std::move(*created));
 
+    if (bound_select_.table_source() != nullptr) {
+      auto required = ConvertProgramResult(AssumeValue(builder_).RequireReadTransaction(),
+                                           "unable to require a read transaction");
+      if (!required.has_value()) {
+        return std::unexpected(std::move(required.error()));
+      }
+    }
     if (auto constants = AddBoundConstants(); !constants.has_value()) {
       return std::unexpected(std::move(constants.error()));
     }

@@ -200,6 +200,7 @@ TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   EXPECT_EQ(program.schema_version().generation, 11U);
   EXPECT_EQ(program.register_count(), 1U);
   EXPECT_EQ(program.parameter_count(), 0U);
+  EXPECT_FALSE(program.requires_read_transaction());
   EXPECT_EQ(program.constants().size(), 1U);
   EXPECT_EQ(program.instructions().size(), 3U);
   EXPECT_EQ(program.result_columns().front().name, "value");
@@ -221,6 +222,7 @@ TEST(BytecodeProgramTest, CanonicalizesCallerStorageBeforePublication) {
   auto created = BytecodeProgram::Create(input);
   ASSERT_TRUE(created.has_value());
   ASSERT_EQ(created->cursors().size(), 1U);
+  EXPECT_TRUE(created->requires_read_transaction());
   EXPECT_NE(created->instructions().data(), source_instructions);
   EXPECT_NE(created->cursors().front().fields.data(), source_fields);
 
@@ -273,6 +275,19 @@ TEST(BytecodeProgramTest, BuilderResolvesOwnedForwardAndBackwardLabels) {
   ASSERT_EQ(program->instructions().size(), 5U);
   EXPECT_EQ(std::get<JumpIfInstruction>(program->instructions()[1]).target, Address(3));
   EXPECT_EQ(std::get<JumpInstruction>(program->instructions()[2]).target, Address(0));
+}
+
+TEST(BytecodeProgramTest, BuilderPublishesExplicitReadTransactionRequirement) {
+  auto created = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  ASSERT_TRUE(builder.RequireReadTransaction().has_value());
+  ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());
+
+  auto program = std::move(builder).Build({});
+
+  ASSERT_TRUE(program.has_value());
+  EXPECT_TRUE(program->requires_read_transaction());
 }
 
 TEST(BytecodeProgramTest, BuilderRejectsDirectNumericBranchesAndForeignLabels) {

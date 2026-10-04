@@ -374,6 +374,7 @@ TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
 
   const BytecodeProgram table = LowerOrThrow("SELECT id, name, score FROM items", catalog);
+  EXPECT_TRUE(table.requires_read_transaction());
   ASSERT_EQ(1U, table.cursors().size());
   EXPECT_EQ(CursorStorageKind::kRowIdTable, table.cursors()[0].storage);
   ASSERT_EQ(4U, table.cursors()[0].fields.size());
@@ -423,6 +424,17 @@ TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   EXPECT_LT(*guard_call, *open);
   EXPECT_LT(*open, *key_call);
   EXPECT_LT(*key_call, *seek);
+}
+
+TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsTransactional) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const BytecodeProgram constant = LowerOrThrow("SELECT 1", catalog);
+  const BytecodeProgram empty = LowerOrThrow("SELECT name FROM items WHERE 0", catalog);
+
+  EXPECT_FALSE(constant.requires_read_transaction());
+  EXPECT_TRUE(empty.requires_read_transaction());
+  EXPECT_TRUE(empty.cursors().empty());
 }
 
 TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {

@@ -183,11 +183,13 @@ class TemporaryDatabase final {
     std::vector<SqlValue> constants, std::vector<std::string> symbols,
     std::vector<ReadCursorDescriptor> cursors, std::vector<ResultColumnMetadata> result_columns,
     std::vector<Instruction> instructions,
-    std::optional<SchemaVersionRequirement> schema = std::nullopt) {
+    std::optional<SchemaVersionRequirement> schema = std::nullopt,
+    bool requires_read_transaction = false) {
   ProgramInput input;
   input.schema_version = schema.value_or(CurrentSchema(pager));
   input.register_count = register_count;
   input.parameter_count = parameter_count;
+  input.requires_read_transaction = requires_read_transaction;
   input.constants = std::move(constants);
   input.symbols = std::move(symbols);
   input.cursors = std::move(cursors);
@@ -339,19 +341,20 @@ TEST_F(ReadVmTest, ExecutesBindingsRowsHaltAndReset) {
 }
 
 TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
-  const BytecodeProgram program =
-      BuildProgram(*pager_, 1, 0,
-                   [] {
-                     std::vector<SqlValue> values;
-                     values.push_back(SqlValue::Integer(7));
-                     return values;
-                   }(),
-                   {}, {}, {ResultColumn()},
-                   {
-                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
-                       ResultRowInstruction{.first = Reg(0), .count = 1},
-                       HaltInstruction{},
-                   });
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 1, 0,
+      [] {
+        std::vector<SqlValue> values;
+        values.push_back(SqlValue::Integer(7));
+        return values;
+      }(),
+      {}, {}, {ResultColumn()},
+      {
+          LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          HaltInstruction{},
+      },
+      std::nullopt, true);
   ReadVm vm = CreateCoreVm(program);
   ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 7);
@@ -770,7 +773,8 @@ TEST_F(ReadVmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations
 }
 
 TEST_F(ReadVmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
-  const BytecodeProgram halt = BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}});
+  const BytecodeProgram halt =
+      BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}}, std::nullopt, true);
 
   const auto generation_mismatch =
       ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration + 1U));
@@ -790,6 +794,10 @@ TEST_F(ReadVmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
   const auto inactive = ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration));
   ASSERT_FALSE(inactive.has_value());
   EXPECT_EQ(inactive.error().code(), ErrorCode::kMisuse);
+  const auto inactive_stale =
+      ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration + 1U));
+  ASSERT_FALSE(inactive_stale.has_value());
+  EXPECT_EQ(inactive_stale.error().code(), ErrorCode::kMisuse);
   RequireStatus(pager_->BeginRead());
 
   const BytecodeProgram loop =
@@ -820,7 +828,8 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
                        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
-                   });
+                   },
+                   std::nullopt, true);
   ReadVm vm =
       TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
   ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
@@ -1216,6 +1225,54 @@ TEST_F(ReadVmTest, MovedFromMachinesRejectOperations) {
   // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
 
   EXPECT_EQ(TakeValue(destination.Step()), ReadVmStep::kDone);
+}
+
+TEST(ReadVm, ExecutesTransactionFreeProgramsAndPublishesBindingsWithoutAPagerSnapshot) {
+  PosixVfs vfs;
+  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program =
+      BuildProgram(*pager, 1, 1, {}, {}, {}, {ResultColumn()},
+                   {
+                       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+  ASSERT_FALSE(program.requires_read_transaction());
+  ReadVm vm =
+      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
+  const SqlValue value = SqlValue::Integer(41);
+  RequireStatus(vm.Bind(Parameter(0), value));
+  ASSERT_EQ(1U, vm.bindings().size());
+  ExpectInteger(vm.bindings().front(), 41);
+  RequireStatus(pager->EndRead());
+
+  EXPECT_EQ(ReadVmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 41);
+  EXPECT_EQ(ReadVmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(vm.Reset());
+  ASSERT_EQ(1U, vm.bindings().size());
+  ExpectInteger(vm.bindings().front(), 41);
+}
+
+TEST(ReadVm, RejectsTransactionRequiredProgramsWithoutAPagerSnapshot) {
+  PosixVfs vfs;
+  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager);
+  input.requires_read_transaction = true;
+  input.instructions.emplace_back(HaltInstruction{});
+  const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
+  ReadVm vm =
+      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
+  RequireStatus(pager->EndRead());
+
+  const auto stepped = vm.Step();
+
+  ASSERT_FALSE(stepped.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, stepped.error().code());
+  EXPECT_EQ(ReadVmState::kError, vm.state());
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
