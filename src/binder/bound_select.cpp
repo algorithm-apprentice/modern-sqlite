@@ -850,6 +850,7 @@ class SelectBinder final {
                            ExpressionProperties{
                                .affinity = column.affinity,
                                .collation = *collation,
+                               .explicit_collation = false,
                            });
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
@@ -1235,12 +1236,17 @@ class SelectBinder final {
                             ExpressionProperties{
                                 .affinity = column.affinity,
                                 .collation = *collation,
+                                .explicit_collation = false,
                             });
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindRowId(SourceSpan span) {
     return AppendExpression(span, BoundRowIdExpression{},
-                            ExpressionProperties{.affinity = TypeAffinity::kInteger});
+                            ExpressionProperties{
+                                .affinity = TypeAffinity::kInteger,
+                                .collation = std::nullopt,
+                                .explicit_collation = false,
+                            });
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> NoSuchColumn(SourceSpan span) const {
@@ -1658,6 +1664,7 @@ class SelectBinder final {
       const ExpressionProperties properties = Properties(expression);
       if (properties.explicit_collation) {
         return ExpressionProperties{
+            .affinity = TypeAffinity::kNone,
             .collation = properties.collation,
             .explicit_collation = true,
         };
