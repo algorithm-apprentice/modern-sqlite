@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-catalog-loader",
+  "currentNode": "implement-bytecode",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
@@ -223,7 +223,7 @@
     },
     "implement-bytecode": {
       "layer": "bytecode",
-      "dependsOn": ["implement-sql-value", "implement-catalog-model", "implement-error-result"],
+      "dependsOn": ["implement-sql-value", "implement-error-result"],
       "deliverable": "Typed opcodes, operands, registers, cursors, labels, immutable programs, and verifier.",
       "acceptance": ["Verifier tests reject invalid register, cursor, jump, and resource lifetimes."],
       "performanceSensitive": true

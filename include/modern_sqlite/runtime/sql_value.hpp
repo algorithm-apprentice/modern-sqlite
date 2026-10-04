@@ -2,6 +2,7 @@
 #define MODERN_SQLITE_RUNTIME_SQL_VALUE_HPP_
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -76,6 +77,7 @@ class SqlValue {
   [[nodiscard]] std::optional<double> real_value() const noexcept;
   [[nodiscard]] std::optional<Utf8View> text_value() const noexcept;
   [[nodiscard]] std::optional<ByteView> blob_value() const noexcept;
+  [[nodiscard]] std::size_t owned_capacity_bytes() const noexcept;
 
  private:
   friend class SqlValueAccess;

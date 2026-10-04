@@ -34,3 +34,4 @@ their corresponding implementation begins.
 28. [ADR-0028: Pure SQLite-Compatible SQL Parser](0028-pure-sql-parser.md)
 29. [ADR-0029: Immutable Catalog Snapshots](0029-immutable-catalog-model.md)
 30. [ADR-0030: SQLite Schema Catalog Loader](0030-sqlite-schema-catalog-loader.md)
+31. [ADR-0031: Typed Immutable Bytecode Programs](0031-typed-bytecode-programs.md)
