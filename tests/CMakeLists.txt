@@ -36,6 +36,7 @@ add_executable(
   unit/storage/cache/page_cache_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
+  unit/syntax/parser_test.cpp
   unit/text/text_test.cpp
   format/record_codec_golden_test.cpp
 )
