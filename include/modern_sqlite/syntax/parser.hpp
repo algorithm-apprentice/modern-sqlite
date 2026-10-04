@@ -36,10 +36,10 @@ enum class ParseExpectation : std::uint8_t {
 
 struct ParseError {
   ParseErrorCode code = ParseErrorCode::kUnexpectedToken;
-  SourceSpan span;
+  SourceSpan span{};
   TokenKind actual = TokenKind::kEndOfInput;
   ParseExpectation expected = ParseExpectation::kNone;
-  ByteOffset next_offset;
+  ByteOffset next_offset{};
 
   constexpr auto operator<=>(const ParseError&) const noexcept = default;
 };

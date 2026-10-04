@@ -1901,16 +1901,8 @@ class Parser final {
     return std::unexpected(Unexpected(token, ParseExpectation::kStatement));
   }
 
-  [[nodiscard]] static SourceSpan StatementSpan(const Statement& statement) noexcept {
-    if (const auto* select = std::get_if<SelectStatement>(&statement)) {
-      return select->span;
-    }
-    if (const auto* table = std::get_if<CreateTableStatement>(&statement)) {
-      return table->span;
-    }
-    const auto* index = std::get_if<CreateIndexStatement>(&statement);
-    assert(index != nullptr);
-    return index->span;
+  [[nodiscard]] static SourceSpan StatementSpan(const Statement& statement) {
+    return std::visit([](const auto& value) { return value.span; }, statement);
   }
 
   Utf8View source_;
