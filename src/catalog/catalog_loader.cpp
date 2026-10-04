@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "../syntax/token_text.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -112,37 +113,12 @@ struct IndexedTermClassification {
 }
 
 [[nodiscard]] Result<std::string> Dequote(std::string_view value) {
-  if (value.empty()) {
-    return std::string{};
-  }
-  char closing = '\0';
-  switch (value.front()) {
-    case '\'':
-    case '"':
-    case '`':
-      closing = value.front();
-      break;
-    case '[':
-      closing = ']';
-      break;
-    default:
-      return std::string{value};
-  }
-  if (value.size() < 2U || value.back() != closing) {
+  std::expected<std::string, internal::DequoteSqlTokenError> dequoted =
+      internal::DequoteSqlToken(value);
+  if (!dequoted.has_value()) {
     return std::unexpected(Corruption("schema contains an unterminated quoted name"));
   }
-
-  std::string result;
-  result.reserve(value.size() - 2U);
-  for (std::size_t index = 1; index + 1U < value.size(); ++index) {
-    if (value[index] == closing && index + 2U < value.size() && value[index + 1U] == closing) {
-      result.push_back(closing);
-      ++index;
-      continue;
-    }
-    result.push_back(value[index]);
-  }
-  return result;
+  return std::move(*dequoted);
 }
 
 [[nodiscard]] Result<std::string> DequoteSpan(const SyntaxTree& tree, SourceSpan span) {

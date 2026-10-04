@@ -72,6 +72,7 @@ add_library(
     src/base/bytes.cpp
     src/base/coding.cpp
     src/base/result.cpp
+    src/binder/bound_select.cpp
     src/bytecode/program.cpp
     src/catalog/catalog.cpp
     src/catalog/catalog_loader.cpp
@@ -146,6 +147,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/bytes.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/binder/bound_select.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/bytecode/program.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog_loader.hpp"
@@ -171,6 +173,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
+  "${PROJECT_SOURCE_DIR}/src/binder/bound_select.cpp"
   "${PROJECT_SOURCE_DIR}/src/bytecode/program.cpp"
   "${PROJECT_SOURCE_DIR}/src/catalog/catalog.cpp"
   "${PROJECT_SOURCE_DIR}/src/catalog/catalog_loader.cpp"
@@ -192,6 +195,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
+  "${PROJECT_SOURCE_DIR}/src/syntax/token_text.hpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/read_vm.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
@@ -199,6 +203,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/binder/bound_select_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/binder/bound_select_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/binder/bound_select_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/bytecode/program_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/bytecode/program_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_allocation_test.cpp"
