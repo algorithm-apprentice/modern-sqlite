@@ -89,6 +89,9 @@ class SqlValue {
 
 [[nodiscard]] SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity);
 [[nodiscard]] SqlValue CastValue(SqlValue value, CastTarget target);
+[[nodiscard]] SqlValue CoerceNumericForArithmetic(const SqlValue& value);
+[[nodiscard]] std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept;
+[[nodiscard]] SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept;
 
 [[nodiscard]] std::strong_ordering CompareSqlValues(const SqlValue& left,
                                                     const SqlValue& right) noexcept;

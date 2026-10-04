@@ -42,6 +42,7 @@ add_executable(
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
   unit/text/text_test.cpp
+  unit/vm/read_vm_test.cpp
   format/record_codec_golden_test.cpp
 )
 target_link_libraries(
@@ -79,6 +80,50 @@ add_test(
 )
 set_tests_properties(
   bytecode.program_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_vm_oom_test
+  unit/vm/read_vm_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_vm_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_vm_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_vm_oom_test)
+add_test(
+  NAME vm.read_vm_oom
+  COMMAND modern_sqlite_read_vm_oom_test
+)
+set_tests_properties(
+  vm.read_vm_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_vm_allocation_test
+  unit/vm/read_vm_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_vm_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_vm_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_vm_allocation_test)
+add_test(
+  NAME vm.read_vm_allocation
+  COMMAND modern_sqlite_read_vm_allocation_test
+)
+set_tests_properties(
+  vm.read_vm_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10

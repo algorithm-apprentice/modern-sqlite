@@ -23,8 +23,9 @@
     "implement-ast",
     "implement-parser",
     "implement-catalog-model",
-    "implement-catalog-loader"
+    "implement-catalog-loader",
+    "implement-bytecode"
   ],
-  "activeNode": "implement-bytecode",
+  "activeNode": "implement-read-vm",
   "activeNodeState": "review_pending"
 }

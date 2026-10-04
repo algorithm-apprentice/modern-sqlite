@@ -549,6 +549,65 @@ SqlValue CastValue(SqlValue value, CastTarget target) {
   return ParseForcedNumeric(bytes);
 }
 
+SqlValue CoerceNumericForArithmetic(const SqlValue& value) {
+  if (value.type() == SqlValueType::kNull || value.type() == SqlValueType::kInteger ||
+      value.type() == SqlValueType::kReal) {
+    return value.Clone();
+  }
+
+  const std::string_view bytes = value.type() == SqlValueType::kText
+                                     ? SqlValueAccess::Text(value).bytes()
+                                     : AsStringView(SqlValueAccess::Blob(value));
+  const std::string_view numeric_input = BeforeFirstNull(bytes);
+  const DecimalPrefix prefix = ScanDecimalPrefix(numeric_input);
+  if (!prefix.has_digits) {
+    return SqlValue::Integer(0);
+  }
+  if (!prefix.has_real_syntax) {
+    const IntegerPrefix integer = ParseIntegerPrefix(bytes);
+    if (integer.has_digits && !integer.overflow) {
+      return SqlValue::Integer(integer.value);
+    }
+  }
+  return SqlValue::Real(ParseDouble(numeric_input, prefix));
+}
+
+std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept {
+  if (value.type() == SqlValueType::kInteger) {
+    return SqlValueAccess::Integer(value);
+  }
+  if (value.type() == SqlValueType::kReal) {
+    return TruncateRealToInteger(SqlValueAccess::Real(value));
+  }
+  if (value.type() == SqlValueType::kText) {
+    return ParseIntegerPrefix(SqlValueAccess::Text(value).bytes()).value;
+  }
+  if (value.type() == SqlValueType::kBlob) {
+    return ParseIntegerPrefix(AsStringView(SqlValueAccess::Blob(value))).value;
+  }
+  return 0;
+}
+
+SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept {
+  if (value.type() == SqlValueType::kNull) {
+    return SqlTruthValue::kNull;
+  }
+  if (value.type() == SqlValueType::kInteger) {
+    return SqlValueAccess::Integer(value) == 0 ? SqlTruthValue::kFalse : SqlTruthValue::kTrue;
+  }
+  if (value.type() == SqlValueType::kReal) {
+    return SqlValueAccess::Real(value) == 0.0 ? SqlTruthValue::kFalse : SqlTruthValue::kTrue;
+  }
+
+  const std::string_view bytes = value.type() == SqlValueType::kText
+                                     ? SqlValueAccess::Text(value).bytes()
+                                     : AsStringView(SqlValueAccess::Blob(value));
+  const std::string_view numeric_input = BeforeFirstNull(bytes);
+  const DecimalPrefix prefix = ScanDecimalPrefix(numeric_input);
+  const double numeric = prefix.has_digits ? ParseDouble(numeric_input, prefix) : 0.0;
+  return numeric == 0.0 ? SqlTruthValue::kFalse : SqlTruthValue::kTrue;
+}
+
 std::strong_ordering CompareSqlValues(const SqlValue& left, const SqlValue& right) noexcept {
   const int left_rank = StorageClassRank(left.type());
   const int right_rank = StorageClassRank(right.type());

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-bytecode",
+  "currentNode": "implement-read-vm",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
