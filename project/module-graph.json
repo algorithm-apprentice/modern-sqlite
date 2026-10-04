@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-catalog-model",
+  "currentNode": "implement-catalog-loader",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
@@ -216,7 +216,7 @@
     },
     "implement-catalog-loader": {
       "layer": "catalog",
-      "dependsOn": ["implement-catalog-model", "implement-parser", "implement-btree-read", "implement-record-codec"],
+      "dependsOn": ["implement-catalog-model", "implement-parser", "implement-btree-read", "implement-record-codec", "implement-function-registry"],
       "deliverable": "Read `sqlite_schema`, parse stored DDL, build catalog snapshots, and detect schema changes.",
       "acceptance": ["Catalogs from SQLite-created databases match expected objects and corrupt schema fails explicitly."],
       "performanceSensitive": true

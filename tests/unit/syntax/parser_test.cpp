@@ -133,6 +133,7 @@ TEST(ParserApi, ProvidesStableNamesAndMessages) {
   EXPECT_EQ("illegal_token", ParseErrorCodeName(ParseErrorCode::kIllegalToken));
   EXPECT_EQ("unexpected_token", ParseErrorCodeName(ParseErrorCode::kUnexpectedToken));
   EXPECT_EQ("unsupported_syntax", ParseErrorCodeName(ParseErrorCode::kUnsupportedSyntax));
+  EXPECT_EQ("resource_limit_exceeded", ParseErrorCodeName(ParseErrorCode::kResourceLimitExceeded));
   EXPECT_EQ("expression_depth_exceeded",
             ParseErrorCodeName(ParseErrorCode::kExpressionDepthExceeded));
   EXPECT_EQ("parser_depth_exceeded", ParseErrorCodeName(ParseErrorCode::kParserDepthExceeded));
@@ -159,12 +160,42 @@ TEST(ParserApi, ProvidesStableNamesAndMessages) {
                             }));
   EXPECT_EQ("unsupported syntax",
             ParseErrorMessage(ParseError{.code = ParseErrorCode::kUnsupportedSyntax}));
+  EXPECT_EQ("resource limit exceeded",
+            ParseErrorMessage(ParseError{.code = ParseErrorCode::kResourceLimitExceeded}));
   EXPECT_EQ("expression depth exceeded",
             ParseErrorMessage(ParseError{.code = ParseErrorCode::kExpressionDepthExceeded}));
   EXPECT_EQ("parser depth exceeded",
             ParseErrorMessage(ParseError{.code = ParseErrorCode::kParserDepthExceeded}));
   EXPECT_EQ("internal parser invariant failed",
             ParseErrorMessage(ParseError{.code = ParseErrorCode::kInternalInvariant}));
+}
+
+TEST(ParserApi, EnforcesConfigurableSourceAndListLimits) {
+  ParseResult oversized_source =
+      ParseOne(Utf8View{"SELECT 1"}, ParseOptions{.maximum_source_bytes = 7});
+  ASSERT_FALSE(oversized_source.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, oversized_source.error().code);
+
+  for (const std::string_view sql : {
+           "SELECT 1, 2",
+           "CREATE TABLE t(a, b)",
+           "CREATE TABLE t(a, UNIQUE(a, a))",
+           "CREATE INDEX i ON t(a, b)",
+       }) {
+    const ParseResult oversized_list = ParseOne(Utf8View{sql}, ParseOptions{.maximum_columns = 1});
+    ASSERT_FALSE(oversized_list.has_value()) << sql;
+    EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, oversized_list.error().code) << sql;
+  }
+}
+
+TEST(Parser, PreservesGeneratedAlwaysFallbackWordsInDeclaredTypes) {
+  const ParseOutput output =
+      ParseOrThrow("CREATE TABLE legacy_type(id INTEGER GENERATED ALWAYS PRIMARY KEY)");
+  const SyntaxTree& tree = RequiredTree(output);
+  const CreateTableStatement& table = CreateTable(tree);
+  ASSERT_EQ(1U, table.columns.size());
+  ASSERT_TRUE(table.columns.front().type_name.has_value());
+  EXPECT_EQ("INTEGER GENERATED ALWAYS", SpanText(tree, *table.columns.front().type_name));
 }
 
 TEST(Parser, MatchesPinnedSqliteDifferentialCorpusPolicy) {

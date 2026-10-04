@@ -73,6 +73,7 @@ add_library(
     src/base/coding.cpp
     src/base/result.cpp
     src/catalog/catalog.cpp
+    src/catalog/catalog_loader.cpp
     src/diagnostics/storage_inspector.cpp
     src/format/record_codec.cpp
     src/pager/read_pager.cpp
@@ -85,6 +86,7 @@ add_library(
     src/storage/btree/cursor.cpp
     src/storage/btree/page.cpp
     src/storage/cache/page_cache.cpp
+    src/storage/database_format.cpp
     src/syntax/ast.cpp
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
@@ -143,6 +145,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog_loader.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/diagnostics/storage_inspector.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
@@ -155,6 +158,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/cursor.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/page.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/cache/page_cache.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/database_format.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/page_number.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/ast.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
@@ -164,6 +168,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
   "${PROJECT_SOURCE_DIR}/src/catalog/catalog.cpp"
+  "${PROJECT_SOURCE_DIR}/src/catalog/catalog_loader.cpp"
   "${PROJECT_SOURCE_DIR}/src/diagnostics/storage_inspector.cpp"
   "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
@@ -178,6 +183,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/page.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/cache/page_cache.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/database_format.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
@@ -188,6 +194,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_loader_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_loader_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_oom_test.cpp"
@@ -202,6 +210,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/cursor_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/page_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/database_format_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/ast_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"

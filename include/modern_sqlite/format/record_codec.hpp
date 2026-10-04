@@ -13,16 +13,12 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/text/text.hpp"
 
 namespace modern_sqlite {
 
-enum class RecordSchemaFormat : std::uint8_t {
-  kOne = 1,
-  kTwo = 2,
-  kThree = 3,
-  kFour = 4,
-};
+using RecordSchemaFormat = DatabaseSchemaFormat;
 
 struct RecordCodecOptions {
   RecordSchemaFormat schema_format = RecordSchemaFormat::kFour;
