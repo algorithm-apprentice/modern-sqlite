@@ -72,6 +72,7 @@ add_library(
     src/base/bytes.cpp
     src/base/coding.cpp
     src/base/result.cpp
+    src/catalog/catalog.cpp
     src/diagnostics/storage_inspector.cpp
     src/format/record_codec.cpp
     src/pager/read_pager.cpp
@@ -141,6 +142,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/bytes.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/diagnostics/storage_inspector.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
@@ -161,6 +163,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
+  "${PROJECT_SOURCE_DIR}/src/catalog/catalog.cpp"
   "${PROJECT_SOURCE_DIR}/src/diagnostics/storage_inspector.cpp"
   "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
@@ -184,6 +187,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_test.cpp"
