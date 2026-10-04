@@ -404,6 +404,23 @@ TEST(SqlCast, TextAndBlobCastsUseCanonicalTextBytes) {
   ExpectNull(CastValue(SqlValue{}, CastTarget::kBlob));
 }
 
+TEST(SqlNumericCoercion, BitwiseIntegerConversionDoesNotRequireOwnedCopies) {
+  EXPECT_EQ(CoerceIntegerForBitwise(SqlValue::Integer(7)), 7);
+  EXPECT_EQ(CoerceIntegerForBitwise(SqlValue::Real(7.9)), 7);
+  EXPECT_EQ(CoerceIntegerForBitwise(TextValue("-12.5x")), -12);
+  EXPECT_EQ(CoerceIntegerForBitwise(BlobValue("42x")), 42);
+  EXPECT_EQ(CoerceIntegerForBitwise(SqlValue{}), 0);
+}
+
+TEST(SqlNumericCoercion, TruthConversionMatchesSQLiteNumericPrefixes) {
+  EXPECT_EQ(EvaluateSqlTruth(SqlValue{}), SqlTruthValue::kNull);
+  EXPECT_EQ(EvaluateSqlTruth(SqlValue::Integer(0)), SqlTruthValue::kFalse);
+  EXPECT_EQ(EvaluateSqlTruth(SqlValue::Real(-0.0)), SqlTruthValue::kFalse);
+  EXPECT_EQ(EvaluateSqlTruth(TextValue("2x")), SqlTruthValue::kTrue);
+  EXPECT_EQ(EvaluateSqlTruth(TextValue("abc")), SqlTruthValue::kFalse);
+  EXPECT_EQ(EvaluateSqlTruth(BlobValue("-3.5tail")), SqlTruthValue::kTrue);
+}
+
 TEST(SqlValueComparison, OrdersSQLiteStorageClassesAndBinaryPayloads) {
   const SqlValue null_value;
   const SqlValue number = SqlValue::Integer(1);

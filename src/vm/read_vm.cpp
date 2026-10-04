@@ -1,0 +1,1223 @@
+#include "modern_sqlite/vm/read_vm.hpp"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "modern_sqlite/base/bytes.hpp"
+#include "modern_sqlite/base/coding.hpp"
+#include "modern_sqlite/format/record_codec.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
+#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/runtime/collation.hpp"
+#include "modern_sqlite/runtime/function_registry.hpp"
+#include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/storage/database_format.hpp"
+#include "modern_sqlite/storage/page_number.hpp"
+
+namespace modern_sqlite {
+namespace {
+
+using DispatchResult = Result<std::optional<ReadVmStep>>;
+
+[[nodiscard]] Error VmError(ErrorCode code, std::string message) {
+  return Error::Create(code, std::move(message));
+}
+
+[[nodiscard]] bool EqualAsciiCaseInsensitive(std::string_view left,
+                                             std::string_view right) noexcept {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    auto left_byte = static_cast<unsigned char>(left[index]);
+    auto right_byte = static_cast<unsigned char>(right[index]);
+    if (left_byte >= static_cast<unsigned char>('A') &&
+        left_byte <= static_cast<unsigned char>('Z')) {
+      left_byte = static_cast<unsigned char>(left_byte + static_cast<unsigned char>('a' - 'A'));
+    }
+    if (right_byte >= static_cast<unsigned char>('A') &&
+        right_byte <= static_cast<unsigned char>('Z')) {
+      right_byte = static_cast<unsigned char>(right_byte + static_cast<unsigned char>('a' - 'A'));
+    }
+    if (left_byte != right_byte) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::size_t ValueByteSize(const SqlValue& value) noexcept {
+  if (const auto text = value.text_value(); text.has_value()) {
+    return text->bytes().size();
+  }
+  if (const auto blob = value.blob_value(); blob.has_value()) {
+    return blob->size();
+  }
+  return 0;
+}
+
+[[nodiscard]] double NumericAsDouble(const SqlValue& value) noexcept {
+  if (const auto integer = value.integer_value(); integer.has_value()) {
+    return static_cast<double>(*integer);
+  }
+  return value.real_value().value_or(0.0);
+}
+
+[[nodiscard]] std::int64_t NumericAsInteger(const SqlValue& value) {
+  return CoerceIntegerForBitwise(value);
+}
+
+[[nodiscard]] SqlTruthValue TruthValue(const SqlValue& value) noexcept {
+  return EvaluateSqlTruth(value);
+}
+
+[[nodiscard]] std::string_view ConcatenationBytes(const SqlValue& value,
+                                                  std::optional<SqlValue>& converted) {
+  if (const auto text = value.text_value(); text.has_value()) {
+    return text->bytes();
+  }
+  if (const auto blob = value.blob_value(); blob.has_value()) {
+    return AsStringView(*blob);
+  }
+  converted.emplace(CastValue(value.Clone(), CastTarget::kText));
+  return converted->text_value().value_or(Utf8View{}).bytes();
+}
+
+[[nodiscard]] std::int64_t BitwiseAnd(std::int64_t left, std::int64_t right) noexcept {
+  const std::uint64_t result =
+      std::bit_cast<std::uint64_t>(left) & std::bit_cast<std::uint64_t>(right);
+  return std::bit_cast<std::int64_t>(result);
+}
+
+[[nodiscard]] std::int64_t BitwiseOr(std::int64_t left, std::int64_t right) noexcept {
+  const std::uint64_t result =
+      std::bit_cast<std::uint64_t>(left) | std::bit_cast<std::uint64_t>(right);
+  return std::bit_cast<std::int64_t>(result);
+}
+
+[[nodiscard]] std::int64_t BitwiseNot(std::int64_t value) noexcept {
+  return std::bit_cast<std::int64_t>(~std::bit_cast<std::uint64_t>(value));
+}
+
+struct ShiftArguments {
+  std::int64_t value;
+  std::int64_t count;
+};
+
+[[nodiscard]] std::int64_t ShiftInteger(ShiftArguments arguments, bool shift_left) noexcept {
+  const std::int64_t value = arguments.value;
+  const std::int64_t count = arguments.count;
+  std::uint64_t amount = 0;
+  if (count < 0) {
+    shift_left = !shift_left;
+    amount = count <= -64 ? 64U : static_cast<std::uint64_t>(-count);
+  } else {
+    amount = static_cast<std::uint64_t>(count);
+    if (amount > 64U) {
+      amount = 64U;
+    }
+  }
+
+  if (amount == 0U) {
+    return value;
+  }
+  if (shift_left) {
+    if (amount >= 64U) {
+      return 0;
+    }
+    const std::uint64_t shifted = std::bit_cast<std::uint64_t>(value) << amount;
+    return std::bit_cast<std::int64_t>(shifted);
+  }
+  if (amount >= 64U) {
+    return value < 0 ? -1 : 0;
+  }
+  if (value >= 0) {
+    const std::uint64_t shifted = std::bit_cast<std::uint64_t>(value) >> amount;
+    return std::bit_cast<std::int64_t>(shifted);
+  }
+  std::uint64_t shifted = std::bit_cast<std::uint64_t>(value) >> amount;
+  shifted |= std::numeric_limits<std::uint64_t>::max() << (64U - amount);
+  return std::bit_cast<std::int64_t>(shifted);
+}
+
+[[nodiscard]] SqlValue LogicalBinary(SqlTruthValue left, SqlTruthValue right,
+                                     bool is_and) noexcept {
+  if (is_and) {
+    if (left == SqlTruthValue::kFalse || right == SqlTruthValue::kFalse) {
+      return SqlValue::Integer(0);
+    }
+    if (left == SqlTruthValue::kNull || right == SqlTruthValue::kNull) {
+      return {};
+    }
+    return SqlValue::Integer(1);
+  }
+
+  if (left == SqlTruthValue::kTrue || right == SqlTruthValue::kTrue) {
+    return SqlValue::Integer(1);
+  }
+  if (left == SqlTruthValue::kNull || right == SqlTruthValue::kNull) {
+    return {};
+  }
+  return SqlValue::Integer(0);
+}
+
+[[nodiscard]] std::optional<std::int64_t> LosslessRowId(const SqlValue& value) {
+  if (value.type() == SqlValueType::kInteger) {
+    return value.integer_value();
+  }
+  if (value.type() == SqlValueType::kNull || value.type() == SqlValueType::kBlob) {
+    return std::nullopt;
+  }
+
+  const SqlValue numeric = value.type() == SqlValueType::kText
+                               ? ApplyAffinity(value.Clone(), TypeAffinity::kNumeric)
+                               : value.Clone();
+  if (numeric.type() == SqlValueType::kInteger) {
+    return numeric.integer_value();
+  }
+  const auto real = numeric.real_value();
+  if (!real.has_value()) {
+    return std::nullopt;
+  }
+  const auto minimum = static_cast<double>(std::numeric_limits<std::int64_t>::min());
+  const double maximum_exclusive = -minimum;
+  if (*real < minimum || *real >= maximum_exclusive) {
+    return std::nullopt;
+  }
+  const auto converted = static_cast<std::int64_t>(*real);
+  if (static_cast<double>(converted) != *real) {
+    return std::nullopt;
+  }
+  return converted;
+}
+
+struct ResolvedCall {
+  std::uint32_t address = 0;
+  const ScalarFunction* function = nullptr;
+  const Collation* collation = nullptr;
+};
+
+struct RuntimeCursor {
+  using Storage = std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor>;
+
+  void ClearRecordCache() noexcept {
+    for (RecordFieldView& field : decoded_fields) {
+      field = RecordFieldView{};
+    }
+    fields_decoded = false;
+    record.reset();
+    owned_record.reset();
+  }
+
+  Storage storage;
+  std::optional<ByteBuffer> owned_record;
+  std::optional<RecordView> record;
+  std::vector<RecordFieldView> decoded_fields;
+  bool fields_decoded = false;
+};
+
+}  // namespace
+
+struct ReadVm::Impl {
+  Impl(const BytecodeProgram& program, ReadVmEnvironment environment, ReadVmLimits limits)
+      : program_(&program),
+        pager_(environment.pager_),
+        catalog_generation_(environment.catalog_generation_),
+        functions_(environment.functions_),
+        available_collations_(environment.collations_),
+        limits_(limits),
+        registers_(program.register_count()),
+        parameters_(program.parameter_count()),
+        cursors_(program.cursors().size()),
+        resolved_collations_(program.symbols().size(), nullptr) {}
+
+  [[nodiscard]] Status Initialize() {
+    if (pager_ == nullptr || functions_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "VM environment is incomplete"));
+    }
+    for (const Collation* collation : available_collations_) {
+      if (collation == nullptr) {
+        return std::unexpected(
+            VmError(ErrorCode::kMisuse, "VM environment contains a null collation"));
+      }
+    }
+    for (const SqlValue& constant : program_->constants()) {
+      if (ValueByteSize(constant) > limits_.maximum_value_bytes) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "bytecode constant exceeds the VM value limit"));
+      }
+    }
+
+    Status schema = ValidateSchema();
+    if (!schema.has_value()) {
+      return schema;
+    }
+
+    for (const ReadCursorDescriptor& descriptor : program_->cursors()) {
+      if (descriptor.storage != CursorStorageKind::kIndex) {
+        continue;
+      }
+      for (const IndexColumnMetadata& column : descriptor.index_columns) {
+        auto collation = ResolveCollation(column.collation);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+      }
+    }
+
+    const std::span<const Instruction> instructions = program_->instructions();
+    for (std::size_t index = 0; index < instructions.size(); ++index) {
+      const Instruction& instruction = instructions[index];
+      if (const auto* compare = std::get_if<CompareInstruction>(&instruction); compare != nullptr) {
+        auto collation = ResolveCollation(compare->collation);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+        continue;
+      }
+      const auto* call = std::get_if<CallScalarInstruction>(&instruction);
+      if (call == nullptr) {
+        continue;
+      }
+      auto function = functions_->Resolve(program_->symbol(call->function), call->argument_count);
+      if (!function.has_value()) {
+        return std::unexpected(std::move(function.error()));
+      }
+      auto collation = ResolveCollation(call->collation);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      resolved_calls_.push_back(ResolvedCall{
+          .address = static_cast<std::uint32_t>(index),
+          .function = *function,
+          .collation = *collation,
+      });
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status Bind(ParameterId parameter, const SqlValue& value) {
+    if (state_ != ReadVmState::kReady) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "parameters can only be bound while the VM is ready"));
+    }
+    if (parameter.value() >= parameters_.size()) {
+      return std::unexpected(VmError(ErrorCode::kOutOfRange, "parameter ID is out of range"));
+    }
+    if (ValueByteSize(value) > limits_.maximum_value_bytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "bound value exceeds the VM value limit"));
+    }
+    SqlValue replacement = value.Clone();
+    parameters_[parameter.value()] = std::move(replacement);
+    return {};
+  }
+
+  [[nodiscard]] Status ClearBindings() {
+    if (state_ != ReadVmState::kReady) {
+      return std::unexpected(VmError(
+          ErrorCode::kMisuse, "parameter bindings can only be cleared while the VM is ready"));
+    }
+    for (SqlValue& parameter : parameters_) {
+      parameter = {};
+    }
+    return {};
+  }
+
+  [[nodiscard]] Result<ReadVmStep> Step() {
+    if (state_ != ReadVmState::kReady && state_ != ReadVmState::kRow) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "the VM cannot step from its current state"));
+    }
+
+    if (state_ == ReadVmState::kReady) {
+      Status schema = ValidateSchema();
+      if (!schema.has_value()) {
+        return Fail(std::move(schema.error()));
+      }
+      execution_data_version_ = pager_->data_version();
+    } else {
+      ClearRow();
+      if (!pager_->in_read_transaction()) {
+        return Fail(
+            VmError(ErrorCode::kMisuse, "the read transaction ended while the VM was suspended"));
+      }
+      if (!execution_data_version_.has_value() ||
+          pager_->data_version() != *execution_data_version_) {
+        return Fail(VmError(ErrorCode::kSchemaChanged,
+                            "the database snapshot changed while the VM was suspended"));
+      }
+    }
+
+    std::uint64_t step_instruction_count = 0;
+    while (true) {
+      if (step_instruction_count >= limits_.maximum_instructions_per_step) {
+        return Fail(VmError(ErrorCode::kInterrupted, "VM instruction budget exhausted"));
+      }
+      ++step_instruction_count;
+      if (executed_instruction_count_ != std::numeric_limits<std::uint64_t>::max()) {
+        ++executed_instruction_count_;
+      }
+      MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVmInstructions, 1U);
+
+      const std::uint32_t address = program_counter_;
+      const Instruction& instruction = program_->instruction(InstructionAddress(address));
+      ++program_counter_;
+      DispatchResult result = Dispatch(address, instruction);
+      if (!result.has_value()) {
+        return Fail(std::move(result.error()));
+      }
+      if (result->has_value()) {
+        return **result;
+      }
+    }
+  }
+
+  [[nodiscard]] Status Reset() noexcept {
+    CloseAllCursors();
+    for (SqlValue& value : registers_) {
+      value = {};
+    }
+    ClearRow();
+    execution_data_version_.reset();
+    program_counter_ = 0;
+    executed_instruction_count_ = 0;
+    state_ = ReadVmState::kReady;
+    return {};
+  }
+
+  [[nodiscard]] std::span<const SqlValue> row() const noexcept {
+    if (state_ != ReadVmState::kRow || row_count_ == 0U) {
+      return {};
+    }
+    return std::span<const SqlValue>{registers_}.subspan(row_first_, row_count_);
+  }
+
+  [[nodiscard]] Result<ReadVmStep> Fail(Error error) noexcept {
+    CloseAllCursors();
+    ClearRow();
+    execution_data_version_.reset();
+    state_ = ReadVmState::kError;
+    return std::unexpected(std::move(error));
+  }
+
+  void FailForException() noexcept {
+    CloseAllCursors();
+    ClearRow();
+    execution_data_version_.reset();
+    state_ = ReadVmState::kError;
+  }
+
+  [[nodiscard]] Status ValidateSchema() {
+    if (!pager_->in_read_transaction()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "an active read transaction is required"));
+    }
+    const DatabaseHeader* header = pager_->header();
+    const std::uint32_t schema_cookie = header == nullptr ? 0U : header->schema_cookie();
+    const SchemaVersionRequirement expected = program_->schema_version();
+    if (schema_cookie != expected.schema_cookie || catalog_generation_ != expected.generation) {
+      return std::unexpected(
+          VmError(ErrorCode::kSchemaChanged, "the bytecode schema version is stale"));
+    }
+
+    const std::uint32_t raw_schema_format = header == nullptr ? 0U : header->schema_format();
+    auto schema_format = NormalizeSchemaFormat(raw_schema_format);
+    if (!schema_format.has_value()) {
+      return std::unexpected(std::move(schema_format.error()));
+    }
+    const std::uint32_t raw_encoding = header == nullptr ? 0U : header->text_encoding();
+    auto encoding = NormalizeTextEncoding(raw_encoding);
+    if (!encoding.has_value()) {
+      return std::unexpected(std::move(encoding.error()));
+    }
+    if (*encoding != DatabaseTextEncoding::kUtf8) {
+      return std::unexpected(
+          VmError(ErrorCode::kProtocol, "the read VM currently supports only UTF-8 databases"));
+    }
+    record_options_.schema_format = *schema_format;
+    return {};
+  }
+
+  [[nodiscard]] Result<const Collation*> ResolveCollation(SymbolId symbol) {
+    const std::size_t index = symbol.value();
+    if (resolved_collations_[index] != nullptr) {
+      return resolved_collations_[index];
+    }
+    const std::string_view name = program_->symbol(symbol);
+    for (const Collation* collation : available_collations_) {
+      if (EqualAsciiCaseInsensitive(name, collation->name())) {
+        resolved_collations_[index] = collation;
+        return collation;
+      }
+    }
+    return std::unexpected(VmError(ErrorCode::kGeneric, "required collation is not registered"));
+  }
+
+  [[nodiscard]] const Collation& CollationFor(SymbolId symbol) const noexcept {
+    return *resolved_collations_[symbol.value()];
+  }
+
+  [[nodiscard]] DispatchResult Dispatch(std::uint32_t address, const Instruction& instruction) {
+    return std::visit(
+        [this, address](const auto& operation) { return Execute(address, operation); },
+        instruction);
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const LoadConstantInstruction& operation) {
+    return SetRegister(operation.output, program_->constant(operation.constant).Clone());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const LoadParameterInstruction& operation) {
+    return SetRegister(operation.output, parameters_[operation.parameter.value()].Clone());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CopyInstruction& operation) {
+    return SetRegister(operation.output, Register(operation.input).Clone());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const UnaryInstruction& operation) {
+    const SqlValue& input = Register(operation.input);
+    SqlValue output;
+    switch (operation.operation) {
+      case UnaryOperation::kNegate: {
+        const SqlValue numeric = CoerceNumericForArithmetic(input);
+        if (numeric.type() == SqlValueType::kNull) {
+          break;
+        }
+        if (const auto integer = numeric.integer_value(); integer.has_value()) {
+          if (*integer == std::numeric_limits<std::int64_t>::min()) {
+            output = SqlValue::Real(-static_cast<double>(*integer));
+          } else {
+            output = SqlValue::Integer(-*integer);
+          }
+        } else {
+          output = SqlValue::Real(-numeric.real_value().value_or(0.0));
+        }
+        break;
+      }
+      case UnaryOperation::kBitwiseNot:
+        if (input.type() != SqlValueType::kNull) {
+          output = SqlValue::Integer(BitwiseNot(NumericAsInteger(input)));
+        }
+        break;
+      case UnaryOperation::kLogicalNot: {
+        const SqlTruthValue truth = TruthValue(input);
+        if (truth != SqlTruthValue::kNull) {
+          output = SqlValue::Integer(truth == SqlTruthValue::kFalse ? 1 : 0);
+        }
+        break;
+      }
+    }
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult ExecuteArithmetic(const BinaryInstruction& operation) {
+    const SqlValue left = CoerceNumericForArithmetic(Register(operation.left));
+    const SqlValue right = CoerceNumericForArithmetic(Register(operation.right));
+    SqlValue output;
+    if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
+      return SetRegister(operation.output, std::move(output));
+    }
+
+    const auto left_integer = left.integer_value();
+    const auto right_integer = right.integer_value();
+    if (operation.operation == BinaryOperation::kRemainder) {
+      const std::int64_t divisor = NumericAsInteger(right);
+      if (divisor == 0) {
+        return SetRegister(operation.output, std::move(output));
+      }
+      const std::int64_t dividend = NumericAsInteger(left);
+      const std::int64_t remainder =
+          dividend == std::numeric_limits<std::int64_t>::min() && divisor == -1
+              ? 0
+              : dividend % divisor;
+      output = left.type() == SqlValueType::kReal || right.type() == SqlValueType::kReal
+                   ? SqlValue::Real(static_cast<double>(remainder))
+                   : SqlValue::Integer(remainder);
+      return SetRegister(operation.output, std::move(output));
+    }
+
+    if (left_integer.has_value() && right_integer.has_value()) {
+      CodingResult<std::int64_t> checked = std::unexpected(CodingError::kOverflow);
+      switch (operation.operation) {
+        case BinaryOperation::kAdd:
+          checked = CheckedAdd(*left_integer, *right_integer);
+          break;
+        case BinaryOperation::kSubtract:
+          checked = CheckedSubtract(*left_integer, *right_integer);
+          break;
+        case BinaryOperation::kMultiply:
+          checked = CheckedMultiply(*left_integer, *right_integer);
+          break;
+        case BinaryOperation::kDivide:
+          if (*right_integer == 0) {
+            return SetRegister(operation.output, std::move(output));
+          }
+          if (*left_integer == std::numeric_limits<std::int64_t>::min() && *right_integer == -1) {
+            output = SqlValue::Real(static_cast<double>(*left_integer) /
+                                    static_cast<double>(*right_integer));
+          } else {
+            output = SqlValue::Integer(*left_integer / *right_integer);
+          }
+          return SetRegister(operation.output, std::move(output));
+        case BinaryOperation::kRemainder:
+        case BinaryOperation::kConcatenate:
+        case BinaryOperation::kBitwiseAnd:
+        case BinaryOperation::kBitwiseOr:
+        case BinaryOperation::kShiftLeft:
+        case BinaryOperation::kShiftRight:
+        case BinaryOperation::kLogicalAnd:
+        case BinaryOperation::kLogicalOr:
+          break;
+      }
+      if (checked.has_value()) {
+        output = SqlValue::Integer(*checked);
+      } else {
+        const auto left_real = static_cast<double>(*left_integer);
+        const auto right_real = static_cast<double>(*right_integer);
+        switch (operation.operation) {
+          case BinaryOperation::kAdd:
+            output = SqlValue::Real(left_real + right_real);
+            break;
+          case BinaryOperation::kSubtract:
+            output = SqlValue::Real(left_real - right_real);
+            break;
+          case BinaryOperation::kMultiply:
+            output = SqlValue::Real(left_real * right_real);
+            break;
+          case BinaryOperation::kDivide:
+          case BinaryOperation::kRemainder:
+          case BinaryOperation::kConcatenate:
+          case BinaryOperation::kBitwiseAnd:
+          case BinaryOperation::kBitwiseOr:
+          case BinaryOperation::kShiftLeft:
+          case BinaryOperation::kShiftRight:
+          case BinaryOperation::kLogicalAnd:
+          case BinaryOperation::kLogicalOr:
+            break;
+        }
+      }
+      return SetRegister(operation.output, std::move(output));
+    }
+
+    const double left_real = NumericAsDouble(left);
+    const double right_real = NumericAsDouble(right);
+    switch (operation.operation) {
+      case BinaryOperation::kAdd:
+        output = SqlValue::Real(left_real + right_real);
+        break;
+      case BinaryOperation::kSubtract:
+        output = SqlValue::Real(left_real - right_real);
+        break;
+      case BinaryOperation::kMultiply:
+        output = SqlValue::Real(left_real * right_real);
+        break;
+      case BinaryOperation::kDivide:
+        if (right_real != 0.0) {
+          output = SqlValue::Real(left_real / right_real);
+        }
+        break;
+      case BinaryOperation::kRemainder:
+      case BinaryOperation::kConcatenate:
+      case BinaryOperation::kBitwiseAnd:
+      case BinaryOperation::kBitwiseOr:
+      case BinaryOperation::kShiftLeft:
+      case BinaryOperation::kShiftRight:
+      case BinaryOperation::kLogicalAnd:
+      case BinaryOperation::kLogicalOr:
+        break;
+    }
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult ExecuteConcatenate(const BinaryInstruction& operation) {
+    const SqlValue& left = Register(operation.left);
+    const SqlValue& right = Register(operation.right);
+    SqlValue output;
+    if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
+      return SetRegister(operation.output, std::move(output));
+    }
+    std::optional<SqlValue> converted_left;
+    std::optional<SqlValue> converted_right;
+    const std::string_view left_bytes = ConcatenationBytes(left, converted_left);
+    const std::string_view right_bytes = ConcatenationBytes(right, converted_right);
+    if (left_bytes.size() > limits_.maximum_value_bytes ||
+        right_bytes.size() > limits_.maximum_value_bytes - left_bytes.size()) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "concatenated value exceeds the VM value limit"));
+    }
+    std::string bytes;
+    bytes.reserve(left_bytes.size() + right_bytes.size());
+    bytes.append(left_bytes);
+    bytes.append(right_bytes);
+    output = SqlValue::Text(std::move(bytes));
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult ExecuteBitwise(const BinaryInstruction& operation) {
+    const SqlValue& left = Register(operation.left);
+    const SqlValue& right = Register(operation.right);
+    SqlValue output;
+    if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
+      return SetRegister(operation.output, std::move(output));
+    }
+    const std::int64_t left_integer = NumericAsInteger(left);
+    const std::int64_t right_integer = NumericAsInteger(right);
+    switch (operation.operation) {
+      case BinaryOperation::kBitwiseAnd:
+        output = SqlValue::Integer(BitwiseAnd(left_integer, right_integer));
+        break;
+      case BinaryOperation::kBitwiseOr:
+        output = SqlValue::Integer(BitwiseOr(left_integer, right_integer));
+        break;
+      case BinaryOperation::kShiftLeft:
+        output = SqlValue::Integer(
+            ShiftInteger(ShiftArguments{.value = left_integer, .count = right_integer}, true));
+        break;
+      case BinaryOperation::kShiftRight:
+        output = SqlValue::Integer(
+            ShiftInteger(ShiftArguments{.value = left_integer, .count = right_integer}, false));
+        break;
+      case BinaryOperation::kAdd:
+      case BinaryOperation::kSubtract:
+      case BinaryOperation::kMultiply:
+      case BinaryOperation::kDivide:
+      case BinaryOperation::kRemainder:
+      case BinaryOperation::kConcatenate:
+      case BinaryOperation::kLogicalAnd:
+      case BinaryOperation::kLogicalOr:
+        break;
+    }
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult ExecuteLogical(const BinaryInstruction& operation) {
+    SqlValue output =
+        LogicalBinary(TruthValue(Register(operation.left)), TruthValue(Register(operation.right)),
+                      operation.operation == BinaryOperation::kLogicalAnd);
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const BinaryInstruction& operation) {
+    switch (operation.operation) {
+      case BinaryOperation::kAdd:
+      case BinaryOperation::kSubtract:
+      case BinaryOperation::kMultiply:
+      case BinaryOperation::kDivide:
+      case BinaryOperation::kRemainder:
+        return ExecuteArithmetic(operation);
+      case BinaryOperation::kConcatenate:
+        return ExecuteConcatenate(operation);
+      case BinaryOperation::kBitwiseAnd:
+      case BinaryOperation::kBitwiseOr:
+      case BinaryOperation::kShiftLeft:
+      case BinaryOperation::kShiftRight:
+        return ExecuteBitwise(operation);
+      case BinaryOperation::kLogicalAnd:
+      case BinaryOperation::kLogicalOr:
+        return ExecuteLogical(operation);
+    }
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown binary operation"));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ApplyAffinityInstruction& operation) {
+    SqlValue output =
+        modern_sqlite::ApplyAffinity(Register(operation.input).Clone(), operation.affinity);
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CastInstruction& operation) {
+    SqlValue output = CastValue(Register(operation.input).Clone(), operation.target);
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CompareInstruction& operation) {
+    const SqlValue& original_left = Register(operation.left);
+    const SqlValue& original_right = Register(operation.right);
+    const SqlValue* left = &original_left;
+    const SqlValue* right = &original_right;
+    std::optional<SqlValue> converted_left;
+    std::optional<SqlValue> converted_right;
+
+    if (original_left.type() != SqlValueType::kNull &&
+        original_right.type() != SqlValueType::kNull &&
+        !(original_left.type() == SqlValueType::kInteger &&
+          original_right.type() == SqlValueType::kInteger)) {
+      if (operation.affinity == TypeAffinity::kNumeric ||
+          operation.affinity == TypeAffinity::kInteger ||
+          operation.affinity == TypeAffinity::kReal) {
+        if (original_left.type() == SqlValueType::kText) {
+          converted_left.emplace(
+              modern_sqlite::ApplyAffinity(original_left.Clone(), TypeAffinity::kNumeric));
+          left = &*converted_left;
+        }
+        if (original_right.type() == SqlValueType::kText) {
+          converted_right.emplace(
+              modern_sqlite::ApplyAffinity(original_right.Clone(), TypeAffinity::kNumeric));
+          right = &*converted_right;
+        }
+      } else if (operation.affinity == TypeAffinity::kText &&
+                 (original_left.type() == SqlValueType::kText ||
+                  original_right.type() == SqlValueType::kText)) {
+        if (original_left.type() == SqlValueType::kInteger ||
+            original_left.type() == SqlValueType::kReal) {
+          converted_left.emplace(
+              modern_sqlite::ApplyAffinity(original_left.Clone(), TypeAffinity::kText));
+          left = &*converted_left;
+        }
+        if (original_right.type() == SqlValueType::kInteger ||
+            original_right.type() == SqlValueType::kReal) {
+          converted_right.emplace(
+              modern_sqlite::ApplyAffinity(original_right.Clone(), TypeAffinity::kText));
+          right = &*converted_right;
+        }
+      }
+    }
+
+    const SqlTruthValue comparison = EvaluateSqlComparison(*left, *right, operation.comparison,
+                                                           CollationFor(operation.collation));
+    SqlValue output;
+    if (comparison != SqlTruthValue::kNull) {
+      output = SqlValue::Integer(comparison == SqlTruthValue::kTrue ? 1 : 0);
+    }
+    return SetRegister(operation.output, std::move(output));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const CallScalarInstruction& operation) {
+    const auto iterator =
+        std::ranges::lower_bound(resolved_calls_, address, {}, &ResolvedCall::address);
+    if (iterator == resolved_calls_.end() || iterator->address != address) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "resolved scalar function call is missing"));
+    }
+    const std::span<const SqlValue> arguments =
+        operation.argument_count == 0U
+            ? std::span<const SqlValue>{}
+            : std::span<const SqlValue>{registers_}.subspan(operation.first_argument.value(),
+                                                            operation.argument_count);
+    const ScalarFunctionContext context(*iterator->collation);
+    auto value = iterator->function->Invoke(context, arguments);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    return SetRegister(operation.output, std::move(*value));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const JumpInstruction& operation) {
+    program_counter_ = operation.target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const JumpIfInstruction& operation) {
+    const SqlValue& input = Register(operation.input);
+    bool should_jump = false;
+    switch (operation.condition) {
+      case JumpCondition::kIfTrue:
+        should_jump = TruthValue(input) == SqlTruthValue::kTrue;
+        break;
+      case JumpCondition::kIfFalse:
+        should_jump = TruthValue(input) == SqlTruthValue::kFalse;
+        break;
+      case JumpCondition::kIfNull:
+        should_jump = input.type() == SqlValueType::kNull;
+        break;
+      case JumpCondition::kIfNotNull:
+        should_jump = input.type() != SqlValueType::kNull;
+        break;
+    }
+    if (should_jump) {
+      program_counter_ = operation.target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenReadCursorInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    if (descriptor.storage == CursorStorageKind::kRowIdTable) {
+      auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      runtime.storage = std::move(*cursor);
+    } else {
+      std::vector<IndexColumnOrder> columns;
+      columns.reserve(descriptor.index_columns.size());
+      for (const IndexColumnMetadata& column : descriptor.index_columns) {
+        const bool descending = column.order == BytecodeSortOrder::kDescending;
+        columns.emplace_back(
+            CollationFor(column.collation),
+            descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
+            descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+      }
+      auto cursor =
+          IndexBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()), columns);
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      runtime.storage = std::move(*cursor);
+    }
+    runtime.decoded_fields.resize(descriptor.record_field_count);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseCursorInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    runtime.storage = std::monostate{};
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    auto has_entry = std::visit(
+        [](auto& cursor) -> Result<bool> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return std::unexpected(VmError(ErrorCode::kInternal, "rewind used a closed cursor"));
+          } else {
+            return cursor.First();
+          }
+        },
+        runtime.storage);
+    if (!has_entry.has_value()) {
+      return std::unexpected(std::move(has_entry.error()));
+    }
+    if (!*has_entry) {
+      program_counter_ = operation.empty_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    auto has_entry = std::visit(
+        [](auto& cursor) -> Result<bool> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return std::unexpected(VmError(ErrorCode::kInternal, "next used a closed cursor"));
+          } else {
+            return cursor.Next();
+          }
+        },
+        runtime.storage);
+    if (!has_entry.has_value()) {
+      return std::unexpected(std::move(has_entry.error()));
+    }
+    if (*has_entry) {
+      program_counter_ = operation.next_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const SeekRowIdInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+    if (cursor == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "rowid seek used a non-table cursor"));
+    }
+    const std::optional<std::int64_t> rowid = LosslessRowId(Register(operation.key));
+    if (!rowid.has_value()) {
+      program_counter_ = operation.missing_target.value();
+      return std::nullopt;
+    }
+    auto found = cursor->Seek(*rowid, BtreeSeekMode::kEqual);
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (!*found) {
+      program_counter_ = operation.missing_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadFieldInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
+    const CursorFieldSource& source = descriptor.fields[operation.field.value()];
+    SqlValue value;
+    if (source.kind == CursorFieldSourceKind::kRowId) {
+      const TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+      if (cursor == nullptr || !cursor->valid()) {
+        return std::unexpected(
+            VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
+      }
+      auto rowid = cursor->rowid();
+      if (!rowid.has_value()) {
+        return std::unexpected(std::move(rowid.error()));
+      }
+      value = SqlValue::Integer(*rowid);
+    } else {
+      auto field = ReadRecordField(runtime, source.record_field);
+      if (!field.has_value()) {
+        return std::unexpected(std::move(field.error()));
+      }
+      value = std::move(*field);
+    }
+    return SetRegister(operation.output, std::move(value));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadRowIdInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    const TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+    if (cursor == nullptr || !cursor->valid()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "rowid read used an invalid table cursor"));
+    }
+    auto rowid = cursor->rowid();
+    if (!rowid.has_value()) {
+      return std::unexpected(std::move(rowid.error()));
+    }
+    return SetRegister(operation.output, SqlValue::Integer(*rowid));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResultRowInstruction& operation) {
+    row_first_ = operation.first.value();
+    row_count_ = operation.count;
+    state_ = ReadVmState::kRow;
+    return ReadVmStep::kRow;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
+    CloseAllCursors();
+    ClearRow();
+    execution_data_version_.reset();
+    state_ = ReadVmState::kDone;
+    return ReadVmStep::kDone;
+  }
+
+  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlValue value) {
+    if (ValueByteSize(value) > limits_.maximum_value_bytes) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
+    }
+    registers_[destination.value()] = std::move(value);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] const SqlValue& Register(RegisterId register_id) const noexcept {
+    return registers_[register_id.value()];
+  }
+
+  [[nodiscard]] RuntimeCursor& Cursor(CursorId cursor_id) noexcept {
+    return cursors_[cursor_id.value()];
+  }
+
+  [[nodiscard]] Result<SqlValue> ReadRecordField(RuntimeCursor& runtime,
+                                                 std::uint32_t field_index) {
+    if (!runtime.fields_decoded) {
+      auto record = CompleteRecord(runtime);
+      if (!record.has_value()) {
+        return std::unexpected(std::move(record.error()));
+      }
+      runtime.record.emplace(*record);
+      RecordCursor cursor = runtime.record->cursor();
+      const std::size_t available = runtime.record->field_count();
+      const std::size_t requested = runtime.decoded_fields.size();
+      const std::size_t decode_count = std::min(available, requested);
+      for (std::size_t index = 0; index < decode_count; ++index) {
+        const std::optional<RecordFieldView> field = cursor.Next();
+        if (!field.has_value()) {
+          return std::unexpected(
+              VmError(ErrorCode::kCorruption, "record field decoding ended unexpectedly"));
+        }
+        runtime.decoded_fields[index] = *field;
+      }
+      runtime.fields_decoded = true;
+    }
+    const RecordFieldView& field = runtime.decoded_fields[field_index];
+    if (const auto text = field.text_value();
+        text.has_value() && text->bytes().size() > limits_.maximum_value_bytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "record text field exceeds the VM value limit"));
+    }
+    if (const auto blob = field.blob_value();
+        blob.has_value() && blob->size() > limits_.maximum_value_bytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "record blob field exceeds the VM value limit"));
+    }
+    return field.ToOwned();
+  }
+
+  [[nodiscard]] Result<RecordView> CompleteRecord(RuntimeCursor& runtime) {
+    auto payload = std::visit(
+        [](auto& cursor) -> Result<BtreePayloadView> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "record read used a closed cursor"));
+          } else {
+            return cursor.payload();
+          }
+        },
+        runtime.storage);
+    if (!payload.has_value()) {
+      return std::unexpected(std::move(payload.error()));
+    }
+
+    ByteView encoded = payload->local_bytes();
+    if (!payload->is_fully_local()) {
+      if (payload->size().value() > limits_.maximum_value_bytes) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "overflow record exceeds the VM value limit"));
+      }
+      auto copied = std::visit(
+          [](auto& cursor) -> Result<ByteBuffer> {
+            using T = std::remove_cvref_t<decltype(cursor)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+              return std::unexpected(
+                  VmError(ErrorCode::kInternal, "record copy used a closed cursor"));
+            } else {
+              return cursor.CopyPayload();
+            }
+          },
+          runtime.storage);
+      if (!copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+      runtime.owned_record.emplace(std::move(*copied));
+      encoded = runtime.owned_record->view();
+    }
+    return RecordView::Parse(encoded, record_options_);
+  }
+
+  void ClearRow() noexcept {
+    row_first_ = 0;
+    row_count_ = 0;
+  }
+
+  void CloseAllCursors() noexcept {
+    for (RuntimeCursor& cursor : cursors_) {
+      cursor.ClearRecordCache();
+      cursor.storage = std::monostate{};
+    }
+  }
+
+  const BytecodeProgram* program_;
+  ReadPager* pager_;
+  std::uint64_t catalog_generation_;
+  const FunctionRegistry* functions_;
+  std::span<const Collation* const> available_collations_;
+  ReadVmLimits limits_;
+  std::vector<SqlValue> registers_;
+  std::vector<SqlValue> parameters_;
+  std::vector<RuntimeCursor> cursors_;
+  std::vector<const Collation*> resolved_collations_;
+  std::vector<ResolvedCall> resolved_calls_;
+  RecordCodecOptions record_options_;
+  ReadVmState state_ = ReadVmState::kReady;
+  std::uint32_t program_counter_ = 0;
+  std::uint32_t row_first_ = 0;
+  std::uint32_t row_count_ = 0;
+  std::uint64_t executed_instruction_count_ = 0;
+  std::optional<std::uint64_t> execution_data_version_;
+};
+
+ReadVmEnvironment ReadVmEnvironment::Core(ReadPager& pager,
+                                          std::uint64_t catalog_generation) noexcept {
+  static const std::array<const Collation*, 3> collations{
+      &BinaryCollation(),
+      &NoCaseCollation(),
+      &RTrimCollation(),
+  };
+  return {pager, catalog_generation, CoreFunctionRegistry(), collations};
+}
+
+Result<ReadVm> ReadVm::Create(const BytecodeProgram& program, ReadVmEnvironment environment,
+                              ReadVmLimits limits) {
+  try {
+    auto impl = std::make_unique<Impl>(program, environment, limits);
+    Status initialized = impl->Initialize();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    return ReadVm(std::move(impl));
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+ReadVm::ReadVm(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+ReadVm::ReadVm(ReadVm&&) noexcept = default;
+
+ReadVm& ReadVm::operator=(ReadVm&&) noexcept = default;
+
+ReadVm::~ReadVm() = default;
+
+Status ReadVm::Bind(ParameterId parameter, const SqlValue& value) {
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "cannot bind a moved-from VM"));
+    }
+    return impl_->Bind(parameter, value);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Status ReadVm::ClearBindings() {
+  if (impl_ == nullptr) {
+    return std::unexpected(VmError(ErrorCode::kMisuse, "cannot clear bindings on a moved-from VM"));
+  }
+  return impl_->ClearBindings();
+}
+
+Result<ReadVmStep> ReadVm::Step() {
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "cannot step a moved-from VM"));
+    }
+    return impl_->Step();
+  } catch (const std::bad_alloc&) {
+    if (impl_ != nullptr) {
+      impl_->FailForException();
+    }
+    return std::unexpected(Error::OutOfMemory());
+  } catch (...) {
+    if (impl_ != nullptr) {
+      impl_->FailForException();
+    }
+    throw;
+  }
+}
+
+Status ReadVm::Reset() {
+  if (impl_ == nullptr) {
+    return std::unexpected(VmError(ErrorCode::kMisuse, "cannot reset a moved-from VM"));
+  }
+  return impl_->Reset();
+}
+
+ReadVmState ReadVm::state() const noexcept {
+  return impl_ == nullptr ? ReadVmState::kInvalid : impl_->state_;
+}
+
+std::span<const SqlValue> ReadVm::row() const noexcept {
+  return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->row();
+}
+
+std::uint64_t ReadVm::executed_instruction_count() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->executed_instruction_count_;
+}
+
+}  // namespace modern_sqlite

@@ -92,6 +92,7 @@ add_library(
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
     src/text/text.cpp
+    src/vm/read_vm.cpp
 )
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
 target_include_directories(
@@ -166,6 +167,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/parser.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/vm/read_vm.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
@@ -191,6 +193,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
+  "${PROJECT_SOURCE_DIR}/src/vm/read_vm.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
@@ -221,6 +224,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/parser_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
   "${PROJECT_SOURCE_DIR}/tools/modern_sqlite_inspect.cpp"
 )
