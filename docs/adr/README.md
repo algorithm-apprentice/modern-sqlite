@@ -37,3 +37,4 @@ their corresponding implementation begins.
 31. [ADR-0031: Typed Immutable Bytecode Programs](0031-typed-bytecode-programs.md)
 32. [ADR-0032: Read-Only Bytecode Virtual Machine](0032-read-only-bytecode-virtual-machine.md)
 33. [ADR-0033: Immutable Read-Only SELECT Binding](0033-immutable-select-binding.md)
+34. [ADR-0034: Immutable Logical SELECT Plans](0034-immutable-logical-select-plans.md)

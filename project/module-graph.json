@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-binder",
+  "currentNode": "implement-logical-plan",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

@@ -79,6 +79,7 @@ add_library(
     src/diagnostics/storage_inspector.cpp
     src/format/record_codec.cpp
     src/pager/read_pager.cpp
+    src/planner/logical_plan.cpp
     src/platform/posix_vfs.cpp
     src/platform/vfs.cpp
     src/runtime/collation.cpp
@@ -155,6 +156,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/pager/read_pager.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/planner/logical_plan.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/posix_vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/collation.hpp"
@@ -181,6 +183,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
   "${PROJECT_SOURCE_DIR}/src/pager/read_pager.cpp"
+  "${PROJECT_SOURCE_DIR}/src/planner/logical_plan.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/posix_vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/collation.cpp"
@@ -218,6 +221,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/pager/read_pager_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/platform/vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/collation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/runtime/function_registry_test.cpp"
