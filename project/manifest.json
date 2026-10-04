@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "read-vm-review",
+    "status": "binder-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -45,6 +45,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "implement-read-vm",
+  "currentNode": "implement-binder",
   "currentNodeState": "review_pending"
 }

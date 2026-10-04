@@ -24,6 +24,7 @@ add_executable(
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
   unit/base/result_test.cpp
+  unit/binder/bound_select_test.cpp
   unit/bytecode/program_test.cpp
   unit/catalog/catalog_test.cpp
   unit/catalog/catalog_loader_test.cpp
@@ -80,6 +81,50 @@ add_test(
 )
 set_tests_properties(
   bytecode.program_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_binder_oom_test
+  unit/binder/bound_select_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_binder_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_binder_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_binder_oom_test)
+add_test(
+  NAME binder.bound_select_oom
+  COMMAND modern_sqlite_binder_oom_test
+)
+set_tests_properties(
+  binder.bound_select_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_binder_allocation_test
+  unit/binder/bound_select_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_binder_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_binder_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_binder_allocation_test)
+add_test(
+  NAME binder.bound_select_allocation
+  COMMAND modern_sqlite_binder_allocation_test
+)
+set_tests_properties(
+  binder.bound_select_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10
