@@ -395,6 +395,8 @@ class ReadPlanLowerer final {
         .root_page = RootPageNumber(root_page),
         .storage = CursorStorageKind::kRowIdTable,
         .record_field_count = 0,
+        .fields = {},
+        .index_columns = {},
     };
     source_field_real_affinity_.assign(bound_select_.source_columns().size(), false);
 
