@@ -145,6 +145,7 @@ struct CatalogColumnInput {
   std::optional<ConflictAction> not_null_conflict{};
   bool primary_key = false;
   std::optional<SchemaExpression> default_expression{};
+  std::shared_ptr<const SqlValue> missing_record_value{};
 };
 
 struct CatalogTableInput {
@@ -184,6 +185,7 @@ struct CatalogColumn {
   std::optional<ConflictAction> effective_not_null_conflict{};
   bool primary_key = false;
   std::optional<SchemaExpression> default_expression{};
+  std::shared_ptr<const SqlValue> missing_record_value{};
 };
 
 struct CatalogTable {

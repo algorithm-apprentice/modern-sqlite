@@ -30,6 +30,7 @@ add_executable(
   unit/catalog/catalog_loader_test.cpp
   unit/diagnostics/storage_inspector_test.cpp
   unit/format/record_codec_test.cpp
+  unit/lowering/read_lowering_test.cpp
   unit/optimizer/physical_plan_test.cpp
   unit/pager/read_pager_test.cpp
   unit/planner/logical_plan_test.cpp
@@ -215,6 +216,50 @@ add_test(
 )
 set_tests_properties(
   optimizer.physical_plan_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_lowering_oom_test
+  unit/lowering/read_lowering_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_lowering_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_lowering_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_lowering_oom_test)
+add_test(
+  NAME lowering.read_lowering_oom
+  COMMAND modern_sqlite_read_lowering_oom_test
+)
+set_tests_properties(
+  lowering.read_lowering_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_lowering_allocation_test
+  unit/lowering/read_lowering_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_lowering_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_lowering_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_lowering_allocation_test)
+add_test(
+  NAME lowering.read_lowering_allocation
+  COMMAND modern_sqlite_read_lowering_allocation_test
+)
+set_tests_properties(
+  lowering.read_lowering_allocation
   PROPERTIES
     LABELS unit
     TIMEOUT 10

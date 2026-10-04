@@ -84,6 +84,12 @@ enum class BoundTruthValue : std::uint8_t {
   kTrue,
 };
 
+enum class BoundTruthHint : std::uint8_t {
+  kNone,
+  kAlwaysFalse,
+  kAlwaysTrue,
+};
+
 struct BoundTableSource {
   BoundSourceKind kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
@@ -116,6 +122,7 @@ struct BoundExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
   std::optional<BoundCollationId> collation{};
   bool has_explicit_collation = false;
+  BoundTruthHint truth_hint = BoundTruthHint::kNone;
 };
 
 struct BoundLiteralExpression {

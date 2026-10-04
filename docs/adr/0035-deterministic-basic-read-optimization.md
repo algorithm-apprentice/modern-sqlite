@@ -75,8 +75,11 @@ observable expression-evaluation rules already fixed by ADR-0033 and
 ADR-0034:
 
 - LIMIT and OFFSET initialize before any WHERE guard or source work;
-- source-independent deterministic WHERE conjuncts execute once in source
-  order before a rowid key or source is initialized;
+- source-independent deterministic WHERE conjuncts for a table source execute
+  once in source order before a rowid key or source is initialized;
+- for a no-FROM SingleRow source, every unknown WHERE conjunct executes once
+  in original order before the synthetic row, including non-deterministic
+  functions;
 - LIMIT zero executes no WHERE guard;
 - a selected rowid key is evaluated once after all guards pass and before
   residual predicates;
@@ -84,7 +87,7 @@ ADR-0034:
 - false or NULL guards bypass rowid-key, source, residual, and projection
   evaluation;
 - a compile-time false conjunct preserves earlier statement guards but skips
-  later guards and all source-dependent or non-deterministic terms;
+  later guards and table-source residual or key terms;
 - residual conjuncts preserve source order; and
 - LIMIT/OFFSET remain below Projection and are not folded into access choice.
 
@@ -250,10 +253,13 @@ struct PhysicalProjectionNode {
 };
 ```
 
-A statement Guard stores one or more source-independent deterministic
-predicate IDs in stable left-to-right order. It runs once when its parent
-first requests input, before calling its child access node. False or NULL
-returns end-of-input without initializing the child. Errors propagate.
+A statement Guard stores one or more source-independent predicate IDs in
+stable left-to-right order. For a table source, every Guard predicate is
+deterministic. For a no-FROM SingleRow source, every unknown WHERE conjunct is
+a Guard predicate regardless of determinism because SQLite evaluates the
+single predicate stream once in original order. Guard runs once when its
+parent first requests input, before calling its child access node. False or
+NULL returns end-of-input without initializing the child. Errors propagate.
 
 A residual Filter stores one or more conjunct IDs in stable left-to-right
 order. Lowering evaluates each occurrence once and rejects the row when a
@@ -314,7 +320,7 @@ Compile-time truth analysis is deliberately narrow. It recognizes:
 For AND, one known false operand is sufficient to prove that conjunct false
 even when the other operand is unknown.
 
-The flattened terms are classified in source order:
+For a table source, flattened terms are classified in source order:
 
 1. a known true term is removed;
 2. a source-independent deterministic unknown term is appended to the
@@ -325,6 +331,19 @@ The flattened terms are classified in source order:
 4. every other unknown term remains eligible for rowid extraction or
    residual filtering.
 
+For a no-FROM SingleRow source:
+
+1. a known true term is removed;
+2. every unknown term is appended to Guard in source order, regardless of
+   function determinism; and
+3. a known false or NULL term selects `PhysicalEmptyNode`, preserves every
+   preceding unknown Guard term, and discards later terms.
+
+This no-FROM rule is an amendment recorded by ADR-0036. It preserves cases
+such as `random() > 0 AND 0`, where pinned SQLite evaluates the first
+non-deterministic conjunct before the known-false term even though no table
+row exists.
+
 This ordering preserves both:
 
 - `rowid = random() AND 0`, where the random key never executes; and
@@ -334,7 +353,9 @@ This ordering preserves both:
 An expression is deterministic when every scalar call in its retained bound
 DAG references `BoundScalarFunction::deterministic == true` and every child is
 deterministic. Literals, parameters, and built-in operators are deterministic.
-Source independence and determinism are separate requirements.
+Source independence and determinism are separate requirements. Determinism is
+required for table-source guards, but not for the no-FROM SingleRow predicate
+stream.
 
 The optimizer performs no other constant folding, comparison evaluation,
 contradiction solving, or algebraic rewrite.
@@ -514,7 +535,7 @@ accessors do not allocate after publication.
 1. rejects an invalid or moved-from logical plan;
 2. derives the logical source and catalog identity;
 3. flattens the optional WHERE conjunction;
-4. removes known true terms, extracts deterministic statement guards, or
+4. removes known true terms, extracts source-appropriate statement guards, or
    selects Empty for known false/NULL while preserving prior guards;
 5. derives full-scan and optional rowid candidates from remaining terms;
 6. selects the deterministic minimum-cost candidate;
@@ -538,8 +559,10 @@ Publication invariants are:
   retained logical source and catalog;
 - a rowid lookup key is in range, source-independent, and belongs to an
   eligible rowid source;
-- statement Guard vectors are non-empty, source-independent, deterministic,
-  source-ordered, and every ID is in range;
+- statement Guard vectors are non-empty, source-independent, source-ordered,
+  and every ID is in range;
+- Guard predicates are deterministic for table sources, while a SingleRow
+  source may retain non-deterministic predicates;
 - residual predicate vectors are non-empty and every ID is in range;
 - Guard, when present, is immediately above the access leaf and below any
   residual Filter, Limit, and Projection;
@@ -684,9 +707,11 @@ Tests cover:
 - operand-level likelihood rejection, including the text-key affinity case;
 - unary-plus and source-dependent-key rejection;
 - residual conjunctions before and after the rowid term;
-- deterministic statement guards before key/source initialization, including
-  empty-table behavior, errors, source-order short-circuiting, and LIMIT-zero
-  suppression;
+- deterministic table-source statement guards before key/source
+  initialization, including empty-table behavior, errors, source-order
+  short-circuiting, and LIMIT-zero suppression;
+- no-FROM non-deterministic predicate order, including preservation before a
+  later known-false conjunct;
 - consumed-term removal and stable residual order;
 - false/NULL bypass, true-term removal, prior-guard preservation, and false
   conjunctions that suppress non-deterministic rowid keys;
@@ -715,8 +740,9 @@ Tests cover:
 - Lowering receives an immutable, inspectable physical access decision.
 - Rowid equality is evaluated once and is not redundantly retained as a
   residual predicate.
-- Deterministic source-independent guards execute once before access while
-  LIMIT zero still suppresses them.
+- Source-independent guards execute once before access while LIMIT zero still
+  suppresses them; table guards require determinism, while no-FROM guards
+  preserve every unknown conjunct.
 - Deterministic false predicates become an explicit Empty access path.
 - Cost data is structured, stable, and intentionally simple enough to audit.
 - Ordinary indexes, WITHOUT ROWID key search, ranges, joins, and ordering

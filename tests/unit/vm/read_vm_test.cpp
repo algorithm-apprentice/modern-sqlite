@@ -563,6 +563,62 @@ TEST_F(ReadVmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue{}), 0);
 }
 
+TEST_F(ReadVmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Text("7.0"));
+  constants.push_back(SqlValue::Integer(8));
+  constants.push_back(SqlValue::Text("9"));
+  const BytecodeProgram conversion = BuildProgram(
+      *pager_, 6, 0, std::move(constants), {}, {},
+      {ResultColumn("strict"), ResultColumn("integer_real"), ResultColumn("text_real")},
+      {
+          LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+          MustBeIntegerInstruction{.input = Reg(0), .output = Reg(3)},
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+          RealAffinityInstruction{.input = Reg(1), .output = Reg(4)},
+          LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+          RealAffinityInstruction{.input = Reg(2), .output = Reg(5)},
+          ResultRowInstruction{.first = Reg(3), .count = 3},
+          HaltInstruction{},
+      });
+  ReadVm conversion_vm = CreateCoreVm(conversion);
+  ASSERT_EQ(TakeValue(conversion_vm.Step()), ReadVmStep::kRow);
+  ExpectInteger(conversion_vm.row()[0], 7);
+  ExpectReal(conversion_vm.row()[1], 8.0);
+  ExpectText(conversion_vm.row()[2], "9");
+
+  std::vector<SqlValue> invalid_constants;
+  invalid_constants.push_back(SqlValue::Text("7.5"));
+  const BytecodeProgram invalid =
+      BuildProgram(*pager_, 1, 0, std::move(invalid_constants), {}, {}, {ResultColumn()},
+                   {
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       MustBeIntegerInstruction{.input = Reg(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+  ReadVm invalid_vm = CreateCoreVm(invalid);
+  const auto failed = invalid_vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, failed.error().code());
+  EXPECT_EQ("datatype mismatch", failed.error().message());
+
+  std::vector<SqlValue> nan_constants;
+  nan_constants.push_back(SqlValue::Real(std::numeric_limits<double>::quiet_NaN()));
+  const BytecodeProgram nan =
+      BuildProgram(*pager_, 1, 0, std::move(nan_constants), {}, {}, {ResultColumn()},
+                   {
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       MustBeIntegerInstruction{.input = Reg(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+  ReadVm nan_vm = CreateCoreVm(nan);
+  const auto nan_failed = nan_vm.Step();
+  ASSERT_FALSE(nan_failed.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, nan_failed.error().code());
+}
+
 TEST_F(ReadVmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(2));
@@ -868,9 +924,10 @@ TEST_F(ReadVmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
 }
 
 [[nodiscard]] BytecodeProgram SeekFieldProgram(const ReadPager& pager, CursorFieldSource source,
-                                               std::uint32_t record_field_count = 7) {
+                                               std::uint32_t record_field_count = 7,
+                                               std::vector<SqlValue> constants = {}) {
   return BuildProgram(
-      pager, 2, 1, {}, {},
+      pager, 2, 1, std::move(constants), {},
       {
           TableDescriptor({source}, record_field_count),
       },
@@ -919,6 +976,36 @@ TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields)
   RequireStatus(missing_vm.Bind(Parameter(0), integer_key));
   ASSERT_EQ(TakeValue(missing_vm.Step()), ReadVmStep::kRow);
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
+
+  std::vector<SqlValue> default_constants;
+  default_constants.push_back(SqlValue::Text("legacy"));
+  const BytecodeProgram default_program =
+      SeekFieldProgram(*pager_,
+                       CursorFieldSource{
+                           .kind = CursorFieldSourceKind::kRecordField,
+                           .record_field = 7,
+                           .missing_value_kind = MissingFieldValueKind::kConstant,
+                           .missing_value = Constant(0),
+                       },
+                       8, std::move(default_constants));
+  ReadVm default_vm = CreateCoreVm(default_program);
+  RequireStatus(default_vm.Bind(Parameter(0), integer_key));
+  ASSERT_EQ(TakeValue(default_vm.Step()), ReadVmStep::kRow);
+  ExpectText(OnlyRowValue(default_vm), "legacy");
+
+  const BytecodeProgram unsupported_program =
+      SeekFieldProgram(*pager_,
+                       CursorFieldSource{
+                           .kind = CursorFieldSourceKind::kRecordField,
+                           .record_field = 7,
+                           .missing_value_kind = MissingFieldValueKind::kUnsupported,
+                       },
+                       8);
+  ReadVm unsupported_vm = CreateCoreVm(unsupported_program);
+  RequireStatus(unsupported_vm.Bind(Parameter(0), integer_key));
+  const auto unsupported = unsupported_vm.Step();
+  ASSERT_FALSE(unsupported.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, unsupported.error().code());
 
   RequireStatus(missing_vm.Reset());
   const SqlValue fractional = SqlValue::Real(44.5);

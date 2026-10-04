@@ -59,6 +59,12 @@ enum class CursorFieldSourceKind : std::uint8_t {
   kRowId,
 };
 
+enum class MissingFieldValueKind : std::uint8_t {
+  kNull,
+  kConstant,
+  kUnsupported,
+};
+
 enum class BytecodeSortOrder : std::uint8_t {
   kAscending,
   kDescending,
@@ -95,6 +101,8 @@ enum class JumpCondition : std::uint8_t {
 struct CursorFieldSource {
   CursorFieldSourceKind kind;
   std::uint32_t record_field;
+  MissingFieldValueKind missing_value_kind = MissingFieldValueKind::kNull;
+  std::optional<ConstantId> missing_value{};
 
   constexpr auto operator<=>(const CursorFieldSource&) const noexcept = default;
 };
@@ -167,6 +175,16 @@ struct BinaryInstruction {
 struct ApplyAffinityInstruction {
   RegisterId input;
   TypeAffinity affinity;
+  RegisterId output;
+};
+
+struct MustBeIntegerInstruction {
+  RegisterId input;
+  RegisterId output;
+};
+
+struct RealAffinityInstruction {
+  RegisterId input;
   RegisterId output;
 };
 
@@ -246,10 +264,11 @@ struct ResultRowInstruction {
 using Instruction =
     std::variant<HaltInstruction, LoadConstantInstruction, LoadParameterInstruction,
                  CopyInstruction, UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction,
-                 CastInstruction, OpenReadCursorInstruction, CloseCursorInstruction,
-                 RewindInstruction, NextInstruction, SeekRowIdInstruction, ReadFieldInstruction,
-                 ReadRowIdInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
-                 JumpIfInstruction, ResultRowInstruction>;
+                 MustBeIntegerInstruction, RealAffinityInstruction, CastInstruction,
+                 OpenReadCursorInstruction, CloseCursorInstruction, RewindInstruction,
+                 NextInstruction, SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
+                 CompareInstruction, CallScalarInstruction, JumpInstruction, JumpIfInstruction,
+                 ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -261,6 +280,8 @@ enum class InstructionKind : std::uint8_t {
   kUnary,
   kBinary,
   kApplyAffinity,
+  kMustBeInteger,
+  kRealAffinity,
   kCast,
   kOpenRead,
   kClose,

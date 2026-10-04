@@ -27,8 +27,9 @@
     "implement-bytecode",
     "implement-read-vm",
     "implement-binder",
-    "implement-logical-plan"
+    "implement-logical-plan",
+    "implement-basic-optimizer"
   ],
-  "activeNode": "implement-basic-optimizer",
+  "activeNode": "implement-read-lowering",
   "activeNodeState": "review_pending"
 }

@@ -78,6 +78,7 @@ add_library(
     src/catalog/catalog_loader.cpp
     src/diagnostics/storage_inspector.cpp
     src/format/record_codec.cpp
+    src/lowering/read_lowering.cpp
     src/optimizer/physical_plan.cpp
     src/pager/read_pager.cpp
     src/planner/logical_plan.cpp
@@ -156,6 +157,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/diagnostics/storage_inspector.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/format/record_codec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/lowering/read_lowering.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/optimizer/physical_plan.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/pager/read_pager.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/planner/logical_plan.hpp"
@@ -184,6 +186,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/diagnostics/storage_inspector.cpp"
   "${PROJECT_SOURCE_DIR}/src/format/record_codec.cpp"
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
+  "${PROJECT_SOURCE_DIR}/src/lowering/read_lowering.cpp"
   "${PROJECT_SOURCE_DIR}/src/optimizer/physical_plan.cpp"
   "${PROJECT_SOURCE_DIR}/src/pager/read_pager.cpp"
   "${PROJECT_SOURCE_DIR}/src/planner/logical_plan.cpp"
@@ -223,6 +226,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/lowering/read_lowering_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/lowering/read_lowering_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/lowering/read_lowering_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_test.cpp"

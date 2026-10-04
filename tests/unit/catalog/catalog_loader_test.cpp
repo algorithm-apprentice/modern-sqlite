@@ -192,6 +192,10 @@ TEST_F(CatalogLoaderTest, LoadsPinnedSqliteSchemaIntoCanonicalSnapshot) {
   EXPECT_EQ("NOCASE", name.collation_name);
   EXPECT_EQ(ConflictAction::kFail, name.effective_not_null_conflict);
   ASSERT_TRUE(name.default_expression.has_value());
+  ASSERT_NE(nullptr, name.missing_record_value);
+  ASSERT_TRUE(name.missing_record_value->text_value().has_value());
+  EXPECT_EQ("unknown", name.missing_record_value->text_value()->bytes());
+  EXPECT_EQ(nullptr, catalog->column(items_id, ColumnId{2}).missing_record_value);
 
   const IndexId score_index_id =
       TakeOptional(catalog->FindIndex("items_score_idx"), "missing items_score_idx");
@@ -331,6 +335,8 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
       TakeOptional(catalog->FindTable("compatibility"), "missing compatibility table");
   const CatalogColumn& column = catalog->column(table_id, ColumnId{1});
   ASSERT_TRUE(column.default_expression.has_value());
+  ASSERT_NE(nullptr, column.missing_record_value);
+  EXPECT_EQ(SqlValueType::kNull, column.missing_record_value->type());
   const Expression& default_expression = catalog->expression(*column.default_expression);
   const auto* parenthesized = std::get_if<ParenthesizedExpression>(&default_expression.payload);
   ASSERT_NE(nullptr, parenthesized);
@@ -343,6 +349,7 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
 
   const CatalogColumn& deferred_arity_column = catalog->column(table_id, ColumnId{2});
   ASSERT_TRUE(deferred_arity_column.default_expression.has_value());
+  EXPECT_EQ(nullptr, deferred_arity_column.missing_record_value);
   const Expression& deferred_arity_expression =
       catalog->expression(*deferred_arity_column.default_expression);
   const auto* deferred_parenthesized =

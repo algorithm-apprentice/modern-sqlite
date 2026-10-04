@@ -269,7 +269,21 @@ A catalog column stores:
 - optional declared NOT NULL conflict action;
 - optional effective NOT NULL conflict action;
 - whether it participates in the declared primary key; and
-- an optional default-expression reference.
+- an optional default-expression reference; and
+- a nullable `std::shared_ptr<const SqlValue>` named `missing_record_value`,
+  used only when an older physical record predates an added column.
+
+ADR-0036 adds `missing_record_value`. A non-null pointer may point to SQL NULL.
+When a default-expression reference exists but the pointer is null, the
+default remains syntactically valid but is not materialized by the current
+catalog producer. Lowering preserves that distinction so complete records
+remain readable and a genuinely short record fails explicitly instead of
+silently substituting NULL.
+
+The immutable shared value keeps aggregate catalog inputs copyable for
+initializer-list construction without making `SqlValue` itself copyable.
+Catalog publication adds at most one allocation per materialized column
+default, which is acceptable for rare ALTER-added columns.
 
 The affinity helper follows pinned SQLite's case-insensitive substring
 priority:

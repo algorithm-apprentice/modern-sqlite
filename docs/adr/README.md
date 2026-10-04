@@ -39,3 +39,4 @@ their corresponding implementation begins.
 33. [ADR-0033: Immutable Read-Only SELECT Binding](0033-immutable-select-binding.md)
 34. [ADR-0034: Immutable Logical SELECT Plans](0034-immutable-logical-select-plans.md)
 35. [ADR-0035: Deterministic Basic Read Optimization](0035-deterministic-basic-read-optimization.md)
+36. [ADR-0036: Physical Read Plan Lowering](0036-physical-read-plan-lowering.md)

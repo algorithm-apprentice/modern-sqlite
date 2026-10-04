@@ -39,6 +39,7 @@ struct ExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
   std::optional<BoundCollationId> collation;
   bool explicit_collation = false;
+  BoundTruthHint truth_hint = BoundTruthHint::kNone;
 };
 
 struct AliasEntry {
@@ -943,7 +944,13 @@ class SelectBinder final {
               .value = SqlValue::Integer(literal.kind == LiteralKind::kTrue ? 1 : 0),
               .boolean_keyword = true,
           },
-          {});
+          ExpressionProperties{
+              .affinity = TypeAffinity::kNone,
+              .collation = std::nullopt,
+              .explicit_collation = false,
+              .truth_hint = literal.kind == LiteralKind::kTrue ? BoundTruthHint::kAlwaysTrue
+                                                               : BoundTruthHint::kAlwaysFalse,
+          });
     }
     if (literal.kind == LiteralKind::kString && !token.empty() && token.front() == '"') {
       BindExpected<std::string> name = Dequote(literal.token);
@@ -1007,7 +1014,16 @@ class SelectBinder final {
       case LiteralKind::kFalse:
         break;
     }
-    return AppendExpression(span, std::move(bound), {});
+    ExpressionProperties properties;
+    if (literal.kind == LiteralKind::kInteger && token.find('_') == std::string_view::npos) {
+      const std::optional<std::int64_t> integer = bound.value.integer_value();
+      if (integer.has_value() && *integer >= 0 &&
+          *integer <= std::numeric_limits<std::int32_t>::max()) {
+        properties.truth_hint =
+            *integer == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
+      }
+    }
+    return AppendExpression(span, std::move(bound), properties);
   }
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal) const {
@@ -1114,7 +1130,13 @@ class SelectBinder final {
                 .value = SqlValue::Integer(NamesEqual(parts->front(), "true") ? 1 : 0),
                 .boolean_keyword = true,
             },
-            {});
+            ExpressionProperties{
+                .affinity = TypeAffinity::kNone,
+                .collation = std::nullopt,
+                .explicit_collation = false,
+                .truth_hint = NamesEqual(parts->front(), "true") ? BoundTruthHint::kAlwaysTrue
+                                                                 : BoundTruthHint::kAlwaysFalse,
+            });
       }
       if (!token.empty() && token.front() == '"') {
         if (!options_.enable_double_quoted_strings) {
@@ -1296,6 +1318,7 @@ class SelectBinder final {
     if (unary.op == UnaryOperator::kPositive) {
       properties = child;
       properties.affinity = TypeAffinity::kNone;
+      properties.truth_hint = BoundTruthHint::kNone;
     } else if (child.explicit_collation) {
       properties.collation = child.collation;
       properties.explicit_collation = true;
@@ -1360,6 +1383,11 @@ class SelectBinder final {
         if (!collation.has_value()) {
           return std::unexpected(std::move(collation.error()));
         }
+        ExpressionProperties properties = PropagatedExplicitProperties(std::array{*left, *right});
+        if (IsParserFoldedNullTestOperand(binary.left)) {
+          properties.truth_hint = binary.op == BinaryOperator::kIs ? BoundTruthHint::kAlwaysFalse
+                                                                   : BoundTruthHint::kAlwaysTrue;
+        }
         return AppendExpression(span,
                                 BoundComparisonExpression{
                                     .comparison = ToSqlComparison(binary.op),
@@ -1368,7 +1396,7 @@ class SelectBinder final {
                                     .left = *left,
                                     .right = *right,
                                 },
-                                PropagatedExplicitProperties(std::array{*left, *right}));
+                                properties);
       }
     }
     if (IsComparisonOperation(binary.op)) {
@@ -1418,6 +1446,23 @@ class SelectBinder final {
     const BoundExpression& expression = impl_->expressions[id.value()];
     const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
     return literal != nullptr && literal->value.type() == SqlValueType::kNull;
+  }
+
+  [[nodiscard]] bool IsParserFoldedNullTestOperand(ExpressionId id) const noexcept {
+    const Expression& expression = tree_.expression(id);
+    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+        parenthesized != nullptr) {
+      return IsParserFoldedNullTestOperand(parenthesized->inner);
+    }
+    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+        unary != nullptr &&
+        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+      return IsParserFoldedNullTestOperand(unary->operand);
+    }
+    const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+    return literal != nullptr &&
+           (literal->kind == LiteralKind::kInteger || literal->kind == LiteralKind::kReal ||
+            literal->kind == LiteralKind::kString || literal->kind == LiteralKind::kBlob);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindCall(const FunctionCallExpression& call,
@@ -1620,6 +1665,7 @@ class SelectBinder final {
     ExpressionProperties properties = Properties(*operand);
     properties.collation = *id;
     properties.explicit_collation = true;
+    properties.truth_hint = BoundTruthHint::kNone;
     return AppendExpression(span,
                             BoundCollateExpression{
                                 .operand = *operand,
@@ -1643,6 +1689,7 @@ class SelectBinder final {
                 .affinity = properties.affinity,
                 .collation = properties.collation,
                 .has_explicit_collation = properties.explicit_collation,
+                .truth_hint = properties.truth_hint,
             },
         .payload = std::move(payload),
     });
@@ -1655,6 +1702,7 @@ class SelectBinder final {
         .affinity = properties.affinity,
         .collation = properties.collation,
         .explicit_collation = properties.has_explicit_collation,
+        .truth_hint = properties.truth_hint,
     };
   }
 

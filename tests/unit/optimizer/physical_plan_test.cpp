@@ -434,6 +434,36 @@ TEST(PhysicalPlan, PreservesPriorGuardsWhenPredicateBecomesEmpty) {
   EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(true_scan.nodes()[0].payload));
 }
 
+TEST(PhysicalPlan, PreservesNoFromPredicateOrderAndNondeterministicEffects) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const PhysicalPlan guarded_empty = OptimizeOrThrow(
+      "SELECT 1 WHERE volatile_key() AND stable_guard(?) AND 0", catalog, TestEnvironment());
+  ASSERT_EQ(3U, guarded_empty.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(guarded_empty.nodes()[0].payload));
+  const auto& guard = std::get<PhysicalGuardNode>(guarded_empty.nodes()[1].payload);
+  ASSERT_EQ(2U, guard.predicates.size());
+  const BoundSelect& bound = guarded_empty.logical_plan().bound_select();
+  const auto& volatile_call =
+      std::get<BoundScalarCallExpression>(bound.expression(guard.predicates[0]).payload);
+  const auto& stable_call =
+      std::get<BoundScalarCallExpression>(bound.expression(guard.predicates[1]).payload);
+  EXPECT_EQ("volatile_key", bound.functions()[volatile_call.function.value()].name);
+  EXPECT_EQ("stable_guard", bound.functions()[stable_call.function.value()].name);
+
+  const PhysicalPlan immediate_empty =
+      OptimizeOrThrow("SELECT 1 WHERE 0 AND volatile_key()", catalog, TestEnvironment());
+  ASSERT_EQ(2U, immediate_empty.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(immediate_empty.nodes()[0].payload));
+
+  const PhysicalPlan guarded_row =
+      OptimizeOrThrow("SELECT 1 WHERE volatile_key()", catalog, TestEnvironment());
+  ASSERT_EQ(3U, guarded_row.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalSingleRowNode>(guarded_row.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalGuardNode>(guarded_row.nodes()[1].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalProjectionNode>(guarded_row.nodes()[2].payload));
+}
+
 TEST(PhysicalPlan, SplitsWrappedConjunctionsAndKeepsResidualOrder) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const std::array<std::string_view, 3> queries{

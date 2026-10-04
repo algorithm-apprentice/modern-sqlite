@@ -313,9 +313,15 @@ physical field needed by the descriptor into the reusable
 than rescans from field zero. Each header entry is therefore decoded at most
 once after structural parsing, avoiding quadratic projection work.
 
-A requested physical field beyond the stored record returns SQL NULL,
-matching `OP_Column` without a default-value operand. Malformed records and
-payload failures propagate explicitly.
+A requested physical field beyond the stored record follows the descriptor's
+ADR-0036 missing-field policy:
+
+- return SQL NULL;
+- clone an affinity-applied program constant; or
+- fail explicitly because the catalog default is unsupported.
+
+A stored NULL remains NULL and never triggers substitution. Malformed records
+and payload failures propagate explicitly.
 
 `ReadRowIdInstruction` reads the current table rowid. The bytecode verifier
 already prevents rowid operations on index-backed descriptors.
@@ -401,6 +407,17 @@ Logical AND and OR implement SQLite's three-valued truth tables:
 
 `ApplyAffinityInstruction` and `CastInstruction` apply the existing
 loss-avoiding affinity and forced-cast contracts to a clone of the input.
+
+ADR-0036 adds two narrow conversions:
+
+- `MustBeIntegerInstruction` applies numeric affinity, accepts only a
+  losslessly representable signed 64-bit integer, and returns
+  `kTypeMismatch` with `datatype mismatch` otherwise; and
+- `RealAffinityInstruction` converts INTEGER to REAL while leaving NULL,
+  REAL, TEXT, and BLOB unchanged.
+
+Both commit their output only after successful conversion or cloning and
+support aliased input/output registers.
 
 `CompareInstruction` uses a comparison-specific coercion routine rather than
 ordinary affinity applied blindly to both values:
@@ -510,7 +527,6 @@ registrations, inactive snapshots, or callback errors into assertions.
 - Index seeks, reverse scans, sorting, joins, aggregates, windows,
   coroutines, subprograms, and ephemeral tables.
 - Writes, journals, savepoints, triggers, foreign keys, and schema mutation.
-- Added-column default substitution for physically missing record fields.
 - Lazy special forms such as `coalesce`, `ifnull`, and `iif`; lowering will
   express them with control flow when the binder supports them.
 - Stateful application functions, auxiliary data, subtypes, and

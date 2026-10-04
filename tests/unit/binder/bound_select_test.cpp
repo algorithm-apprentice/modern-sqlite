@@ -675,6 +675,36 @@ TEST(Binder, PublishesExpressionMetadataAndTruthTestTransparency) {
       CollationName(truth, RequiredOptional(ResultExpression(truth, 2).properties.collation)));
 }
 
+TEST(Binder, PublishesOnlyPinnedSqliteScalarTruthHints) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow(
+      "SELECT TRUE, FALSE, 0, 1, (0), 0x10, 0x7fffffff, "
+      "0x80000000, 0x8000000000000000, 0xffffffffffffffff, "
+      "-1, +1, 2147483648, 1_0, 0.0, NULL, "
+      "1 IS NULL, 1 IS NOT NULL, +1 IS NULL, "
+      "1 COLLATE BINARY",
+      catalog);
+
+  const std::array<BoundTruthHint, 20> expected{
+      BoundTruthHint::kAlwaysTrue,  BoundTruthHint::kAlwaysFalse, BoundTruthHint::kAlwaysFalse,
+      BoundTruthHint::kAlwaysTrue,  BoundTruthHint::kAlwaysFalse, BoundTruthHint::kAlwaysTrue,
+      BoundTruthHint::kAlwaysTrue,  BoundTruthHint::kNone,        BoundTruthHint::kNone,
+      BoundTruthHint::kNone,        BoundTruthHint::kNone,        BoundTruthHint::kNone,
+      BoundTruthHint::kNone,        BoundTruthHint::kNone,        BoundTruthHint::kNone,
+      BoundTruthHint::kNone,        BoundTruthHint::kAlwaysFalse, BoundTruthHint::kAlwaysTrue,
+      BoundTruthHint::kAlwaysFalse, BoundTruthHint::kNone,
+  };
+  ASSERT_EQ(expected.size(), select.result_columns().size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(expected[index], ResultExpression(select, index).properties.truth_hint) << index;
+  }
+
+  const BoundSelect alias = BindOrThrow("SELECT 0 AS never WHERE never", catalog);
+  ASSERT_TRUE(alias.where_expression().has_value());
+  EXPECT_EQ(BoundTruthHint::kAlwaysFalse,
+            alias.expression(RequiredOptional(alias.where_expression())).properties.truth_hint);
+}
+
 TEST(Binder, PreservesConditionalParityAndScalarOverrideRules) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect conditionals = BindOrThrow(
