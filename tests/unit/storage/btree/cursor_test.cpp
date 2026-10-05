@@ -28,7 +28,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -430,8 +430,8 @@ struct LocatedTableCell {
 class BtreeCursorCompatibilityTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    auto opened = ReadPager::Open(vfs_, FixtureDatabasePath().string(),
-                                  ReadPagerOptions{.cache_capacity_pages = 256});
+    auto opened = Pager::Open(vfs_, FixtureDatabasePath().string(),
+                              PagerOptions{.cache_capacity_pages = 256});
     ASSERT_TRUE(opened.has_value()) << opened.error().ToString();
     pager_ = std::move(*opened);
     const Status begun = pager_->BeginRead();
@@ -446,7 +446,7 @@ class BtreeCursorCompatibilityTest : public ::testing::Test {
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<ReadPager> pager_;
+  std::unique_ptr<Pager> pager_;
 };
 
 TEST_F(BtreeCursorCompatibilityTest, TraversesMultiLevelTableInBothDirections) {
@@ -775,7 +775,7 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   {
     TemporaryDatabase empty(std::vector<std::byte>{});
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, empty.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, empty.path().string()));
     RequireStatus(pager->BeginRead());
     TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
     EXPECT_FALSE(TakeValue(cursor.First()));
@@ -801,7 +801,7 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   {
     const TemporaryDatabase database(MakeVirtualRootDatabase());
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     {
       TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
@@ -826,7 +826,7 @@ TEST(BtreeCursor, RejectsInvalidChildLinksEmptyChildrenAndExcessiveDepth) {
   const auto expect_corruption = [](std::vector<std::byte> bytes) {
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     {
       TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
@@ -876,7 +876,7 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
     Write32(MutablePageAt(bytes, first_overflow), 0, 0);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     {
       TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
@@ -902,7 +902,7 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
 
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     {
       TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
@@ -932,7 +932,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
 
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     {
       const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
@@ -952,7 +952,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
     const auto cursor = IndexBtreeCursor::Open(*pager, PageNumber{76}, columns);
@@ -965,7 +965,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
     {
@@ -985,7 +985,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
 TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
   const TemporaryDatabase database(MakeImpossiblePayloadDatabase());
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
   RequireStatus(pager->BeginRead());
   {
     TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
@@ -1006,8 +1006,7 @@ TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
 
 TEST(BtreeCursor, RequiresAnActiveTransactionAtOpen) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, FixtureDatabasePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixtureDatabasePath().string()));
 
   const auto table = TableBtreeCursor::Open(*pager, PageNumber{2});
   ASSERT_FALSE(table.has_value());

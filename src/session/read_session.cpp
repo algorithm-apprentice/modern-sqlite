@@ -16,7 +16,7 @@
 #include "modern_sqlite/catalog/catalog_loader.hpp"
 #include "modern_sqlite/lowering/read_lowering.hpp"
 #include "modern_sqlite/optimizer/physical_plan.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
@@ -50,7 +50,7 @@ enum class StatementState : std::uint8_t {
   return SessionError(ErrorCode::kTooLarge, std::move(message));
 }
 
-void CleanupReadStateAfterAllocationFailure(ReadPager& pager) noexcept {
+void CleanupReadStateAfterAllocationFailure(Pager& pager) noexcept {
   try {
     [[maybe_unused]] const auto cleanup = pager.CleanupReadState();
   } catch (const std::bad_alloc&) {
@@ -160,7 +160,7 @@ struct CompiledStatement {
 }  // namespace
 
 struct ReadSession::State final {
-  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<ReadPager> owned_pager) noexcept
+  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<Pager> owned_pager) noexcept
       : vfs(std::move(owned_vfs)), pager(std::move(owned_pager)) {}
 
   [[nodiscard]] Status CleanupBarrier() {
@@ -282,7 +282,7 @@ struct ReadSession::State final {
   }
 
   std::unique_ptr<Vfs> vfs;
-  std::unique_ptr<ReadPager> pager;
+  std::unique_ptr<Pager> pager;
   CatalogSnapshotPtr catalog;
   std::uint64_t catalog_generation = 0;
   std::size_t active_readers = 0;
@@ -686,7 +686,7 @@ Result<ReadSession> ReadSession::Open(std::unique_ptr<Vfs> vfs, std::string_view
     if (vfs == nullptr) {
       return std::unexpected(Misuse("read session requires an owned VFS"));
     }
-    auto pager = ReadPager::Open(*vfs, path);
+    auto pager = Pager::Open(*vfs, path);
     if (!pager.has_value()) {
       return std::unexpected(std::move(pager.error()));
     }

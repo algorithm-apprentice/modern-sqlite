@@ -9,7 +9,7 @@
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
@@ -51,7 +51,7 @@ class TableBtreeCursor final {
   explicit TableBtreeCursor(std::unique_ptr<Impl> impl) noexcept;
 
  public:
-  [[nodiscard]] static Result<TableBtreeCursor> Open(ReadPager& pager, PageNumber root_page);
+  [[nodiscard]] static Result<TableBtreeCursor> Open(Pager& pager, PageNumber root_page);
 
   TableBtreeCursor(const TableBtreeCursor&) = delete;
   TableBtreeCursor& operator=(const TableBtreeCursor&) = delete;
@@ -82,7 +82,7 @@ class IndexBtreeCursor final {
   explicit IndexBtreeCursor(std::unique_ptr<Impl> impl) noexcept;
 
  public:
-  [[nodiscard]] static Result<IndexBtreeCursor> Open(ReadPager& pager, PageNumber root_page,
+  [[nodiscard]] static Result<IndexBtreeCursor> Open(Pager& pager, PageNumber root_page,
                                                      std::span<const IndexColumnOrder> columns);
 
   IndexBtreeCursor(const IndexBtreeCursor&) = delete;

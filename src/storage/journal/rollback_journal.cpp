@@ -877,7 +877,13 @@ class RollbackJournal::Impl final {
     active_ = false;
     recovering_ = false;
 
-    auto deleted = vfs_->Delete(journal_path_, options_.delete_directory_sync);
+    Status deleted;
+    try {
+      deleted = vfs_->Delete(journal_path_, options_.delete_directory_sync);
+    } catch (const std::bad_alloc&) {
+      terminal_failure_ = true;
+      return std::unexpected(Error::OutOfMemory());
+    }
     if (!deleted.has_value()) {
       terminal_failure_ = true;
       return deleted;

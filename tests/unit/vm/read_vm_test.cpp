@@ -30,7 +30,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
@@ -168,7 +168,7 @@ class TemporaryDatabase final {
 }
 
 [[nodiscard]] SchemaVersionRequirement CurrentSchema(
-    const ReadPager& pager, std::uint64_t generation = kCatalogGeneration) {
+    const Pager& pager, std::uint64_t generation = kCatalogGeneration) {
   const DatabaseHeader* header = pager.header();
   return SchemaVersionRequirement{
       .schema_cookie = header == nullptr ? 0U : header->schema_cookie(),
@@ -179,7 +179,7 @@ class TemporaryDatabase final {
 // The adjacent counts mirror ProgramInput and remain explicit at each test call site.
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 [[nodiscard]] BytecodeProgram BuildProgram(
-    const ReadPager& pager, std::uint32_t register_count, std::uint32_t parameter_count,
+    const Pager& pager, std::uint32_t register_count, std::uint32_t parameter_count,
     std::vector<SqlValue> constants, std::vector<std::string> symbols,
     std::vector<ReadCursorDescriptor> cursors, std::vector<ResultColumnMetadata> result_columns,
     std::vector<Instruction> instructions,
@@ -268,8 +268,8 @@ void ExpectText(const SqlValue& value, std::string_view expected) {
 class ReadVmTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    pager_ = TakeValue(ReadPager::Open(vfs_, FixturePath().string(),
-                                       ReadPagerOptions{.cache_capacity_pages = 256}));
+    pager_ = TakeValue(
+        Pager::Open(vfs_, FixturePath().string(), PagerOptions{.cache_capacity_pages = 256}));
     RequireStatus(pager_->BeginRead());
   }
 
@@ -286,7 +286,7 @@ class ReadVmTest : public ::testing::Test {
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<ReadPager> pager_;
+  std::unique_ptr<Pager> pager_;
 };
 
 TEST_F(ReadVmTest, ExecutesBindingsRowsHaltAndReset) {
@@ -372,7 +372,7 @@ TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
   ExpectInteger(OnlyRowValue(vm), 7);
 }
 
-[[nodiscard]] SqlValue EvaluateUnary(ReadPager& pager, UnaryOperation operation, SqlValue input) {
+[[nodiscard]] SqlValue EvaluateUnary(Pager& pager, UnaryOperation operation, SqlValue input) {
   std::vector<SqlValue> constants;
   constants.push_back(std::move(input));
   const BytecodeProgram program =
@@ -391,7 +391,7 @@ TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
   return OnlyRowValue(vm).Clone();
 }
 
-[[nodiscard]] SqlValue EvaluateBinary(ReadPager& pager, BinaryOperation operation, SqlValue left,
+[[nodiscard]] SqlValue EvaluateBinary(Pager& pager, BinaryOperation operation, SqlValue left,
                                       SqlValue right) {
   std::vector<SqlValue> constants;
   constants.push_back(std::move(left));
@@ -501,7 +501,7 @@ TEST_F(ReadVmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
       EvaluateBinary(*pager_, BinaryOperation::kLogicalOr, SqlValue{}, SqlValue::Integer(1)), 1);
 }
 
-[[nodiscard]] SqlValue EvaluateJump(ReadPager& pager, JumpCondition condition, SqlValue input) {
+[[nodiscard]] SqlValue EvaluateJump(Pager& pager, JumpCondition condition, SqlValue input) {
   std::vector<SqlValue> constants;
   constants.push_back(std::move(input));
   constants.push_back(SqlValue::Integer(0));
@@ -817,7 +817,7 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   std::vector<std::byte> bytes = ReadBytes(FixturePath());
   TemporaryDatabase database(bytes);
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
   RequireStatus(pager->BeginRead());
 
   std::vector<SqlValue> constants;
@@ -849,7 +849,7 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   RequireStatus(pager->EndRead());
 }
 
-[[nodiscard]] BytecodeProgram TableScanProgram(const ReadPager& pager) {
+[[nodiscard]] BytecodeProgram TableScanProgram(const Pager& pager) {
   return BuildProgram(
       pager, 2, 0, {}, {},
       {
@@ -932,7 +932,7 @@ TEST_F(ReadVmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
   RequireStatus(pager_->EndRead());
 }
 
-[[nodiscard]] BytecodeProgram SeekFieldProgram(const ReadPager& pager, CursorFieldSource source,
+[[nodiscard]] BytecodeProgram SeekFieldProgram(const Pager& pager, CursorFieldSource source,
                                                std::uint32_t record_field_count = 7,
                                                std::vector<SqlValue> constants = {}) {
   return BuildProgram(
@@ -1190,7 +1190,7 @@ TEST_F(ReadVmTest, UsesSharedDatabaseFormatNormalization) {
   Write32(bytes, 56, 0);
   const TemporaryDatabase database(bytes);
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
   RequireStatus(pager->BeginRead());
 
   const BytecodeProgram program = BuildProgram(*pager, 0, 0, {}, {},
@@ -1229,7 +1229,7 @@ TEST_F(ReadVmTest, MovedFromMachinesRejectOperations) {
 
 TEST(ReadVm, ExecutesTransactionFreeProgramsAndPublishesBindingsWithoutAPagerSnapshot) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program =
       BuildProgram(*pager, 1, 1, {}, {}, {}, {ResultColumn()},
@@ -1257,7 +1257,7 @@ TEST(ReadVm, ExecutesTransactionFreeProgramsAndPublishesBindingsWithoutAPagerSna
 
 TEST(ReadVm, RejectsTransactionRequiredProgramsWithoutAPagerSnapshot) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   ProgramInput input;
   input.schema_version = CurrentSchema(*pager);

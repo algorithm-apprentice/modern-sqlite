@@ -99,7 +99,8 @@ set(
     src/format/record_codec.cpp
     src/lowering/read_lowering.cpp
     src/optimizer/physical_plan.cpp
-    src/pager/read_pager.cpp
+    src/pager/pager.cpp
+    src/pager/write_pager.cpp
     src/planner/logical_plan.cpp
     src/platform/posix_vfs.cpp
     src/platform/vfs.cpp
@@ -485,7 +486,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/instrumentation/counters.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/lowering/read_lowering.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/optimizer/physical_plan.hpp"
-  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/pager/read_pager.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/pager/pager.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/planner/logical_plan.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/posix_vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/vfs.hpp"
@@ -517,7 +518,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
   "${PROJECT_SOURCE_DIR}/src/lowering/read_lowering.cpp"
   "${PROJECT_SOURCE_DIR}/src/optimizer/physical_plan.cpp"
-  "${PROJECT_SOURCE_DIR}/src/pager/read_pager.cpp"
+  "${PROJECT_SOURCE_DIR}/src/pager/pager.cpp"
+  "${PROJECT_SOURCE_DIR}/src/pager/write_pager.cpp"
   "${PROJECT_SOURCE_DIR}/src/planner/logical_plan.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/posix_vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/vfs.cpp"
@@ -566,7 +568,11 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/optimizer/physical_plan_test.cpp"
-  "${PROJECT_SOURCE_DIR}/tests/unit/pager/read_pager_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/pager/pager_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/pager/write_pager_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/pager/write_pager_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/pager/write_pager_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/pager/write_pager_test_support.hpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/planner/logical_plan_test.cpp"
@@ -598,6 +604,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/rollback_journal_fixture.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/compatibility/write_pager_sqlite_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_fuzz.hpp"

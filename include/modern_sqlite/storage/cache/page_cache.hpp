@@ -74,18 +74,21 @@ class PageCache final {
     // The returned view must not outlive this pin or a subsequent MarkClean().
     [[nodiscard]] Result<MutableByteView> mutable_bytes();
 
-    void MarkDirty() noexcept;
-    void MarkClean() noexcept;
+    [[nodiscard]] Status MarkDirty();
+    [[nodiscard]] Status MarkClean();
+    [[nodiscard]] bool exclusive() const noexcept { return exclusive_; }
 
    private:
     friend class PageCache;
 
-    Pin(PageCache& cache, Entry& entry) noexcept : cache_(&cache), entry_(&entry) {}
+    Pin(PageCache& cache, Entry& entry, bool exclusive) noexcept
+        : cache_(&cache), entry_(&entry), exclusive_(exclusive) {}
 
     void Reset() noexcept;
 
     PageCache* cache_;
     Entry* entry_;
+    bool exclusive_ = false;
   };
 
   [[nodiscard]] static Result<std::unique_ptr<PageCache>> Create(PageCacheOptions options);
@@ -99,16 +102,22 @@ class PageCache final {
   ~PageCache();
 
   [[nodiscard]] Result<Pin> Insert(PageNumber page_number, ByteBuffer bytes);
+  [[nodiscard]] Result<Pin> InsertExclusive(PageNumber page_number, ByteBuffer bytes);
   [[nodiscard]] Result<std::optional<Pin>> Lookup(PageNumber page_number);
+  [[nodiscard]] Result<std::optional<Pin>> LookupExclusive(PageNumber page_number);
   [[nodiscard]] Status Discard(PageNumber page_number);
+  [[nodiscard]] Status DiscardAfter(std::uint32_t page_count);
+  [[nodiscard]] Status Clear();
   [[nodiscard]] std::size_t ReclaimClean() noexcept;
 
+  [[nodiscard]] std::optional<PageWritebackRequest> writeback_candidate() const noexcept;
   [[nodiscard]] PageCachePressure pressure() const noexcept;
   [[nodiscard]] ByteCount page_size() const noexcept { return page_size_; }
   [[nodiscard]] std::size_t capacity_pages() const noexcept { return capacity_pages_; }
   [[nodiscard]] std::size_t page_count() const noexcept { return pages_.size(); }
   [[nodiscard]] std::size_t dirty_page_count() const noexcept { return dirty_page_count_; }
   [[nodiscard]] std::size_t pin_count() const noexcept { return total_pin_count_; }
+  [[nodiscard]] std::size_t exclusive_pin_count() const noexcept { return exclusive_pin_count_; }
 
  private:
   struct PageNumberHash final {
@@ -135,11 +144,12 @@ class PageCache final {
     Entry* dirty_next = nullptr;
     bool in_clean_list = false;
     bool in_dirty_list = false;
+    bool exclusively_pinned = false;
   };
 
   using PageMap = std::unordered_map<std::uint32_t, Entry, PageNumberHash>;
 
-  [[nodiscard]] Pin Acquire(Entry& entry) noexcept;
+  [[nodiscard]] Pin Acquire(Entry& entry, bool exclusive) noexcept;
   void Release(Entry& entry) noexcept;
   void MarkDirty(Entry& entry) noexcept;
   void MarkClean(Entry& entry) noexcept;
@@ -160,6 +170,7 @@ class PageCache final {
   Entry* dirty_newest_ = nullptr;
   std::size_t dirty_page_count_ = 0;
   std::size_t total_pin_count_ = 0;
+  std::size_t exclusive_pin_count_ = 0;
 };
 
 }  // namespace modern_sqlite

@@ -89,6 +89,7 @@ class RecordingBackend final : public JournalBackend {
   std::optional<std::string> failing_event;
   int failures_remaining = 0;
   ErrorCode failure_code = ErrorCode::kIo;
+  std::optional<std::string> throwing_event;
   bool playback_destroyed = false;
   bool savepoint_completion_saw_destroyed_playback = false;
   bool rollback_finalization_saw_destroyed_playback = false;
@@ -210,6 +211,9 @@ class RecordingBackend final : public JournalBackend {
  private:
   [[nodiscard]] Status Event(std::string_view name) {
     trace.emplace_back(name);
+    if (throwing_event == name) {
+      throw std::bad_alloc{};
+    }
     if (failing_event == name && failures_remaining > 0) {
       --failures_remaining;
       return std::unexpected(Error::Create(failure_code, "injected backend failure"));
@@ -330,6 +334,28 @@ TEST(JournalTransaction, CapturesOnceAndEnforcesCommitOrdering) {
   EXPECT_EQ((std::vector<std::string>{"begin", "append-main", "sync", "finalize-commit"}),
             backend.trace);
   EXPECT_EQ(JournalTransactionState::kFinished, transaction->state());
+}
+
+TEST(JournalTransaction, ReportsWhetherTransactionOrSavepointCaptureIsStillRequired) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend, 4);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{0}));
+  EXPECT_TRUE(transaction->NeedsCapture(PageNumber{2}));
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{5}));
+  ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{2}));
+
+  const auto savepoint = transaction->CreateSavepoint(6);
+  ASSERT_TRUE(savepoint.has_value());
+  EXPECT_TRUE(transaction->NeedsCapture(PageNumber{2}));
+  EXPECT_TRUE(transaction->NeedsCapture(PageNumber{5}));
+  ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
+  ASSERT_TRUE(transaction->CapturePage(Image(5, page)).has_value());
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{2}));
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{5}));
 }
 
 TEST(JournalTransaction, ValidatesPageImagesAndRejectsTheLockingPage) {
@@ -968,6 +994,49 @@ TEST(JournalTransaction, CommitFinalizationFailureBecomesPersistent) {
   EXPECT_EQ(JournalTransactionState::kError, transaction->state());
   RecordingTarget target(backend.trace);
   EXPECT_FALSE(transaction->Rollback(target).has_value());
+}
+
+TEST(JournalTransaction, CommitFinalizationAllocationFailureBecomesPersistent) {
+  RecordingBackend backend;
+  backend.throwing_event = "finalize-commit";
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+  ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+  ASSERT_TRUE(transaction->SyncJournal().has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
+
+  const auto committed = transaction->Commit();
+
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfMemory, committed.error().code());
+  EXPECT_EQ(JournalTransactionState::kError, transaction->state());
+}
+
+TEST(JournalTransaction, RollbackFinalizationAllocationFailureBecomesPersistent) {
+  RecordingBackend backend;
+  backend.throwing_event = "finalize-rollback";
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  RecordingTarget target(backend.trace);
+
+  const auto rolled_back = transaction->Rollback(target);
+
+  ASSERT_FALSE(rolled_back.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfMemory, rolled_back.error().code());
+  EXPECT_EQ(JournalTransactionState::kError, transaction->state());
+}
+
+TEST(JournalRecovery, HotFinalizationAllocationFailureIsReturned) {
+  RecordingBackend backend;
+  backend.throwing_event = "finalize-rollback";
+  RecordingTarget target(backend.trace);
+
+  const auto recovered = RecoverHotJournal(backend, target);
+
+  ASSERT_FALSE(recovered.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfMemory, recovered.error().code());
 }
 
 TEST(JournalTransaction, RejectsInvalidSemanticPlaybackImages) {

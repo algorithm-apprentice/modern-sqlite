@@ -182,7 +182,7 @@ TEST(PageCache, AllowsPinnedPagesToExceedSoftCapacity) {
   std::optional<PageCache::Pin> first;
   std::optional<PageCache::Pin> second;
   {
-    auto inserted = cache->Insert(PageNumber{1}, MakePage(0x10));
+    auto inserted = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
     ASSERT_TRUE(inserted.has_value());
     first.emplace(std::move(*inserted));
   }
@@ -206,7 +206,7 @@ TEST(PageCache, AllowsPinnedPagesToExceedSoftCapacity) {
 TEST(PageCache, TracksDirtyStateAndRestrictsMutableAccess) {
   auto cache = MakeCache(8, 2);
   ASSERT_NE(nullptr, cache);
-  auto inserted = cache->Insert(PageNumber{1}, MakePage(0x10));
+  auto inserted = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
   ASSERT_TRUE(inserted.has_value());
   PageCache::Pin pin = std::move(*inserted);
 
@@ -214,8 +214,8 @@ TEST(PageCache, TracksDirtyStateAndRestrictsMutableAccess) {
   ASSERT_FALSE(clean_mutable.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, clean_mutable.error().code());
 
-  pin.MarkDirty();
-  pin.MarkDirty();
+  EXPECT_TRUE(pin.MarkDirty().has_value());
+  EXPECT_TRUE(pin.MarkDirty().has_value());
   EXPECT_TRUE(pin->dirty());
   EXPECT_EQ(1U, cache->dirty_page_count());
   auto mutable_bytes = pin.mutable_bytes();
@@ -223,8 +223,8 @@ TEST(PageCache, TracksDirtyStateAndRestrictsMutableAccess) {
   mutable_bytes->front() = std::byte{0x7f};
   EXPECT_EQ(std::byte{0x7f}, pin->bytes().front());
 
-  pin.MarkClean();
-  pin.MarkClean();
+  EXPECT_TRUE(pin.MarkClean().has_value());
+  EXPECT_TRUE(pin.MarkClean().has_value());
   EXPECT_FALSE(pin->dirty());
   EXPECT_EQ(0U, cache->dirty_page_count());
   const auto cleaned_mutable = pin.mutable_bytes();
@@ -237,14 +237,14 @@ TEST(PageCache, RequestsOldestUnpinnedDirtyPageUnderPressure) {
   ASSERT_NE(nullptr, cache);
 
   {
-    auto first = cache->Insert(PageNumber{1}, MakePage(0x10));
+    auto first = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
     ASSERT_TRUE(first.has_value());
-    first->MarkDirty();
+    ASSERT_TRUE(first->MarkDirty().has_value());
   }
   {
-    auto second = cache->Insert(PageNumber{2}, MakePage(0x20));
+    auto second = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
     ASSERT_TRUE(second.has_value());
-    second->MarkDirty();
+    ASSERT_TRUE(second->MarkDirty().has_value());
   }
   const auto third = cache->Insert(PageNumber{3}, MakePage(0x30));
   ASSERT_TRUE(third.has_value());
@@ -274,10 +274,10 @@ TEST(PageCache, RequestsOldestUnpinnedDirtyPageUnderPressure) {
   EXPECT_EQ(PageNumber{2}, pressure.writeback->page_number);
 
   {
-    auto second_lookup = cache->Lookup(PageNumber{2});
+    auto second_lookup = cache->LookupExclusive(PageNumber{2});
     ASSERT_TRUE(second_lookup.has_value());
     ASSERT_TRUE(second_lookup->has_value());
-    (**second_lookup).MarkClean();
+    ASSERT_TRUE((**second_lookup).MarkClean().has_value());
   }
 
   EXPECT_EQ(2U, cache->page_count());
@@ -297,9 +297,9 @@ TEST(PageCache, ReclaimsOnlyUnpinnedCleanPages) {
     ASSERT_TRUE(second.has_value());
   }
   {
-    auto dirty = cache->Insert(PageNumber{3}, MakePage(0x30));
+    auto dirty = cache->InsertExclusive(PageNumber{3}, MakePage(0x30));
     ASSERT_TRUE(dirty.has_value());
-    dirty->MarkDirty();
+    ASSERT_TRUE(dirty->MarkDirty().has_value());
   }
   const auto pinned = cache->Insert(PageNumber{4}, MakePage(0x40));
   ASSERT_TRUE(pinned.has_value());
@@ -330,14 +330,125 @@ TEST(PageCache, DiscardsOnlyUnpinnedFramesAndMayDiscardDirtyDataExplicitly) {
   EXPECT_FALSE(Contains(*cache, PageNumber{1}));
 
   {
-    auto dirty = cache->Insert(PageNumber{2}, MakePage(0x20));
+    auto dirty = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
     ASSERT_TRUE(dirty.has_value());
-    dirty->MarkDirty();
+    ASSERT_TRUE(dirty->MarkDirty().has_value());
   }
   EXPECT_EQ(1U, cache->dirty_page_count());
   EXPECT_TRUE(cache->Discard(PageNumber{2}).has_value());
   EXPECT_EQ(0U, cache->dirty_page_count());
   EXPECT_FALSE(Contains(*cache, PageNumber{2}));
+}
+
+TEST(PageCache, ExclusivePinsRejectAliasingReadsAndWrites) {
+  auto cache = MakeCache(8, 4);
+  ASSERT_NE(nullptr, cache);
+  {
+    const auto inserted = cache->Insert(PageNumber{1}, MakePage(0x10));
+    ASSERT_TRUE(inserted.has_value());
+  }
+
+  auto reader = cache->Lookup(PageNumber{1});
+  ASSERT_TRUE(reader.has_value());
+  ASSERT_TRUE(reader->has_value());
+  const auto busy_writer = cache->LookupExclusive(PageNumber{1});
+  ASSERT_FALSE(busy_writer.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, busy_writer.error().code());
+  reader->reset();
+
+  auto writer = cache->LookupExclusive(PageNumber{1});
+  ASSERT_TRUE(writer.has_value());
+  ASSERT_TRUE(writer->has_value());
+  const auto busy_reader = cache->Lookup(PageNumber{1});
+  const auto second_writer = cache->LookupExclusive(PageNumber{1});
+  ASSERT_FALSE(busy_reader.has_value());
+  ASSERT_FALSE(second_writer.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, busy_reader.error().code());
+  EXPECT_EQ(ErrorCode::kBusy, second_writer.error().code());
+
+  ASSERT_TRUE((**writer).MarkDirty().has_value());
+  auto bytes = (**writer).mutable_bytes();
+  ASSERT_TRUE(bytes.has_value());
+  bytes->front() = std::byte{0x7f};
+  writer->reset();
+
+  auto reloaded = cache->Lookup(PageNumber{1});
+  ASSERT_TRUE(reloaded.has_value());
+  ASSERT_TRUE(reloaded->has_value());
+  EXPECT_EQ(std::byte{0x7f}, (***reloaded).bytes().front());
+}
+
+TEST(PageCache, InsertsAnExclusivelyPinnedPage) {
+  auto cache = MakeCache(8, 4);
+  ASSERT_NE(nullptr, cache);
+
+  auto inserted = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
+
+  ASSERT_TRUE(inserted.has_value());
+  EXPECT_EQ(1U, cache->pin_count());
+  EXPECT_EQ(1U, cache->exclusive_pin_count());
+  const auto busy_lookup = cache->Lookup(PageNumber{2});
+  ASSERT_FALSE(busy_lookup.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, busy_lookup.error().code());
+  EXPECT_TRUE(inserted->MarkDirty().has_value());
+  EXPECT_TRUE(inserted->mutable_bytes().has_value());
+  inserted = std::unexpected(Error::Create(ErrorCode::kGeneric, "release exclusive test pin"));
+  EXPECT_EQ(0U, cache->exclusive_pin_count());
+}
+
+TEST(PageCache, ExposesTheOldestUnpinnedDirtyWritebackCandidate) {
+  auto cache = MakeCache(8, 4);
+  ASSERT_NE(nullptr, cache);
+  {
+    auto first = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first->MarkDirty().has_value());
+  }
+  auto second = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(second->MarkDirty().has_value());
+
+  ASSERT_TRUE(cache->writeback_candidate().has_value());
+  EXPECT_EQ(PageNumber{1}, cache->writeback_candidate()->page_number);
+}
+
+TEST(PageCache, DiscardsARangeAtomicallyAndClearsOnlyWithoutPins) {
+  auto cache = MakeCache(8, 4);
+  ASSERT_NE(nullptr, cache);
+  {
+    const auto first = cache->Insert(PageNumber{1}, MakePage(0x10));
+    ASSERT_TRUE(first.has_value());
+  }
+  {
+    auto second = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(second->MarkDirty().has_value());
+  }
+  auto third_result = cache->Insert(PageNumber{3}, MakePage(0x30));
+  ASSERT_TRUE(third_result.has_value());
+  std::optional<PageCache::Pin> third;
+  third.emplace(std::move(*third_result));
+
+  const auto busy_discard = cache->DiscardAfter(1);
+  ASSERT_FALSE(busy_discard.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, busy_discard.error().code());
+  EXPECT_TRUE(Contains(*cache, PageNumber{1}));
+  EXPECT_TRUE(Contains(*cache, PageNumber{2}));
+  EXPECT_TRUE(Contains(*cache, PageNumber{3}));
+
+  const auto busy_clear = cache->Clear();
+  ASSERT_FALSE(busy_clear.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, busy_clear.error().code());
+  third.reset();
+
+  ASSERT_TRUE(cache->DiscardAfter(1).has_value());
+  EXPECT_EQ(1U, cache->page_count());
+  EXPECT_EQ(0U, cache->dirty_page_count());
+  EXPECT_TRUE(Contains(*cache, PageNumber{1}));
+  EXPECT_FALSE(Contains(*cache, PageNumber{2}));
+  EXPECT_FALSE(Contains(*cache, PageNumber{3}));
+  EXPECT_TRUE(cache->Clear().has_value());
+  EXPECT_EQ(0U, cache->page_count());
 }
 
 TEST(PageCache, ZeroCapacityRetainsCleanPagesOnlyWhilePinned) {

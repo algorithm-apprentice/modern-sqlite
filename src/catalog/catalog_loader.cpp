@@ -632,7 +632,7 @@ void NormalizeDefaultVariables(std::vector<Expression>& expressions, ExpressionI
 
 class CatalogLoader final {
  public:
-  CatalogLoader(ReadPager& pager, CatalogLoadOptions options)
+  CatalogLoader(Pager& pager, CatalogLoadOptions options)
       : pager_(pager), options_(std::move(options)) {
     input_.schema_name = options_.schema_name;
     input_.version.generation = options_.generation;
@@ -1745,7 +1745,7 @@ class CatalogLoader final {
     return {};
   }
 
-  ReadPager& pager_;
+  Pager& pager_;
   CatalogLoadOptions options_;
   CatalogInput input_;
   DatabaseSchemaFormat schema_format_ = DatabaseSchemaFormat::kFour;
@@ -1757,7 +1757,7 @@ class CatalogLoader final {
 
 }  // namespace
 
-Result<CatalogSnapshotPtr> LoadCatalog(ReadPager& pager) {
+Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager) {
   try {
     return CatalogLoader{pager, CatalogLoadOptions{}}.Run();
   } catch (const std::bad_alloc&) {
@@ -1765,7 +1765,7 @@ Result<CatalogSnapshotPtr> LoadCatalog(ReadPager& pager) {
   }
 }
 
-Result<CatalogSnapshotPtr> LoadCatalog(ReadPager& pager, const CatalogLoadOptions& options) {
+Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager, const CatalogLoadOptions& options) {
   try {
     return CatalogLoader{pager, CatalogLoadOptions{options}}.Run();
   } catch (const std::bad_alloc&) {
@@ -1773,7 +1773,7 @@ Result<CatalogSnapshotPtr> LoadCatalog(ReadPager& pager, const CatalogLoadOption
   }
 }
 
-Result<bool> CatalogRequiresReload(const ReadPager& pager, const CatalogSnapshot& catalog) {
+Result<bool> CatalogRequiresReload(const Pager& pager, const CatalogSnapshot& catalog) {
   if (!pager.in_read_transaction()) {
     return std::unexpected(Misuse("catalog reload detection requires an active read transaction"));
   }

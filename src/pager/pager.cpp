@@ -1,4 +1,4 @@
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 
 #include <algorithm>
 #include <array>
@@ -134,42 +134,99 @@ Result<DatabaseHeader> ParseDatabaseHeader(ByteView bytes) {
   return header;
 }
 
-Result<std::unique_ptr<ReadPager>> ReadPager::Open(Vfs& vfs, std::string_view path,
-                                                   ReadPagerOptions options) {
-  if (!IsValidPageSize(options.empty_database_page_size)) {
-    return std::unexpected(
-        Misuse("empty-database page size must be a power of two from 512 through 65536"));
-  }
-
-  auto full_path = vfs.FullPath(path);
-  if (!full_path.has_value()) {
-    return std::unexpected(std::move(full_path.error()));
-  }
-  auto opened = vfs.Open(*full_path, FileOpenOptions{
-                                         .kind = FileKind::kMainDatabase,
-                                         .access = FileAccessMode::kReadOnly,
-                                     });
-  if (!opened.has_value()) {
-    return std::unexpected(std::move(opened.error()));
-  }
-
-  return std::make_unique<ReadPager>(ConstructionKey{}, vfs, std::move(*full_path),
-                                     std::move(opened->file), options);
+MutableByteView WritePagePin::mutable_bytes() noexcept {
+  auto bytes = pin_.mutable_bytes();
+  assert(bytes.has_value());
+  return *bytes;
 }
 
-ReadPager::ReadPager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
-                     ReadPagerOptions options)
+Result<std::unique_ptr<Pager>> Pager::Open(Vfs& vfs, std::string_view path, PagerOptions options) {
+  try {
+    if (!IsValidPageSize(options.empty_database_page_size)) {
+      return std::unexpected(
+          Misuse("empty-database page size must be a power of two from 512 through 65536"));
+    }
+
+    auto full_path = vfs.FullPath(path);
+    if (!full_path.has_value()) {
+      return std::unexpected(std::move(full_path.error()));
+    }
+    auto opened = vfs.Open(*full_path, FileOpenOptions{
+                                           .kind = FileKind::kMainDatabase,
+                                           .access = FileAccessMode::kReadOnly,
+                                       });
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+
+    return std::make_unique<Pager>(ConstructionKey{}, vfs, std::move(*full_path),
+                                   std::move(opened->file), options);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Result<std::unique_ptr<Pager>> Pager::OpenWritable(Vfs& vfs, std::string_view path,
+                                                   WritablePagerOptions options) {
+  try {
+    if (!IsValidPageSize(options.pager.empty_database_page_size)) {
+      return std::unexpected(
+          Misuse("empty-database page size must be a power of two from 512 through 65536"));
+    }
+
+    auto full_path = vfs.FullPath(path);
+    if (!full_path.has_value()) {
+      return std::unexpected(std::move(full_path.error()));
+    }
+    auto opened = vfs.Open(*full_path, FileOpenOptions{
+                                           .kind = FileKind::kMainDatabase,
+                                           .access = FileAccessMode::kReadWrite,
+                                           .create = true,
+                                       });
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    auto properties = opened->file->Properties();
+    if (!properties.has_value()) {
+      return std::unexpected(std::move(properties.error()));
+    }
+    auto sector_size = ResolveRollbackJournalSectorSize(*properties);
+    if (!sector_size.has_value()) {
+      return std::unexpected(std::move(sector_size.error()));
+    }
+    auto rollback = RollbackJournal::Create(vfs, *full_path, *properties, options.journal);
+    if (!rollback.has_value()) {
+      return std::unexpected(std::move(rollback.error()));
+    }
+
+    return std::make_unique<Pager>(ConstructionKey{}, vfs, std::move(*full_path),
+                                   std::move(opened->file), options.pager, *properties,
+                                   std::move(*rollback), *sector_size);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
+             PagerOptions options, std::optional<FileProperties> file_properties,
+             std::unique_ptr<RollbackJournal> rollback_journal, ByteCount journal_sector_size)
     : vfs_(&vfs),
       path_(std::move(path)),
       journal_path_(path_ + "-journal"),
       wal_path_(path_ + "-wal"),
       file_(std::move(file)),
-      options_(options) {}
+      options_(options),
+      file_properties_(file_properties),
+      rollback_journal_(std::move(rollback_journal)),
+      journal_sector_size_(journal_sector_size) {}
 
-ReadPager::~ReadPager() { assert(cache_ == nullptr || cache_->pin_count() == 0); }
+Pager::~Pager() { assert(cache_ == nullptr || cache_->pin_count() == 0); }
 
-Status ReadPager::BeginRead() {
-  if (transaction_active_) {
+Status Pager::BeginRead() {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (state_ != PagerState::kOpen) {
     return std::unexpected(Misuse("a read transaction is already active"));
   }
   auto retained_cleanup = ReleaseRetainedLock();
@@ -181,9 +238,13 @@ Status ReadPager::BeginRead() {
   if (!locked.has_value()) {
     return std::unexpected(std::move(locked.error()));
   }
-  shared_lock_held_ = true;
+  database_lock_ = DatabaseLock::kShared;
 
   try {
+    auto recovered = RecoverHotJournalIfNeeded();
+    if (!recovered.has_value()) {
+      return FailBegin(std::move(recovered.error()));
+    }
     auto snapshot = ReadSnapshot();
     if (!snapshot.has_value()) {
       return FailBegin(std::move(snapshot.error()));
@@ -196,12 +257,15 @@ Status ReadPager::BeginRead() {
     return FailBegin(Error::OutOfMemory());
   }
 
-  transaction_active_ = true;
+  state_ = PagerState::kReader;
   return {};
 }
 
-Status ReadPager::EndRead() {
-  if (!transaction_active_) {
+Status Pager::EndRead() {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (state_ != PagerState::kReader) {
     return std::unexpected(Misuse("no read transaction is active"));
   }
   assert(cache_ != nullptr);
@@ -212,8 +276,14 @@ Status ReadPager::EndRead() {
   return CleanupReadState();
 }
 
-Status ReadPager::CleanupReadState() {
-  if (!shared_lock_held_) {
+Status Pager::CleanupReadState() {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (in_write_transaction()) {
+    return std::unexpected(Misuse("cannot clean up read state during a write transaction"));
+  }
+  if (database_lock_ == DatabaseLock::kNone) {
     return {};
   }
   if (cache_ != nullptr && cache_->pin_count() != 0) {
@@ -224,15 +294,21 @@ Status ReadPager::CleanupReadState() {
   if (!unlocked.has_value()) {
     return std::unexpected(std::move(unlocked.error()));
   }
-  shared_lock_held_ = false;
-  transaction_active_ = false;
+  database_lock_ = DatabaseLock::kNone;
+  state_ = PagerState::kOpen;
   current_header_.reset();
   current_page_count_ = 0;
   return {};
 }
 
-Status ReadPager::ValidatePageNumber(PageNumber page_number) const {
-  if (!transaction_active_) {
+Status Pager::ValidatePageNumber(PageNumber page_number) const {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (state_ == PagerState::kWriterFinished) {
+    return std::unexpected(Misuse("page validation is unavailable while write cleanup is pending"));
+  }
+  if (!in_read_transaction()) {
     return std::unexpected(Misuse("page validation requires an active read transaction"));
   }
   if (page_number.value() == 0 || page_number.value() > current_page_count_) {
@@ -247,63 +323,40 @@ Status ReadPager::ValidatePageNumber(PageNumber page_number) const {
   return {};
 }
 
-Result<ReadPagePin> ReadPager::ReadPage(PageNumber page_number) {
+Result<ReadPagePin> Pager::ReadPage(PageNumber page_number) {
   auto valid = ValidatePageNumber(page_number);
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  assert(cache_ != nullptr);
-
-  auto found = cache_->Lookup(page_number);
-  if (!found.has_value()) {
-    return std::unexpected(std::move(found.error()));
+  auto pressure = MaintainCachePressure();
+  if (!pressure.has_value()) {
+    return std::unexpected(std::move(pressure.error()));
   }
-  if (found->has_value()) {
-    return ReadPagePin{std::move(found->value())};
+  auto pin = AcquirePage(page_number, false);
+  if (!pin.has_value()) {
+    return std::unexpected(std::move(pin.error()));
   }
-
-  const std::uint64_t page_size_value = static_cast<std::uint64_t>(cache_->page_size().value());
-  const auto page_index = static_cast<std::uint64_t>(page_number.value() - 1U);
-  if (page_index > std::numeric_limits<std::uint64_t>::max() / page_size_value) {
-    return std::unexpected(TooLarge("database page offset is not representable"));
-  }
-  const std::uint64_t offset = page_index * page_size_value;
-  ByteBuffer bytes{cache_->page_size()};
-  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesRead, 1U);
-  auto read = file_->ReadAt(bytes.mutable_view(), FileOffset{offset});
-  if (!read.has_value()) {
-    return std::unexpected(std::move(read.error()));
-  }
-  auto inserted = cache_->Insert(page_number, std::move(bytes));
-  if (!inserted.has_value()) {
-    return std::unexpected(std::move(inserted.error()));
-  }
-  return ReadPagePin{std::move(*inserted)};
+  return ReadPagePin{std::move(*pin)};
 }
 
-const DatabaseHeader* ReadPager::header() const noexcept {
-  if (!transaction_active_ || !current_header_.has_value()) {
+const DatabaseHeader* Pager::header() const noexcept {
+  if (!in_read_transaction() || !current_header_.has_value()) {
     return nullptr;
   }
   return &*current_header_;
 }
 
-ByteCount ReadPager::page_size() const noexcept {
+ByteCount Pager::page_size() const noexcept {
   if (cache_ == nullptr) {
     return options_.empty_database_page_size;
   }
   return cache_->page_size();
 }
 
-Result<ReadPager::Snapshot> ReadPager::ReadSnapshot() {
+Result<Pager::Snapshot> Pager::ReadSnapshot() {
   auto database_size = file_->Size();
   if (!database_size.has_value()) {
     return std::unexpected(std::move(database_size.error()));
-  }
-
-  auto hot_journal = CheckHotJournal(*database_size);
-  if (!hot_journal.has_value()) {
-    return std::unexpected(std::move(hot_journal.error()));
   }
 
   if (database_size->value() == 0) {
@@ -365,9 +418,9 @@ Result<ReadPager::Snapshot> ReadPager::ReadSnapshot() {
   };
 }
 
-Status ReadPager::CheckHotJournal(FileSize database_size) {
+Result<bool> Pager::CheckHotJournal(FileSize database_size) {
   if (database_size.value() == 0) {
-    return {};
+    return false;
   }
 
   auto exists = vfs_->Access(journal_path_, FileAccessQuery::kExists);
@@ -375,7 +428,7 @@ Status ReadPager::CheckHotJournal(FileSize database_size) {
     return std::unexpected(std::move(exists.error()));
   }
   if (!*exists) {
-    return {};
+    return false;
   }
 
   auto reserved = file_->HasReservedLock();
@@ -383,7 +436,7 @@ Status ReadPager::CheckHotJournal(FileSize database_size) {
     return std::unexpected(std::move(reserved.error()));
   }
   if (*reserved) {
-    return {};
+    return false;
   }
 
   auto journal = vfs_->Open(journal_path_, FileOpenOptions{
@@ -398,14 +451,10 @@ Status ReadPager::CheckHotJournal(FileSize database_size) {
   if (!read.has_value()) {
     return std::unexpected(std::move(read.error()));
   }
-  if (first.front() != std::byte{0}) {
-    return std::unexpected(
-        Protocol("hot rollback journal requires recovery before the database can be read"));
-  }
-  return {};
+  return first.front() != std::byte{0};
 }
 
-Status ReadPager::CheckWal() {
+Status Pager::CheckWal() {
   auto exists = vfs_->Access(wal_path_, FileAccessQuery::kExists);
   if (!exists.has_value()) {
     return std::unexpected(std::move(exists.error()));
@@ -431,7 +480,7 @@ Status ReadPager::CheckWal() {
   return {};
 }
 
-Status ReadPager::ApplySnapshot(Snapshot snapshot) {
+Status Pager::ApplySnapshot(Snapshot snapshot) {
   const bool page_size_changed = cache_ != nullptr && cache_->page_size() != snapshot.page_size;
   const bool identity_changed = has_seen_snapshot_ && last_change_token_ != snapshot.change_token;
   const bool invalidated = page_size_changed || identity_changed;
@@ -462,11 +511,13 @@ Status ReadPager::ApplySnapshot(Snapshot snapshot) {
   return {};
 }
 
-Status ReadPager::FailBegin(Error setup_error) {
-  assert(shared_lock_held_);
+Status Pager::FailBegin(Error setup_error) {
+  if (state_ == PagerState::kError || database_lock_ == DatabaseLock::kNone) {
+    return std::unexpected(std::move(setup_error));
+  }
   auto unlocked = file_->Unlock(DatabaseLock::kNone);
   if (unlocked.has_value()) {
-    shared_lock_held_ = false;
+    database_lock_ = DatabaseLock::kNone;
     return std::unexpected(std::move(setup_error));
   }
   if (setup_error.code() == ErrorCode::kOutOfMemory) {
@@ -480,9 +531,59 @@ Status ReadPager::FailBegin(Error setup_error) {
   return std::unexpected(Error::Create(unlocked.error().code(), std::move(message)));
 }
 
-Status ReadPager::ReleaseRetainedLock() {
-  assert(!transaction_active_);
+Status Pager::ReleaseRetainedLock() {
+  assert(state_ == PagerState::kOpen);
   return CleanupReadState();
+}
+
+Result<PageCache::Pin> Pager::AcquirePage(PageNumber page_number, bool exclusive) try {
+  assert(cache_ != nullptr);
+  auto found = exclusive ? cache_->LookupExclusive(page_number) : cache_->Lookup(page_number);
+  if (!found.has_value()) {
+    return std::unexpected(std::move(found.error()));
+  }
+  if (found->has_value()) {
+    return std::move(found->value());
+  }
+
+  const std::uint64_t page_size_value = static_cast<std::uint64_t>(cache_->page_size().value());
+  const auto page_index = static_cast<std::uint64_t>(page_number.value() - 1U);
+  if (page_index > std::numeric_limits<std::uint64_t>::max() / page_size_value) {
+    return std::unexpected(TooLarge("database page offset is not representable"));
+  }
+  const std::uint64_t offset = page_index * page_size_value;
+  ByteBuffer bytes{cache_->page_size()};
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesRead, 1U);
+  auto read = file_->ReadAt(bytes.mutable_view(), FileOffset{offset});
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
+  }
+  auto inserted = exclusive ? cache_->InsertExclusive(page_number, std::move(bytes))
+                            : cache_->Insert(page_number, std::move(bytes));
+  if (!inserted.has_value()) {
+    return std::unexpected(std::move(inserted.error()));
+  }
+  return std::move(*inserted);
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+}
+
+PagerState Pager::state() const noexcept { return state_; }
+
+bool Pager::writable() const noexcept { return rollback_journal_ != nullptr; }
+
+bool Pager::in_read_transaction() const noexcept {
+  return state_ != PagerState::kOpen && state_ != PagerState::kError;
+}
+
+bool Pager::in_write_transaction() const noexcept {
+  return state_ == PagerState::kWriterLocked || state_ == PagerState::kWriterCacheModified ||
+         state_ == PagerState::kWriterDatabaseModified || state_ == PagerState::kWriterFinished;
+}
+
+Status Pager::StoredError() const {
+  return std::unexpected(Error::Create(persistent_error_.value_or(ErrorCode::kInternal),
+                                       "pager is in a persistent error state"));
 }
 
 }  // namespace modern_sqlite

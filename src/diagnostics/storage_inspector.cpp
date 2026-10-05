@@ -19,7 +19,7 @@
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
@@ -287,7 +287,7 @@ struct ByteRange {
 
 class Inspector final {
  public:
-  Inspector(ReadPager& pager, const DatabaseHeader& header, BtreePageGeometry geometry,
+  Inspector(Pager& pager, const DatabaseHeader& header, BtreePageGeometry geometry,
             RecordSchemaFormat schema_format, StorageInspectionOptions options)
       : pager_(pager),
         header_(header),
@@ -1155,7 +1155,7 @@ class Inspector final {
     }
   }
 
-  ReadPager& pager_;
+  Pager& pager_;
   const DatabaseHeader& header_;
   BtreePageGeometry geometry_;
   bool auto_vacuum_;
@@ -1506,7 +1506,7 @@ Result<StorageInspectionReport> InspectDatabase(Vfs& vfs, std::string_view path,
     if (options.max_issues == 0) {
       return std::unexpected(Misuse("storage inspection issue limit must be nonzero"));
     }
-    auto pager = ReadPager::Open(vfs, path);
+    auto pager = Pager::Open(vfs, path);
     if (!pager.has_value()) {
       return std::unexpected(std::move(pager.error()));
     }

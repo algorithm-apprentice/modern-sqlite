@@ -32,7 +32,7 @@ class CatalogLayeringTest(unittest.TestCase):
             {
                 "modern_sqlite/base/result.hpp",
                 "modern_sqlite/catalog/catalog.hpp",
-                "modern_sqlite/pager/read_pager.hpp",
+                "modern_sqlite/pager/pager.hpp",
             },
             includes,
         )
