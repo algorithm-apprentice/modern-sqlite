@@ -21,8 +21,8 @@
         "mode": "identity",
         "schema_version": 1,
         "source": {
-          "revision": "c70a9b261538f0c9df56610f0cd1f91d17946719",
-          "tree": "b0f921c1d5e015fae3ec64819d9c6795caeaa4e8"
+          "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
+          "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17"
         },
         "sqlite": {
           "compile_options": [
@@ -70,7 +70,7 @@
         }
       },
       "logical_name": "modern_sqlite_read_diagnostics",
-      "sha256": "006929ef2267ed46b74b19bef8c1d2b023fe0589144fe00e87b4c6ea5b46b734",
+      "sha256": "9f0be99b850fa5e7f6124223c2911e7ea1d194881bc7fb091b1f67f18cf6efb1",
       "size_bytes": 2359200
     },
     "timing": {
@@ -94,8 +94,8 @@
         "mode": "identity",
         "schema_version": 1,
         "source": {
-          "revision": "c70a9b261538f0c9df56610f0cd1f91d17946719",
-          "tree": "b0f921c1d5e015fae3ec64819d9c6795caeaa4e8"
+          "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
+          "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17"
         },
         "sqlite": {
           "compile_options": [
@@ -143,7 +143,7 @@
         }
       },
       "logical_name": "modern_sqlite_read_benchmark",
-      "sha256": "613c7e19543f43077a2b25d489762ebb74c023f52767c47a068bf87223ec15fc",
+      "sha256": "60fa3220c5e181f06fbafa4dc8b3ecde1e974f9f2d091cb13d1af96dcec5d028",
       "size_bytes": 2357296
     }
   },
@@ -194,7 +194,7 @@
       "ordinal": 0,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 40177292,
+        "runner_elapsed_ns": 41877500,
         "timed_out": false
       },
       "stderr": {
@@ -231,7 +231,7 @@
       "ordinal": 1,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 33042917,
+        "runner_elapsed_ns": 34120458,
         "timed_out": false
       },
       "stderr": {
@@ -268,7 +268,7 @@
       "ordinal": 2,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 35836583,
+        "runner_elapsed_ns": 35789625,
         "timed_out": false
       },
       "stderr": {
@@ -305,7 +305,7 @@
       "ordinal": 3,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 30616250,
+        "runner_elapsed_ns": 29961917,
         "timed_out": false
       },
       "stderr": {
@@ -342,7 +342,7 @@
       "ordinal": 4,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 14823875,
+        "runner_elapsed_ns": 11782542,
         "timed_out": false
       },
       "stderr": {
@@ -379,7 +379,7 @@
       "ordinal": 5,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 12184417,
+        "runner_elapsed_ns": 9783125,
         "timed_out": false
       },
       "stderr": {
@@ -416,7 +416,7 @@
       "ordinal": 6,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 669570041,
+        "runner_elapsed_ns": 648323292,
         "timed_out": false
       },
       "stderr": {
@@ -453,7 +453,7 @@
       "ordinal": 7,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 537016666,
+        "runner_elapsed_ns": 527447542,
         "timed_out": false
       },
       "stderr": {
@@ -490,7 +490,7 @@
       "ordinal": 8,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 595839209,
+        "runner_elapsed_ns": 625692083,
         "timed_out": false
       },
       "stderr": {
@@ -527,7 +527,7 @@
       "ordinal": 9,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 487882375,
+        "runner_elapsed_ns": 486963584,
         "timed_out": false
       },
       "stderr": {
@@ -564,7 +564,7 @@
       "ordinal": 10,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 124332875,
+        "runner_elapsed_ns": 124888417,
         "timed_out": false
       },
       "stderr": {
@@ -601,7 +601,7 @@
       "ordinal": 11,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 89530584,
+        "runner_elapsed_ns": 90099542,
         "timed_out": false
       },
       "stderr": {
@@ -642,8 +642,8 @@
     {
       "path": "benchmarks/read_performance.cpp",
       "role": "benchmark-source",
-      "sha256": "74bf6a14c75db57400cc8bb6b621097cd49f1ec79f30dd9455d2effcdc8f88b4",
-      "size_bytes": 65392
+      "sha256": "c9a4eba73c8dfbc3f5da69685bf1bd2257e250852df3dcb7a37ac8dd8f8939d6",
+      "size_bytes": 65394
     },
     {
       "path": "tools/read_performance.py",
@@ -705,10 +705,10 @@
   "schema_version": 1,
   "source": {
     "clean": true,
-    "revision": "c70a9b261538f0c9df56610f0cd1f91d17946719",
+    "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
     "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "tree": "b0f921c1d5e015fae3ec64819d9c6795caeaa4e8",
-    "worktree_content_sha256": "83903b22890c506a62d37c3ec26560d4135949954a08f21e9edb9760e4133560"
+    "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17",
+    "worktree_content_sha256": "1f026d3d71eeeb9e91ea571ec5b0cc4ccf4fdf1491b41832a5bdd1ae727e207f"
   },
   "sqlite": {
     "compile_options": [
@@ -782,7 +782,7 @@
       "ordinal": 0,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10934948208,
+        "runner_elapsed_ns": 11214661458,
         "timed_out": false
       },
       "round": 0,
@@ -793,7 +793,7 @@
       },
       "stdout": {
         "path": "raw/timing/000-round-0-point-present-ipk-fit-modern.json",
-        "sha256": "211e7ba9101520546e8fae06d68db14635cda8b2ad2f903f6c4ee778be7e5636",
+        "sha256": "a52da0c42e75cb55ebad2c35b3f1c5317165792d9a641b3409d2ddbae4688601",
         "size_bytes": 2462
       }
     },
@@ -820,7 +820,7 @@
       "ordinal": 1,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9109178042,
+        "runner_elapsed_ns": 9444208208,
         "timed_out": false
       },
       "round": 0,
@@ -831,7 +831,7 @@
       },
       "stdout": {
         "path": "raw/timing/001-round-0-point-present-ipk-fit-sqlite.json",
-        "sha256": "de97d5fb53cfec9a954ffb0199efa55703a0cdf95fe2ee7406240e64f5380c76",
+        "sha256": "c732df1a4cf9b24007ebc5496e45e3f1e017611bc5d868d9c0d6eeabcc840501",
         "size_bytes": 2462
       }
     },
@@ -858,7 +858,7 @@
       "ordinal": 2,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9872188792,
+        "runner_elapsed_ns": 10124117417,
         "timed_out": false
       },
       "round": 0,
@@ -869,7 +869,7 @@
       },
       "stdout": {
         "path": "raw/timing/002-round-0-point-missing-ipk-fit-modern.json",
-        "sha256": "651e0c8d5ce428aad50ad2ae206ba92119ef356c9d0c594071edc4a5162f6ad3",
+        "sha256": "dd2c7fbe49c7d098e016645aaf2019cc9009bdb39faa2783bad13b8477255625",
         "size_bytes": 2411
       }
     },
@@ -896,7 +896,7 @@
       "ordinal": 3,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8418484750,
+        "runner_elapsed_ns": 8485495792,
         "timed_out": false
       },
       "round": 0,
@@ -907,7 +907,7 @@
       },
       "stdout": {
         "path": "raw/timing/003-round-0-point-missing-ipk-fit-sqlite.json",
-        "sha256": "e5efd64c6f8b91ce26fe3d26938b1a12fb964ad8ed859345ce28ae8f3ede3da6",
+        "sha256": "f04013fa34f3d6ea8b031bb60f02a55aa513cace5bec3e2ca7566c5e2e96e6a8",
         "size_bytes": 2411
       }
     },
@@ -934,7 +934,7 @@
       "ordinal": 4,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5154024750,
+        "runner_elapsed_ns": 5158179750,
         "timed_out": false
       },
       "round": 0,
@@ -945,7 +945,7 @@
       },
       "stdout": {
         "path": "raw/timing/004-round-0-scan-ipk-fit-modern.json",
-        "sha256": "1771577a203d18fbcc8e25db6602c0d7cf3db8ddd6787ecf99c1d094121f08c0",
+        "sha256": "8f681a5ced01a18dd507839dfd18bac7dfdf29f882ea1d1b035f526da99cb930",
         "size_bytes": 2429
       }
     },
@@ -972,7 +972,7 @@
       "ordinal": 5,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3320749542,
+        "runner_elapsed_ns": 3405899083,
         "timed_out": false
       },
       "round": 0,
@@ -983,7 +983,7 @@
       },
       "stdout": {
         "path": "raw/timing/005-round-0-scan-ipk-fit-sqlite.json",
-        "sha256": "b455b9937f66e6b1dc1f80d8b845a35995a5496453fe13ce585b201f4a1419fd",
+        "sha256": "22c748d966f6041f53d3d2fba83f3edfeacdb1cc3595d4055002131477c28d01",
         "size_bytes": 2429
       }
     },
@@ -1010,7 +1010,7 @@
       "ordinal": 6,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 14050735458,
+        "runner_elapsed_ns": 14109372666,
         "timed_out": false
       },
       "round": 0,
@@ -1021,7 +1021,7 @@
       },
       "stdout": {
         "path": "raw/timing/006-round-0-point-present-ipk-pressure-modern.json",
-        "sha256": "c1f70e05b2d5feabbd1fd1b5369507b3d9d2bcd680754a8eaf7373f87eed98ce",
+        "sha256": "8269a6e9af0674181736e1cac4d0c9c5d423d0e9ddb20c9106527e063afb05fe",
         "size_bytes": 2472
       }
     },
@@ -1048,7 +1048,7 @@
       "ordinal": 7,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11427064542,
+        "runner_elapsed_ns": 11578981125,
         "timed_out": false
       },
       "round": 0,
@@ -1059,7 +1059,7 @@
       },
       "stdout": {
         "path": "raw/timing/007-round-0-point-present-ipk-pressure-sqlite.json",
-        "sha256": "a266aa86ce2671082ec52cd9718ed3497e7dc5bbb8aec2a400bcbd0e7a25f82d",
+        "sha256": "30a782f0b7c78b0a3ab77b7f2e799d8f64d50c2696e65435150495082e1ec8c1",
         "size_bytes": 2472
       }
     },
@@ -1086,7 +1086,7 @@
       "ordinal": 8,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 13007905542,
+        "runner_elapsed_ns": 13034470416,
         "timed_out": false
       },
       "round": 0,
@@ -1097,7 +1097,7 @@
       },
       "stdout": {
         "path": "raw/timing/008-round-0-point-missing-ipk-pressure-modern.json",
-        "sha256": "f8ac4b5adae4576e8281f437a50c6000824ef2ed24d5c7dfe2273cc5fae4bf05",
+        "sha256": "850a511473bbdd71243af2811550732e707b724e0dd8e6fb4d6e1594e1a856c6",
         "size_bytes": 2419
       }
     },
@@ -1124,7 +1124,7 @@
       "ordinal": 9,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10557983084,
+        "runner_elapsed_ns": 10473235208,
         "timed_out": false
       },
       "round": 0,
@@ -1135,7 +1135,7 @@
       },
       "stdout": {
         "path": "raw/timing/009-round-0-point-missing-ipk-pressure-sqlite.json",
-        "sha256": "f9686332d1884b14ace198af583e267f07709af69724d58a8005c5f7e4d45608",
+        "sha256": "ad1f32da9b46942eef40410eb0d734bd355a426a095d5844d0603c6f5901c21f",
         "size_bytes": 2419
       }
     },
@@ -1162,7 +1162,7 @@
       "ordinal": 10,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5657146792,
+        "runner_elapsed_ns": 5860162875,
         "timed_out": false
       },
       "round": 0,
@@ -1173,7 +1173,7 @@
       },
       "stdout": {
         "path": "raw/timing/010-round-0-scan-ipk-pressure-modern.json",
-        "sha256": "7c01fcc31b6819dcae66f3778d0e4a4bc1cbd7981678ec9e80d496e3b2ec00b4",
+        "sha256": "ccd6fb29556bc16ebb5157cb413eaf3f7a3ad11c4ab6130b23cf9e554f8eb74c",
         "size_bytes": 2424
       }
     },
@@ -1200,7 +1200,7 @@
       "ordinal": 11,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3753410292,
+        "runner_elapsed_ns": 3781275625,
         "timed_out": false
       },
       "round": 0,
@@ -1211,7 +1211,7 @@
       },
       "stdout": {
         "path": "raw/timing/011-round-0-scan-ipk-pressure-sqlite.json",
-        "sha256": "034c9e232578584619cffccf83938352771bbc35a566686a372006710d2cb7de",
+        "sha256": "6cae39252760a394b1d2dd053d79d7185d78651e347d695f7f0d03eac9b56f53",
         "size_bytes": 2424
       }
     },
@@ -1238,7 +1238,7 @@
       "ordinal": 12,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3764146666,
+        "runner_elapsed_ns": 3788467000,
         "timed_out": false
       },
       "round": 1,
@@ -1249,7 +1249,7 @@
       },
       "stdout": {
         "path": "raw/timing/012-round-1-scan-ipk-pressure-sqlite.json",
-        "sha256": "a4f29c05deed80a7276fb11bb659221a9854c8434ef8247723ac2bf7806d687d",
+        "sha256": "d9fe85727283af9e10edb7471b218133323f41198252247822ea141d9a13d0f7",
         "size_bytes": 2424
       }
     },
@@ -1276,7 +1276,7 @@
       "ordinal": 13,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5689864750,
+        "runner_elapsed_ns": 5812975500,
         "timed_out": false
       },
       "round": 1,
@@ -1287,7 +1287,7 @@
       },
       "stdout": {
         "path": "raw/timing/013-round-1-scan-ipk-pressure-modern.json",
-        "sha256": "df1e196fef453097a2fe880b10a500babace8ac48d798adf9d62a4668a9bc72f",
+        "sha256": "aa410a0d2f9e69da8654d217c570fea307ed355b0fe4148ac672d751412a2459",
         "size_bytes": 2424
       }
     },
@@ -1314,7 +1314,7 @@
       "ordinal": 14,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10576163791,
+        "runner_elapsed_ns": 10738696334,
         "timed_out": false
       },
       "round": 1,
@@ -1325,7 +1325,7 @@
       },
       "stdout": {
         "path": "raw/timing/014-round-1-point-missing-ipk-pressure-sqlite.json",
-        "sha256": "96c6ac7ed335e3cb952f96d3932da29eae337c741e5f75be24e1950c8332cf67",
+        "sha256": "d4ee0dfeb8bdee368ea183609b035b29f0ecb63a870ca7ab1b5eaa9befe45eef",
         "size_bytes": 2419
       }
     },
@@ -1352,7 +1352,7 @@
       "ordinal": 15,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 13053165708,
+        "runner_elapsed_ns": 12747740375,
         "timed_out": false
       },
       "round": 1,
@@ -1363,7 +1363,7 @@
       },
       "stdout": {
         "path": "raw/timing/015-round-1-point-missing-ipk-pressure-modern.json",
-        "sha256": "0df03bd0c356e354ec1c2d73219c616eb36a7dc3ad9c39d05748fa328e44943e",
+        "sha256": "9f54ba4866d627979ebf984df104eb6c602fe31f74f1aeb7806816e84e30d57d",
         "size_bytes": 2419
       }
     },
@@ -1390,7 +1390,7 @@
       "ordinal": 16,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11576199875,
+        "runner_elapsed_ns": 11448340666,
         "timed_out": false
       },
       "round": 1,
@@ -1401,7 +1401,7 @@
       },
       "stdout": {
         "path": "raw/timing/016-round-1-point-present-ipk-pressure-sqlite.json",
-        "sha256": "d85757365388d54497f8ed44499c665d8c2771479ef89f50e1507dcdb32abbb6",
+        "sha256": "87336a6be50d14cc5c2db8562ab23f1f824c6e30113e0369af2067db9a224331",
         "size_bytes": 2472
       }
     },
@@ -1428,7 +1428,7 @@
       "ordinal": 17,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 14217163292,
+        "runner_elapsed_ns": 14191117208,
         "timed_out": false
       },
       "round": 1,
@@ -1439,7 +1439,7 @@
       },
       "stdout": {
         "path": "raw/timing/017-round-1-point-present-ipk-pressure-modern.json",
-        "sha256": "707221f164dcb29d2d073a3ed9078f48167c750988aefa3841018fac93260545",
+        "sha256": "7d65344992dbd4c178a57f0e72becb5f44c98138b0caf7400667239515faf56a",
         "size_bytes": 2472
       }
     },
@@ -1466,7 +1466,7 @@
       "ordinal": 18,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3349460750,
+        "runner_elapsed_ns": 3347302583,
         "timed_out": false
       },
       "round": 1,
@@ -1477,7 +1477,7 @@
       },
       "stdout": {
         "path": "raw/timing/018-round-1-scan-ipk-fit-sqlite.json",
-        "sha256": "480872c177c8c302b62c8a1b6ab91c5624bc21707242434e742970ae96f3d4cc",
+        "sha256": "da32b2d5c226f94c91151df0183cd707c49439cf137f6a101bb7310ce1a897b6",
         "size_bytes": 2429
       }
     },
@@ -1504,7 +1504,7 @@
       "ordinal": 19,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5230510792,
+        "runner_elapsed_ns": 5256585583,
         "timed_out": false
       },
       "round": 1,
@@ -1515,7 +1515,7 @@
       },
       "stdout": {
         "path": "raw/timing/019-round-1-scan-ipk-fit-modern.json",
-        "sha256": "3ae8161af6d599a64858a18c76236081fe55bf226b08833e224a6980bb70d33f",
+        "sha256": "d7933104a4ed512050b8301ce107227e961ecb5cc68199aa557fb2ba340ce55d",
         "size_bytes": 2429
       }
     },
@@ -1542,7 +1542,7 @@
       "ordinal": 20,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8573138291,
+        "runner_elapsed_ns": 8609476875,
         "timed_out": false
       },
       "round": 1,
@@ -1553,7 +1553,7 @@
       },
       "stdout": {
         "path": "raw/timing/020-round-1-point-missing-ipk-fit-sqlite.json",
-        "sha256": "8e8b784338c3e919ef4ab0d0d79dd8eb3f28ea56d1d2fcebca1e59663d83a26d",
+        "sha256": "f9b3945bbc13fe7302423e15b14f052d887c7f51430ebd650f68fc3098f0b8c1",
         "size_bytes": 2411
       }
     },
@@ -1580,7 +1580,7 @@
       "ordinal": 21,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10069055125,
+        "runner_elapsed_ns": 10174764459,
         "timed_out": false
       },
       "round": 1,
@@ -1591,7 +1591,7 @@
       },
       "stdout": {
         "path": "raw/timing/021-round-1-point-missing-ipk-fit-modern.json",
-        "sha256": "5a34da7c684ab437dcbf34baafb9dad19b5887d1fda5dac80ccb83436273b812",
+        "sha256": "6e618466632f1237e7ac459857b80c3fd81d7772d0f2944da41af57b0fb24560",
         "size_bytes": 2411
       }
     },
@@ -1618,7 +1618,7 @@
       "ordinal": 22,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9401082083,
+        "runner_elapsed_ns": 9498582958,
         "timed_out": false
       },
       "round": 1,
@@ -1629,7 +1629,7 @@
       },
       "stdout": {
         "path": "raw/timing/022-round-1-point-present-ipk-fit-sqlite.json",
-        "sha256": "591e3e0704b6704ceab64775df7c87995d0a66b4fa02e7830838389179930d09",
+        "sha256": "1e1e82348106260652eb84e6b552b53e1ac09b6083ea016f42568a43168ae1a3",
         "size_bytes": 2462
       }
     },
@@ -1656,7 +1656,7 @@
       "ordinal": 23,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11277940583,
+        "runner_elapsed_ns": 11313422083,
         "timed_out": false
       },
       "round": 1,
@@ -1667,7 +1667,7 @@
       },
       "stdout": {
         "path": "raw/timing/023-round-1-point-present-ipk-fit-modern.json",
-        "sha256": "014676d385ce945b5e96f11d6a5787c3d23d286ecd0764fb33442b8ee67c41e4",
+        "sha256": "b4b928b76a0258a68eabae70c8ea0a12442a328a9c6f1887c5ff247c8844aec7",
         "size_bytes": 2462
       }
     },
@@ -1694,7 +1694,7 @@
       "ordinal": 24,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11303114042,
+        "runner_elapsed_ns": 11183589625,
         "timed_out": false
       },
       "round": 2,
@@ -1705,7 +1705,7 @@
       },
       "stdout": {
         "path": "raw/timing/024-round-2-point-present-ipk-fit-modern.json",
-        "sha256": "ad4c72a97ae8c629cb76a476eb1c55c6bf15a1ba752b21c987f6fbaaba08f1ed",
+        "sha256": "17cf15d8d6eee678e18d9385b3ab17dbf1794ca452beb7d82d31c286127a84e7",
         "size_bytes": 2462
       }
     },
@@ -1732,7 +1732,7 @@
       "ordinal": 25,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9411556542,
+        "runner_elapsed_ns": 9419033417,
         "timed_out": false
       },
       "round": 2,
@@ -1743,7 +1743,7 @@
       },
       "stdout": {
         "path": "raw/timing/025-round-2-point-present-ipk-fit-sqlite.json",
-        "sha256": "90538b1ce02676b5ea406aac50acef0eb3c5fd31831898e685301ab58dffac11",
+        "sha256": "ff5d8cd5a64a8c2174130746bea75743275321e2285f3735b58a980555abeb2b",
         "size_bytes": 2462
       }
     },
@@ -1770,7 +1770,7 @@
       "ordinal": 26,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10149670375,
+        "runner_elapsed_ns": 10123418792,
         "timed_out": false
       },
       "round": 2,
@@ -1781,7 +1781,7 @@
       },
       "stdout": {
         "path": "raw/timing/026-round-2-point-missing-ipk-fit-modern.json",
-        "sha256": "641ba62db0dc7aa65fd26da939af399f5b55f0022a5dc708c4aa1e8603fe027a",
+        "sha256": "7396db66ec46fb8c26b59b8cc600df7fec32a00de187d60fa9fda1f44ad7133c",
         "size_bytes": 2411
       }
     },
@@ -1808,7 +1808,7 @@
       "ordinal": 27,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8667574917,
+        "runner_elapsed_ns": 8600032708,
         "timed_out": false
       },
       "round": 2,
@@ -1819,7 +1819,7 @@
       },
       "stdout": {
         "path": "raw/timing/027-round-2-point-missing-ipk-fit-sqlite.json",
-        "sha256": "8ec5397e149c1a9b4ad9ae11c6b4053f0f1ad44668b9be3fe873d02c792e3d9c",
+        "sha256": "dc26be25b5d9559685860be06fee0f92f4727a2339ec1bd8e252ebcc9de4951e",
         "size_bytes": 2411
       }
     },
@@ -1846,7 +1846,7 @@
       "ordinal": 28,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5201869917,
+        "runner_elapsed_ns": 5205645333,
         "timed_out": false
       },
       "round": 2,
@@ -1857,7 +1857,7 @@
       },
       "stdout": {
         "path": "raw/timing/028-round-2-scan-ipk-fit-modern.json",
-        "sha256": "8859b77e5d79c642241124fde5c9ceb3038a59fc8ecf3b7f8a09d26199a84795",
+        "sha256": "02d241ec8e7691bca229ce46c6ab3d095971f16074b27dcea84c22b60dd9a0e1",
         "size_bytes": 2429
       }
     },
@@ -1884,7 +1884,7 @@
       "ordinal": 29,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3310039583,
+        "runner_elapsed_ns": 3383936000,
         "timed_out": false
       },
       "round": 2,
@@ -1895,7 +1895,7 @@
       },
       "stdout": {
         "path": "raw/timing/029-round-2-scan-ipk-fit-sqlite.json",
-        "sha256": "45f8be6298db86ff0a25312c5917415e12fea37585262fa0ca6eda6bf6ddd3ae",
+        "sha256": "e3714c8fd00feb066ce9aa535aca184d8986e55b041b5d1ddbc5366ccdf8ba7c",
         "size_bytes": 2429
       }
     },
@@ -1922,7 +1922,7 @@
       "ordinal": 30,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 14067802959,
+        "runner_elapsed_ns": 14497073875,
         "timed_out": false
       },
       "round": 2,
@@ -1933,7 +1933,7 @@
       },
       "stdout": {
         "path": "raw/timing/030-round-2-point-present-ipk-pressure-modern.json",
-        "sha256": "b8fcf711f9155c86e975baa508688cced52a4d9e14b70e02b77abdc51ba9e62e",
+        "sha256": "b3485a1a752197c90999e4fa34d4197018a78dff24d92913058a37e82cffe88a",
         "size_bytes": 2472
       }
     },
@@ -1960,7 +1960,7 @@
       "ordinal": 31,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11564852208,
+        "runner_elapsed_ns": 11541184917,
         "timed_out": false
       },
       "round": 2,
@@ -1971,7 +1971,7 @@
       },
       "stdout": {
         "path": "raw/timing/031-round-2-point-present-ipk-pressure-sqlite.json",
-        "sha256": "65ed228e92c48adb7a03388c5573974ca24a550b9681e1b5eaa8bf375c541dcf",
+        "sha256": "91c72a66de7a00a437bf9886876ac93932381a5fb949a404473c349d8bfc6cc4",
         "size_bytes": 2472
       }
     },
@@ -1998,7 +1998,7 @@
       "ordinal": 32,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 12969474583,
+        "runner_elapsed_ns": 12985132583,
         "timed_out": false
       },
       "round": 2,
@@ -2009,7 +2009,7 @@
       },
       "stdout": {
         "path": "raw/timing/032-round-2-point-missing-ipk-pressure-modern.json",
-        "sha256": "a4766c7d504083c24853374701a655fc22ed18c962e0d80a4b474c05af29ac4d",
+        "sha256": "4442fbf4db04b3b7abacbe54447830308c2b6179bd4c51b3e0d4add50a84bd74",
         "size_bytes": 2419
       }
     },
@@ -2036,7 +2036,7 @@
       "ordinal": 33,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10793583166,
+        "runner_elapsed_ns": 10636998792,
         "timed_out": false
       },
       "round": 2,
@@ -2047,7 +2047,7 @@
       },
       "stdout": {
         "path": "raw/timing/033-round-2-point-missing-ipk-pressure-sqlite.json",
-        "sha256": "445f63838b7f9ab94afd9c5c971faeb7ddece9b80bed8a5ad8ff6a6972ae5ebf",
+        "sha256": "23a85173df43d0b155667bdd0dd14c50dc09cd11d5582daebbbb71d7695c892d",
         "size_bytes": 2419
       }
     },
@@ -2074,7 +2074,7 @@
       "ordinal": 34,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 5838120042,
+        "runner_elapsed_ns": 5771397959,
         "timed_out": false
       },
       "round": 2,
@@ -2085,7 +2085,7 @@
       },
       "stdout": {
         "path": "raw/timing/034-round-2-scan-ipk-pressure-modern.json",
-        "sha256": "b4012814e1eae402e19c52482444f29b2cd12edbf57d1d5b061c1fb3190ced71",
+        "sha256": "8dbf25495db1f9047554f04ca27a2c90f654dc44e117fdcca4c03a7af48d6971",
         "size_bytes": 2424
       }
     },
@@ -2112,7 +2112,7 @@
       "ordinal": 35,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 3788186541,
+        "runner_elapsed_ns": 3884719750,
         "timed_out": false
       },
       "round": 2,
@@ -2123,7 +2123,7 @@
       },
       "stdout": {
         "path": "raw/timing/035-round-2-scan-ipk-pressure-sqlite.json",
-        "sha256": "896a385cd783d0b80ec2aecefb1c2bed637d8c09ed1777f673c8b59f8a659554",
+        "sha256": "6db5ffa5ab4162cc84855bffa14051046721216705ac65b64647cd6b9e8f88ab",
         "size_bytes": 2424
       }
     }
