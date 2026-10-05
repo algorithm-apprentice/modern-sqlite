@@ -85,7 +85,7 @@ struct PlaybackExpectation {
 
 [[nodiscard]] Status ApplyPlayback(JournalPlayback& playback, JournalRecoveryTarget& target,
                                    const PlaybackExpectation& expected, bool sync_database,
-                                   bool& target_started) {
+                                   bool& target_started) try {
   target_started = false;
   const std::optional<JournalPlaybackInfo> info = playback.info();
   if (!info.has_value()) {
@@ -161,6 +161,8 @@ struct PlaybackExpectation {
     return std::unexpected(std::move(completed.error()));
   }
   return {};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
 }
 
 }  // namespace
@@ -272,6 +274,20 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
     return std::unexpected(Error::OutOfMemory());
   }
   return {};
+}
+
+bool JournalTransaction::NeedsCapture(PageNumber page_number) const noexcept {
+  if (state_ != JournalTransactionState::kActive || !IsValidPageNumber(page_number)) {
+    return false;
+  }
+
+  const std::uint32_t page = page_number.value();
+  if (page <= info_.original_page_count && !transaction_pages_.contains(page)) {
+    return true;
+  }
+  return std::ranges::any_of(savepoints_, [page](const SavepointState& state) {
+    return page <= state.savepoint.original_page_count && !state.pages.contains(page);
+  });
 }
 
 Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t current_page_count) {
@@ -515,7 +531,13 @@ Status JournalTransaction::Commit() {
         Misuse("journal commit requires synchronized journal and database contents"));
   }
 
-  auto finalized = backend_->DoFinalizeCommit();
+  Status finalized;
+  try {
+    finalized = backend_->DoFinalizeCommit();
+  } catch (const std::bad_alloc&) {
+    EnterError(ErrorCode::kOutOfMemory);
+    return std::unexpected(Error::OutOfMemory());
+  }
   if (!finalized.has_value()) {
     const ErrorCode code = finalized.error().code();
     EnterError(code);
@@ -574,7 +596,13 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
   }
 
   opened->reset();
-  auto finalized = backend_->DoFinalizeRollback();
+  Status finalized;
+  try {
+    finalized = backend_->DoFinalizeRollback();
+  } catch (const std::bad_alloc&) {
+    EnterError(ErrorCode::kOutOfMemory);
+    return std::unexpected(Error::OutOfMemory());
+  }
   if (!finalized.has_value()) {
     const ErrorCode code = finalized.error().code();
     EnterError(code);
@@ -670,7 +698,12 @@ Status RecoverHotJournal(JournalBackend& backend, JournalRecoveryTarget& target)
   }
 
   opened->reset();
-  auto finalized = backend.DoFinalizeRollback();
+  Status finalized;
+  try {
+    finalized = backend.DoFinalizeRollback();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
   if (!finalized.has_value()) {
     return std::unexpected(std::move(finalized.error()));
   }

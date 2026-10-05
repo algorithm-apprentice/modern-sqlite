@@ -22,7 +22,9 @@ namespace {
 }  // namespace
 
 PageCache::Pin::Pin(Pin&& other) noexcept
-    : cache_(std::exchange(other.cache_, nullptr)), entry_(std::exchange(other.entry_, nullptr)) {}
+    : cache_(std::exchange(other.cache_, nullptr)),
+      entry_(std::exchange(other.entry_, nullptr)),
+      exclusive_(std::exchange(other.exclusive_, false)) {}
 
 PageCache::Pin& PageCache::Pin::operator=(Pin&& other) noexcept {
   if (this == &other) {
@@ -31,6 +33,7 @@ PageCache::Pin& PageCache::Pin::operator=(Pin&& other) noexcept {
   Reset();
   cache_ = std::exchange(other.cache_, nullptr);
   entry_ = std::exchange(other.entry_, nullptr);
+  exclusive_ = std::exchange(other.exclusive_, false);
   return *this;
 }
 
@@ -47,22 +50,33 @@ const PageFrame& PageCache::Pin::operator*() const noexcept { return frame(); }
 
 Result<MutableByteView> PageCache::Pin::mutable_bytes() {
   assert(entry_ != nullptr);
+  if (!exclusive_) {
+    return std::unexpected(Misuse("mutable page bytes require an exclusive pin"));
+  }
   if (!entry_->frame.dirty_) {
     return std::unexpected(Misuse("mutable page bytes require dirty state"));
   }
   return entry_->frame.bytes_.mutable_view();
 }
 
-void PageCache::Pin::MarkDirty() noexcept {
+Status PageCache::Pin::MarkDirty() {
   assert(cache_ != nullptr);
   assert(entry_ != nullptr);
+  if (!exclusive_) {
+    return std::unexpected(Misuse("dirty transition requires an exclusive pin"));
+  }
   cache_->MarkDirty(*entry_);
+  return {};
 }
 
-void PageCache::Pin::MarkClean() noexcept {
+Status PageCache::Pin::MarkClean() {
   assert(cache_ != nullptr);
   assert(entry_ != nullptr);
+  if (!exclusive_) {
+    return std::unexpected(Misuse("clean transition requires an exclusive pin"));
+  }
   cache_->MarkClean(*entry_);
+  return {};
 }
 
 void PageCache::Pin::Reset() noexcept {
@@ -74,6 +88,7 @@ void PageCache::Pin::Reset() noexcept {
   cache_->Release(*entry_);
   cache_ = nullptr;
   entry_ = nullptr;
+  exclusive_ = false;
 }
 
 Result<std::unique_ptr<PageCache>> PageCache::Create(PageCacheOptions options) {
@@ -85,6 +100,7 @@ Result<std::unique_ptr<PageCache>> PageCache::Create(PageCacheOptions options) {
 
 PageCache::~PageCache() {
   assert(total_pin_count_ == 0);
+  assert(exclusive_pin_count_ == 0);
   assert(clean_oldest_ == nullptr || clean_oldest_->in_clean_list);
   assert(clean_newest_ == nullptr || clean_newest_->in_clean_list);
   assert(dirty_oldest_ == nullptr || dirty_oldest_->in_dirty_list);
@@ -105,7 +121,26 @@ Result<PageCache::Pin> PageCache::Insert(PageNumber page_number, ByteBuffer byte
     return std::unexpected(Misuse("page is already present in the cache"));
   }
 
-  Pin pin = Acquire(iterator->second);
+  Pin pin = Acquire(iterator->second, false);
+  EnforceCapacity();
+  return pin;
+}
+
+Result<PageCache::Pin> PageCache::InsertExclusive(PageNumber page_number, ByteBuffer bytes) {
+  if (page_number.value() == 0) {
+    return std::unexpected(Misuse("page zero cannot be cached"));
+  }
+  if (bytes.size() != page_size_) {
+    return std::unexpected(Misuse("inserted page size does not match the cache page size"));
+  }
+
+  auto [iterator, inserted] =
+      pages_.try_emplace(page_number.value(), page_number, std::move(bytes));
+  if (!inserted) {
+    return std::unexpected(Misuse("page is already present in the cache"));
+  }
+
+  Pin pin = Acquire(iterator->second, true);
   EnforceCapacity();
   return pin;
 }
@@ -120,8 +155,28 @@ Result<std::optional<PageCache::Pin>> PageCache::Lookup(PageNumber page_number) 
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheMisses, 1U);
     return std::optional<Pin>{};
   }
+  if (iterator->second.exclusively_pinned) {
+    return std::unexpected(Busy("cannot read a page while it has an exclusive pin"));
+  }
   MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheHits, 1U);
-  return std::optional<Pin>{Acquire(iterator->second)};
+  return std::optional<Pin>{Acquire(iterator->second, false)};
+}
+
+Result<std::optional<PageCache::Pin>> PageCache::LookupExclusive(PageNumber page_number) {
+  if (page_number.value() == 0) {
+    return std::unexpected(Misuse("page zero cannot be cached"));
+  }
+
+  const auto iterator = pages_.find(page_number.value());
+  if (iterator == pages_.end()) {
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheMisses, 1U);
+    return std::optional<Pin>{};
+  }
+  if (iterator->second.pin_count != 0) {
+    return std::unexpected(Busy("cannot exclusively pin an already pinned page"));
+  }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheHits, 1U);
+  return std::optional<Pin>{Acquire(iterator->second, true)};
 }
 
 Status PageCache::Discard(PageNumber page_number) {
@@ -149,6 +204,44 @@ Status PageCache::Discard(PageNumber page_number) {
   return {};
 }
 
+Status PageCache::DiscardAfter(std::uint32_t page_count) {
+  for (const auto& [page_number, entry] : pages_) {
+    if (page_number > page_count && entry.pin_count != 0) {
+      return std::unexpected(Busy("cannot discard a range containing a pinned page"));
+    }
+  }
+
+  for (auto iterator = pages_.begin(); iterator != pages_.end();) {
+    if (iterator->first <= page_count) {
+      ++iterator;
+      continue;
+    }
+    Entry& entry = iterator->second;
+    if (entry.frame.dirty_) {
+      RemoveDirty(entry);
+      assert(dirty_page_count_ > 0);
+      --dirty_page_count_;
+    } else {
+      RemoveClean(entry);
+    }
+    iterator = pages_.erase(iterator);
+  }
+  return {};
+}
+
+Status PageCache::Clear() {
+  if (total_pin_count_ != 0) {
+    return std::unexpected(Busy("cannot clear a cache containing pinned pages"));
+  }
+  pages_.clear();
+  clean_oldest_ = nullptr;
+  clean_newest_ = nullptr;
+  dirty_oldest_ = nullptr;
+  dirty_newest_ = nullptr;
+  dirty_page_count_ = 0;
+  return {};
+}
+
 std::size_t PageCache::ReclaimClean() noexcept {
   std::size_t reclaimed = 0;
   while (clean_oldest_ != nullptr) {
@@ -170,29 +263,45 @@ PageCachePressure PageCache::pressure() const noexcept {
   }
 
   result.excess_pages = pages_.size() - capacity_pages_;
-  for (const Entry* entry = dirty_oldest_; entry != nullptr; entry = entry->dirty_next) {
-    if (entry->pin_count == 0) {
-      result.writeback = PageWritebackRequest{.page_number = entry->frame.page_number_};
-      break;
-    }
-  }
+  result.writeback = writeback_candidate();
   return result;
 }
 
-PageCache::Pin PageCache::Acquire(Entry& entry) noexcept {
+std::optional<PageWritebackRequest> PageCache::writeback_candidate() const noexcept {
+  for (const Entry* entry = dirty_oldest_; entry != nullptr; entry = entry->dirty_next) {
+    if (entry->pin_count == 0) {
+      return PageWritebackRequest{.page_number = entry->frame.page_number_};
+    }
+  }
+  return std::nullopt;
+}
+
+PageCache::Pin PageCache::Acquire(Entry& entry, bool exclusive) noexcept {
   if (entry.in_clean_list) {
     assert(entry.pin_count == 0);
     assert(!entry.frame.dirty_);
     RemoveClean(entry);
   }
+  assert(!entry.exclusively_pinned);
+  if (exclusive) {
+    assert(entry.pin_count == 0);
+    entry.exclusively_pinned = true;
+    ++exclusive_pin_count_;
+  }
   ++entry.pin_count;
   ++total_pin_count_;
-  return Pin{*this, entry};
+  return Pin{*this, entry, exclusive};
 }
 
 void PageCache::Release(Entry& entry) noexcept {
   assert(entry.pin_count > 0);
   assert(total_pin_count_ > 0);
+  if (entry.exclusively_pinned) {
+    assert(entry.pin_count == 1);
+    assert(exclusive_pin_count_ > 0);
+    entry.exclusively_pinned = false;
+    --exclusive_pin_count_;
+  }
   --entry.pin_count;
   --total_pin_count_;
   if (entry.pin_count != 0) {

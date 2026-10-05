@@ -5,7 +5,7 @@
 #include <string>
 
 #include "modern_sqlite/catalog/catalog_loader.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 
 namespace {
@@ -38,7 +38,7 @@ void operator delete[](void* allocation, std::size_t) noexcept { std::free(alloc
 
 int main() try {
   modern_sqlite::PosixVfs vfs;
-  auto opened = modern_sqlite::ReadPager::Open(vfs, FixturePath().string());
+  auto opened = modern_sqlite::Pager::Open(vfs, FixturePath().string());
   if (!opened.has_value() || !(*opened)->BeginRead().has_value()) {
     return 1;
   }

@@ -1783,6 +1783,8 @@ Result<OpenedFile> PosixVfs::DoOpen(std::optional<std::string_view> path, FileOp
 
 Status PosixVfs::DoDelete(std::string_view path, DirectorySync directory_sync) {
   const std::string owned_path{path};
+  const std::string parent =
+      directory_sync == DirectorySync::kYes ? ParentPath(path) : std::string{};
   int result = -1;
   do {
     result = ::unlink(owned_path.c_str());
@@ -1796,7 +1798,6 @@ Status PosixVfs::DoDelete(std::string_view path, DirectorySync directory_sync) {
     return {};
   }
 
-  const std::string parent = ParentPath(path);
   const int descriptor = OpenDirectory(parent);
   if (descriptor == -1) {
     return std::unexpected(SystemError(ErrorCode::kIo, "open parent directory", parent, errno));

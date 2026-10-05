@@ -1,4 +1,4 @@
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 
 #include <gtest/gtest.h>
 
@@ -30,8 +30,8 @@
 namespace modern_sqlite {
 namespace {
 
-static_assert(!std::is_copy_constructible_v<ReadPager>);
-static_assert(!std::is_move_constructible_v<ReadPager>);
+static_assert(!std::is_copy_constructible_v<Pager>);
+static_assert(!std::is_move_constructible_v<Pager>);
 static_assert(!std::is_copy_constructible_v<ReadPagePin>);
 static_assert(std::is_nothrow_move_constructible_v<ReadPagePin>);
 
@@ -398,14 +398,14 @@ TEST(DatabaseHeader, RejectsMalformedStructuralFields) {
   expect_not_database(std::move(bad_usable_size));
 }
 
-TEST(ReadPager, ValidatesOptionsBeforeUsingTheVfs) {
+TEST(Pager, ValidatesOptionsBeforeUsingTheVfs) {
   FakeEnvironment environment{MakeDatabaseImage()};
 
-  const auto pager = ReadPager::Open(environment.vfs, kInputPath,
-                                     ReadPagerOptions{
-                                         .empty_database_page_size = ByteCount{1000},
-                                         .cache_capacity_pages = 4,
-                                     });
+  const auto pager = Pager::Open(environment.vfs, kInputPath,
+                                 PagerOptions{
+                                     .empty_database_page_size = ByteCount{1000},
+                                     .cache_capacity_pages = 4,
+                                 });
 
   ASSERT_FALSE(pager.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, pager.error().code());
@@ -413,10 +413,10 @@ TEST(ReadPager, ValidatesOptionsBeforeUsingTheVfs) {
   EXPECT_TRUE(environment.state->open_requests.empty());
 }
 
-TEST(ReadPager, ResolvesAndOpensTheMainDatabaseReadOnlyWithoutReading) {
+TEST(Pager, ResolvesAndOpensTheMainDatabaseReadOnlyWithoutReading) {
   FakeEnvironment environment{MakeDatabaseImage()};
 
-  const auto pager = ReadPager::Open(environment.vfs, kInputPath);
+  const auto pager = Pager::Open(environment.vfs, kInputPath);
 
   ASSERT_TRUE(pager.has_value());
   EXPECT_EQ(kCanonicalPath, (*pager)->path());
@@ -431,11 +431,11 @@ TEST(ReadPager, ResolvesAndOpensTheMainDatabaseReadOnlyWithoutReading) {
   EXPECT_TRUE(environment.main_file->lock_requests.empty());
 }
 
-TEST(ReadPager, ReadsAnEmptyDatabaseTransaction) {
+TEST(Pager, ReadsAnEmptyDatabaseTransaction) {
   FakeEnvironment environment{{}};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   EXPECT_TRUE(pager->in_read_transaction());
@@ -454,9 +454,9 @@ TEST(ReadPager, ReadsAnEmptyDatabaseTransaction) {
   EXPECT_EQ(DatabaseLock::kNone, environment.main_file->unlock_requests.front());
 }
 
-TEST(ReadPager, RejectsOperationsOutsideTheirTransactionState) {
+TEST(Pager, RejectsOperationsOutsideTheirTransactionState) {
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   const auto page_before_begin = (*opened)->ReadPage(PageNumber{1});
@@ -473,13 +473,13 @@ TEST(ReadPager, RejectsOperationsOutsideTheirTransactionState) {
   EXPECT_TRUE((*opened)->EndRead().has_value());
 }
 
-TEST(ReadPager, UsesTrustedHeaderPageCountOnlyWhenChangeCountersAgree) {
+TEST(Pager, UsesTrustedHeaderPageCountOnlyWhenChangeCountersAgree) {
   {
     FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{
         .physical_pages = 3,
         .header_pages = 2,
     })};
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     ASSERT_TRUE((*opened)->BeginRead().has_value());
     EXPECT_EQ(2U, (*opened)->page_count());
@@ -492,7 +492,7 @@ TEST(ReadPager, UsesTrustedHeaderPageCountOnlyWhenChangeCountersAgree) {
         .header_pages = 2,
         .version_valid_for = 0x05060708U,
     })};
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     ASSERT_TRUE((*opened)->BeginRead().has_value());
     EXPECT_EQ(3U, (*opened)->page_count());
@@ -500,12 +500,12 @@ TEST(ReadPager, UsesTrustedHeaderPageCountOnlyWhenChangeCountersAgree) {
   }
 }
 
-TEST(ReadPager, RejectsTrustedPageCountBeyondThePhysicalFile) {
+TEST(Pager, RejectsTrustedPageCountBeyondThePhysicalFile) {
   FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{
       .physical_pages = 2,
       .header_pages = 3,
   })};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   const auto begun = (*opened)->BeginRead();
@@ -516,7 +516,7 @@ TEST(ReadPager, RejectsTrustedPageCountBeyondThePhysicalFile) {
   EXPECT_EQ(DatabaseLock::kNone, environment.main_file->current_lock);
 }
 
-TEST(ReadPager, RejectsPhysicalPageCountsBeyondThePageNumberRange) {
+TEST(Pager, RejectsPhysicalPageCountsBeyondThePageNumberRange) {
   constexpr std::uint64_t kPhysicalPages =
       static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
   constexpr std::uint64_t kPageSize = 512;
@@ -525,7 +525,7 @@ TEST(ReadPager, RejectsPhysicalPageCountsBeyondThePageNumberRange) {
       .header_pages = 0,
   })};
   environment.main_file->size_override = kPhysicalPages * kPageSize;
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   const auto begun = (*opened)->BeginRead();
@@ -535,10 +535,10 @@ TEST(ReadPager, RejectsPhysicalPageCountsBeyondThePageNumberRange) {
   EXPECT_EQ(DatabaseLock::kNone, environment.main_file->current_lock);
 }
 
-TEST(ReadPager, PropagatesSharedLockContentionWithoutReading) {
+TEST(Pager, PropagatesSharedLockContentionWithoutReading) {
   FakeEnvironment environment{MakeDatabaseImage()};
   environment.main_file->lock_failures_remaining = 1;
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   const auto begun = (*opened)->BeginRead();
@@ -549,13 +549,12 @@ TEST(ReadPager, PropagatesSharedLockContentionWithoutReading) {
   EXPECT_TRUE(environment.main_file->unlock_requests.empty());
 }
 
-TEST(ReadPager, CachesPageReadsAndRequiresPinsToEndTheTransaction) {
+TEST(Pager, CachesPageReadsAndRequiresPinsToEndTheTransaction) {
   constexpr std::size_t kPageSize = 4096;
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened =
-      ReadPager::Open(environment.vfs, kInputPath, ReadPagerOptions{.cache_capacity_pages = 4});
+  auto opened = Pager::Open(environment.vfs, kInputPath, PagerOptions{.cache_capacity_pages = 4});
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   std::optional<ReadPagePin> first_pin;
@@ -583,14 +582,14 @@ TEST(ReadPager, CachesPageReadsAndRequiresPinsToEndTheTransaction) {
   EXPECT_EQ(2U, CountReads(*environment.main_file, 0, 100));
 }
 
-TEST(ReadPager, ZeroFillsAPartialFinalPage) {
+TEST(Pager, ZeroFillsAPartialFinalPage) {
   constexpr std::size_t kPageSize = 4096;
   std::vector<std::byte> image = MakeDatabaseImage(DatabaseImageOptions{
       .header_pages = 0,
   });
   image.resize(kPageSize + 10);
   FakeEnvironment environment{std::move(image)};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
   ASSERT_TRUE((*opened)->BeginRead().has_value());
   ASSERT_EQ(2U, (*opened)->page_count());
@@ -606,7 +605,7 @@ TEST(ReadPager, ZeroFillsAPartialFinalPage) {
   EXPECT_TRUE((*opened)->EndRead().has_value());
 }
 
-TEST(ReadPager, RejectsInvalidAndLockingPageNumbers) {
+TEST(Pager, RejectsInvalidAndLockingPageNumbers) {
   constexpr std::size_t kPageSize = 65536;
   const auto locking_page = static_cast<std::uint32_t>((kPendingByte / kPageSize) + 1U);
   FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{
@@ -616,7 +615,7 @@ TEST(ReadPager, RejectsInvalidAndLockingPageNumbers) {
   })};
   environment.main_file->size_override =
       static_cast<std::uint64_t>(locking_page) * static_cast<std::uint64_t>(kPageSize);
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
   ASSERT_TRUE((*opened)->BeginRead().has_value());
 
@@ -646,10 +645,10 @@ TEST(ReadPager, RejectsInvalidAndLockingPageNumbers) {
   EXPECT_TRUE((*opened)->EndRead().has_value());
 }
 
-TEST(ReadPager, DoesNotCacheFailedPageReads) {
+TEST(Pager, DoesNotCacheFailedPageReads) {
   constexpr std::size_t kPageSize = 4096;
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
   ASSERT_TRUE((*opened)->BeginRead().has_value());
   environment.main_file->failing_read_offset = kPageSize;
@@ -667,12 +666,12 @@ TEST(ReadPager, DoesNotCacheFailedPageReads) {
   EXPECT_TRUE((*opened)->EndRead().has_value());
 }
 
-TEST(ReadPager, InvalidatesCachedPagesWhenTheDatabaseIdentityChanges) {
+TEST(Pager, InvalidatesCachedPagesWhenTheDatabaseIdentityChanges) {
   constexpr std::size_t kPageSize = 4096;
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   {
@@ -707,15 +706,15 @@ TEST(ReadPager, InvalidatesCachedPagesWhenTheDatabaseIdentityChanges) {
   EXPECT_EQ(2U, CountReads(*environment.main_file, kPageSize, kPageSize));
 }
 
-TEST(ReadPager, RecomputesPageCountWithoutInvalidatingAnUnchangedSnapshot) {
+TEST(Pager, RecomputesPageCountWithoutInvalidatingAnUnchangedSnapshot) {
   constexpr std::size_t kPageSize = 4096;
   FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{
       .physical_pages = 3,
       .header_pages = 0,
   })};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   EXPECT_EQ(3U, pager->page_count());
@@ -737,11 +736,11 @@ TEST(ReadPager, RecomputesPageCountWithoutInvalidatingAnUnchangedSnapshot) {
   EXPECT_EQ(1U, CountReads(*environment.main_file, kPageSize, kPageSize));
 }
 
-TEST(ReadPager, InvalidatesAcrossEmptyAndNonemptyTransitions) {
+TEST(Pager, InvalidatesAcrossEmptyAndNonemptyTransitions) {
   FakeEnvironment environment{{}};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   EXPECT_EQ(0U, pager->data_version());
@@ -758,11 +757,11 @@ TEST(ReadPager, InvalidatesAcrossEmptyAndNonemptyTransitions) {
   EXPECT_TRUE(pager->EndRead().has_value());
 }
 
-TEST(ReadPager, ReplacesTheCacheWhenThePageSizeChanges) {
+TEST(Pager, ReplacesTheCacheWhenThePageSizeChanges) {
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<ReadPager> pager = std::move(*opened);
+  std::unique_ptr<Pager> pager = std::move(*opened);
 
   ASSERT_TRUE(pager->BeginRead().has_value());
   EXPECT_EQ(ByteCount{4096}, pager->page_size());
@@ -790,9 +789,9 @@ TEST(ReadPager, ReplacesTheCacheWhenThePageSizeChanges) {
   EXPECT_EQ(1U, CountReads(*environment.main_file, 512, 512));
 }
 
-TEST(ReadPager, LeavesTheTransactionActiveWhenUnlockFailsSoItCanBeRetried) {
+TEST(Pager, LeavesTheTransactionActiveWhenUnlockFailsSoItCanBeRetried) {
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
   ASSERT_TRUE((*opened)->BeginRead().has_value());
   environment.main_file->unlock_failures_remaining = 1;
@@ -808,12 +807,12 @@ TEST(ReadPager, LeavesTheTransactionActiveWhenUnlockFailsSoItCanBeRetried) {
   EXPECT_EQ(2U, environment.main_file->unlock_requests.size());
 }
 
-TEST(ReadPager, RetriesRetainedLockCleanupBeforeTheNextTransaction) {
+TEST(Pager, RetriesRetainedLockCleanupBeforeTheNextTransaction) {
   std::vector<std::byte> image = MakeDatabaseImage();
   image[0] = std::byte{0};
   FakeEnvironment environment{std::move(image)};
   environment.main_file->unlock_failures_remaining = 1;
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   const auto failed = (*opened)->BeginRead();
@@ -831,20 +830,20 @@ TEST(ReadPager, RetriesRetainedLockCleanupBeforeTheNextTransaction) {
   EXPECT_EQ(3U, environment.main_file->unlock_requests.size());
 }
 
-TEST(ReadPager, CleanupReadStateIsIdempotentWhenNoReadLockIsHeld) {
+TEST(Pager, CleanupReadStateIsIdempotentWhenNoReadLockIsHeld) {
   FakeEnvironment environment{MakeDatabaseImage()};
-  auto opened = ReadPager::Open(environment.vfs, kInputPath);
+  auto opened = Pager::Open(environment.vfs, kInputPath);
   ASSERT_TRUE(opened.has_value());
 
   EXPECT_TRUE((*opened)->CleanupReadState().has_value());
   EXPECT_TRUE(environment.main_file->unlock_requests.empty());
 }
 
-TEST(ReadPager, RejectsHotJournalsButAllowsActiveAndZeroHeaderJournals) {
+TEST(Pager, RejectsHotJournalsButAllowsActiveAndZeroHeaderJournals) {
   {
     FakeEnvironment environment{MakeDatabaseImage()};
     environment.AddSidecar("-journal", {std::byte{0xd9}});
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     const auto begun = (*opened)->BeginRead();
     ASSERT_FALSE(begun.has_value());
@@ -855,7 +854,7 @@ TEST(ReadPager, RejectsHotJournalsButAllowsActiveAndZeroHeaderJournals) {
     FakeEnvironment environment{MakeDatabaseImage()};
     environment.AddSidecar("-journal", {std::byte{0xd9}});
     environment.main_file->reserved_lock = true;
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     EXPECT_TRUE((*opened)->BeginRead().has_value());
     EXPECT_TRUE((*opened)->EndRead().has_value());
@@ -864,19 +863,19 @@ TEST(ReadPager, RejectsHotJournalsButAllowsActiveAndZeroHeaderJournals) {
   {
     FakeEnvironment environment{MakeDatabaseImage()};
     environment.AddSidecar("-journal", {std::byte{0x00}});
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     EXPECT_TRUE((*opened)->BeginRead().has_value());
     EXPECT_TRUE((*opened)->EndRead().has_value());
   }
 }
 
-TEST(ReadPager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
+TEST(Pager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
   {
     FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{
         .read_version = 2,
     })};
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     const auto begun = (*opened)->BeginRead();
     ASSERT_FALSE(begun.has_value());
@@ -886,7 +885,7 @@ TEST(ReadPager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
   {
     FakeEnvironment environment{MakeDatabaseImage()};
     environment.AddSidecar("-wal", {std::byte{0x37}});
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     const auto begun = (*opened)->BeginRead();
     ASSERT_FALSE(begun.has_value());
@@ -896,7 +895,7 @@ TEST(ReadPager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
   {
     FakeEnvironment environment{MakeDatabaseImage()};
     environment.AddSidecar("-wal", {});
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     EXPECT_TRUE((*opened)->BeginRead().has_value());
     EXPECT_TRUE((*opened)->EndRead().has_value());
@@ -905,7 +904,7 @@ TEST(ReadPager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
   {
     FakeEnvironment environment{{}};
     environment.AddSidecar("-wal", {std::byte{0x37}});
-    auto opened = ReadPager::Open(environment.vfs, kInputPath);
+    auto opened = Pager::Open(environment.vfs, kInputPath);
     ASSERT_TRUE(opened.has_value());
     const auto begun = (*opened)->BeginRead();
     ASSERT_FALSE(begun.has_value());
@@ -913,7 +912,7 @@ TEST(ReadPager, RejectsWalSnapshotsButIgnoresAnEmptyWalSidecar) {
   }
 }
 
-TEST(ReadPager, ReadsPinnedSQLite354CompatibilityFixtures) {
+TEST(Pager, ReadsPinnedSQLite354CompatibilityFixtures) {
   const std::filesystem::path fixture_directory =
       std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
       "read_pager";
@@ -924,7 +923,7 @@ TEST(ReadPager, ReadsPinnedSQLite354CompatibilityFixtures) {
     PosixVfs vfs;
     const std::filesystem::path path =
         fixture_directory / ("sqlite-3.54.0-page-" + std::to_string(page_size) + ".db");
-    auto opened = ReadPager::Open(vfs, path.string(), ReadPagerOptions{.cache_capacity_pages = 4});
+    auto opened = Pager::Open(vfs, path.string(), PagerOptions{.cache_capacity_pages = 4});
     ASSERT_TRUE(opened.has_value());
     ASSERT_TRUE((*opened)->BeginRead().has_value());
     ASSERT_NE(nullptr, (*opened)->header());

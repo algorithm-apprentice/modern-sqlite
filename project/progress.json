@@ -33,8 +33,9 @@
     "implement-read-session-api",
     "build-read-compatibility-harness",
     "build-read-performance-baseline",
-    "implement-journal-contracts"
+    "implement-journal-contracts",
+    "implement-rollback-journal"
   ],
-  "activeNode": "implement-rollback-journal",
+  "activeNode": "implement-write-pager",
   "activeNodeState": "review_pending"
 }

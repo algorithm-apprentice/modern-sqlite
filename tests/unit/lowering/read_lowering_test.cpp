@@ -19,7 +19,7 @@
 #include "modern_sqlite/binder/bound_select.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/catalog/catalog_loader.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
@@ -218,7 +218,7 @@ struct CustomEnvironment {
     return BindEnvironment{registry, collations, 29};
   }
 
-  [[nodiscard]] ReadVmEnvironment Vm(ReadPager& pager,
+  [[nodiscard]] ReadVmEnvironment Vm(Pager& pager,
                                      std::uint64_t catalog_generation) const noexcept {
     return ReadVmEnvironment{pager, catalog_generation, registry, collations};
   }
@@ -369,7 +369,7 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
 
 TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
 
@@ -439,7 +439,7 @@ TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsTransactiona
 
 TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
       TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 73}));
@@ -491,7 +491,7 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
 
 TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
       TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 79}));
@@ -542,7 +542,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
 
 TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
       TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 83}));
@@ -559,8 +559,7 @@ TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
 
 TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, AlterDefaultsFixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, AlterDefaultsFixturePath().string()));
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
       TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 89}));

@@ -1,5 +1,5 @@
-#ifndef MODERN_SQLITE_PAGER_READ_PAGER_HPP_
-#define MODERN_SQLITE_PAGER_READ_PAGER_HPP_
+#ifndef MODERN_SQLITE_PAGER_PAGER_HPP_
+#define MODERN_SQLITE_PAGER_PAGER_HPP_
 
 #include <array>
 #include <cstddef>
@@ -14,6 +14,8 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/storage/cache/page_cache.hpp"
+#include "modern_sqlite/storage/journal/journal.hpp"
+#include "modern_sqlite/storage/journal/rollback_journal.hpp"
 
 namespace modern_sqlite {
 
@@ -41,7 +43,7 @@ class DatabaseHeader final {
 
  private:
   friend Result<DatabaseHeader> ParseDatabaseHeader(ByteView bytes);
-  friend class ReadPager;
+  friend class Pager;
 
   DatabaseHeader() = default;
 
@@ -69,12 +71,27 @@ class DatabaseHeader final {
 
 [[nodiscard]] Result<DatabaseHeader> ParseDatabaseHeader(ByteView bytes);
 
-struct ReadPagerOptions {
+struct PagerOptions {
   ByteCount empty_database_page_size{4096};
   std::size_t cache_capacity_pages = 512;
 };
 
-class ReadPager;
+struct WritablePagerOptions {
+  PagerOptions pager;
+  RollbackJournalOptions journal;
+};
+
+enum class PagerState : std::uint8_t {
+  kOpen,
+  kReader,
+  kWriterLocked,
+  kWriterCacheModified,
+  kWriterDatabaseModified,
+  kWriterFinished,
+  kError,
+};
+
+class Pager;
 
 class ReadPagePin final {
  public:
@@ -89,18 +106,46 @@ class ReadPagePin final {
   [[nodiscard]] const PageFrame& operator*() const noexcept { return frame(); }
 
  private:
-  friend class ReadPager;
+  friend class Pager;
 
   explicit ReadPagePin(PageCache::Pin pin) noexcept : pin_(std::move(pin)) {}
 
   PageCache::Pin pin_;
 };
 
+class WritePagePin final {
+ public:
+  WritePagePin(const WritePagePin&) = delete;
+  WritePagePin& operator=(const WritePagePin&) = delete;
+  WritePagePin(WritePagePin&&) noexcept = default;
+  WritePagePin& operator=(WritePagePin&&) noexcept = default;
+  ~WritePagePin() = default;
+
+  [[nodiscard]] const PageFrame& frame() const noexcept { return pin_.frame(); }
+  [[nodiscard]] const PageFrame* operator->() const noexcept { return &frame(); }
+  [[nodiscard]] const PageFrame& operator*() const noexcept { return frame(); }
+  [[nodiscard]] MutableByteView mutable_bytes() noexcept;
+
+ private:
+  friend class Pager;
+
+  explicit WritePagePin(PageCache::Pin pin) noexcept : pin_(std::move(pin)) {}
+
+  PageCache::Pin pin_;
+};
+
 // Externally serialized. The VFS must outlive the pager, and the pager must
 // outlive every page pin returned by ReadPage().
-class ReadPager final {
+class Pager final {
  private:
   struct ConstructionKey final {};
+  class RecoveryTarget;
+
+  enum class WriteCompletion : std::uint8_t {
+    kNone,
+    kCommit,
+    kRollback,
+  };
 
   struct Snapshot {
     std::optional<DatabaseHeader> header;
@@ -110,54 +155,100 @@ class ReadPager final {
   };
 
  public:
-  [[nodiscard]] static Result<std::unique_ptr<ReadPager>> Open(Vfs& vfs, std::string_view path,
-                                                               ReadPagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<Pager>> Open(Vfs& vfs, std::string_view path,
+                                                           PagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<Pager>> OpenWritable(
+      Vfs& vfs, std::string_view path, WritablePagerOptions options = {});
 
-  ReadPager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
-            ReadPagerOptions options);
-  ReadPager(const ReadPager&) = delete;
-  ReadPager& operator=(const ReadPager&) = delete;
-  ReadPager(ReadPager&&) = delete;
-  ReadPager& operator=(ReadPager&&) = delete;
-  ~ReadPager();
+  Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
+        PagerOptions options, std::optional<FileProperties> file_properties = std::nullopt,
+        std::unique_ptr<RollbackJournal> rollback_journal = nullptr,
+        ByteCount journal_sector_size = {});
+  Pager(const Pager&) = delete;
+  Pager& operator=(const Pager&) = delete;
+  Pager(Pager&&) = delete;
+  Pager& operator=(Pager&&) = delete;
+  ~Pager();
 
   [[nodiscard]] Status BeginRead();
   [[nodiscard]] Status EndRead();
   [[nodiscard]] Status CleanupReadState();
+  [[nodiscard]] Status BeginWrite();
+  [[nodiscard]] Status Commit();
+  [[nodiscard]] Status Rollback();
+  [[nodiscard]] Result<JournalSavepointId> CreateSavepoint();
+  [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
+  [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
+  [[nodiscard]] Result<WritePagePin> WritePage(PageNumber page_number);
+  [[nodiscard]] Result<WritePagePin> AllocatePage();
+  [[nodiscard]] Status TruncateImage(std::uint32_t page_count);
   [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
   [[nodiscard]] Result<ReadPagePin> ReadPage(PageNumber page_number);
 
-  [[nodiscard]] bool in_read_transaction() const noexcept { return transaction_active_; }
+  [[nodiscard]] bool in_read_transaction() const noexcept;
   [[nodiscard]] const DatabaseHeader* header() const noexcept;
   [[nodiscard]] ByteCount page_size() const noexcept;
   [[nodiscard]] std::uint32_t page_count() const noexcept { return current_page_count_; }
   [[nodiscard]] std::uint64_t data_version() const noexcept { return data_version_; }
   [[nodiscard]] std::string_view path() const noexcept { return path_; }
+  [[nodiscard]] PagerState state() const noexcept;
+  [[nodiscard]] bool writable() const noexcept;
+  [[nodiscard]] bool in_write_transaction() const noexcept;
 
  private:
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
-  [[nodiscard]] Status CheckHotJournal(FileSize database_size);
+  [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
   [[nodiscard]] Status CheckWal();
   [[nodiscard]] Status ApplySnapshot(Snapshot snapshot);
   [[nodiscard]] Status FailBegin(Error setup_error);
   [[nodiscard]] Status ReleaseRetainedLock();
+  [[nodiscard]] Status RecoverHotJournalIfNeeded();
+  [[nodiscard]] Result<PageCache::Pin> AcquirePage(PageNumber page_number, bool exclusive);
+  [[nodiscard]] Status MaintainCachePressure();
+  [[nodiscard]] Status EnsureJournalTransaction();
+  [[nodiscard]] Status CaptureSector(PageNumber page_number, const PageCache::Pin& target,
+                                     std::uint32_t logical_page_count);
+  [[nodiscard]] Status EnsureExclusiveLock();
+  [[nodiscard]] Status SpillPage(PageNumber page_number);
+  [[nodiscard]] Status UpdateChangeCounter();
+  [[nodiscard]] Status FlushDirtyPages();
+  [[nodiscard]] Status CompleteWriteCleanup(WriteCompletion completion);
+  [[nodiscard]] Status RefreshCurrentHeader();
+  [[nodiscard]] Status EnterError(Error error);
+  [[nodiscard]] Status StoredError() const;
+  void ResetWriteState() noexcept;
 
   Vfs* vfs_;
   std::string path_;
   std::string journal_path_;
   std::string wal_path_;
   std::unique_ptr<File> file_;
-  ReadPagerOptions options_;
+  PagerOptions options_;
+  std::optional<FileProperties> file_properties_;
+  std::unique_ptr<RollbackJournal> rollback_journal_;
+  ByteCount journal_sector_size_;
   std::unique_ptr<PageCache> cache_;
+  std::unique_ptr<JournalTransaction> journal_transaction_;
   std::optional<std::array<std::byte, 16>> last_change_token_;
   std::optional<DatabaseHeader> current_header_;
+  std::optional<DatabaseHeader> transaction_start_header_;
+  std::optional<std::array<std::byte, 16>> transaction_start_change_token_;
   std::uint32_t current_page_count_ = 0;
+  std::uint32_t transaction_start_page_count_ = 0;
   std::uint64_t data_version_ = 0;
+  PagerState state_ = PagerState::kOpen;
+  DatabaseLock database_lock_ = DatabaseLock::kNone;
+  WriteCompletion completion_ = WriteCompletion::kNone;
+  std::optional<ErrorCode> persistent_error_;
   bool has_seen_snapshot_ = false;
-  bool transaction_active_ = false;
-  bool shared_lock_held_ = false;
+  bool transaction_modified_ = false;
+  bool database_bytes_modified_ = false;
+  bool image_size_changed_ = false;
+  bool change_counter_updated_ = false;
+  bool final_image_ = false;
+  bool journal_finalized_ = false;
 };
 
 }  // namespace modern_sqlite
 
-#endif  // MODERN_SQLITE_PAGER_READ_PAGER_HPP_
+#endif  // MODERN_SQLITE_PAGER_PAGER_HPP_

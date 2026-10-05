@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "modern_sqlite/bytecode/program.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/vm/read_vm.hpp"
 
@@ -68,7 +68,7 @@ int main() try {
   using namespace modern_sqlite;
 
   PosixVfs vfs;
-  auto opened = ReadPager::Open(vfs, FixturePath().string());
+  auto opened = Pager::Open(vfs, FixturePath().string());
   if (!opened.has_value() || !(*opened)->BeginRead().has_value()) {
     return 1;
   }

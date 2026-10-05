@@ -231,6 +231,7 @@ class FakeVfs final : public Vfs {
   std::optional<Error> randomness_error;
   std::optional<Error> sleep_error;
   std::optional<Error> time_error;
+  bool throw_delete_bad_alloc = false;
   FileAccessMode opened_access = FileAccessMode::kReadWrite;
   bool return_null_file = false;
   bool access_result = true;
@@ -277,6 +278,9 @@ class FakeVfs final : public Vfs {
 
   Status DoDelete(std::string_view path, DirectorySync directory_sync) override {
     ++delete_calls;
+    if (throw_delete_bad_alloc) {
+      throw std::bad_alloc{};
+    }
     last_delete_path = path;
     last_directory_sync = directory_sync;
     if (delete_error.has_value()) {
@@ -805,6 +809,17 @@ TEST(VfsContracts, ValidatesPathsAndForwardsPathOperations) {
   const auto embedded_nul_result = vfs.FullPath("database.sqlite");
   ASSERT_FALSE(embedded_nul_result.has_value());
   EXPECT_EQ(ErrorCode::kInternal, embedded_nul_result.error().code());
+}
+
+TEST(VfsContracts, TranslatesDeleteAllocationFailure) {
+  FakeVfs vfs;
+  vfs.throw_delete_bad_alloc = true;
+
+  const auto deleted = vfs.Delete("database.sqlite-journal", DirectorySync::kYes);
+
+  ASSERT_FALSE(deleted.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfMemory, deleted.error().code());
+  EXPECT_EQ(1U, vfs.delete_calls);
 }
 
 TEST(VfsContracts, ExposesTheMaximumSupportedPathLength) {

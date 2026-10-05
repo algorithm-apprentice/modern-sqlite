@@ -163,6 +163,7 @@ class JournalTransaction final {
   ~JournalTransaction() = default;
 
   [[nodiscard]] Status CapturePage(JournalPageImage image);
+  [[nodiscard]] bool NeedsCapture(PageNumber page_number) const noexcept;
   [[nodiscard]] Result<JournalSavepointId> CreateSavepoint(std::uint32_t current_page_count);
   [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint,

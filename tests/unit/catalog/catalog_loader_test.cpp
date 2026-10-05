@@ -24,7 +24,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 
 namespace modern_sqlite {
@@ -158,12 +158,12 @@ class TemporaryDatabase final {
 class CatalogLoaderTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    pager_ = TakeValue(ReadPager::Open(vfs_, FixturePath().string()));
+    pager_ = TakeValue(Pager::Open(vfs_, FixturePath().string()));
     TakeStatus(pager_->BeginRead());
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<ReadPager> pager_;
+  std::unique_ptr<Pager> pager_;
 };
 
 TEST_F(CatalogLoaderTest, LoadsPinnedSqliteSchemaIntoCanonicalSnapshot) {
@@ -294,7 +294,7 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyHeaderFieldsThroughTheLoade
   Write32(bytes, 56, 5);
   const TemporaryDatabase database{std::move(bytes)};
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
   TakeStatus(pager->BeginRead());
 
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
@@ -307,7 +307,7 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
     Write32(bytes, 44, schema_format);
     const TemporaryDatabase database{std::move(bytes)};
     PosixVfs vfs;
-    std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
     TakeStatus(pager->BeginRead());
 
     const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
@@ -326,8 +326,7 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
 
 TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreservesUnknownFunctions) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, CompatibilityFixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, CompatibilityFixturePath().string()));
   TakeStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
 
@@ -381,8 +380,8 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
 
 TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, DuplicateAutomaticRootFixturePath().string()));
+  std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, DuplicateAutomaticRootFixturePath().string()));
   TakeStatus(pager->BeginRead());
 
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
@@ -392,8 +391,7 @@ TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {
 
 TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzParsing) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, Stat1ShapeFixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, Stat1ShapeFixturePath().string()));
   TakeStatus(pager->BeginRead());
 
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
@@ -405,8 +403,8 @@ TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzPar
 
 TEST(CatalogLoaderValidationTest, RejectsMissingSchemaExpressionColumns) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, InvalidExpressionFixturePath().string()));
+  std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, InvalidExpressionFixturePath().string()));
   TakeStatus(pager->BeginRead());
 
   const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
@@ -416,8 +414,7 @@ TEST(CatalogLoaderValidationTest, RejectsMissingSchemaExpressionColumns) {
 
 TEST(CatalogLoaderValidationTest, RejectsKnownFunctionsWithInvalidArity) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, InvalidFunctionFixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, InvalidFunctionFixturePath().string()));
   TakeStatus(pager->BeginRead());
 
   const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
@@ -427,8 +424,7 @@ TEST(CatalogLoaderValidationTest, RejectsKnownFunctionsWithInvalidArity) {
 
 TEST(CatalogLoaderValidationTest, RejectsUnsupportedPersistentObjects) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager =
-      TakeValue(ReadPager::Open(vfs, UnsupportedFixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, UnsupportedFixturePath().string()));
   TakeStatus(pager->BeginRead());
 
   const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
@@ -442,7 +438,7 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
       LoadBigEndian<std::uint32_t>(std::span<const std::byte, 4>{bytes.data() + 40, 4});
   const TemporaryDatabase database{std::move(bytes)};
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, database.path().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
   TakeStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
   TakeStatus(pager->EndRead());
@@ -456,7 +452,7 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
 
 TEST(CatalogLoaderTransactionTest, RequiresAnActiveReadTransaction) {
   PosixVfs vfs;
-  std::unique_ptr<ReadPager> pager = TakeValue(ReadPager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
 
   const Result<CatalogSnapshotPtr> load = LoadCatalog(*pager);
   ASSERT_FALSE(load.has_value());

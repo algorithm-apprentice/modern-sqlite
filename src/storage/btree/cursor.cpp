@@ -22,7 +22,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/database_format.hpp"
@@ -123,7 +123,7 @@ class CursorCore final {
   CursorCore& operator=(CursorCore&&) noexcept = default;
   ~CursorCore() = default;
 
-  [[nodiscard]] static Result<CursorCore> Open(ReadPager& pager, PageNumber root_page, bool table) {
+  [[nodiscard]] static Result<CursorCore> Open(Pager& pager, PageNumber root_page, bool table) {
     if (!pager.in_read_transaction()) {
       return std::unexpected(Misuse("opening a B-tree cursor requires a read transaction"));
     }
@@ -513,7 +513,7 @@ class CursorCore final {
   }
 
  private:
-  CursorCore(ReadPager& pager, PageNumber root_page, bool table, std::uint64_t data_version,
+  CursorCore(Pager& pager, PageNumber root_page, bool table, std::uint64_t data_version,
              std::optional<BtreePageGeometry> geometry, bool empty_database) noexcept
       : pager_(&pager),
         root_page_(root_page),
@@ -876,7 +876,7 @@ class CursorCore final {
     return std::unexpected(Misuse("invalid B-tree seek mode"));
   }
 
-  ReadPager* pager_;
+  Pager* pager_;
   PageNumber root_page_;
   bool table_;
   std::uint64_t data_version_;
@@ -948,7 +948,7 @@ TableBtreeCursor& TableBtreeCursor::operator=(TableBtreeCursor&&) noexcept = def
 
 TableBtreeCursor::~TableBtreeCursor() = default;
 
-Result<TableBtreeCursor> TableBtreeCursor::Open(ReadPager& pager, PageNumber root_page) {
+Result<TableBtreeCursor> TableBtreeCursor::Open(Pager& pager, PageNumber root_page) {
   auto core = CursorCore::Open(pager, root_page, true);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
@@ -1057,7 +1057,7 @@ IndexBtreeCursor& IndexBtreeCursor::operator=(IndexBtreeCursor&&) noexcept = def
 
 IndexBtreeCursor::~IndexBtreeCursor() = default;
 
-Result<IndexBtreeCursor> IndexBtreeCursor::Open(ReadPager& pager, PageNumber root_page,
+Result<IndexBtreeCursor> IndexBtreeCursor::Open(Pager& pager, PageNumber root_page,
                                                 std::span<const IndexColumnOrder> columns) {
   if (!pager.in_read_transaction()) {
     return std::unexpected(Misuse("opening an index cursor requires a read transaction"));

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -405,7 +406,11 @@ Status Vfs::Delete(std::string_view path, DirectorySync directory_sync) {
     return std::unexpected(Misuse("the file deletion request is invalid"));
   }
   MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
-  return DoDelete(path, directory_sync);
+  try {
+    return DoDelete(path, directory_sync);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<bool> Vfs::Access(std::string_view path, FileAccessQuery query) {

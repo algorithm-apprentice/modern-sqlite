@@ -22,7 +22,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
-#include "modern_sqlite/pager/read_pager.hpp"
+#include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -1163,7 +1163,7 @@ struct ReadVm::Impl {
   }
 
   const BytecodeProgram* program_;
-  ReadPager* pager_;
+  Pager* pager_;
   std::uint64_t catalog_generation_;
   const FunctionRegistry* functions_;
   std::span<const Collation* const> available_collations_;
@@ -1182,8 +1182,7 @@ struct ReadVm::Impl {
   std::optional<std::uint64_t> execution_data_version_;
 };
 
-ReadVmEnvironment ReadVmEnvironment::Core(ReadPager& pager,
-                                          std::uint64_t catalog_generation) noexcept {
+ReadVmEnvironment ReadVmEnvironment::Core(Pager& pager, std::uint64_t catalog_generation) noexcept {
   static const std::array<const Collation*, 3> collations{
       &BinaryCollation(),
       &NoCaseCollation(),

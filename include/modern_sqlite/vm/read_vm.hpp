@@ -14,7 +14,7 @@ namespace modern_sqlite {
 
 class Collation;
 class FunctionRegistry;
-class ReadPager;
+class Pager;
 
 enum class ReadVmState : std::uint8_t {
   kReady,
@@ -36,7 +36,7 @@ struct ReadVmLimits {
 
 class ReadVmEnvironment final {
  public:
-  ReadVmEnvironment(ReadPager& pager, std::uint64_t catalog_generation,
+  ReadVmEnvironment(Pager& pager, std::uint64_t catalog_generation,
                     const FunctionRegistry& functions,
                     std::span<const Collation* const> collations) noexcept
       : pager_(&pager),
@@ -44,13 +44,13 @@ class ReadVmEnvironment final {
         functions_(&functions),
         collations_(collations) {}
 
-  [[nodiscard]] static ReadVmEnvironment Core(ReadPager& pager,
+  [[nodiscard]] static ReadVmEnvironment Core(Pager& pager,
                                               std::uint64_t catalog_generation) noexcept;
 
  private:
   friend class ReadVm;
 
-  ReadPager* pager_;
+  Pager* pager_;
   std::uint64_t catalog_generation_;
   const FunctionRegistry* functions_;
   std::span<const Collation* const> collations_;

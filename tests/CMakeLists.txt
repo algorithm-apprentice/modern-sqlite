@@ -32,7 +32,8 @@ add_executable(
   unit/format/record_codec_test.cpp
   unit/lowering/read_lowering_test.cpp
   unit/optimizer/physical_plan_test.cpp
-  unit/pager/read_pager_test.cpp
+  unit/pager/pager_test.cpp
+  unit/pager/write_pager_test.cpp
   unit/planner/logical_plan_test.cpp
   unit/platform/vfs_test.cpp
   unit/runtime/collation_test.cpp
@@ -206,6 +207,56 @@ add_test(
 )
 set_tests_properties(
   journal.rollback_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_write_pager_allocation_test
+  unit/pager/write_pager_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_write_pager_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(
+  modern_sqlite_write_pager_allocation_test
+  PRIVATE
+)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_pager_allocation_test)
+add_test(
+  NAME pager.write_allocation
+  COMMAND modern_sqlite_write_pager_allocation_test
+)
+set_tests_properties(
+  pager.write_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_write_pager_oom_test
+  unit/pager/write_pager_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_write_pager_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(
+  modern_sqlite_write_pager_oom_test
+  PRIVATE
+)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_pager_oom_test)
+add_test(
+  NAME pager.write_oom
+  COMMAND modern_sqlite_write_pager_oom_test
+)
+set_tests_properties(
+  pager.write_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10
@@ -686,6 +737,34 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
   )
 endif()
 if(TARGET modern_sqlite_benchmark_sqlite)
+  add_executable(
+    modern_sqlite_write_pager_sqlite_compatibility
+    compatibility/write_pager_sqlite_compatibility.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_write_pager_sqlite_compatibility
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(
+    modern_sqlite_write_pager_sqlite_compatibility
+    PRIVATE
+  )
+  modern_sqlite_enable_clang_tidy(
+    modern_sqlite_write_pager_sqlite_compatibility
+  )
+  add_test(
+    NAME compatibility.write_pager_sqlite
+    COMMAND modern_sqlite_write_pager_sqlite_compatibility
+  )
+  set_tests_properties(
+    compatibility.write_pager_sqlite
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
+
   add_executable(
     modern_sqlite_rollback_journal_fixture
     compatibility/rollback_journal_fixture.cpp
