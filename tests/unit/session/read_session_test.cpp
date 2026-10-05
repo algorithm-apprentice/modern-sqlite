@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "src/session/read_session_internal.hpp"
 
@@ -548,6 +549,35 @@ TEST(ReadSessionInternal, ChecksCatalogGenerationOverflowDeterministically) {
   ASSERT_FALSE(overflow.has_value());
   EXPECT_EQ(CatalogGenerationError::kOverflow, overflow.error());
 }
+
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSessionInstrumentation, RecordsIntegratedReadPathWork) {
+  using instrumentation::Counter;
+  using instrumentation::CounterCollection;
+  using instrumentation::ScopedCounterCollection;
+
+  CounterCollection counters;
+  {
+    const ScopedCounterCollection scope{counters};
+    ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+    ReadStatement statement = PrepareStatement(session, "SELECT name FROM items WHERE rowid=?1");
+    RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_FALSE(TextValue(statement.row().front()).empty());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Finalize());
+  }
+
+  EXPECT_GT(counters.Value(Counter::kVfsCalls), 0U);
+  EXPECT_GT(counters.Value(Counter::kPagesRead), 0U);
+  EXPECT_GT(counters.Value(Counter::kCacheMisses), 0U);
+  EXPECT_GT(counters.Value(Counter::kBytesCopied), 0U);
+  EXPECT_GT(counters.Value(Counter::kBtreeComparisons), 0U);
+  EXPECT_GT(counters.Value(Counter::kVmInstructions), 0U);
+  EXPECT_GT(counters.Value(Counter::kPlannerWork), 0U);
+  EXPECT_EQ(0U, counters.Value(Counter::kPagesWritten));
+}
+#endif
 
 }  // namespace
 }  // namespace modern_sqlite

@@ -51,6 +51,7 @@ source-level coupling.
 - [SQLite source analysis and target architecture](docs/architecture.md)
 - [Implementation dependency DAG](docs/dependency-dag.md)
 - [Architecture decision records](docs/adr/README.md)
+- [Pinned read-performance baseline](docs/performance/read-baseline.md)
 - [AI project manifest](project/manifest.json)
 - [Machine-readable module graph](project/module-graph.json)
 

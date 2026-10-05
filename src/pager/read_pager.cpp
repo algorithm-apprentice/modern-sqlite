@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -268,6 +269,7 @@ Result<ReadPagePin> ReadPager::ReadPage(PageNumber page_number) {
   }
   const std::uint64_t offset = page_index * page_size_value;
   ByteBuffer bytes{cache_->page_size()};
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesRead, 1U);
   auto read = file_->ReadAt(bytes.mutable_view(), FileOffset{offset});
   if (!read.has_value()) {
     return std::unexpected(std::move(read.error()));

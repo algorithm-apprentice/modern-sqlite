@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "build-read-compatibility-harness",
+  "currentNode": "build-read-performance-baseline",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

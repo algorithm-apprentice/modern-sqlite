@@ -562,6 +562,80 @@ gtest_discover_tests(
 
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 add_test(
+  NAME performance.read_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest discover
+    -s tests/performance
+    -p "read_performance_tool_test.py"
+)
+set_tests_properties(
+  performance.read_performance_tool
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
+  add_test(
+    NAME performance.read_baseline_validation
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tools/read_performance.py"
+      validate-baseline
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/read-workloads-v1.json"
+      --baseline "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1"
+  )
+  set_tests_properties(
+    performance.read_baseline_validation
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics)
+  add_test(
+    NAME performance.read_benchmark_cli
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/performance/read_benchmark_cli_test.py"
+      --timing-binary "$<TARGET_FILE:modern_sqlite_read_benchmark>"
+      --diagnostic-binary "$<TARGET_FILE:modern_sqlite_read_diagnostics>"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/read-workloads-v1.json"
+  )
+  set_tests_properties(
+    performance.read_benchmark_cli
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 300
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+  add_test(
+    NAME performance.read_fixture_regeneration
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/performance/read_fixture_regeneration_test.py"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/read-workloads-v1.json"
+      --profile
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/sqlite-oracle-profile-v1.json"
+      --sqlite-library "$<TARGET_FILE:modern_sqlite_benchmark_sqlite_shared>"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    performance.read_fixture_regeneration
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 300
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+
+add_test(
   NAME project.graph
   COMMAND
     "${Python3_EXECUTABLE}"
@@ -655,7 +729,13 @@ foreach(_oracle_input IN LISTS _modern_sqlite_oracle_inputs)
   endif()
 endforeach()
 if(NOT _modern_sqlite_oracle_input_count EQUAL 0
-   AND NOT _modern_sqlite_oracle_input_count EQUAL 3)
+   AND NOT _modern_sqlite_oracle_input_count EQUAL 3
+   AND NOT (
+     MODERN_SQLITE_BUILD_BENCHMARKS
+     AND MODERN_SQLITE_PINNED_SQLITE_LIBRARY STREQUAL ""
+     AND NOT MODERN_SQLITE_PINNED_SQLITE_C STREQUAL ""
+     AND NOT MODERN_SQLITE_PINNED_SQLITE_H STREQUAL ""
+   ))
   message(FATAL_ERROR
     "Pinned SQLite oracle tests require the library, sqlite3.c, and sqlite3.h together")
 endif()

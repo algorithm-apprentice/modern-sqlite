@@ -71,6 +71,27 @@ class VerificationLayeringTest(unittest.TestCase):
         for module in imported:
             self.assertIn(module, sys.stdlib_module_names, module)
 
+    def test_performance_tool_uses_only_standard_library_and_local_tools(
+        self,
+    ) -> None:
+        tool = self.root / "tools/read_performance.py"
+        tree = ast.parse(tool.read_text(encoding="utf-8"), filename=str(tool))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                if node.module is not None:
+                    imported.add(node.module.split(".", 1)[0])
+
+        self.assertTrue(imported)
+        for module in imported:
+            self.assertTrue(
+                module in {"read_compatibility", "tools"}
+                or module in sys.stdlib_module_names,
+                module,
+            )
+
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
         allowed = {
             "read_fuzz.hpp",

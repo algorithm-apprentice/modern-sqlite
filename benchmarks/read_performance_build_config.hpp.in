@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace modern_sqlite::read_performance_build_config {
+
+inline constexpr std::string_view kGitRevision =
+    "@MODERN_SQLITE_BENCHMARK_GIT_REVISION@";
+inline constexpr std::string_view kGitTree =
+    "@MODERN_SQLITE_BENCHMARK_GIT_TREE@";
+
+}  // namespace modern_sqlite::read_performance_build_config

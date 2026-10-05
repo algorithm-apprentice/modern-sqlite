@@ -11,6 +11,7 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -358,6 +359,40 @@ TEST(PageCache, ZeroCapacityRetainsCleanPagesOnlyWhilePinned) {
   EXPECT_EQ(0U, cache->pin_count());
   EXPECT_FALSE(Contains(*cache, PageNumber{1}));
 }
+
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(PageCacheInstrumentation, CountsOnlyValidHitAndMissLookups) {
+  using instrumentation::Counter;
+  using instrumentation::CounterCollection;
+  using instrumentation::ScopedCounterCollection;
+
+  auto cache = MakeCache(8, 2);
+  ASSERT_NE(nullptr, cache);
+  {
+    const auto inserted = cache->Insert(PageNumber{1}, MakePage(0x10));
+    ASSERT_TRUE(inserted.has_value());
+  }
+
+  CounterCollection counters;
+  {
+    const ScopedCounterCollection scope{counters};
+
+    const auto hit = cache->Lookup(PageNumber{1});
+    ASSERT_TRUE(hit.has_value());
+    ASSERT_TRUE(hit->has_value());
+
+    const auto miss = cache->Lookup(PageNumber{2});
+    ASSERT_TRUE(miss.has_value());
+    EXPECT_FALSE(miss->has_value());
+
+    const auto invalid = cache->Lookup(PageNumber{0});
+    ASSERT_FALSE(invalid.has_value());
+  }
+
+  EXPECT_EQ(1U, counters.Value(Counter::kCacheHits));
+  EXPECT_EQ(1U, counters.Value(Counter::kCacheMisses));
+}
+#endif
 
 }  // namespace
 }  // namespace modern_sqlite

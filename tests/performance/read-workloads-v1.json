@@ -1,0 +1,425 @@
+{
+  "cases": [
+    {
+      "diagnostic_iterations": 4096,
+      "expected": {
+        "diagnostic": {
+          "bytes": 1048576,
+          "digest": "a7f2817a1d534e06",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 4096,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "measured": {
+          "bytes": 268435456,
+          "digest": "1fdd4b5874c27725",
+          "items": 1048576,
+          "operations": 1048576,
+          "result_hits": 1048576,
+          "result_misses": 0,
+          "rows": 1048576
+        },
+        "verification": {
+          "bytes": 1081344,
+          "digest": "81d3fc6a19796fad",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 1048576,
+          "digest": "a7f2817a1d534e06",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 4096,
+          "result_misses": 0,
+          "rows": 4096
+        }
+      },
+      "fixture": "fit",
+      "id": "point-present-ipk-fit",
+      "items_per_iteration": 1,
+      "kind": "point_present",
+      "measured_iterations": 1048576,
+      "primary_unit": "lookup",
+      "sql": "SELECT v FROM kv WHERE k=?1",
+      "warmup_iterations": 4096
+    },
+    {
+      "diagnostic_iterations": 4096,
+      "expected": {
+        "diagnostic": {
+          "bytes": 0,
+          "digest": "12e4577493e208d1",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 0,
+          "result_misses": 4096,
+          "rows": 0
+        },
+        "measured": {
+          "bytes": 0,
+          "digest": "782f767e81e77f25",
+          "items": 1048576,
+          "operations": 1048576,
+          "result_hits": 0,
+          "result_misses": 1048576,
+          "rows": 0
+        },
+        "verification": {
+          "bytes": 1081344,
+          "digest": "81d3fc6a19796fad",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 0,
+          "digest": "12e4577493e208d1",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 0,
+          "result_misses": 4096,
+          "rows": 0
+        }
+      },
+      "fixture": "fit",
+      "id": "point-missing-ipk-fit",
+      "items_per_iteration": 1,
+      "kind": "point_missing",
+      "measured_iterations": 1048576,
+      "primary_unit": "lookup",
+      "sql": "SELECT v FROM kv WHERE k=?1",
+      "warmup_iterations": 4096
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 1081344,
+          "digest": "81d3fc6a19796fad",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "measured": {
+          "bytes": 1107296256,
+          "digest": "c9b5b3073ca44325",
+          "items": 4194304,
+          "operations": 1024,
+          "result_hits": 1024,
+          "result_misses": 0,
+          "rows": 4194304
+        },
+        "verification": {
+          "bytes": 1081344,
+          "digest": "81d3fc6a19796fad",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 1081344,
+          "digest": "81d3fc6a19796fad",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        }
+      },
+      "fixture": "fit",
+      "id": "scan-ipk-fit",
+      "items_per_iteration": 4096,
+      "kind": "scan",
+      "measured_iterations": 1024,
+      "primary_unit": "traversal",
+      "sql": "SELECT k,v FROM kv",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 65536,
+      "expected": {
+        "diagnostic": {
+          "bytes": 16777216,
+          "digest": "b1fd505d6186bc52",
+          "items": 65536,
+          "operations": 65536,
+          "result_hits": 65536,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 268435456,
+          "digest": "a74f0b8981386185",
+          "items": 1048576,
+          "operations": 1048576,
+          "result_hits": 1048576,
+          "result_misses": 0,
+          "rows": 1048576
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "6d8c1155f69eb405",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 16777216,
+          "digest": "b1fd505d6186bc52",
+          "items": 65536,
+          "operations": 65536,
+          "result_hits": 65536,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "pressure",
+      "id": "point-present-ipk-pressure",
+      "items_per_iteration": 1,
+      "kind": "point_present",
+      "measured_iterations": 1048576,
+      "primary_unit": "lookup",
+      "sql": "SELECT v FROM kv WHERE k=?1",
+      "warmup_iterations": 65536
+    },
+    {
+      "diagnostic_iterations": 65536,
+      "expected": {
+        "diagnostic": {
+          "bytes": 0,
+          "digest": "5849c891510bd9b5",
+          "items": 65536,
+          "operations": 65536,
+          "result_hits": 0,
+          "result_misses": 65536,
+          "rows": 0
+        },
+        "measured": {
+          "bytes": 0,
+          "digest": "3a86c57174254025",
+          "items": 1048576,
+          "operations": 1048576,
+          "result_hits": 0,
+          "result_misses": 1048576,
+          "rows": 0
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "6d8c1155f69eb405",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 0,
+          "digest": "5849c891510bd9b5",
+          "items": 65536,
+          "operations": 65536,
+          "result_hits": 0,
+          "result_misses": 65536,
+          "rows": 0
+        }
+      },
+      "fixture": "pressure",
+      "id": "point-missing-ipk-pressure",
+      "items_per_iteration": 1,
+      "kind": "point_missing",
+      "measured_iterations": 1048576,
+      "primary_unit": "lookup",
+      "sql": "SELECT v FROM kv WHERE k=?1",
+      "warmup_iterations": 65536
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 17301504,
+          "digest": "6d8c1155f69eb405",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 1107296256,
+          "digest": "a5caacc5a1828b25",
+          "items": 4194304,
+          "operations": 64,
+          "result_hits": 64,
+          "result_misses": 0,
+          "rows": 4194304
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "6d8c1155f69eb405",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 17301504,
+          "digest": "6d8c1155f69eb405",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "pressure",
+      "id": "scan-ipk-pressure",
+      "items_per_iteration": 65536,
+      "kind": "scan",
+      "measured_iterations": 64,
+      "primary_unit": "traversal",
+      "sql": "SELECT k,v FROM kv",
+      "warmup_iterations": 1
+    }
+  ],
+  "configuration": {
+    "cache_pages": 512,
+    "journal_mode": "delete",
+    "mmap_bytes": 0,
+    "page_size": 4096,
+    "query_only": true,
+    "synchronous": "full",
+    "temp_store": "memory",
+    "thread_mode": "single"
+  },
+  "fixtures": [
+    {
+      "content_fingerprint": "8f04aac3937fdf34",
+      "id": "fit",
+      "missing_order_fingerprint": "612125994e99f499",
+      "page_count": 276,
+      "page_size": 4096,
+      "path": "tests/fixtures/read_performance/fit.db",
+      "present_order_fingerprint": "cff06663a40ec94d",
+      "row_count": 4096,
+      "sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+      "size_bytes": 1130496,
+      "sql_path": "tests/fixtures/read_performance/fit.sql",
+      "sql_sha256": "83391a4f55d639220a2cfe25786064850abf2947a27be0cb1086875719f898ba",
+      "value_size": 256
+    },
+    {
+      "content_fingerprint": "484606a5b5769004",
+      "id": "pressure",
+      "missing_order_fingerprint": "76fd47170127aded",
+      "page_count": 4383,
+      "page_size": 4096,
+      "path": "tests/fixtures/read_performance/pressure.db",
+      "present_order_fingerprint": "67a9cd111cec092f",
+      "row_count": 65536,
+      "sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+      "size_bytes": 17952768,
+      "sql_path": "tests/fixtures/read_performance/pressure.sql",
+      "sql_sha256": "2f1ab567c0a431fe9f484dfa8fe153ef3e9528b4551edce7433c6281959e337d",
+      "value_size": 256
+    }
+  ],
+  "guard": {
+    "maximum_cpu_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "maximum_wall_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    }
+  },
+  "permutation": {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "fingerprint": "fnv1a64-v1",
+    "fit_seed": "9e3779b97f4a7c15",
+    "pressure_seed": "d1b54a32d192ed03"
+  },
+  "rounds": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "sqlite_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "sqlite_semantic_compile_options": [
+    "ATOMIC_INTRINSICS=1",
+    "DEFAULT_AUTOVACUUM",
+    "DEFAULT_CACHE_SIZE=-2000",
+    "DEFAULT_FILE_FORMAT=4",
+    "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+    "DEFAULT_MMAP_SIZE=0",
+    "DEFAULT_PAGE_SIZE=4096",
+    "DEFAULT_PCACHE_INITSZ=20",
+    "DEFAULT_RECURSIVE_TRIGGERS",
+    "DEFAULT_SECTOR_SIZE=4096",
+    "DEFAULT_SYNCHRONOUS=2",
+    "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+    "DEFAULT_WAL_SYNCHRONOUS=2",
+    "DEFAULT_WORKER_THREADS=0",
+    "DIRECT_OVERFLOW_READ",
+    "DQS=3",
+    "MALLOC_SOFT_LIMIT=1024",
+    "MAX_ATTACHED=10",
+    "MAX_COLUMN=2000",
+    "MAX_COMPOUND_SELECT=500",
+    "MAX_DEFAULT_PAGE_SIZE=8192",
+    "MAX_EXPR_DEPTH=1000",
+    "MAX_FUNCTION_ARG=1000",
+    "MAX_LENGTH=1000000000",
+    "MAX_LIKE_PATTERN_LENGTH=50000",
+    "MAX_MMAP_SIZE=0x7fff0000",
+    "MAX_PAGE_COUNT=0xfffffffe",
+    "MAX_PAGE_SIZE=65536",
+    "MAX_SCHEMA=10000000",
+    "MAX_SQL_LENGTH=1000000000",
+    "MAX_TRIGGER_DEPTH=1000",
+    "MAX_VARIABLE_NUMBER=32766",
+    "MAX_VDBE_OP=250000000",
+    "MAX_WORKER_THREADS=0",
+    "MUTEX_OMIT",
+    "SYSTEM_MALLOC",
+    "TEMP_STORE=1",
+    "THREADSAFE=0"
+  ],
+  "workload_semantics_version": 1
+}
