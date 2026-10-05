@@ -31,8 +31,9 @@
     "implement-basic-optimizer",
     "implement-read-lowering",
     "implement-read-session-api",
-    "build-read-compatibility-harness"
+    "build-read-compatibility-harness",
+    "build-read-performance-baseline"
   ],
-  "activeNode": "build-read-performance-baseline",
+  "activeNode": "implement-journal-contracts",
   "activeNodeState": "review_pending"
 }

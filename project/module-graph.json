@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "build-read-performance-baseline",
+  "currentNode": "implement-journal-contracts",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

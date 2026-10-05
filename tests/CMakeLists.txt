@@ -43,6 +43,7 @@ add_executable(
   unit/storage/btree/page_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
+  unit/storage/journal/journal_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
@@ -138,6 +139,50 @@ add_test(
 )
 set_tests_properties(
   bytecode.program_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_journal_allocation_test
+  unit/storage/journal/journal_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_journal_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_journal_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_journal_allocation_test)
+add_test(
+  NAME journal.allocation
+  COMMAND modern_sqlite_journal_allocation_test
+)
+set_tests_properties(
+  journal.allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_journal_oom_test
+  unit/storage/journal/journal_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_journal_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_journal_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_journal_oom_test)
+add_test(
+  NAME journal.oom
+  COMMAND modern_sqlite_journal_oom_test
+)
+set_tests_properties(
+  journal.oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10
