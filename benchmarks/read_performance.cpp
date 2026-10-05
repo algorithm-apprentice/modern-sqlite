@@ -619,7 +619,7 @@ void ConfigureSqlite(sqlite3* database) {
       {SQLITE_DBCONFIG_ENABLE_COMMENTS, 1},
       {1023, 17},
   }};
-  for (const auto [configuration, expected] : configurations) {
+  for (const auto& [configuration, expected] : configurations) {
     int effective = 0;
     CheckSqlite(sqlite3_db_config(database, configuration, expected, &effective), database,
                 "SQLite db_config");
@@ -636,7 +636,7 @@ void ConfigureSqlite(sqlite3* database) {
       {SQLITE_LIMIT_FUNCTION_ARG, 1'000},
       {SQLITE_LIMIT_VARIABLE_NUMBER, 256},
   }};
-  for (const auto [limit, expected] : limits) {
+  for (const auto& [limit, expected] : limits) {
     static_cast<void>(sqlite3_limit(database, limit, expected));
     if (sqlite3_limit(database, limit, -1) != expected) {
       throw BenchmarkMismatch{"SQLite limit configuration failed"};
