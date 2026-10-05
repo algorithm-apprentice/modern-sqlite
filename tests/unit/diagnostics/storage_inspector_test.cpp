@@ -323,6 +323,8 @@ class CountingVfs final : public Vfs {
 
   [[nodiscard]] Result<WallClockTime> DoCurrentTime() override { return WallClockTime{}; }
 
+  [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override { return ByteCount{512}; }
+
   std::shared_ptr<CountingState> state_;
 };
 

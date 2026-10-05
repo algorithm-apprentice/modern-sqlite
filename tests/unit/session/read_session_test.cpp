@@ -248,6 +248,10 @@ class UnlockFailingVfs final : public Vfs {
 
   Result<WallClockTime> DoCurrentTime() override { return delegate_.CurrentTime(); }
 
+  [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override {
+    return delegate_.MaximumPathLength();
+  }
+
   PosixVfs delegate_;
   std::shared_ptr<UnlockFailureState> state_;
 };

@@ -132,8 +132,8 @@ class NoopBackend final : public modern_sqlite::JournalBackend {
     return {};
   }
 
-  [[nodiscard]] modern_sqlite::Status DoReleaseSavepoint(
-      modern_sqlite::JournalSavepointId) override {
+  [[nodiscard]] modern_sqlite::Status DoReleaseSavepoint(modern_sqlite::JournalSavepointId,
+                                                         bool) override {
     return {};
   }
 

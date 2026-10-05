@@ -120,7 +120,8 @@ class JournalBackend {
   [[nodiscard]] virtual Status DoAppendTransactionPage(JournalPageImage image) = 0;
   [[nodiscard]] virtual Status DoAppendSavepointPage(JournalPageImage image) = 0;
   [[nodiscard]] virtual Status DoCreateSavepoint(JournalSavepoint savepoint) = 0;
-  [[nodiscard]] virtual Status DoReleaseSavepoint(JournalSavepointId savepoint) = 0;
+  [[nodiscard]] virtual Status DoReleaseSavepoint(JournalSavepointId savepoint,
+                                                  bool rewind_subjournal) = 0;
   [[nodiscard]] virtual Result<std::unique_ptr<JournalPlayback>> DoOpenSavepointPlayback(
       JournalSavepoint savepoint) = 0;
   [[nodiscard]] virtual Status DoCompleteSavepointPlayback(JournalSavepoint savepoint) = 0;
@@ -146,6 +147,7 @@ class JournalTransaction final {
   struct SavepointState {
     JournalSavepoint savepoint;
     std::unordered_set<std::uint32_t> pages;
+    bool rewind_subjournal_on_release = true;
   };
 
  public:

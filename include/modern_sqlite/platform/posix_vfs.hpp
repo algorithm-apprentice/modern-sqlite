@@ -27,6 +27,7 @@ class PosixVfs final : public Vfs {
   [[nodiscard]] Result<std::chrono::microseconds> DoSleepFor(
       std::chrono::microseconds duration) override;
   [[nodiscard]] Result<WallClockTime> DoCurrentTime() override;
+  [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override;
 };
 
 }  // namespace modern_sqlite

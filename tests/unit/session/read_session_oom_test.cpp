@@ -243,6 +243,10 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
     return delegate_.CurrentTime();
   }
 
+  [[nodiscard]] modern_sqlite::ByteCount DoMaximumPathLength() const noexcept override {
+    return delegate_.MaximumPathLength();
+  }
+
   modern_sqlite::PosixVfs delegate_;
   std::shared_ptr<LockTrackingState> state_;
 };

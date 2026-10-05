@@ -32,8 +32,9 @@
     "implement-read-lowering",
     "implement-read-session-api",
     "build-read-compatibility-harness",
-    "build-read-performance-baseline"
+    "build-read-performance-baseline",
+    "implement-journal-contracts"
   ],
-  "activeNode": "implement-journal-contracts",
+  "activeNode": "implement-rollback-journal",
   "activeNodeState": "review_pending"
 }

@@ -1907,4 +1907,6 @@ Result<WallClockTime> PosixVfs::DoCurrentTime() {
   return std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
 }
 
+ByteCount PosixVfs::DoMaximumPathLength() const noexcept { return ByteCount{512}; }
+
 }  // namespace modern_sqlite
