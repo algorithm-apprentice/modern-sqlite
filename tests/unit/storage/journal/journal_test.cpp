@@ -87,6 +87,9 @@ class RecordingBackend final : public JournalBackend {
               .page_size = ByteCount{512},
               .original_page_count = 8,
           },
+      .records = {},
+      .failing_next = std::nullopt,
+      .next_error = ErrorCode::kIo,
   };
   PlaybackScript savepoint_playback{
       .info =
@@ -95,8 +98,16 @@ class RecordingBackend final : public JournalBackend {
               .page_size = ByteCount{512},
               .original_page_count = 8,
           },
+      .records = {},
+      .failing_next = std::nullopt,
+      .next_error = ErrorCode::kIo,
   };
-  PlaybackScript hot_playback{.info = std::nullopt};
+  PlaybackScript hot_playback{
+      .info = std::nullopt,
+      .records = {},
+      .failing_next = std::nullopt,
+      .next_error = ErrorCode::kIo,
+  };
   bool null_savepoint_playback = false;
 
  protected:

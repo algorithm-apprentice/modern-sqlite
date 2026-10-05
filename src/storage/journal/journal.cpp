@@ -285,7 +285,10 @@ Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t cur
       .original_page_count = current_page_count,
   };
   try {
-    savepoints_.push_back(SavepointState{.savepoint = savepoint});
+    savepoints_.push_back(SavepointState{
+        .savepoint = savepoint,
+        .pages = {},
+    });
   } catch (const std::bad_alloc&) {
     EnterFailed(ErrorCode::kOutOfMemory);
     return std::unexpected(Error::OutOfMemory());
@@ -651,6 +654,8 @@ Status RecoverHotJournal(JournalBackend& backend, JournalRecoveryTarget& target)
   auto applied = ApplyPlayback(**opened, target,
                                PlaybackExpectation{
                                    .kind = JournalPlaybackKind::kHotRecovery,
+                                   .page_size = std::nullopt,
+                                   .original_page_count = std::nullopt,
                                },
                                true, target_started);
   if (!applied.has_value()) {
