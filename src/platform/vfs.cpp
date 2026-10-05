@@ -470,4 +470,6 @@ Result<WallClockTime> Vfs::CurrentTime() {
   return DoCurrentTime();
 }
 
+ByteCount Vfs::MaximumPathLength() const noexcept { return DoMaximumPathLength(); }
+
 }  // namespace modern_sqlite

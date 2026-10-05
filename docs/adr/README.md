@@ -44,3 +44,4 @@ their corresponding implementation begins.
 38. [ADR-0038: Pinned Read Compatibility Harness](0038-pinned-read-compatibility-harness.md)
 39. [ADR-0039: Pinned Read Performance Baseline](0039-pinned-read-performance-baseline.md)
 40. [ADR-0040: Journal Contracts and Durable Ordering](0040-journal-contracts.md)
+41. [ADR-0041: SQLite-Compatible DELETE-Mode Rollback Journal](0041-sqlite-compatible-rollback-journal.md)

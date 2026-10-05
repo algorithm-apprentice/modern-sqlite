@@ -122,4 +122,4 @@ jobs:
         run: |
           ctest --test-dir build/benchmark \
             --output-on-failure \
-            -R '^performance\.read_(benchmark_cli|fixture_regeneration)$'
+            -R '^(performance\.read_(benchmark_cli|fixture_regeneration)|compatibility\.rollback_journal_fixture_regeneration)$'

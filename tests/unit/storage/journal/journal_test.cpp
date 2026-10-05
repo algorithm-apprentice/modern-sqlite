@@ -28,6 +28,7 @@ struct PlaybackScript {
   std::vector<PlaybackRecord> records;
   std::optional<std::size_t> failing_next;
   ErrorCode next_error = ErrorCode::kIo;
+  bool trace_destruction = false;
 };
 
 [[nodiscard]] PlaybackRecord Record(std::uint32_t page_number, std::byte value,
@@ -40,8 +41,14 @@ struct PlaybackScript {
 
 class ScriptedPlayback final : public JournalPlayback {
  public:
-  ScriptedPlayback(PlaybackScript script, std::vector<std::string>& trace)
-      : script_(std::move(script)), trace_(&trace) {}
+  ScriptedPlayback(PlaybackScript script, std::vector<std::string>& trace, bool& destroyed)
+      : script_(std::move(script)), trace_(&trace), destroyed_(&destroyed) {}
+
+  ~ScriptedPlayback() override {
+    if (script_.trace_destruction) {
+      *destroyed_ = true;
+    }
+  }
 
   [[nodiscard]] std::optional<JournalPlaybackInfo> info() const noexcept override {
     return script_.info;
@@ -69,6 +76,7 @@ class ScriptedPlayback final : public JournalPlayback {
  private:
   PlaybackScript script_;
   std::vector<std::string>* trace_;
+  bool* destroyed_;
   std::size_t next_index_ = 0;
 };
 
@@ -77,9 +85,13 @@ class RecordingBackend final : public JournalBackend {
   std::vector<std::string> trace;
   std::vector<PageNumber> transaction_pages;
   std::vector<PageNumber> savepoint_pages;
+  std::vector<bool> release_rewinds;
   std::optional<std::string> failing_event;
   int failures_remaining = 0;
   ErrorCode failure_code = ErrorCode::kIo;
+  bool playback_destroyed = false;
+  bool savepoint_completion_saw_destroyed_playback = false;
+  bool rollback_finalization_saw_destroyed_playback = false;
   PlaybackScript transaction_playback{
       .info =
           JournalPlaybackInfo{
@@ -90,6 +102,7 @@ class RecordingBackend final : public JournalBackend {
       .records = {},
       .failing_next = std::nullopt,
       .next_error = ErrorCode::kIo,
+      .trace_destruction = false,
   };
   PlaybackScript savepoint_playback{
       .info =
@@ -101,12 +114,14 @@ class RecordingBackend final : public JournalBackend {
       .records = {},
       .failing_next = std::nullopt,
       .next_error = ErrorCode::kIo,
+      .trace_destruction = false,
   };
   PlaybackScript hot_playback{
       .info = std::nullopt,
       .records = {},
       .failing_next = std::nullopt,
       .next_error = ErrorCode::kIo,
+      .trace_destruction = false,
   };
   bool null_savepoint_playback = false;
 
@@ -133,8 +148,12 @@ class RecordingBackend final : public JournalBackend {
     return Event("create-savepoint");
   }
 
-  [[nodiscard]] Status DoReleaseSavepoint(JournalSavepointId) override {
-    return Event("release-savepoint");
+  [[nodiscard]] Status DoReleaseSavepoint(JournalSavepointId, bool rewind_subjournal) override {
+    auto result = Event("release-savepoint");
+    if (result.has_value()) {
+      release_rewinds.push_back(rewind_subjournal);
+    }
+    return result;
   }
 
   [[nodiscard]] Result<std::unique_ptr<JournalPlayback>> DoOpenSavepointPlayback(
@@ -150,10 +169,12 @@ class RecordingBackend final : public JournalBackend {
     if (script.info.has_value()) {
       script.info->original_page_count = savepoint.original_page_count;
     }
-    return std::make_unique<ScriptedPlayback>(std::move(script), trace);
+    playback_destroyed = false;
+    return std::make_unique<ScriptedPlayback>(std::move(script), trace, playback_destroyed);
   }
 
   [[nodiscard]] Status DoCompleteSavepointPlayback(JournalSavepoint) override {
+    savepoint_completion_saw_destroyed_playback = playback_destroyed;
     return Event("complete-savepoint-playback");
   }
 
@@ -164,7 +185,8 @@ class RecordingBackend final : public JournalBackend {
     if (!result.has_value()) {
       return std::unexpected(std::move(result.error()));
     }
-    return std::make_unique<ScriptedPlayback>(transaction_playback, trace);
+    playback_destroyed = false;
+    return std::make_unique<ScriptedPlayback>(transaction_playback, trace, playback_destroyed);
   }
 
   [[nodiscard]] Status DoPrepareHotRecovery() override { return Event("prepare-hot"); }
@@ -174,12 +196,16 @@ class RecordingBackend final : public JournalBackend {
     if (!result.has_value()) {
       return std::unexpected(std::move(result.error()));
     }
-    return std::make_unique<ScriptedPlayback>(hot_playback, trace);
+    playback_destroyed = false;
+    return std::make_unique<ScriptedPlayback>(hot_playback, trace, playback_destroyed);
   }
 
   [[nodiscard]] Status DoFinalizeCommit() override { return Event("finalize-commit"); }
 
-  [[nodiscard]] Status DoFinalizeRollback() override { return Event("finalize-rollback"); }
+  [[nodiscard]] Status DoFinalizeRollback() override {
+    rollback_finalization_saw_destroyed_playback = playback_destroyed;
+    return Event("finalize-rollback");
+  }
 
  private:
   [[nodiscard]] Status Event(std::string_view name) {
@@ -380,6 +406,40 @@ TEST(JournalTransaction, ReleasesTheTargetSavepointAndEveryNestedSavepoint) {
   ASSERT_FALSE(stale.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, stale.error().code());
   EXPECT_EQ(1U, EventCount(backend, "release-savepoint"));
+}
+
+TEST(JournalTransaction, RewindsSubjournalWhenReleasedSavepointOwnsItsLaterRecords) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const auto first = transaction->CreateSavepoint(8);
+  const auto second = transaction->CreateSavepoint(9);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  const PageBytes page{};
+
+  ASSERT_TRUE(transaction->CapturePage(Image(9, page)).has_value());
+  ASSERT_TRUE(transaction->ReleaseSavepoint(*second).has_value());
+
+  EXPECT_EQ((std::vector<bool>{true}), backend.release_rewinds);
+}
+
+TEST(JournalTransaction, RetainsSharedSubjournalRecordsUntilTheOlderSavepointIsReleased) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+  ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
+  const auto first = transaction->CreateSavepoint(8);
+  const auto second = transaction->CreateSavepoint(8);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+
+  ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
+  ASSERT_TRUE(transaction->ReleaseSavepoint(*second).has_value());
+  ASSERT_TRUE(transaction->ReleaseSavepoint(*first).has_value());
+
+  EXPECT_EQ((std::vector<bool>{false, true}), backend.release_rewinds);
 }
 
 TEST(JournalTransaction, RejectsALiveForeignSavepointWithoutBackendIo) {
@@ -586,6 +646,20 @@ TEST(JournalTransaction, SavepointRollbackClearsPriorDatabaseSyncAndRetainsTheTa
   EXPECT_TRUE(transaction->Commit().has_value());
 }
 
+TEST(JournalTransaction, DestroysSavepointPlaybackBeforeCompletingBackendState) {
+  RecordingBackend backend;
+  backend.savepoint_playback.trace_destruction = true;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const auto savepoint = transaction->CreateSavepoint(8);
+  ASSERT_TRUE(savepoint.has_value());
+  RecordingTarget target(backend.trace);
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+
+  EXPECT_TRUE(backend.savepoint_completion_saw_destroyed_playback);
+}
+
 TEST(JournalTransaction, FullRollbackFiltersPagesAndStreamsValidRecords) {
   RecordingBackend backend;
   backend.transaction_playback.records = {
@@ -605,6 +679,18 @@ TEST(JournalTransaction, FullRollbackFiltersPagesAndStreamsValidRecords) {
             target.restored_pages);
   EXPECT_EQ(1U, EventCount(backend, "target-sync"));
   EXPECT_EQ(1U, EventCount(backend, "finalize-rollback"));
+}
+
+TEST(JournalTransaction, DestroysTransactionPlaybackBeforeFinalizingRollback) {
+  RecordingBackend backend;
+  backend.transaction_playback.trace_destruction = true;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  RecordingTarget target(backend.trace);
+
+  ASSERT_TRUE(transaction->Rollback(target).has_value());
+
+  EXPECT_TRUE(backend.rollback_finalization_saw_destroyed_playback);
 }
 
 TEST(JournalTransaction, FullRollbackNextFailureBecomesPersistentAfterTargetMutation) {

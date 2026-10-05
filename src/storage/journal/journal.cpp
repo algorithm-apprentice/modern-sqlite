@@ -167,33 +167,31 @@ struct PlaybackExpectation {
 
 Result<std::unique_ptr<JournalTransaction>> JournalTransaction::Begin(JournalBackend& backend,
                                                                       JournalTransactionInfo info) {
-  if (!IsValidPageSize(info.page_size)) {
-    return std::unexpected(
-        Misuse("journal page size must be a power of two from 512 through 65536"));
-  }
-  if (!IsValidSectorSize(info.sector_size)) {
-    return std::unexpected(
-        Misuse("journal sector size must be a power of two from 32 through 65536"));
-  }
-
-  auto owner_token = AllocateTransactionToken();
-  if (!owner_token.has_value()) {
-    return std::unexpected(std::move(owner_token.error()));
-  }
-
-  std::unique_ptr<JournalTransaction> transaction;
   try {
-    transaction =
+    if (!IsValidPageSize(info.page_size)) {
+      return std::unexpected(
+          Misuse("journal page size must be a power of two from 512 through 65536"));
+    }
+    if (!IsValidSectorSize(info.sector_size)) {
+      return std::unexpected(
+          Misuse("journal sector size must be a power of two from 32 through 65536"));
+    }
+
+    auto owner_token = AllocateTransactionToken();
+    if (!owner_token.has_value()) {
+      return std::unexpected(std::move(owner_token.error()));
+    }
+
+    auto transaction =
         std::make_unique<JournalTransaction>(ConstructionKey{}, backend, info, *owner_token);
+    auto begun = backend.DoBegin(info);
+    if (!begun.has_value()) {
+      return std::unexpected(std::move(begun.error()));
+    }
+    return transaction;
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
-
-  auto begun = backend.DoBegin(info);
-  if (!begun.has_value()) {
-    return std::unexpected(std::move(begun.error()));
-  }
-  return transaction;
 }
 
 JournalTransaction::JournalTransaction(ConstructionKey, JournalBackend& backend,
@@ -216,10 +214,11 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
   const std::uint32_t page_number = image.page_number.value();
   const bool needs_transaction =
       page_number <= info_.original_page_count && !transaction_pages_.contains(page_number);
-  bool needs_savepoint = false;
-  for (const SavepointState& state : savepoints_) {
+  std::optional<std::size_t> first_savepoint_needing_image;
+  for (std::size_t index = 0; index < savepoints_.size(); ++index) {
+    const SavepointState& state = savepoints_[index];
     if (page_number <= state.savepoint.original_page_count && !state.pages.contains(page_number)) {
-      needs_savepoint = true;
+      first_savepoint_needing_image = index;
       break;
     }
   }
@@ -248,7 +247,7 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
     return {};
   }
 
-  if (!needs_savepoint) {
+  if (!first_savepoint_needing_image.has_value()) {
     return {};
   }
 
@@ -257,6 +256,10 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
     const ErrorCode code = appended.error().code();
     EnterFailed(code);
     return std::unexpected(std::move(appended.error()));
+  }
+  for (std::size_t index = *first_savepoint_needing_image + 1U; index < savepoints_.size();
+       ++index) {
+    savepoints_[index].rewind_subjournal_on_release = false;
   }
   try {
     for (SavepointState& state : savepoints_) {
@@ -288,6 +291,7 @@ Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t cur
     savepoints_.push_back(SavepointState{
         .savepoint = savepoint,
         .pages = {},
+        .rewind_subjournal_on_release = true,
     });
   } catch (const std::bad_alloc&) {
     EnterFailed(ErrorCode::kOutOfMemory);
@@ -320,7 +324,8 @@ Status JournalTransaction::ReleaseSavepoint(JournalSavepointId savepoint) {
     return std::unexpected(Misuse("journal savepoint is not active"));
   }
 
-  auto released = backend_->DoReleaseSavepoint(savepoint);
+  auto released =
+      backend_->DoReleaseSavepoint(savepoint, savepoints_[*index].rewind_subjournal_on_release);
   if (!released.has_value()) {
     const ErrorCode code = released.error().code();
     EnterFailed(code);
@@ -377,6 +382,7 @@ Status JournalTransaction::RollbackToSavepoint(JournalSavepointId savepoint,
     return std::unexpected(std::move(applied.error()));
   }
 
+  opened->reset();
   auto completed = backend_->DoCompleteSavepointPlayback(scope);
   if (!completed.has_value()) {
     const ErrorCode code = completed.error().code();
@@ -567,6 +573,7 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
     return std::unexpected(std::move(applied.error()));
   }
 
+  opened->reset();
   auto finalized = backend_->DoFinalizeRollback();
   if (!finalized.has_value()) {
     const ErrorCode code = finalized.error().code();
@@ -662,6 +669,7 @@ Status RecoverHotJournal(JournalBackend& backend, JournalRecoveryTarget& target)
     return applied;
   }
 
+  opened->reset();
   auto finalized = backend.DoFinalizeRollback();
   if (!finalized.has_value()) {
     return std::unexpected(std::move(finalized.error()));

@@ -330,6 +330,8 @@ class FakeVfs final : public Vfs {
     }
     return current_time;
   }
+
+  [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override { return ByteCount{512}; }
 };
 
 [[nodiscard]] FileOpenOptions ReadWriteMainDatabaseOptions() {
@@ -803,6 +805,12 @@ TEST(VfsContracts, ValidatesPathsAndForwardsPathOperations) {
   const auto embedded_nul_result = vfs.FullPath("database.sqlite");
   ASSERT_FALSE(embedded_nul_result.has_value());
   EXPECT_EQ(ErrorCode::kInternal, embedded_nul_result.error().code());
+}
+
+TEST(VfsContracts, ExposesTheMaximumSupportedPathLength) {
+  const FakeVfs vfs;
+
+  EXPECT_EQ(ByteCount{512}, vfs.MaximumPathLength());
 }
 
 TEST(VfsContracts, RequiresCompleteRandomnessAndSkipsEmptyRequests) {

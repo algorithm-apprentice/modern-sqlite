@@ -124,7 +124,8 @@ class JournalBackend {
   virtual Status DoAppendTransactionPage(JournalPageImage image) = 0;
   virtual Status DoAppendSavepointPage(JournalPageImage image) = 0;
   virtual Status DoCreateSavepoint(JournalSavepoint savepoint) = 0;
-  virtual Status DoReleaseSavepoint(JournalSavepointId savepoint) = 0;
+  virtual Status DoReleaseSavepoint(
+      JournalSavepointId savepoint, bool rewind_subjournal) = 0;
   virtual Result<std::unique_ptr<JournalPlayback>>
   DoOpenSavepointPlayback(JournalSavepoint savepoint) = 0;
   virtual Status DoCompleteSavepointPlayback(
@@ -148,15 +149,16 @@ boundary, not a general journal plugin framework.
 unique ownership of a non-copyable, non-movable transaction that borrows the
 backend. The backend must outlive the transaction. Playback cursors are
 uniquely owned but may borrow backend file and buffer state, so they are
-created, consumed synchronously, and destroyed before the transaction or
-hot-recovery call returns. A recovery target must outlive the call using it.
-No cursor is exposed to the future pager.
+created and consumed synchronously. The coordinator destroys each cursor before
+calling savepoint-completion or rollback-finalization hooks that may invalidate
+borrowed backend state. A recovery target must outlive the call using it. No
+cursor is exposed to the future pager.
 
 The future rollback backend maps these semantic calls to main-journal and
 sub-journal offsets. `DoPrepareHotRecovery()` performs the pre-playback
 journal synchronization required after a crash. `DoFinalizeCommit()` and
 `DoFinalizeRollback()` make the journal non-hot; for the writable MVP this
-means DELETE-mode removal with the required directory durability.
+means DELETE-mode removal with the configured directory-durability policy.
 
 Backend calls are all-or-error at the semantic boundary. A failed append may
 leave an incomplete trailing record, but must not report success. The next
@@ -219,6 +221,14 @@ Savepoints are nested:
   sequence number, so stale, foreign, or already released identifiers return
   `kMisuse` without calling the backend.
 
+Each savepoint also starts eligible to rewind the logical subjournal record
+count when it is released. If a later subjournal image is required first by an
+older savepoint, every newer savepoint becomes ineligible because rewinding at
+that newer boundary would discard an image still needed by the older
+savepoint. Release passes this coordinator-owned decision to
+`DoReleaseSavepoint(id, rewind_subjournal)`. This mirrors SQLite's
+`bTruncateOnRelease` rule without requiring per-record backend metadata.
+
 If main-journal records have been appended since the last journal sync,
 savepoint rollback synchronizes the main journal before target playback.
 This preserves recovery if target playback writes the database and a second
@@ -246,7 +256,7 @@ ordering facts:
 - `database_may_be_modified`: a database write, truncate, or extension has
   been authorized and may have changed persistent bytes; and
 - `database_synced`: all authorized database mutations completed and the
-  database then completed its final FULL sync.
+  database then completed the final sync required by pager durability policy.
 
 The normal commit path is:
 
@@ -270,9 +280,9 @@ The normal commit path is:
    listed page against every applicable membership set and enforces the sync
    state, while the pager owns the format-aware proof that the list includes
    every tail page requiring exact restoration.
-5. After all database mutations succeed and the final FULL database sync
-   completes, `MarkDatabaseSynced()` requires a clean main journal and a
-   prior database authorization, then sets `database_synced`.
+5. After all database mutations succeed and the final database sync required
+   by pager policy completes, `MarkDatabaseSynced()` requires a clean main
+   journal and a prior database authorization, then sets `database_synced`.
 6. `Commit()` calls `DoFinalizeCommit()` and enters `kFinished`.
 
 The physical sector cohort for a database page is computed from the page and
@@ -347,12 +357,13 @@ resize, or page restoration, but still permits rollback finalization so the
 invalid journal does not remain hot. Savepoint playback must always have
 metadata; an empty savepoint `info()` is an internal contract violation.
 
-After a valid first header, an incomplete later header or record, invalid
-later header fields, illegal main-journal page number, or checksum mismatch
-terminates the cursor successfully at the last valid record, matching
-SQLite's tolerated crash-tail behavior. Actual VFS read failures remain
-errors. Savepoint records are generated and consumed by the same process; an
-invalid savepoint record is an internal contract violation.
+After a valid first header, an incomplete or unrecognizable later header or
+record, illegal main-journal page number, or checksum mismatch terminates the
+cursor successfully at the last valid record, matching SQLite's tolerated
+crash-tail behavior. The concrete SQLite backend ignores later header geometry
+fields, as specified by ADR-0041. Actual VFS read failures remain errors.
+Savepoint records are generated and consumed by the same process; an invalid
+savepoint record is an internal contract violation.
 
 The shared playback driver performs operations in this order:
 
@@ -366,11 +377,14 @@ The shared playback driver performs operations in this order:
    number during savepoint playback;
 5. for transaction rollback and hot recovery, call `SyncDatabase()`;
 6. call `CompletePlayback()`; and
-7. only for full rollback or hot recovery, call
+7. destroy the playback cursor;
+8. only for full rollback or hot recovery, call
    `DoFinalizeRollback()`.
 
-When metadata is absent for transaction rollback or hot recovery, steps 2
-through 6 are skipped and rollback finalization is still attempted.
+For savepoint rollback, cursor destruction occurs before
+`DoCompleteSavepointPlayback()`. When metadata is absent for transaction
+rollback or hot recovery, steps 2 through 6 are skipped, the cursor is
+destroyed, and rollback finalization is still attempted.
 
 Savepoint size filtering runs before duplicate tracking, so a shared
 sub-journal image for a page created after an older savepoint cannot recreate
@@ -386,8 +400,8 @@ the write transaction remains active and the durable main journal still
 protects any database pages already written. The backend completes its
 savepoint bookkeeping only after target playback succeeds. Successful
 savepoint playback conservatively sets `database_may_be_modified`, clears
-`database_synced`, and therefore requires another flush and FULL database
-sync before commit, even if the target restored only cached pages.
+`database_synced`, and therefore requires another flush and pager-policy
+database sync before commit, even if the target restored only cached pages.
 
 `RecoverHotJournal(backend, target)` is independent of a live
 `JournalTransaction`. It performs:
@@ -478,7 +492,9 @@ It does not implement:
 - PERSIST, TRUNCATE, MEMORY, OFF, or atomic-write optimizations; or
 - transaction SQL semantics and connection-level savepoint names.
 
-The first concrete backend is DELETE mode with FULL synchronization.
+The first concrete backend is DELETE mode with SQLite's
+`synchronous=FULL` publication protocol. ADR-0041 distinguishes that protocol
+from the stronger VFS full-sync flag.
 
 ## Validation plan
 

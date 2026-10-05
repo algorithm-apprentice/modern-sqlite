@@ -97,7 +97,9 @@ Pinned SQLite references:
   copy any path state retained by an open file. Empty paths and embedded NUL
   bytes are rejected; temporary files use a missing path instead.
 - `FullPath` returns an owned path. `Access` distinguishes existence,
-  readability, and read-write directory capability.
+  readability, and read-write directory capability. `MaximumPathLength`
+  provides a non-failing upper bound for formats that embed a pathname; each
+  backend returns an explicit deterministic value.
 - Randomness success fills the complete requested buffer. Sleep returns the
   actual duration and may not report less than requested. Current time uses a
   millisecond-resolution `std::chrono::system_clock` time point.

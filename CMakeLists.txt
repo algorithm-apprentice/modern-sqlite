@@ -113,6 +113,7 @@ set(
     src/storage/cache/page_cache.cpp
     src/storage/database_format.cpp
     src/storage/journal/journal.cpp
+    src/storage/journal/rollback_journal.cpp
     src/syntax/ast.cpp
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
@@ -497,6 +498,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/cache/page_cache.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/database_format.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/journal/journal.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/journal/rollback_journal.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/page_number.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/ast.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
@@ -531,6 +533,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/storage/cache/page_cache.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/database_format.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/journal/journal.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/journal/rollback_journal.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
@@ -581,6 +584,10 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/journal_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/journal_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/journal_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_test_support.hpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/ast_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
@@ -590,6 +597,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/compatibility/rollback_journal_fixture.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_fuzz.hpp"

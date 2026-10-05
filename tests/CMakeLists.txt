@@ -44,6 +44,7 @@ add_executable(
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp
+  unit/storage/journal/rollback_journal_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
@@ -183,6 +184,50 @@ add_test(
 )
 set_tests_properties(
   journal.oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_rollback_journal_allocation_test
+  unit/storage/journal/rollback_journal_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_rollback_journal_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_rollback_journal_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_rollback_journal_allocation_test)
+add_test(
+  NAME journal.rollback_allocation
+  COMMAND modern_sqlite_rollback_journal_allocation_test
+)
+set_tests_properties(
+  journal.rollback_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_rollback_journal_oom_test
+  unit/storage/journal/rollback_journal_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_rollback_journal_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_rollback_journal_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_rollback_journal_oom_test)
+add_test(
+  NAME journal.rollback_oom
+  COMMAND modern_sqlite_rollback_journal_oom_test
+)
+set_tests_properties(
+  journal.rollback_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10
@@ -636,6 +681,37 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
     performance.read_baseline_validation
     PROPERTIES
       LABELS performance
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+if(TARGET modern_sqlite_benchmark_sqlite)
+  add_executable(
+    modern_sqlite_rollback_journal_fixture
+    compatibility/rollback_journal_fixture.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_rollback_journal_fixture
+    PRIVATE
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite_project_options
+  )
+  modern_sqlite_set_project_warnings(
+    modern_sqlite_rollback_journal_fixture
+    PRIVATE
+  )
+  modern_sqlite_enable_clang_tidy(modern_sqlite_rollback_journal_fixture)
+  add_test(
+    NAME compatibility.rollback_journal_fixture_regeneration
+    COMMAND
+      modern_sqlite_rollback_journal_fixture
+      --verify
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/rollback_journal"
+  )
+  set_tests_properties(
+    compatibility.rollback_journal_fixture_regeneration
+    PROPERTIES
+      LABELS compatibility
       TIMEOUT 30
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )

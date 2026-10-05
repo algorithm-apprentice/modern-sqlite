@@ -278,6 +278,7 @@ class Vfs {
   [[nodiscard]] Status RandomBytes(MutableByteView output);
   [[nodiscard]] Result<std::chrono::microseconds> SleepFor(std::chrono::microseconds duration);
   [[nodiscard]] Result<WallClockTime> CurrentTime();
+  [[nodiscard]] ByteCount MaximumPathLength() const noexcept;
 
  protected:
   [[nodiscard]] virtual Result<OpenedFile> DoOpen(std::optional<std::string_view> path,
@@ -289,6 +290,7 @@ class Vfs {
   [[nodiscard]] virtual Result<std::chrono::microseconds> DoSleepFor(
       std::chrono::microseconds duration) = 0;
   [[nodiscard]] virtual Result<WallClockTime> DoCurrentTime() = 0;
+  [[nodiscard]] virtual ByteCount DoMaximumPathLength() const noexcept = 0;
 };
 
 }  // namespace modern_sqlite
