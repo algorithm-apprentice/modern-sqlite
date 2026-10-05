@@ -63,6 +63,14 @@
       "displayName": "Optimized Benchmark Build",
       "inherits": "release",
       "binaryDir": "${sourceDir}/build/benchmark"
+    },
+    {
+      "name": "fuzz",
+      "displayName": "Clang libFuzzer with ASan and UBSan",
+      "inherits": "asan-ubsan",
+      "cacheVariables": {
+        "MODERN_SQLITE_BUILD_FUZZERS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -89,6 +97,14 @@
     {
       "name": "benchmark",
       "configurePreset": "benchmark"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz",
+      "targets": [
+        "modern_sqlite_read_sql_fuzz",
+        "modern_sqlite_read_database_fuzz"
+      ]
     }
   ],
   "testPresets": [

@@ -21,10 +21,29 @@ option(MODERN_SQLITE_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MODERN_SQLITE_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MODERN_SQLITE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MODERN_SQLITE_ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
+option(MODERN_SQLITE_BUILD_FUZZERS "Build Clang libFuzzer targets" OFF)
 option(
   MODERN_SQLITE_ENABLE_INSTRUMENTATION
   "Compile and link optional instrumentation hooks"
   OFF
+)
+set(
+  MODERN_SQLITE_PINNED_SQLITE_LIBRARY
+  ""
+  CACHE FILEPATH
+  "Pinned SQLite shared library used only for oracle regeneration tests"
+)
+set(
+  MODERN_SQLITE_PINNED_SQLITE_C
+  ""
+  CACHE FILEPATH
+  "Pinned SQLite amalgamation source used only for oracle regeneration tests"
+)
+set(
+  MODERN_SQLITE_PINNED_SQLITE_H
+  ""
+  CACHE FILEPATH
+  "Pinned SQLite generated header used only for oracle regeneration tests"
 )
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/CompilerWarnings.cmake")
@@ -66,9 +85,8 @@ target_link_libraries(
 )
 modern_sqlite_enable_clang_tidy(modern_sqlite_instrumentation)
 
-add_library(
-  modern_sqlite
-  STATIC
+set(
+  MODERN_SQLITE_ENGINE_SOURCES
     src/base/bytes.cpp
     src/base/coding.cpp
     src/base/result.cpp
@@ -99,6 +117,12 @@ add_library(
     src/text/text.cpp
     src/vm/read_vm.cpp
 )
+
+add_library(
+  modern_sqlite
+  STATIC
+    ${MODERN_SQLITE_ENGINE_SOURCES}
+)
 add_library(modern_sqlite::modern_sqlite ALIAS modern_sqlite)
 target_include_directories(
   modern_sqlite
@@ -115,6 +139,101 @@ target_link_libraries(
 )
 modern_sqlite_enable_clang_tidy(modern_sqlite)
 
+if(MODERN_SQLITE_BUILD_FUZZERS)
+  include(CheckCXXSourceCompiles)
+  set(_modern_sqlite_saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
+
+  set(CMAKE_REQUIRED_FLAGS
+      "${_modern_sqlite_saved_required_flags} -fsanitize=fuzzer-no-link")
+  check_cxx_source_compiles(
+    "int main() { return 0; }"
+    MODERN_SQLITE_HAS_FUZZER_NO_LINK
+  )
+
+  set(CMAKE_REQUIRED_FLAGS
+      "${_modern_sqlite_saved_required_flags} -fsanitize=fuzzer")
+  check_cxx_source_compiles(
+    "
+      #include <cstddef>
+      extern \"C\" int LLVMFuzzerTestOneInput(
+          const unsigned char*, std::size_t) {
+        return 0;
+      }
+    "
+    MODERN_SQLITE_HAS_FUZZER_RUNTIME
+  )
+  set(CMAKE_REQUIRED_FLAGS "${_modern_sqlite_saved_required_flags}")
+  unset(_modern_sqlite_saved_required_flags)
+
+  if(NOT MODERN_SQLITE_HAS_FUZZER_NO_LINK OR
+     NOT MODERN_SQLITE_HAS_FUZZER_RUNTIME)
+    message(
+      FATAL_ERROR
+      "MODERN_SQLITE_BUILD_FUZZERS requires working "
+      "-fsanitize=fuzzer-no-link and -fsanitize=fuzzer flags"
+    )
+  endif()
+
+  add_library(
+    modern_sqlite_fuzz_engine
+    STATIC
+      ${MODERN_SQLITE_ENGINE_SOURCES}
+  )
+  target_include_directories(
+    modern_sqlite_fuzz_engine
+    PUBLIC
+      "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+      "$<INSTALL_INTERFACE:include>"
+  )
+  target_link_libraries(
+    modern_sqlite_fuzz_engine
+    PUBLIC
+      modern_sqlite_project_options
+    PRIVATE
+      modern_sqlite_project_warnings
+  )
+  target_compile_options(
+    modern_sqlite_fuzz_engine
+    PRIVATE
+      -fsanitize=fuzzer-no-link
+  )
+  modern_sqlite_enable_clang_tidy(modern_sqlite_fuzz_engine)
+
+  add_executable(
+    modern_sqlite_read_sql_fuzz
+    tests/fuzz/read_sql_fuzz.cpp
+    tests/fuzz/read_sql_fuzzer_main.cpp
+  )
+  target_compile_definitions(
+    modern_sqlite_read_sql_fuzz
+    PRIVATE
+      MODERN_SQLITE_READ_FUZZ_DATABASE="${PROJECT_SOURCE_DIR}/tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db"
+  )
+
+  add_executable(
+    modern_sqlite_read_database_fuzz
+    tests/fuzz/database_image_fuzz.cpp
+    tests/fuzz/database_image_fuzzer_main.cpp
+  )
+
+  foreach(
+    fuzz_target
+    IN ITEMS
+      modern_sqlite_read_sql_fuzz
+      modern_sqlite_read_database_fuzz
+  )
+    target_link_libraries(
+      "${fuzz_target}"
+      PRIVATE
+        modern_sqlite_fuzz_engine
+    )
+    target_compile_options("${fuzz_target}" PRIVATE -fsanitize=fuzzer-no-link)
+    target_link_options("${fuzz_target}" PRIVATE -fsanitize=fuzzer)
+    modern_sqlite_set_project_warnings("${fuzz_target}" PRIVATE)
+    modern_sqlite_enable_clang_tidy("${fuzz_target}")
+  endforeach()
+endif()
+
 add_executable(
   modern_sqlite_inspect
   tools/modern_sqlite_inspect.cpp
@@ -126,6 +245,18 @@ target_link_libraries(
 )
 modern_sqlite_set_project_warnings(modern_sqlite_inspect PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_inspect)
+
+add_executable(
+  modern_sqlite_read_trace
+  tools/modern_sqlite_read_trace.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_trace
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_trace PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_trace)
 
 if(MODERN_SQLITE_ENABLE_INSTRUMENTATION)
   target_compile_definitions(
@@ -260,5 +391,13 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzz.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzzer_main.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/read_fuzz.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/read_fuzz_smoke_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzz.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzzer_main.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/model/read_session_model_test.cpp"
   "${PROJECT_SOURCE_DIR}/tools/modern_sqlite_inspect.cpp"
+  "${PROJECT_SOURCE_DIR}/tools/modern_sqlite_read_trace.cpp"
 )

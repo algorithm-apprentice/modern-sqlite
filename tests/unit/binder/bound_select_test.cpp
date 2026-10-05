@@ -264,6 +264,27 @@ TEST(Binder, ExpandsWildcardsAndPublishesDirectColumnMetadata) {
   EXPECT_TRUE(moved.valid());
 }
 
+TEST(Binder, PublishesIntegerPrimaryKeyMetadataForHiddenRowIdNames) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const BoundSelect aliased = BindOrThrow("SELECT _rowid_, oid FROM Items", catalog);
+  ASSERT_EQ(2U, aliased.result_columns().size());
+  for (const BoundResultColumn& result : aliased.result_columns()) {
+    EXPECT_EQ("id", result.name);
+    EXPECT_EQ(std::optional<std::string>{"INTEGER"}, result.declared_type);
+    EXPECT_EQ(TypeAffinity::kInteger, result.affinity);
+  }
+
+  const BoundSelect ordinary =
+      BindOrThrow("SELECT rowid, _rowid_, oid FROM CustomCollation", catalog);
+  ASSERT_EQ(3U, ordinary.result_columns().size());
+  for (const BoundResultColumn& result : ordinary.result_columns()) {
+    EXPECT_EQ("rowid", result.name);
+    EXPECT_EQ(std::optional<std::string>{"INTEGER"}, result.declared_type);
+    EXPECT_EQ(TypeAffinity::kInteger, result.affinity);
+  }
+}
+
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select =

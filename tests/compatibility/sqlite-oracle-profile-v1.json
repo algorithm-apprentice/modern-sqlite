@@ -1,0 +1,99 @@
+{
+  "build": {
+    "commands": {
+      "linux": "cc -O2 -DNDEBUG -DSQLITE_THREADSAFE=0 -DSQLITE_DQS=3 -fPIC -shared sqlite3.c -lm -ldl -lpthread -o libsqlite3-read-compat-profile.so",
+      "macos": "clang -O2 -DNDEBUG -DSQLITE_THREADSAFE=0 -DSQLITE_DQS=3 -fPIC -dynamiclib sqlite3.c -o libsqlite3-read-compat-profile.dylib"
+    },
+    "defines": [
+      "NDEBUG",
+      "SQLITE_DQS=3",
+      "SQLITE_THREADSAFE=0"
+    ],
+    "forbidden_compile_options": [
+      "OMIT_DECLTYPE",
+      "OMIT_FLOATING_POINT"
+    ],
+    "required_compile_options": [
+      "DQS=3",
+      "THREADSAFE=0"
+    ],
+    "semantic_compile_options": [
+      "ATOMIC_INTRINSICS=1",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "DQS=3",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=0",
+      "MUTEX_OMIT",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=0"
+    ]
+  },
+  "connection": {
+    "db_config": {
+      "DQS_DDL": 1,
+      "DQS_DML": 1,
+      "ENABLE_COMMENTS": 1,
+      "FP_DIGITS": 17,
+      "REVERSE_SCANORDER": 0
+    },
+    "extended_result_codes": false,
+    "limits": {
+      "COLUMN": 256,
+      "EXPR_DEPTH": 1000,
+      "FUNCTION_ARG": 1000,
+      "LENGTH": 1048576,
+      "SQL_LENGTH": 65536,
+      "VARIABLE_NUMBER": 256,
+      "VDBE_OP": 25000
+    }
+  },
+  "fixture_sources": [
+    {
+      "path": "tests/fixtures/read_compatibility/read-compatibility.sql",
+      "sha256": "6da29de262fa702a09fdd4030417c93405258f5cfbce652b341bbcf4ec798d1a"
+    }
+  ],
+  "generator": {
+    "path": "tools/read_compatibility.py",
+    "sha256": "24f4c5b458af493128219c1961a6d13cef7c99278c24527e21a2a0f546688592"
+  },
+  "schema_version": 1,
+  "sqlite": {
+    "fossil_check_in": "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+    "git_mirror_commit": "cb547ab3e931c7766e24834af5ef6c4578863e3d",
+    "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+    "sqlite3_c_sha256": "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
+    "sqlite3_h_sha256": "ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5",
+    "version": "3.54.0"
+  }
+}
