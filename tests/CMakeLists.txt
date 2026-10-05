@@ -74,6 +74,54 @@ gtest_discover_tests(
 )
 
 add_executable(
+  modern_sqlite_read_session_model_test
+  model/read_session_model_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_session_model_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_session_model_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_model_test)
+gtest_discover_tests(
+  modern_sqlite_read_session_model_test
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS model
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_read_fuzz_smoke_test
+  fuzz/database_image_fuzz.cpp
+  fuzz/read_fuzz_smoke_test.cpp
+  fuzz/read_sql_fuzz.cpp
+)
+target_link_libraries(
+  modern_sqlite_read_fuzz_smoke_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_read_fuzz_smoke_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_read_fuzz_smoke_test)
+add_test(
+  NAME fuzz.read_smoke
+  COMMAND
+    modern_sqlite_read_fuzz_smoke_test
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db"
+    "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/read_sql"
+    "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/read_database"
+)
+set_tests_properties(
+  fuzz.read_smoke
+  PROPERTIES
+    LABELS fuzz
+    TIMEOUT 10
+)
+
+add_executable(
   modern_sqlite_bytecode_allocation_test
   unit/bytecode/program_allocation_test.cpp
 )
@@ -561,4 +609,113 @@ set_tests_properties(
   PROPERTIES
     LABELS cli
     TIMEOUT 10
+)
+
+add_test(
+  NAME cli.read_trace
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/cli/read_trace_cli_test.py"
+    --binary "$<TARGET_FILE:modern_sqlite_read_trace>"
+    --fixture
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/session/sqlite-3.54.0-session-v1.db"
+)
+set_tests_properties(
+  cli.read_trace
+  PROPERTIES
+    LABELS cli
+    TIMEOUT 10
+)
+
+add_test(
+  NAME differential.read_compatibility_tool
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest
+    tests/differential/read_compatibility_tool_test.py
+)
+set_tests_properties(
+  differential.read_compatibility_tool
+  PROPERTIES
+    LABELS differential
+    TIMEOUT 10
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+set(_modern_sqlite_oracle_inputs
+  "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
+  "${MODERN_SQLITE_PINNED_SQLITE_C}"
+  "${MODERN_SQLITE_PINNED_SQLITE_H}"
+)
+set(_modern_sqlite_oracle_input_count 0)
+foreach(_oracle_input IN LISTS _modern_sqlite_oracle_inputs)
+  if(NOT _oracle_input STREQUAL "")
+    math(EXPR _modern_sqlite_oracle_input_count
+      "${_modern_sqlite_oracle_input_count} + 1")
+  endif()
+endforeach()
+if(NOT _modern_sqlite_oracle_input_count EQUAL 0
+   AND NOT _modern_sqlite_oracle_input_count EQUAL 3)
+  message(FATAL_ERROR
+    "Pinned SQLite oracle tests require the library, sqlite3.c, and sqlite3.h together")
+endif()
+if(_modern_sqlite_oracle_input_count EQUAL 3)
+  add_test(
+    NAME differential.sqlite_oracle
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/differential/sqlite_oracle_test.py"
+      --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    differential.sqlite_oracle
+    PROPERTIES
+      LABELS differential
+      TIMEOUT 10
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+  add_test(
+    NAME differential.sqlite_oracle_regeneration
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/differential/sqlite_oracle_regeneration_test.py"
+      --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --corpus
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/read-corpus-v1.json"
+      --oracle
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/read-oracle-v1.json"
+      --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    differential.sqlite_oracle_regeneration
+    PROPERTIES
+      LABELS differential
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+
+add_test(
+  NAME differential.read_compatibility
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+    --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --corpus
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/read-corpus-v1.json"
+    --oracle
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/read-oracle-v1.json"
+)
+set_tests_properties(
+  differential.read_compatibility
+  PROPERTIES
+    LABELS differential
+    TIMEOUT 60
 )

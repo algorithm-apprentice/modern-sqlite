@@ -29,8 +29,9 @@
     "implement-binder",
     "implement-logical-plan",
     "implement-basic-optimizer",
-    "implement-read-lowering"
+    "implement-read-lowering",
+    "implement-read-session-api"
   ],
-  "activeNode": "implement-read-session-api",
+  "activeNode": "build-read-compatibility-harness",
   "activeNodeState": "review_pending"
 }

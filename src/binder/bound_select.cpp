@@ -804,6 +804,18 @@ class SelectBinder final {
       return;
     }
     if (std::holds_alternative<BoundRowIdExpression>(bound.payload)) {
+      if (impl_->table_source.has_value() && impl_->table_source->table.has_value()) {
+        const CatalogTable& table = catalog_->table(*impl_->table_source->table);
+        if (table.rowid_alias.has_value() &&
+            table.rowid_alias->value < impl_->source_columns.size()) {
+          const BoundSourceColumn& source = impl_->source_columns[table.rowid_alias->value];
+          result.name = std::string{source.name};
+          if (source.declared_type.has_value()) {
+            result.declared_type = std::string{*source.declared_type};
+          }
+          return;
+        }
+      }
       result.name = "rowid";
       result.declared_type = "INTEGER";
       return;

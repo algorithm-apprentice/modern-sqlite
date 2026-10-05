@@ -41,3 +41,4 @@ their corresponding implementation begins.
 35. [ADR-0035: Deterministic Basic Read Optimization](0035-deterministic-basic-read-optimization.md)
 36. [ADR-0036: Physical Read Plan Lowering](0036-physical-read-plan-lowering.md)
 37. [ADR-0037: RAII Read Session API](0037-read-session-api.md)
+38. [ADR-0038: Pinned Read Compatibility Harness](0038-pinned-read-compatibility-harness.md)
