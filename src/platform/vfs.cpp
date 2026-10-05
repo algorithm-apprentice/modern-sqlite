@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "modern_sqlite/instrumentation/counters.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -253,6 +255,7 @@ Result<FileReadResult> File::ReadAt(MutableByteView destination, FileOffset offs
     return std::unexpected(TooLarge("the file read range is not representable"));
   }
 
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto bytes_read = DoReadAt(destination, offset);
   if (!bytes_read.has_value()) {
     return std::unexpected(std::move(bytes_read.error()));
@@ -273,24 +276,33 @@ Status File::WriteAt(ByteView source, FileOffset offset) {
   if (!IsRangeRepresentable(offset, source.size())) {
     return std::unexpected(TooLarge("the file write range is not representable"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoWriteAt(source, offset);
 }
 
-Status File::Truncate(FileSize size) { return DoTruncate(size); }
+Status File::Truncate(FileSize size) {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
+  return DoTruncate(size);
+}
 
 Status File::Sync(SyncOptions options) {
   if (!IsValid(options.mode)) {
     return std::unexpected(Misuse("the sync mode is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoSync(options);
 }
 
-Result<FileSize> File::Size() { return DoSize(); }
+Result<FileSize> File::Size() {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
+  return DoSize();
+}
 
 Status File::Lock(DatabaseLock lock) {
   if (!IsValidLockTarget(lock)) {
     return std::unexpected(Misuse("the requested database lock is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoLock(lock);
 }
 
@@ -298,12 +310,17 @@ Status File::Unlock(DatabaseLock lock) {
   if (!IsValidUnlockTarget(lock)) {
     return std::unexpected(Misuse("the requested database unlock target is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoUnlock(lock);
 }
 
-Result<bool> File::HasReservedLock() { return DoHasReservedLock(); }
+Result<bool> File::HasReservedLock() {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
+  return DoHasReservedLock();
+}
 
 Result<FileProperties> File::Properties() const {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   const FileProperties properties = DoProperties();
   if (properties.sector_size.value() == 0) {
     return std::unexpected(Internal("the file backend returned a zero sector size"));
@@ -327,6 +344,7 @@ Result<std::optional<MutableByteView>> File::MapSharedMemory(SharedMemoryRegionI
     return std::unexpected(TooLarge("the shared-memory map range is not representable"));
   }
 
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto mapping = DoMapSharedMemory(region, region_size, mode);
   if (!mapping.has_value()) {
     return std::unexpected(std::move(mapping.error()));
@@ -347,15 +365,20 @@ Status File::LockSharedMemory(SharedMemoryLockRange range, SharedMemoryLockOpera
       !IsValid(mode)) {
     return std::unexpected(Misuse("the shared-memory lock request is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoLockSharedMemory(range, operation, mode);
 }
 
-void File::SharedMemoryBarrier() noexcept { DoSharedMemoryBarrier(); }
+void File::SharedMemoryBarrier() noexcept {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
+  DoSharedMemoryBarrier();
+}
 
 Status File::UnmapSharedMemory(SharedMemoryUnmapMode mode) {
   if (!IsValid(mode)) {
     return std::unexpected(Misuse("the shared-memory unmap mode is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoUnmapSharedMemory(mode);
 }
 
@@ -365,6 +388,7 @@ Result<OpenedFile> Vfs::Open(std::optional<std::string_view> path, FileOpenOptio
     return std::unexpected(std::move(validated.error()));
   }
 
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto opened = DoOpen(path, options);
   if (!opened.has_value()) {
     return std::unexpected(std::move(opened.error()));
@@ -380,6 +404,7 @@ Status Vfs::Delete(std::string_view path, DirectorySync directory_sync) {
   if (!IsValidPath(path) || !IsValid(directory_sync)) {
     return std::unexpected(Misuse("the file deletion request is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoDelete(path, directory_sync);
 }
 
@@ -387,6 +412,7 @@ Result<bool> Vfs::Access(std::string_view path, FileAccessQuery query) {
   if (!IsValidPath(path) || !IsValid(query)) {
     return std::unexpected(Misuse("the file access request is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   return DoAccess(path, query);
 }
 
@@ -394,6 +420,7 @@ Result<std::string> Vfs::FullPath(std::string_view path) {
   if (!IsValidPath(path)) {
     return std::unexpected(Misuse("the input path is invalid"));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto full_path = DoFullPath(path);
   if (!full_path.has_value()) {
     return std::unexpected(std::move(full_path.error()));
@@ -408,6 +435,7 @@ Status Vfs::RandomBytes(MutableByteView output) {
   if (output.empty()) {
     return {};
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto bytes_written = DoRandomBytes(output);
   if (!bytes_written.has_value()) {
     return std::unexpected(std::move(bytes_written.error()));
@@ -426,6 +454,7 @@ Result<std::chrono::microseconds> Vfs::SleepFor(std::chrono::microseconds durati
   if (duration.count() == 0) {
     return std::chrono::microseconds{0};
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
   auto elapsed = DoSleepFor(duration);
   if (!elapsed.has_value()) {
     return std::unexpected(std::move(elapsed.error()));
@@ -436,6 +465,9 @@ Result<std::chrono::microseconds> Vfs::SleepFor(std::chrono::microseconds durati
   return elapsed;
 }
 
-Result<WallClockTime> Vfs::CurrentTime() { return DoCurrentTime(); }
+Result<WallClockTime> Vfs::CurrentTime() {
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kVfsCalls, 1U);
+  return DoCurrentTime();
+}
 
 }  // namespace modern_sqlite

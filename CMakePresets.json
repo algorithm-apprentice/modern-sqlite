@@ -62,7 +62,18 @@
       "name": "benchmark",
       "displayName": "Optimized Benchmark Build",
       "inherits": "release",
-      "binaryDir": "${sourceDir}/build/benchmark"
+      "binaryDir": "${sourceDir}/build/benchmark",
+      "cacheVariables": {
+        "MODERN_SQLITE_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "instrumentation",
+      "displayName": "Instrumented Read Engine",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "MODERN_SQLITE_ENABLE_INSTRUMENTATION": "ON"
+      }
     },
     {
       "name": "fuzz",
@@ -97,6 +108,10 @@
     {
       "name": "benchmark",
       "configurePreset": "benchmark"
+    },
+    {
+      "name": "instrumentation",
+      "configurePreset": "instrumentation"
     },
     {
       "name": "fuzz",
@@ -143,6 +158,11 @@
       "name": "clang-tidy",
       "inherits": "required-tests",
       "configurePreset": "clang-tidy"
+    },
+    {
+      "name": "instrumentation",
+      "inherits": "required-tests",
+      "configurePreset": "instrumentation"
     }
   ]
 }

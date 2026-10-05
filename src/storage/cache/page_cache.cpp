@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "modern_sqlite/instrumentation/counters.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -115,8 +117,10 @@ Result<std::optional<PageCache::Pin>> PageCache::Lookup(PageNumber page_number) 
 
   const auto iterator = pages_.find(page_number.value());
   if (iterator == pages_.end()) {
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheMisses, 1U);
     return std::optional<Pin>{};
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kCacheHits, 1U);
   return std::optional<Pin>{Acquire(iterator->second)};
 }
 

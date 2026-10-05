@@ -30,8 +30,9 @@
     "implement-logical-plan",
     "implement-basic-optimizer",
     "implement-read-lowering",
-    "implement-read-session-api"
+    "implement-read-session-api",
+    "build-read-compatibility-harness"
   ],
-  "activeNode": "build-read-compatibility-harness",
+  "activeNode": "build-read-performance-baseline",
   "activeNodeState": "review_pending"
 }

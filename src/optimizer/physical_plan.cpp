@@ -18,6 +18,8 @@
 #include <variant>
 #include <vector>
 
+#include "modern_sqlite/instrumentation/counters.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -951,6 +953,8 @@ class PhysicalPlanBuilder final {
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork,
+                                 1U + impl->candidate_count);
     return PhysicalPlan{std::move(impl)};
   }
 };

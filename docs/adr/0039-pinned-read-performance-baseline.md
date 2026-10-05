@@ -1,0 +1,561 @@
+# ADR-0039: Pinned Read Performance Baseline
+
+- Status: Accepted
+- Date: 2026-10-05
+
+## Context
+
+ADR-0008 requires performance comparisons against pinned SQLite only after the
+compared work, configuration, correctness checks, and provenance are matched.
+ADR-0012 provides compile-time optional counters, and ADR-0038 pins SQLite
+3.54.0 plus the public `ReadSession` application boundary. The
+`build-read-performance-baseline` DAG node must turn those policies into a
+repeatable read benchmark rather than another ad hoc microbenchmark.
+
+The historical read-session experiment in ADR-0037 established that the
+current implementation is within the initial 10x severe-regression guard for
+five useful operations. It is evidence, not a durable baseline:
+
+- both engines execute inside one process;
+- only one timing sequence is retained;
+- corpus and query-order fingerprints are incomplete;
+- raw process results, completion state, and strict report validation are not
+  preserved;
+- internal counters are only partially connected to the integrated read path;
+- the fixture does not prove cache-fit and cache-pressure behavior; and
+- profiling commands are not tied to one immutable workload.
+
+SQLite's `test/kvtest.c` and `test/speedtest1.c` provide useful prepared
+integer-primary-key lookup, deterministic access-order, result hashing, and
+page-cache-statistics precedents. They are not suitable runners because their
+timed regions include unrelated lifecycle work, their broader suites mix read
+and write behavior, and their reports do not enforce this project's
+correctness and provenance contract.
+
+The Modern LevelDB performance harness provides stronger reusable process
+patterns:
+
+- one engine and one case per fresh process;
+- deterministic corpus and query-order fingerprints;
+- explicit warmup and final verification outside measured regions;
+- raw repetition retention plus strict aggregate validation;
+- uninstrumented throughput separated from fixed-work diagnostics; and
+- contract-only hosted CI rather than noisy timing reruns.
+
+The first formal Modern SQLite read baseline must therefore measure a small,
+immutable workload matrix deeply. Startup, repeated preparation, secondary
+indexes, aggregation, wide rows, concurrency, writes, cold-device I/O, and
+memory-mapped reads remain separate future workloads.
+
+## Decision
+
+### 1. Baseline role and boundaries
+
+Node 32 will add a versioned, pinned, warm read-performance baseline over the
+public `ReadSession` and SQLite C APIs.
+
+The baseline is:
+
+- a development and severe-regression control, not a product SLA;
+- an engine comparison, not a storage-device benchmark;
+- single-threaded and read-only;
+- generated only from an optimized, uninstrumented Release build;
+- diagnostic-counter aware, but never timed with diagnostic hooks enabled;
+- reproducible in work and validation, not byte-reproducible in elapsed time;
+  and
+- scoped to the currently implemented integer-primary-key lookup and table
+  scan paths.
+
+The benchmark must not add a public cache-tuning API. SQLite will be configured
+to the existing Modern SQLite default of 512 cached pages.
+
+### 2. Pinned SQLite build
+
+The benchmark configuration requires the exact `sqlite3.c` and `sqlite3.h`
+identified by ADR-0038:
+
+- SQLite version `3.54.0`;
+- source ID
+  `2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`;
+- amalgamation SHA-256
+  `4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6`;
+- generated-header SHA-256
+  `ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5`;
+  and
+- the exact semantic compile-option set in
+  `tests/compatibility/sqlite-oracle-profile-v1.json`.
+
+When `MODERN_SQLITE_BUILD_BENCHMARKS=ON`, CMake will:
+
+1. require both pinned source paths;
+2. verify both hashes before compiling;
+3. enable the C language only for the optional benchmark configuration;
+4. compile the amalgamation as a private static benchmark dependency with
+   `NDEBUG`, `SQLITE_DQS=3`, and `SQLITE_THREADSAFE=0`; and
+5. build SQLite C and Modern SQLite C++ with the same Release configuration
+   and record both compiler identities plus base, Release, and combined
+   effective flags.
+
+The benchmark configuration rejects sanitizers, coverage, instrumentation on
+the timing engine, unoptimized compiler flags, and non-Release builds. Both
+executables embed the configured Git revision and tree. Generation requires
+those identities and each `CMAKE_HOME_DIRECTORY` to match the clean source
+worktree. Generation also requires the pinned Ninja generator, reads the actual
+SQLite, Modern engine, harness compile commands and timing-executable link
+command, records their normalized flags, and rejects profiler, sanitizer,
+coverage, or LTO instrumentation found only at target level. The runtime report
+independently checks SQLite version, source ID, and the complete sorted
+semantic compile-option set.
+
+### 3. Canonical fixture
+
+The two committed fixtures are generated by pinned SQLite from committed SQL
+sources. Each database uses:
+
+- 4096-byte pages;
+- rollback-journal mode with no WAL or shared-memory sidecars;
+- UTF-8 encoding;
+- no auto-vacuum;
+- one table with schema `kv(k INTEGER PRIMARY KEY, v BLOB NOT NULL)`.
+
+The fit database has 4,096 rows. The pressure database has 65,536 rows.
+
+Logical row number `n` starts at one:
+
+- the stored key is `2 * n`, so present keys are even;
+- the interior missing key is `2 * n - 1`;
+- the 256-byte BLOB value is eight lowercase ASCII hexadecimal digits for
+  `n`, followed by 248 ASCII zero bytes.
+
+The fit database has approximately 1 MiB of payload and its complete
+`PRAGMA page_count` must be fewer than 512 pages. The pressure database has
+16 MiB of payload and its complete page count must exceed 512 pages. The exact
+database SHA-256, byte size, page count, row count, schema-source SHA-256,
+full-content fingerprint, and query-order fingerprints are pinned in
+`tests/performance/read-workloads-v1.json`.
+
+Fixture regeneration is explicit and refuses:
+
+- the wrong SQLite identity or compile options;
+- output aliases of the SQLite library, amalgamation, header, SQL source, tool,
+  or existing fixture;
+- pre-existing journal, WAL, or shared-memory sidecars;
+- any schema, column constraint, encoding, auto-vacuum, application-ID,
+  user-version, or extra user-object deviation;
+- a nonempty integrity check;
+- an unexpected page size, journal mode, row count, key, value, or page-count
+  classification; and
+- any noncanonical filesystem alias, including hard links and
+  case-insensitive aliases.
+
+### 4. Portable query order
+
+Each corpus size has one immutable permutation of logical row numbers.
+
+The permutation uses:
+
+1. SplitMix64 with a fixed 64-bit seed;
+2. rejection-sampled bounded integers; and
+3. descending Fisher-Yates swaps.
+
+All arithmetic is unsigned 64-bit arithmetic with wraparound. The fit and
+pressure seeds, algorithm version, and FNV-1a-64 fingerprints are stored in
+the workload manifest. Present and missing point cases use the same logical
+permutation and map it to even and adjacent odd keys respectively.
+
+Changing a seed, generator, mapping, table size, value shape, SQL statement,
+statement lifecycle, or result-consumption rule creates a new workload
+semantics version and new case IDs.
+
+### 5. Immutable workload matrix
+
+The baseline has six cases and two engines, producing twelve cells per round.
+
+| Case | Rows | SQL | Primary unit |
+|---|---:|---|---|
+| `point-present-ipk-fit` | 4,096 | `SELECT v FROM kv WHERE k=?1` | lookup |
+| `point-missing-ipk-fit` | 4,096 | `SELECT v FROM kv WHERE k=?1` | lookup |
+| `scan-ipk-fit` | 4,096 | `SELECT k,v FROM kv` | full traversal |
+| `point-present-ipk-pressure` | 65,536 | `SELECT v FROM kv WHERE k=?1` | lookup |
+| `point-missing-ipk-pressure` | 65,536 | `SELECT v FROM kv WHERE k=?1` | lookup |
+| `scan-ipk-pressure` | 65,536 | `SELECT k,v FROM kv` | full traversal |
+
+The scan SQL intentionally omits `ORDER BY`, which the current public SQL
+subset does not support. Both engines must expose the natural ascending
+integer-primary-key table order, and every returned key and value is checked.
+The case name records this narrower storage-order contract.
+
+Each selected-case process:
+
+1. opens exactly one engine and one read-only session or connection;
+2. applies and verifies the effective read configuration;
+3. performs a complete untimed content verification;
+4. prepares the selected statement once;
+5. performs one untimed workload warmup;
+6. records three measured repetitions;
+7. performs one final complete untimed verification;
+8. finalizes the statement and closes the session; and
+9. emits one strict raw report.
+
+Point repetitions contain 1,048,576 lookups. A fit scan repetition contains
+1,024 full traversals, and a pressure scan repetition contains 64 full
+traversals. Both scan cases therefore consume 4,194,304 rows per repetition.
+These fixed counts must produce at least 200 ms of wall time per repetition on
+the baseline host. A shorter result is invalid; the runner never silently
+calibrates or changes work after seeing performance.
+
+Prepared point statements are rebound, stepped through `ROW` or `DONE`, stepped
+to terminal `DONE` when a row is present, and reset on every lookup. Scan
+statements consume every row, verify terminal `DONE`, and reset on every
+traversal. Result bytes are hashed inside the measured loop for both engines so
+the compiler cannot remove result materialization.
+
+### 6. Matched effective configuration
+
+Both engines use:
+
+- the same copied database bytes;
+- one read-only connection;
+- one thread;
+- 4 KiB database pages;
+- a 512-page engine cache;
+- memory mapping disabled;
+- in-memory temporary storage;
+- rollback-journal mode;
+- the same SQL bytes, binding values, query order, statement reuse, and
+  transaction-free public API behavior;
+- complete row-value consumption; and
+- warm operating-system file cache semantics.
+
+The benchmark does not drop or claim control over the operating-system page
+cache. Results are labeled warm engine/page-cache reads, not cold-device I/O.
+
+SQLite uses `SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX`,
+`SQLITE_PREPARE_PERSISTENT`, `PRAGMA cache_size=512`,
+`PRAGMA mmap_size=0`, `PRAGMA temp_store=MEMORY`,
+`PRAGMA synchronous=FULL`, and `PRAGMA query_only=ON`. It also applies the
+semantic `sqlite3_db_config` and limit profile from ADR-0038. The runner queries
+every effective value back and fails on a mismatch.
+
+### 7. Process and repetition protocol
+
+One engine and one case run in each fresh child process. The timing executable
+contains both implementations but selects the engine before either is
+initialized. The uninstrumented target has no global allocation override and
+does not link the instrumented Modern SQLite engine.
+
+The Python runner executes three paired rounds:
+
+1. canonical case order, Modern then SQLite;
+2. reverse case order, SQLite then Modern; and
+3. canonical case order, Modern then SQLite.
+
+Each child receives a fresh runner-owned database copy. Setup, copying, opening,
+preparation, warmup, and final verification are outside measured regions. The
+copy hash must be unchanged after the child exits, and no `-journal`, `-wal`, or
+`-shm` file may remain.
+
+The child records integer wall-clock nanoseconds and integer process-CPU
+nanoseconds. Each raw report retains all three repetition indexes, operation
+counts, item counts, row and byte counts, result digest, process completion
+state, and timer identity. CPU time is whole-process CPU consumption, not
+request latency.
+
+The aggregate report retains all nine repetitions per engine and case. It
+computes:
+
+- each round's three-repetition median;
+- the all-nine-repetition median;
+- exact rational Modern-to-SQLite wall and CPU ratios;
+- decimal renderings derived from those rationals; and
+- the minimum and maximum round ratios.
+
+No result is called a request percentile. No failed, interrupted, malformed,
+or unfavorable repetition may be omitted or replaced.
+
+### 8. Correctness and completion contract
+
+The timed process fails unless:
+
+- every present lookup returns exactly one expected 256-byte BLOB and then
+  `DONE`;
+- every missing lookup returns no row and `DONE`;
+- every scan returns exactly the expected number of rows in ascending key
+  order with exact values and then `DONE`;
+- Modern SQLite and the pinned fixture agree with the manifest fingerprints;
+- every warmup and measured operation completes without a storage or API
+  error;
+- the pre-run and post-run full-table digests match;
+- the result digest and all completion counters match the case definition; and
+- all statement finalization and session cleanup succeeds.
+
+The Python runner treats exit zero as necessary but insufficient. It
+independently validates the raw report, completion fields, copied database,
+sidecar absence, executable hash, workload manifest, and expected run identity.
+
+### 9. Report and artifact schemas
+
+The committed baseline directory contains:
+
+- a versioned aggregate report;
+- a versioned run manifest;
+- every untouched raw timing report;
+- every untouched raw diagnostic report; and
+- bounded stderr logs for every child.
+
+The canonical version-1 evidence path is
+`benchmarks/read-baseline-v1/`. Generation requires that path not to exist and
+that the source worktree be clean before the directory is created.
+
+Exact-key schemas reject unknown fields. Required provenance includes:
+
+- report, workload-semantics, completion, and diagnostic schema versions;
+- SQLite version, full source ID, compile options, source/header hashes, and
+  benchmark static-library role;
+- Modern SQLite source revision, Git tree, clean/dirty state, status hash, and
+  worktree-content hash captured before output creation;
+- C and C++ compiler identities, versions, base/Release/combined compiler and
+  linker flags, normalized actual target compile/link flags, target
+  architecture, standard library, CMake version, pinned Ninja generator, and
+  build type;
+- timing and diagnostic binary identities bound to the recorded Git revision,
+  Git tree, SQLite identity, and complete semantic compile-option set;
+- timing and diagnostic executable SHA-256 values;
+- fixture, fixture SQL, workload manifest, benchmark source, and Python runner
+  hashes;
+- host OS, kernel, architecture, CPU identity, logical CPU count, and timer
+  identities;
+- effective page, cache, mmap, temp, journal, thread, and statement settings;
+- exact logical argv and artifact-relative paths;
+- expected and actual rounds, repetitions, operations, items, rows, bytes, and
+  digests;
+- child return code, timeout state, runner elapsed time, and cleanup status;
+  and
+- every raw artifact path and SHA-256.
+
+JSON parsing rejects duplicate keys, NaN, infinity, partial documents, wrong
+types, booleans where integers are required, empty arrays, skipped rows,
+nonpositive wall time, negative CPU time, duplicate or missing indexes,
+inconsistent derived values, and missing or extra workloads.
+
+Raw durations and counts are integers. Ratios and normalized values are stored
+as exact numerator/denominator pairs plus validated decimal strings, never as
+unconstrained JSON floating-point values.
+
+The runner bounds stdout, stderr, child duration, file counts, and report
+sizes. Timeouts terminate the owned process group, record explicit failure, and
+retain scratch artifacts. It never discovers inputs through "newest file"
+matching and never overwrites an existing output directory.
+
+### 10. Diagnostic counters
+
+The authoritative timing target links the ordinary uninstrumented engine.
+`modern_sqlite_read_diagnostics` links a separately compiled instrumented
+engine and performs fixed work after the same untimed warmup.
+
+The existing stable Modern SQLite counters retain these exact semantics:
+
+- `allocations`: C++ allocation calls made while the diagnostic scope is
+  active;
+- `bytes_copied`: explicitly instrumented payload-copy bytes;
+- `vfs_calls`: valid front-end operations dispatched to a VFS or file backend,
+  whether they succeed or fail;
+- `pages_read`: pager page-fill attempts after a cache miss;
+- `pages_written`: pager page-write attempts, expected to remain zero here;
+- `cache_hits`: valid page-cache lookups that return a frame;
+- `cache_misses`: valid page-cache lookups that do not return a frame;
+- `btree_comparisons`: instrumented B-tree key comparisons;
+- `vm_instructions`: executed read-VM instructions; and
+- `planner_work`: one unit for each completed physical plan plus one unit for
+  every access-path candidate costed for that plan.
+
+Node 32 connects VFS calls, page reads, cache outcomes, and planner work to the
+integrated read path. Page writes remain zero because this is a read-only
+baseline. Allocation counting is implemented only in the diagnostic
+executable, not in production code.
+
+SQLite diagnostics record separately named native values from
+`sqlite3_db_status`, `sqlite3_stmt_status`, and `sqlite3_status64`, including
+page-cache hits, misses, writes, cache bytes, VM steps, full-scan steps, runs,
+reprepares, and available memory high-water values. Native SQLite counters are
+not renamed as Modern SQLite counters when their semantics differ.
+
+The report also includes engine-neutral completion counters: opens, prepares,
+resets, operations, result hits, result misses, rows, result bytes, and full
+verifications.
+
+Fit diagnostics must confirm that the complete selected database occupies
+fewer than 512 pages and incurs no measured engine-cache misses after warmup.
+Pressure diagnostics must confirm that the complete selected database occupies
+more than 512 pages and incurs measured engine-cache misses. A classification
+that is not observed is a harness failure, not a zero-valued success.
+
+Instrumented timings are diagnostic only and can never populate the
+authoritative timing fields or satisfy the severe-regression guard.
+
+### 11. Severe-regression policy and CI
+
+The first formal baseline retains ADR-0008's deliberately broad 10x guard.
+Every case must satisfy:
+
+- aggregate Modern/SQLite wall ratio at most 10.0;
+- aggregate Modern/SQLite process-CPU ratio at most 10.0;
+- every paired-round wall ratio at most 10.0; and
+- every paired-round process-CPU ratio at most 10.0.
+
+The generator writes and preserves a structurally valid failing report before
+returning the performance-mismatch exit code. The committed baseline must pass.
+
+Hosted CI validates the committed report, raw artifacts, hashes, workload
+coverage, fixture contract, and severe-regression result. CI does not rerun the
+full timing matrix or gate on newly measured hosted-runner throughput.
+
+macOS and Ubuntu CI additionally:
+
+1. check out `sqlite/sqlite` at Git mirror commit
+   `cb547ab3e931c7766e24834af5ef6c4578863e3d`;
+2. verify `VERSION` is `3.54.0` and `manifest.uuid` is the pinned Fossil
+   check-in;
+3. run an out-of-tree `configure` followed by `make sqlite3.c`;
+4. verify the generated amalgamation and header hashes; and
+5. build and run the benchmark smoke matrix.
+
+Smoke mode performs one operation or traversal per cell and proves build,
+identity, correctness, process, and schema contracts. Its elapsed values are
+never admitted as baseline evidence.
+
+### 12. Profiling workflow
+
+The uninstrumented timing executable provides a selected-engine,
+selected-case replay mode. Replay performs setup, validation, warmup, and a
+fixed user-requested number of operations or traversals, then verifies the
+result digest and cleanup.
+
+The profiling guide documents:
+
+- macOS Xcode Time Profiler capture;
+- Linux `perf record` and `perf stat`;
+- optional Linux Cachegrind instruction attribution; and
+- selected-case diagnostic-counter replay.
+
+Profiles are collected only after an unprofiled baseline. Profile elapsed time
+is never presented as a speedup or regression result. Unsupported tools or
+capture modes fail explicitly rather than silently substituting another
+profiler.
+
+### 13. Exit-code partition
+
+Both the Python runner and benchmark executables reserve:
+
+- `0` for complete validated success;
+- `1` for command-line, environment, provenance, malformed-input, process, or
+  harness failure; and
+- `2` for a correctness mismatch or a validated performance-guard failure.
+
+Argument-parser usage errors return `1`, not `2`.
+
+### 14. TDD and validation sequence
+
+Implementation follows this order:
+
+1. strict workload, raw-report, aggregate-report, path, process, and exit-code
+   tests fail against the absent tool;
+2. fixture-regeneration tests fail against the absent generator;
+3. C++ smoke and counter-integration tests fail against absent targets and
+   hooks;
+4. the smallest strict Python and C++ implementations make focused tests pass;
+5. the canonical fixture and its fingerprints are regenerated and verified;
+6. Debug, Release, instrumentation, sanitizer, thread-sanitizer, clang-tidy,
+   formatting, graph, and Python syntax checks pass;
+7. the benchmark smoke matrix passes with pinned SQLite;
+8. the full baseline is generated twice, with identical work, correctness,
+   provenance identities, and workload coverage while retaining independent
+   timing samples;
+9. the committed baseline passes the 10x guard and strict validator; and
+10. design and code receive independent read-only review without delegating
+    build or test execution to reviewers.
+
+## Pre-Implementation Proof Obligations
+
+### Correctness
+
+- [ ] The fixture has deterministic schema, row values, file hash, row counts,
+      page size, page classifications, and content/query fingerprints.
+- [ ] Present, missing, and scan cases verify exact values, cardinality, order,
+      terminal status, and full-content pre/post digests.
+- [ ] Timed result bytes are consumed and contribute to a result digest.
+- [ ] Database bytes remain unchanged and no sidecar survives.
+- [ ] Both engines receive identical logical operation streams.
+
+### ABI and process boundaries
+
+- [ ] SQLite C source and header hashes, version, source ID, compile options,
+      integer widths, and C API return codes are validated.
+- [ ] One engine and one case are initialized per measured process.
+- [ ] Timing binaries contain no diagnostic instrumentation, sanitizer,
+      coverage, or profiler hooks.
+- [ ] Statement reuse, bindings, row extraction, terminal stepping, reset, and
+      finalization have matched meanings.
+- [ ] Child output, stderr, duration, process-group cleanup, and return codes
+      are bounded and independently checked.
+
+### Statistics
+
+- [ ] Primary iteration and item units are immutable per case.
+- [ ] Setup, warmup, and final verification are outside measured regions.
+- [ ] Three rounds, three repetitions, engine order, case order, and medians
+      are predeclared.
+- [ ] Every repetition is present exactly once and lasts at least 200 ms.
+- [ ] Wall and CPU values are positive integers and all derived values
+      recompute exactly.
+- [ ] No result is discarded and no aggregate is mislabeled as a request
+      percentile.
+
+### Paths and files
+
+- [ ] Output directories must not exist and ambiguous symlinks or aliases are
+      rejected.
+- [ ] Every child owns a fresh copied database path.
+- [ ] All inputs, executables, raw reports, and logs are explicitly named and
+      hashed.
+- [ ] Failure preserves raw output and scratch state.
+- [ ] Cleanup occurs only after owned processes have exited.
+
+### Cross-platform behavior
+
+- [ ] macOS and Linux use the same workload, report, counter-name, and
+      validation contracts.
+- [ ] Compiler, standard library, architecture, timers, and effective SQLite
+      settings are recorded.
+- [ ] Unsupported profiler and OS-specific diagnostic fields are unavailable,
+      never silently zero.
+- [ ] Corpus and permutation fingerprints are identical across supported
+      compiler/library pairs.
+
+### Future evolution
+
+- [ ] Report, workload, completion, and diagnostic schemas are independently
+      versioned.
+- [ ] Existing case IDs retain immutable semantics.
+- [ ] Raw reports remain available for future aggregation.
+- [ ] New startup, preparation, index, aggregate, wide-row, mmap, cold-I/O,
+      concurrent, and write cases receive new IDs and decisions.
+- [ ] A different SQLite source or configuration receives a distinct oracle
+      identity rather than replacing this baseline silently.
+
+## Consequences
+
+- The baseline is slower and more artifact-heavy than a single-process
+  microbenchmark, but engine initialization, allocator state, and counters do
+  not contaminate the comparison.
+- Committing roughly 17 MiB of payload plus database-format overhead across two
+  canonical databases is an intentional cost for immutable cache-fit and
+  cache-pressure layouts plus ordinary-CI hash validation.
+- The initial matrix is deliberately narrow. It measures the implemented read
+  engine well without pretending to cover unsupported SQL or future write
+  paths.
+- Hosted CI remains deterministic because it validates contracts and committed
+  evidence rather than comparing noisy fresh timings.
+- Performance regressions become attributable through raw samples, exact work
+  fingerprints, completion counters, Modern SQLite counters, SQLite-native
+  diagnostics, and selected-case profiles.

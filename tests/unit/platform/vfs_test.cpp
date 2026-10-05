@@ -18,6 +18,7 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -931,6 +932,32 @@ TEST(VfsContracts, RejectsInvalidEnumValuesBeforeCallingBackend) {
   EXPECT_EQ(0U, vfs.delete_calls);
   EXPECT_EQ(0U, vfs.access_calls);
 }
+
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(VfsInstrumentation, CountsOnlyValidatedBackendDispatches) {
+  using instrumentation::Counter;
+  using instrumentation::CounterCollection;
+  using instrumentation::ScopedCounterCollection;
+
+  FakeFile file;
+  std::array<std::byte, 4> destination{};
+  CounterCollection counters;
+  {
+    const ScopedCounterCollection scope{counters};
+
+    EXPECT_TRUE(file.ReadAt(MutableByteView{destination}, FileOffset{0}).has_value());
+    EXPECT_TRUE(file.ReadAt(MutableByteView{}, FileOffset{0}).has_value());
+    EXPECT_TRUE(file.Size().has_value());
+    EXPECT_TRUE(file.Properties().has_value());
+
+    const auto invalid =
+        file.Sync(SyncOptions{.mode = InvalidEnumValue<SyncMode>(20), .data_only = false});
+    EXPECT_FALSE(invalid.has_value());
+  }
+
+  EXPECT_EQ(3U, counters.Value(Counter::kVfsCalls));
+}
+#endif
 
 }  // namespace
 }  // namespace modern_sqlite

@@ -1,0 +1,2137 @@
+{
+  "binaries": {
+    "diagnostic": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": true,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
+          "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "logical_name": "modern_sqlite_read_diagnostics",
+      "sha256": "9f0be99b850fa5e7f6124223c2911e7ea1d194881bc7fb091b1f67f18cf6efb1",
+      "size_bytes": 2359200
+    },
+    "timing": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": false,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
+          "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "logical_name": "modern_sqlite_read_benchmark",
+      "sha256": "60fa3220c5e181f06fbafa4dc8b3ecde1e974f9f2d091cb13d1af96dcec5d028",
+      "size_bytes": 2357296
+    }
+  },
+  "build": {
+    "actual_harness_cxx_compile_flags": "'-I<BUILD_DIRECTORY>/generated' '-I<REPOSITORY_ROOT>/include' '-I<SQLITE_SOURCE_DIRECTORY>' -O3 -DNDEBUG -std=gnu++23 -arch arm64 -Wall -Wextra -Wpedantic -Wcast-align -Wconversion -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -Wnon-virtual-dtor -Wnull-dereference -Wold-style-cast -Woverloaded-virtual -Wshadow -Wsign-conversion -Werror",
+    "actual_modern_cxx_compile_flags": "'-I<REPOSITORY_ROOT>/include' -O3 -DNDEBUG -std=gnu++23 -arch arm64 -Wall -Wextra -Wpedantic -Wcast-align -Wconversion -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -Wnon-virtual-dtor -Wnull-dereference -Wold-style-cast -Woverloaded-virtual -Wshadow -Wsign-conversion -Werror",
+    "actual_sqlite_c_compile_flags": "-DNDEBUG -DSQLITE_DQS=3 -DSQLITE_THREADSAFE=0 '-I<SQLITE_SOURCE_DIRECTORY>' -O3 -DNDEBUG -std=gnu99 -arch arm64",
+    "actual_timing_link_flags": "-O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names",
+    "build_type": "Release",
+    "c_base_flags": "",
+    "c_compiler": "/usr/bin/cc",
+    "c_compiler_version": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "c_effective_flags": "-O3 -DNDEBUG",
+    "c_release_flags": "-O3 -DNDEBUG",
+    "cmake_version": "cmake version 4.4.3",
+    "cxx_base_flags": "",
+    "cxx_compiler": "/usr/bin/c++",
+    "cxx_compiler_version": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "cxx_effective_flags": "-O3 -DNDEBUG",
+    "cxx_release_flags": "-O3 -DNDEBUG",
+    "generator": "Ninja",
+    "linker_base_flags": "",
+    "linker_effective_flags": "",
+    "linker_release_flags": ""
+  },
+  "completion_schema_version": 1,
+  "diagnostic_runs": [
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/000-point-present-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "point-present-ipk-fit",
+        "scratch/000-point-present-ipk-fit-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 0,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 41877500,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/000-point-present-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/000-point-present-ipk-fit-modern.json",
+        "sha256": "3869f8dfb47185d166ae18d9fb709a807d829bc71d776df2cfdd8e0d4a94541d",
+        "size_bytes": 2040
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/001-point-present-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "point-present-ipk-fit",
+        "scratch/001-point-present-ipk-fit-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 1,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 34120458,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/001-point-present-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/001-point-present-ipk-fit-sqlite.json",
+        "sha256": "0352e5bc216038a0bb5a5702aed9c94a4044d1990f733ee33c9d8478f11d1383",
+        "size_bytes": 2091
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/002-point-missing-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "point-missing-ipk-fit",
+        "scratch/002-point-missing-ipk-fit-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 2,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 35789625,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/002-point-missing-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/002-point-missing-ipk-fit-modern.json",
+        "sha256": "73baf7df895c19e1e674b29a80f16d78b5b042a3d5a5c9ea557c1a846a4e7b9e",
+        "size_bytes": 2031
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/003-point-missing-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "point-missing-ipk-fit",
+        "scratch/003-point-missing-ipk-fit-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 3,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 29961917,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/003-point-missing-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/003-point-missing-ipk-fit-sqlite.json",
+        "sha256": "62d732b53bafd9b32847947121aa015ef34435d8e8e864fbf1dbcf0ae450afaa",
+        "size_bytes": 2082
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/004-scan-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "scan-ipk-fit",
+        "scratch/004-scan-ipk-fit-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 4,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11782542,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/004-scan-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/004-scan-ipk-fit-modern.json",
+        "sha256": "c6cf7566543559395fcd7e8325c176b02987c082878e0dc9862c74fced4df852",
+        "size_bytes": 2013
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/005-scan-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "scan-ipk-fit",
+        "scratch/005-scan-ipk-fit-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 5,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 9783125,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/005-scan-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/005-scan-ipk-fit-sqlite.json",
+        "sha256": "714bad5cf3e19b3e504fe12f7c5cc15d309135a6e0fd3dfdfa17ca0da1158adf",
+        "size_bytes": 2071
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/006-point-present-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "point-present-ipk-pressure",
+        "scratch/006-point-present-ipk-pressure-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 6,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 648323292,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/006-point-present-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/006-point-present-ipk-pressure-modern.json",
+        "sha256": "fa496c38674667068b45a0cbd74d1ae26de9088880278b00a1d316f9afd7ad63",
+        "size_bytes": 2067
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/007-point-present-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "point-present-ipk-pressure",
+        "scratch/007-point-present-ipk-pressure-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 7,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 527447542,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/007-point-present-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/007-point-present-ipk-pressure-sqlite.json",
+        "sha256": "baf107414aab6f19f856260c74c21548ad5d481e03643d4ebd1349c9d7294ed6",
+        "size_bytes": 2110
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/008-point-missing-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "point-missing-ipk-pressure",
+        "scratch/008-point-missing-ipk-pressure-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 8,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 625692083,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/008-point-missing-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/008-point-missing-ipk-pressure-modern.json",
+        "sha256": "2700f0a0203e64d9eed5eee940c7f6950305b54fed2391a1955209f1440f9d50",
+        "size_bytes": 2056
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/009-point-missing-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "point-missing-ipk-pressure",
+        "scratch/009-point-missing-ipk-pressure-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 9,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 486963584,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/009-point-missing-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/009-point-missing-ipk-pressure-sqlite.json",
+        "sha256": "1de1a6ae44a426abf1ac7dcb365aba0288167761b5aeccf103ea56b484083d89",
+        "size_bytes": 2099
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/010-scan-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "modern",
+        "scan-ipk-pressure",
+        "scratch/010-scan-ipk-pressure-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 10,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 124888417,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/010-scan-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/010-scan-ipk-pressure-modern.json",
+        "sha256": "faaa5c419f4d38257c4e85c7819b7c7dee7e8e6cde6bcc6a11336b9eb193c7dd",
+        "size_bytes": 2029
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/011-scan-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_diagnostics",
+        "run",
+        "sqlite",
+        "scan-ipk-pressure",
+        "scratch/011-scan-ipk-pressure-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 11,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 90099542,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/011-scan-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/011-scan-ipk-pressure-sqlite.json",
+        "sha256": "3deca22320dfcc0a4f5c926d65698b2829d88ab1e0bef24ef141157d3abd6cb3",
+        "size_bytes": 2082
+      }
+    }
+  ],
+  "diagnostic_schema_version": 1,
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cpu_timer": "CLOCK_PROCESS_CPUTIME_ID",
+    "kernel": "27.0.0",
+    "logical_cpu_count": 14,
+    "os": "Darwin",
+    "wall_timer": "steady_clock"
+  },
+  "inputs": [
+    {
+      "path": "tests/performance/read-workloads-v1.json",
+      "role": "workload-manifest",
+      "sha256": "ef6c44735e9830050351c8ca436d4d925e43e67f0f61ee4f7995f65f6dbfa596",
+      "size_bytes": 11372
+    },
+    {
+      "path": "tests/compatibility/sqlite-oracle-profile-v1.json",
+      "role": "sqlite-profile",
+      "sha256": "cf0982cb2f38c893359188a6ed11bd05ff541d5975a57d482f7fd367a4d02981",
+      "size_bytes": 3072
+    },
+    {
+      "path": "benchmarks/read_performance.cpp",
+      "role": "benchmark-source",
+      "sha256": "c9a4eba73c8dfbc3f5da69685bf1bd2257e250852df3dcb7a37ac8dd8f8939d6",
+      "size_bytes": 65394
+    },
+    {
+      "path": "tools/read_performance.py",
+      "role": "runner-source",
+      "sha256": "94d504f00aada0d2de34f4852fb5c46e9717a67cc2127a50f3d3665af5fbe7c1",
+      "size_bytes": 139185
+    },
+    {
+      "path": "tests/fixtures/read_performance/fit.db",
+      "role": "fixture-fit",
+      "sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+      "size_bytes": 1130496
+    },
+    {
+      "path": "tests/fixtures/read_performance/fit.sql",
+      "role": "fixture-sql-fit",
+      "sha256": "83391a4f55d639220a2cfe25786064850abf2947a27be0cb1086875719f898ba",
+      "size_bytes": 484
+    },
+    {
+      "path": "tests/fixtures/read_performance/pressure.db",
+      "role": "fixture-pressure",
+      "sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+      "size_bytes": 17952768
+    },
+    {
+      "path": "tests/fixtures/read_performance/pressure.sql",
+      "role": "fixture-sql-pressure",
+      "sha256": "2f1ab567c0a431fe9f484dfa8fe153ef3e9528b4551edce7433c6281959e337d",
+      "size_bytes": 485
+    }
+  ],
+  "schedule": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "clean": true,
+    "revision": "b5f6b0d2c5d6a307c4989bfbc365bd9e50efe6a7",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "e06359dca632e274a2e1d4492bd23439da1b3b17",
+    "worktree_content_sha256": "1f026d3d71eeeb9e91ea571ec5b0cc4ccf4fdf1491b41832a5bdd1ae727e207f"
+  },
+  "sqlite": {
+    "compile_options": [
+      "ATOMIC_INTRINSICS=1",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "DQS=3",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=0",
+      "MUTEX_OMIT",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=0"
+    ],
+    "library_role": "statically-linked-benchmark-oracle",
+    "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+    "sqlite3_c_sha256": "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
+    "sqlite3_h_sha256": "ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5",
+    "version": "3.54.0"
+  },
+  "status": "complete",
+  "timing_runs": [
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/000-round-0-point-present-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-fit",
+        "scratch/000-round-0-point-present-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 0,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11214661458,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/000-round-0-point-present-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/000-round-0-point-present-ipk-fit-modern.json",
+        "sha256": "a52da0c42e75cb55ebad2c35b3f1c5317165792d9a641b3409d2ddbae4688601",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/001-round-0-point-present-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-fit",
+        "scratch/001-round-0-point-present-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 1,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 9444208208,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/001-round-0-point-present-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/001-round-0-point-present-ipk-fit-sqlite.json",
+        "sha256": "c732df1a4cf9b24007ebc5496e45e3f1e017611bc5d868d9c0d6eeabcc840501",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/002-round-0-point-missing-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-fit",
+        "scratch/002-round-0-point-missing-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 2,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10124117417,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/002-round-0-point-missing-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/002-round-0-point-missing-ipk-fit-modern.json",
+        "sha256": "dd2c7fbe49c7d098e016645aaf2019cc9009bdb39faa2783bad13b8477255625",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/003-round-0-point-missing-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-fit",
+        "scratch/003-round-0-point-missing-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 3,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 8485495792,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/003-round-0-point-missing-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/003-round-0-point-missing-ipk-fit-sqlite.json",
+        "sha256": "f04013fa34f3d6ea8b031bb60f02a55aa513cace5bec3e2ca7566c5e2e96e6a8",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/004-round-0-scan-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-fit",
+        "scratch/004-round-0-scan-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 4,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5158179750,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/004-round-0-scan-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/004-round-0-scan-ipk-fit-modern.json",
+        "sha256": "8f681a5ced01a18dd507839dfd18bac7dfdf29f882ea1d1b035f526da99cb930",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/005-round-0-scan-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-fit",
+        "scratch/005-round-0-scan-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 5,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3405899083,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/005-round-0-scan-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/005-round-0-scan-ipk-fit-sqlite.json",
+        "sha256": "22c748d966f6041f53d3d2fba83f3edfeacdb1cc3595d4055002131477c28d01",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/006-round-0-point-present-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-pressure",
+        "scratch/006-round-0-point-present-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 6,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 14109372666,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/006-round-0-point-present-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/006-round-0-point-present-ipk-pressure-modern.json",
+        "sha256": "8269a6e9af0674181736e1cac4d0c9c5d423d0e9ddb20c9106527e063afb05fe",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/007-round-0-point-present-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-pressure",
+        "scratch/007-round-0-point-present-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 7,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11578981125,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/007-round-0-point-present-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/007-round-0-point-present-ipk-pressure-sqlite.json",
+        "sha256": "30a782f0b7c78b0a3ab77b7f2e799d8f64d50c2696e65435150495082e1ec8c1",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/008-round-0-point-missing-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-pressure",
+        "scratch/008-round-0-point-missing-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 8,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 13034470416,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/008-round-0-point-missing-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/008-round-0-point-missing-ipk-pressure-modern.json",
+        "sha256": "850a511473bbdd71243af2811550732e707b724e0dd8e6fb4d6e1594e1a856c6",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/009-round-0-point-missing-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-pressure",
+        "scratch/009-round-0-point-missing-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 9,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10473235208,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/009-round-0-point-missing-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/009-round-0-point-missing-ipk-pressure-sqlite.json",
+        "sha256": "ad1f32da9b46942eef40410eb0d734bd355a426a095d5844d0603c6f5901c21f",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/010-round-0-scan-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-pressure",
+        "scratch/010-round-0-scan-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 10,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5860162875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/010-round-0-scan-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/010-round-0-scan-ipk-pressure-modern.json",
+        "sha256": "ccd6fb29556bc16ebb5157cb413eaf3f7a3ad11c4ab6130b23cf9e554f8eb74c",
+        "size_bytes": 2424
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/011-round-0-scan-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-pressure",
+        "scratch/011-round-0-scan-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 11,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3781275625,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/011-round-0-scan-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/011-round-0-scan-ipk-pressure-sqlite.json",
+        "sha256": "6cae39252760a394b1d2dd053d79d7185d78651e347d695f7f0d03eac9b56f53",
+        "size_bytes": 2424
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/012-round-1-scan-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-pressure",
+        "scratch/012-round-1-scan-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 12,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3788467000,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/012-round-1-scan-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/012-round-1-scan-ipk-pressure-sqlite.json",
+        "sha256": "d9fe85727283af9e10edb7471b218133323f41198252247822ea141d9a13d0f7",
+        "size_bytes": 2424
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/013-round-1-scan-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-pressure",
+        "scratch/013-round-1-scan-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 13,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5812975500,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/013-round-1-scan-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/013-round-1-scan-ipk-pressure-modern.json",
+        "sha256": "aa410a0d2f9e69da8654d217c570fea307ed355b0fe4148ac672d751412a2459",
+        "size_bytes": 2424
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/014-round-1-point-missing-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-pressure",
+        "scratch/014-round-1-point-missing-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 14,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10738696334,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/014-round-1-point-missing-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/014-round-1-point-missing-ipk-pressure-sqlite.json",
+        "sha256": "d4ee0dfeb8bdee368ea183609b035b29f0ecb63a870ca7ab1b5eaa9befe45eef",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/015-round-1-point-missing-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-pressure",
+        "scratch/015-round-1-point-missing-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 15,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 12747740375,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/015-round-1-point-missing-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/015-round-1-point-missing-ipk-pressure-modern.json",
+        "sha256": "9f54ba4866d627979ebf984df104eb6c602fe31f74f1aeb7806816e84e30d57d",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/016-round-1-point-present-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-pressure",
+        "scratch/016-round-1-point-present-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 16,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11448340666,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/016-round-1-point-present-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/016-round-1-point-present-ipk-pressure-sqlite.json",
+        "sha256": "87336a6be50d14cc5c2db8562ab23f1f824c6e30113e0369af2067db9a224331",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/017-round-1-point-present-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-pressure",
+        "scratch/017-round-1-point-present-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 17,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 14191117208,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/017-round-1-point-present-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/017-round-1-point-present-ipk-pressure-modern.json",
+        "sha256": "7d65344992dbd4c178a57f0e72becb5f44c98138b0caf7400667239515faf56a",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/018-round-1-scan-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-fit",
+        "scratch/018-round-1-scan-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 18,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3347302583,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/018-round-1-scan-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/018-round-1-scan-ipk-fit-sqlite.json",
+        "sha256": "da32b2d5c226f94c91151df0183cd707c49439cf137f6a101bb7310ce1a897b6",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/019-round-1-scan-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-fit",
+        "scratch/019-round-1-scan-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 19,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5256585583,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/019-round-1-scan-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/019-round-1-scan-ipk-fit-modern.json",
+        "sha256": "d7933104a4ed512050b8301ce107227e961ecb5cc68199aa557fb2ba340ce55d",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/020-round-1-point-missing-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-fit",
+        "scratch/020-round-1-point-missing-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 20,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 8609476875,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/020-round-1-point-missing-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/020-round-1-point-missing-ipk-fit-sqlite.json",
+        "sha256": "f9b3945bbc13fe7302423e15b14f052d887c7f51430ebd650f68fc3098f0b8c1",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/021-round-1-point-missing-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-fit",
+        "scratch/021-round-1-point-missing-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 21,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10174764459,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/021-round-1-point-missing-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/021-round-1-point-missing-ipk-fit-modern.json",
+        "sha256": "6e618466632f1237e7ac459857b80c3fd81d7772d0f2944da41af57b0fb24560",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/022-round-1-point-present-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-fit",
+        "scratch/022-round-1-point-present-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 22,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 9498582958,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/022-round-1-point-present-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/022-round-1-point-present-ipk-fit-sqlite.json",
+        "sha256": "1e1e82348106260652eb84e6b552b53e1ac09b6083ea016f42568a43168ae1a3",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/023-round-1-point-present-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-fit",
+        "scratch/023-round-1-point-present-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 23,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11313422083,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/023-round-1-point-present-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/023-round-1-point-present-ipk-fit-modern.json",
+        "sha256": "b4b928b76a0258a68eabae70c8ea0a12442a328a9c6f1887c5ff247c8844aec7",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/024-round-2-point-present-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-fit",
+        "scratch/024-round-2-point-present-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 24,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11183589625,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/024-round-2-point-present-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/024-round-2-point-present-ipk-fit-modern.json",
+        "sha256": "17cf15d8d6eee678e18d9385b3ab17dbf1794ca452beb7d82d31c286127a84e7",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-present-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/025-round-2-point-present-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-fit",
+        "scratch/025-round-2-point-present-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 25,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 9419033417,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/025-round-2-point-present-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/025-round-2-point-present-ipk-fit-sqlite.json",
+        "sha256": "ff5d8cd5a64a8c2174130746bea75743275321e2285f3735b58a980555abeb2b",
+        "size_bytes": 2462
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/026-round-2-point-missing-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-fit",
+        "scratch/026-round-2-point-missing-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 26,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10123418792,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/026-round-2-point-missing-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/026-round-2-point-missing-ipk-fit-modern.json",
+        "sha256": "7396db66ec46fb8c26b59b8cc600df7fec32a00de187d60fa9fda1f44ad7133c",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "point-missing-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/027-round-2-point-missing-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-fit",
+        "scratch/027-round-2-point-missing-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 27,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 8600032708,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/027-round-2-point-missing-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/027-round-2-point-missing-ipk-fit-sqlite.json",
+        "sha256": "dc26be25b5d9559685860be06fee0f92f4727a2339ec1bd8e252ebcc9de4951e",
+        "size_bytes": 2411
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/028-round-2-scan-ipk-fit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-fit",
+        "scratch/028-round-2-scan-ipk-fit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 28,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5205645333,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/028-round-2-scan-ipk-fit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/028-round-2-scan-ipk-fit-modern.json",
+        "sha256": "02d241ec8e7691bca229ce46c6ab3d095971f16074b27dcea84c22b60dd9a0e1",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "scan-ipk-fit",
+      "database": {
+        "after_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "before_sha256": "bbf1c1c95a0e2237424175af3adeabe98b2dc538707eb885e6c52dcbccb3cfb3",
+        "cleanup": "removed",
+        "copy_path": "scratch/029-round-2-scan-ipk-fit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/fit.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-fit",
+        "scratch/029-round-2-scan-ipk-fit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 29,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3383936000,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/029-round-2-scan-ipk-fit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/029-round-2-scan-ipk-fit-sqlite.json",
+        "sha256": "e3714c8fd00feb066ce9aa535aca184d8986e55b041b5d1ddbc5366ccdf8ba7c",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/030-round-2-point-present-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-present-ipk-pressure",
+        "scratch/030-round-2-point-present-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 30,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 14497073875,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/030-round-2-point-present-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/030-round-2-point-present-ipk-pressure-modern.json",
+        "sha256": "b3485a1a752197c90999e4fa34d4197018a78dff24d92913058a37e82cffe88a",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "point-present-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/031-round-2-point-present-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-present-ipk-pressure",
+        "scratch/031-round-2-point-present-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 31,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 11541184917,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/031-round-2-point-present-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/031-round-2-point-present-ipk-pressure-sqlite.json",
+        "sha256": "91c72a66de7a00a437bf9886876ac93932381a5fb949a404473c349d8bfc6cc4",
+        "size_bytes": 2472
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/032-round-2-point-missing-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "point-missing-ipk-pressure",
+        "scratch/032-round-2-point-missing-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 32,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 12985132583,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/032-round-2-point-missing-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/032-round-2-point-missing-ipk-pressure-modern.json",
+        "sha256": "4442fbf4db04b3b7abacbe54447830308c2b6179bd4c51b3e0d4add50a84bd74",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "point-missing-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/033-round-2-point-missing-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "point-missing-ipk-pressure",
+        "scratch/033-round-2-point-missing-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 33,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 10636998792,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/033-round-2-point-missing-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/033-round-2-point-missing-ipk-pressure-sqlite.json",
+        "sha256": "23a85173df43d0b155667bdd0dd14c50dc09cd11d5582daebbbb71d7695c892d",
+        "size_bytes": 2419
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/034-round-2-scan-ipk-pressure-modern.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "modern",
+        "scan-ipk-pressure",
+        "scratch/034-round-2-scan-ipk-pressure-modern.db",
+        "baseline"
+      ],
+      "ordinal": 34,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 5771397959,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/034-round-2-scan-ipk-pressure-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/034-round-2-scan-ipk-pressure-modern.json",
+        "sha256": "8dbf25495db1f9047554f04ca27a2c90f654dc44e117fdcca4c03a7af48d6971",
+        "size_bytes": 2424
+      }
+    },
+    {
+      "case": "scan-ipk-pressure",
+      "database": {
+        "after_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "before_sha256": "ed9742b9dc019bd6ade90699eb7fdd0940fda49cbc73c86a8f2df9fa651c25ff",
+        "cleanup": "removed",
+        "copy_path": "scratch/035-round-2-scan-ipk-pressure-sqlite.db",
+        "fixture": "pressure",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/read_performance/pressure.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_read_benchmark",
+        "run",
+        "sqlite",
+        "scan-ipk-pressure",
+        "scratch/035-round-2-scan-ipk-pressure-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 35,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3884719750,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/035-round-2-scan-ipk-pressure-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/035-round-2-scan-ipk-pressure-sqlite.json",
+        "sha256": "6db5ffa5ab4162cc84855bffa14051046721216705ac65b64647cd6b9e8f88ab",
+        "size_bytes": 2424
+      }
+    }
+  ],
+  "workload_manifest": {
+    "path": "tests/performance/read-workloads-v1.json",
+    "sha256": "ef6c44735e9830050351c8ca436d4d925e43e67f0f61ee4f7995f65f6dbfa596",
+    "size_bytes": 11372
+  },
+  "workload_semantics_version": 1
+}

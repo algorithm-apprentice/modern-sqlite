@@ -22,6 +22,7 @@ option(MODERN_SQLITE_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MODERN_SQLITE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MODERN_SQLITE_ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 option(MODERN_SQLITE_BUILD_FUZZERS "Build Clang libFuzzer targets" OFF)
+option(MODERN_SQLITE_BUILD_BENCHMARKS "Build pinned read benchmark targets" OFF)
 option(
   MODERN_SQLITE_ENABLE_INSTRUMENTATION
   "Compile and link optional instrumentation hooks"
@@ -37,13 +38,13 @@ set(
   MODERN_SQLITE_PINNED_SQLITE_C
   ""
   CACHE FILEPATH
-  "Pinned SQLite amalgamation source used only for oracle regeneration tests"
+  "Pinned SQLite amalgamation source used by oracle and benchmark targets"
 )
 set(
   MODERN_SQLITE_PINNED_SQLITE_H
   ""
   CACHE FILEPATH
-  "Pinned SQLite generated header used only for oracle regeneration tests"
+  "Pinned SQLite generated header used by oracle and benchmark targets"
 )
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/CompilerWarnings.cmake")
@@ -234,6 +235,197 @@ if(MODERN_SQLITE_BUILD_FUZZERS)
   endforeach()
 endif()
 
+if(MODERN_SQLITE_BUILD_BENCHMARKS)
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR "Pinned performance benchmarks require a Release build")
+  endif()
+  if(MODERN_SQLITE_ENABLE_ASAN OR
+     MODERN_SQLITE_ENABLE_UBSAN OR
+     MODERN_SQLITE_ENABLE_TSAN OR
+     MODERN_SQLITE_ENABLE_INSTRUMENTATION)
+    message(
+      FATAL_ERROR
+      "Pinned timing benchmarks require sanitizers and ordinary instrumentation to be disabled"
+    )
+  endif()
+  if(MODERN_SQLITE_PINNED_SQLITE_C STREQUAL "" OR
+     MODERN_SQLITE_PINNED_SQLITE_H STREQUAL "")
+    message(
+      FATAL_ERROR
+      "Pinned performance benchmarks require MODERN_SQLITE_PINNED_SQLITE_C and "
+      "MODERN_SQLITE_PINNED_SQLITE_H"
+    )
+  endif()
+  if(NOT EXISTS "${MODERN_SQLITE_PINNED_SQLITE_C}" OR
+     NOT EXISTS "${MODERN_SQLITE_PINNED_SQLITE_H}")
+    message(FATAL_ERROR "Pinned SQLite benchmark source inputs do not exist")
+  endif()
+  file(SHA256 "${MODERN_SQLITE_PINNED_SQLITE_C}" _modern_sqlite_benchmark_c_sha256)
+  file(SHA256 "${MODERN_SQLITE_PINNED_SQLITE_H}" _modern_sqlite_benchmark_h_sha256)
+  if(NOT _modern_sqlite_benchmark_c_sha256 STREQUAL
+     "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6")
+    message(FATAL_ERROR "Pinned benchmark sqlite3.c has the wrong SHA-256")
+  endif()
+  if(NOT _modern_sqlite_benchmark_h_sha256 STREQUAL
+     "ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5")
+    message(FATAL_ERROR "Pinned benchmark sqlite3.h has the wrong SHA-256")
+  endif()
+
+  execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE _modern_sqlite_benchmark_git_revision_result
+    OUTPUT_VARIABLE MODERN_SQLITE_BENCHMARK_GIT_REVISION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  execute_process(
+    COMMAND git rev-parse HEAD^{tree}
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE _modern_sqlite_benchmark_git_tree_result
+    OUTPUT_VARIABLE MODERN_SQLITE_BENCHMARK_GIT_TREE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(NOT _modern_sqlite_benchmark_git_revision_result EQUAL 0 OR
+     NOT _modern_sqlite_benchmark_git_tree_result EQUAL 0)
+    message(FATAL_ERROR "Pinned performance benchmarks require Git source identity")
+  endif()
+  set(_modern_sqlite_benchmark_generated_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  file(MAKE_DIRECTORY "${_modern_sqlite_benchmark_generated_dir}")
+  configure_file(
+    benchmarks/read_performance_build_config.hpp.in
+    "${_modern_sqlite_benchmark_generated_dir}/read_performance_build_config.hpp"
+    @ONLY
+  )
+
+  enable_language(C)
+  add_library(
+    modern_sqlite_benchmark_sqlite
+    STATIC
+    EXCLUDE_FROM_ALL
+      "${MODERN_SQLITE_PINNED_SQLITE_C}"
+  )
+  add_library(
+    modern_sqlite_benchmark_sqlite_shared
+    SHARED
+      "${MODERN_SQLITE_PINNED_SQLITE_C}"
+  )
+  get_filename_component(
+    _modern_sqlite_benchmark_header_dir
+    "${MODERN_SQLITE_PINNED_SQLITE_H}"
+    DIRECTORY
+  )
+  foreach(
+    _modern_sqlite_benchmark_sqlite_target
+    IN ITEMS
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite_benchmark_sqlite_shared
+  )
+    set_target_properties(
+      ${_modern_sqlite_benchmark_sqlite_target}
+      PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED YES
+        C_EXTENSIONS YES
+    )
+    target_compile_definitions(
+      ${_modern_sqlite_benchmark_sqlite_target}
+      PRIVATE
+        NDEBUG
+        SQLITE_DQS=3
+        SQLITE_THREADSAFE=0
+    )
+    target_include_directories(
+      ${_modern_sqlite_benchmark_sqlite_target}
+      PUBLIC
+        "${_modern_sqlite_benchmark_header_dir}"
+    )
+    target_link_libraries(
+      ${_modern_sqlite_benchmark_sqlite_target}
+      PUBLIC
+        ${CMAKE_DL_LIBS}
+    )
+    if(UNIX AND NOT APPLE)
+      target_link_libraries(
+        ${_modern_sqlite_benchmark_sqlite_target}
+        PUBLIC
+          m
+      )
+    endif()
+  endforeach()
+
+  add_executable(
+    modern_sqlite_read_benchmark
+    benchmarks/read_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_read_benchmark
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_link_libraries(
+    modern_sqlite_read_benchmark
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_read_benchmark PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_read_benchmark)
+
+  add_library(
+    modern_sqlite_read_diagnostic_engine
+    STATIC
+      ${MODERN_SQLITE_ENGINE_SOURCES}
+  )
+  target_include_directories(
+    modern_sqlite_read_diagnostic_engine
+    PUBLIC
+      "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+      "$<INSTALL_INTERFACE:include>"
+  )
+  target_compile_definitions(
+    modern_sqlite_read_diagnostic_engine
+    PUBLIC
+      MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+  )
+  target_link_libraries(
+    modern_sqlite_read_diagnostic_engine
+    PUBLIC
+      modern_sqlite_project_options
+    PRIVATE
+      modern_sqlite_project_warnings
+      modern_sqlite::instrumentation
+  )
+  modern_sqlite_enable_clang_tidy(modern_sqlite_read_diagnostic_engine)
+
+  add_executable(
+    modern_sqlite_read_diagnostics
+    benchmarks/read_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_read_diagnostics
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_compile_definitions(
+    modern_sqlite_read_diagnostics
+    PRIVATE
+      MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+      MODERN_SQLITE_READ_PERFORMANCE_DIAGNOSTICS=1
+  )
+  target_link_libraries(
+    modern_sqlite_read_diagnostics
+    PRIVATE
+      modern_sqlite_read_diagnostic_engine
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite::instrumentation
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_read_diagnostics PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_read_diagnostics)
+endif()
+
 add_executable(
   modern_sqlite_inspect
   tools/modern_sqlite_inspect.cpp
@@ -342,6 +534,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/token_text.hpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/read_vm.cpp"
+  "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
