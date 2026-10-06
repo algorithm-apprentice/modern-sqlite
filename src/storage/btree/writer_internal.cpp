@@ -1722,6 +1722,139 @@ Status MutableBtreePage::BalanceQuick(MutableBtreePage& parent, MutableBtreePage
   return {};
 }
 
+Result<MutableBtreePage> MutableBtreePage::BalanceDeeper(MutableBtreePage& root) {
+  if (root.owner_ == nullptr) {
+    return std::unexpected(Misuse("root deepening requires a live mutable B-tree page"));
+  }
+  if (root.staged_count_ == 0U) {
+    return std::unexpected(Misuse("root deepening requires staged overflow cells"));
+  }
+  auto root_bytes = root.Bytes();
+  if (!root_bytes.has_value()) {
+    return std::unexpected(std::move(root_bytes.error()));
+  }
+  auto root_view = BtreePageView::Parse(*root_bytes, root.page_number_, root.geometry_);
+  if (!root_view.has_value()) {
+    return std::unexpected(std::move(root_view.error()));
+  }
+  auto root_free = root_view->AnalyzeFreeSpace();
+  if (!root_free.has_value()) {
+    return std::unexpected(std::move(root_free.error()));
+  }
+
+  std::optional<std::size_t> previous_staged_index;
+  for (std::size_t index = 0U; index < root.staged_count_; ++index) {
+    const StagedCell staged =
+        root.staged_cells_[index].value_or(StagedCell{.index = 0U, .bytes = {}});
+    if (staged.bytes.empty() || staged.index > root.cell_count_ + index ||
+        (previous_staged_index.has_value() && staged.index != *previous_staged_index + 1U)) {
+      return std::unexpected(Corruption("root staged-cell state is inconsistent"));
+    }
+    std::optional<PageNumber> left_child;
+    if (!root.is_leaf()) {
+      if (staged.bytes.size() < sizeof(std::uint32_t)) {
+        return std::unexpected(Corruption("root staged interior cell is truncated"));
+      }
+      left_child = PageNumber{Load32(staged.bytes, 0U)};
+    }
+    auto valid = root.ValidateCellImage(staged.bytes, left_child);
+    if (!valid.has_value()) {
+      return std::unexpected(std::move(valid.error()));
+    }
+    const std::less<> before;
+    const bool overlaps_root =
+        before(staged.bytes.data(), root_bytes->data() + root_bytes->size()) &&
+        before(root_bytes->data(), staged.bytes.data() + staged.bytes.size());
+    if (overlaps_root) {
+      return std::unexpected(Corruption("root staged cell aliases bytes overwritten by deepening"));
+    }
+    previous_staged_index = staged.index;
+  }
+
+  std::size_t content = Load16(*root_bytes, root.header_offset_ + 5U);
+  if (content == 0U && root.geometry_.usable_size().value() == 65536U) {
+    content = 65536U;
+  }
+  const std::size_t copied_prefix_size = root.cell_pointer_offset_ + root.cell_count_ * 2U;
+  if (content > root.geometry_.usable_size().value() || copied_prefix_size > content ||
+      root.header_offset_ > root.geometry_.usable_size().value() - copied_prefix_size) {
+    return std::unexpected(Corruption("root node cannot be copied into an ordinary child page"));
+  }
+
+  BtreePageType replacement_type = root.type_;
+  if (replacement_type == BtreePageType::kLeafIndex) {
+    replacement_type = BtreePageType::kInteriorIndex;
+  } else if (replacement_type == BtreePageType::kLeafTable) {
+    replacement_type = BtreePageType::kInteriorTable;
+  }
+
+  MutationPageOwner& owner = *root.owner_;
+  const std::uint64_t checkpoint = owner.mutation_sequence();
+  const auto fail = [&owner, checkpoint](Error error) -> Result<MutableBtreePage> {
+    owner.MarkRollbackRequiredAfter(error.code(), checkpoint);
+    return std::unexpected(std::move(error));
+  };
+  auto allocated = AllocateBtreePage(owner, root.geometry_);
+  if (!allocated.has_value()) {
+    return fail(std::move(allocated.error()));
+  }
+  TemporaryOwnedPage child_lease{owner, allocated->page_number, true};
+  root_bytes = root.Bytes();
+  if (!root_bytes.has_value()) {
+    return fail(std::move(root_bytes.error()));
+  }
+  auto child_bytes = owner.MutableBytes(allocated->owner_slot);
+  if (!child_bytes.has_value()) {
+    return fail(std::move(child_bytes.error()));
+  }
+
+  owner.NoteMutation();
+  std::memmove(child_bytes->data() + static_cast<std::ptrdiff_t>(content),
+               root_bytes->data() + static_cast<std::ptrdiff_t>(content),
+               root.geometry_.usable_size().value() - content);
+  std::memmove(child_bytes->data(),
+               root_bytes->data() + static_cast<std::ptrdiff_t>(root.header_offset_),
+               copied_prefix_size);
+  auto child_view = BtreePageView::Parse(*child_bytes, allocated->page_number, root.geometry_);
+  if (!child_view.has_value()) {
+    return fail(std::move(child_view.error()));
+  }
+  auto child_free = child_view->AnalyzeFreeSpace();
+  if (!child_free.has_value()) {
+    return fail(std::move(child_free.error()));
+  }
+  if (child_view->type() != root.type_ || child_view->cell_count() != root.cell_count_) {
+    return fail(Corruption("deepened child does not match the copied root node"));
+  }
+
+  MutableBtreePage child{
+      owner,
+      allocated->owner_slot,
+      root.geometry_,
+      allocated->page_number,
+      root.type_,
+      Metadata{
+          .header_offset = 0U,
+          .cell_pointer_offset = child_view->is_leaf() ? 8U : 12U,
+          .cell_count = child_view->cell_count(),
+          .free_bytes = child_free->total().value(),
+      },
+  };
+  child.staged_cells_ = root.staged_cells_;
+  child.staged_count_ = root.staged_count_;
+
+  auto zeroed = root.Zero(replacement_type);
+  if (!zeroed.has_value()) {
+    return fail(std::move(zeroed.error()));
+  }
+  auto rightmost = root.SetRightmostChild(allocated->page_number);
+  if (!rightmost.has_value()) {
+    return fail(std::move(rightmost.error()));
+  }
+  child_lease.Keep();
+  return child;
+}
+
 Status MutableBtreePage::Edit(const CellArray& cells, std::size_t old_first, std::size_t new_first,
                               std::size_t count, BtreeWriteWorkspace& workspace) {
   if (cells.geometry_.page_size() != geometry_.page_size() ||
