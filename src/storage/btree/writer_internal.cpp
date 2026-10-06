@@ -1466,6 +1466,447 @@ Status MutableBtreePage::InsertCell(std::size_t index, ByteView cell,
   return {};
 }
 
+Status MutableBtreePage::Rebuild(const CellArray& cells, std::size_t first, std::size_t count,
+                                 BtreeWriteWorkspace& workspace) {
+  if (cells.geometry_.page_size() != geometry_.page_size() ||
+      cells.geometry_.usable_size() != geometry_.usable_size()) {
+    return std::unexpected(Misuse("rebuilt B-tree cells use different page geometry"));
+  }
+  if (count == 0U || first > cells.size() || count > cells.size() - first) {
+    return std::unexpected(Misuse("rebuilt B-tree cell range is invalid"));
+  }
+  const std::size_t maximum_cells = (geometry_.page_size().value() - 8U) / 6U;
+  if (count > maximum_cells) {
+    return std::unexpected(Corruption("rebuilt B-tree page has too many cells"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  const MutableByteView scratch = workspace.rebuild_scratch();
+  if (scratch.size() != bytes->size()) {
+    return std::unexpected(Misuse("B-tree rebuild scratch has the wrong size"));
+  }
+  std::ranges::copy(*bytes, scratch.begin());
+  return RebuildFromSnapshot(cells, first, count, ByteView{scratch});
+}
+
+Status MutableBtreePage::RebuildFromSnapshot(const CellArray& cells, std::size_t first,
+                                             std::size_t count, ByteView target_copy) {
+  if (cells.geometry_.page_size() != geometry_.page_size() ||
+      cells.geometry_.usable_size() != geometry_.usable_size()) {
+    return std::unexpected(Misuse("rebuilt B-tree cells use different page geometry"));
+  }
+  if (count == 0U || first > cells.size() || count > cells.size() - first) {
+    return std::unexpected(Misuse("rebuilt B-tree cell range is invalid"));
+  }
+  const std::size_t maximum_cells = (geometry_.page_size().value() - 8U) / 6U;
+  if (count > maximum_cells) {
+    return std::unexpected(Corruption("rebuilt B-tree page has too many cells"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  if (target_copy.size() != bytes->size()) {
+    return std::unexpected(Misuse("B-tree rebuild snapshot has the wrong size"));
+  }
+  const ByteView target{*bytes};
+  const std::size_t pointer_end = cell_pointer_offset_ + count * 2U;
+  std::size_t total_size = 0U;
+  for (std::size_t index = 0U; index < count; ++index) {
+    auto resolved = cells.ResolveForTarget(first + index, target, target_copy);
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    std::optional<PageNumber> left_child;
+    if (!is_leaf()) {
+      if (resolved->size() < sizeof(std::uint32_t)) {
+        return std::unexpected(Corruption("rebuilt interior B-tree cell is truncated"));
+      }
+      left_child = PageNumber{Load32(*resolved, 0U)};
+    }
+    auto valid = ValidateCellImage(*resolved, left_child);
+    if (!valid.has_value()) {
+      return valid;
+    }
+    if (resolved->size() > geometry_.usable_size().value() - total_size) {
+      return std::unexpected(Corruption("rebuilt B-tree cells exceed the usable page"));
+    }
+    total_size += resolved->size();
+  }
+  if (pointer_end > geometry_.usable_size().value() ||
+      total_size > geometry_.usable_size().value() - pointer_end) {
+    return std::unexpected(Corruption("rebuilt B-tree cells do not fit on the page"));
+  }
+
+  owner_->NoteMutation();
+  std::size_t content = geometry_.usable_size().value();
+  for (std::size_t index = 0U; index < count; ++index) {
+    auto resolved = cells.ResolveForTarget(first + index, target, target_copy);
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    content -= resolved->size();
+    Store16(*bytes, BigEndian16{
+                        .offset = cell_pointer_offset_ + index * 2U,
+                        .value = content,
+                    });
+    std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(content), resolved->data(),
+                 resolved->size());
+  }
+  Store16(*bytes, BigEndian16{.offset = header_offset_ + 1U, .value = 0U});
+  Store16(*bytes, BigEndian16{.offset = header_offset_ + 3U, .value = count});
+  Store16(*bytes, BigEndian16{.offset = header_offset_ + 5U, .value = content});
+  (*bytes)[header_offset_ + 7U] = std::byte{0};
+  cell_count_ = count;
+  free_bytes_ = content - pointer_end;
+  ClearStagedCells();
+  return {};
+}
+
+Status MutableBtreePage::Edit(const CellArray& cells, std::size_t old_first, std::size_t new_first,
+                              std::size_t count, BtreeWriteWorkspace& workspace) {
+  if (cells.geometry_.page_size() != geometry_.page_size() ||
+      cells.geometry_.usable_size() != geometry_.usable_size()) {
+    return std::unexpected(Misuse("edited B-tree cells use different page geometry"));
+  }
+  const std::size_t old_count = cell_count_ + staged_count_;
+  if (old_first > cells.size() || old_count > cells.size() - old_first || count == 0U ||
+      new_first > cells.size() || count > cells.size() - new_first) {
+    return std::unexpected(Misuse("edited B-tree cell range is invalid"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  const MutableByteView page_copy = workspace.rebuild_scratch();
+  if (page_copy.size() != bytes->size()) {
+    return std::unexpected(Misuse("B-tree rebuild scratch has the wrong size"));
+  }
+  std::ranges::copy(*bytes, page_copy.begin());
+  const ByteView target_copy{page_copy};
+  const ByteView target{*bytes};
+
+  auto original_page = BtreePageView::Parse(target_copy, page_number_, geometry_);
+  if (!original_page.has_value()) {
+    return std::unexpected(std::move(original_page.error()));
+  }
+  std::size_t persisted = 0U;
+  std::size_t staged = 0U;
+  for (std::size_t logical = 0U; logical < old_count; ++logical) {
+    const std::size_t index = old_first + logical;
+    auto listed = cells.Cell(index);
+    if (!listed.has_value()) {
+      return std::unexpected(std::move(listed.error()));
+    }
+    if (staged < staged_count_) {
+      const std::optional<StagedCell>& candidate = staged_cells_[staged];
+      if (!candidate.has_value()) {
+        return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+      }
+      if (candidate->index == logical) {
+        if (cells.locator(index).flags != static_cast<std::uint8_t>(CellLocatorFlags::kStaged) ||
+            !std::ranges::equal(candidate->bytes, *listed)) {
+          return std::unexpected(
+              Corruption("CellArray staged cell does not match the edited page"));
+        }
+        ++staged;
+        continue;
+      }
+      if (candidate->index < logical) {
+        return std::unexpected(Corruption("staged B-tree cells are unordered"));
+      }
+    }
+    if (persisted >= cell_count_) {
+      return std::unexpected(Corruption("CellArray page range exceeds persisted page cells"));
+    }
+    auto expected_offset = original_page->cell_offset(persisted);
+    auto expected_cell = original_page->cell(persisted);
+    auto listed_offset = cells.OffsetWithinTarget(index, target);
+    if (!expected_offset.has_value()) {
+      return std::unexpected(std::move(expected_offset.error()));
+    }
+    if (!expected_cell.has_value()) {
+      return std::unexpected(std::move(expected_cell.error()));
+    }
+    if (!listed_offset.has_value()) {
+      return std::unexpected(std::move(listed_offset.error()));
+    }
+    if (!listed_offset->has_value() || **listed_offset != expected_offset->value() ||
+        cells.locator(index).size != expected_cell->encoded_size().value() ||
+        cells.locator(index).flags != static_cast<std::uint8_t>(CellLocatorFlags::kBorrowed)) {
+      return std::unexpected(Corruption("CellArray persisted cell does not match the edited page"));
+    }
+    ++persisted;
+  }
+  if (persisted != cell_count_ || staged != staged_count_) {
+    return std::unexpected(Corruption("CellArray does not contain the complete edited page range"));
+  }
+
+  const std::size_t pointer_end = cell_pointer_offset_ + count * 2U;
+  std::size_t total_size = 0U;
+  for (std::size_t index = 0U; index < count; ++index) {
+    auto resolved = cells.ResolveForTarget(new_first + index, target, target_copy);
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    std::optional<PageNumber> left_child;
+    if (!is_leaf()) {
+      if (resolved->size() < sizeof(std::uint32_t)) {
+        return std::unexpected(Corruption("edited interior B-tree cell is truncated"));
+      }
+      left_child = PageNumber{Load32(*resolved, 0U)};
+    }
+    auto valid = ValidateCellImage(*resolved, left_child);
+    if (!valid.has_value()) {
+      return valid;
+    }
+    if (resolved->size() > geometry_.usable_size().value() - total_size) {
+      return std::unexpected(Corruption("edited B-tree cells exceed the usable page"));
+    }
+    total_size += resolved->size();
+  }
+  if (pointer_end > geometry_.usable_size().value() ||
+      total_size > geometry_.usable_size().value() - pointer_end) {
+    return std::unexpected(Corruption("edited B-tree cells do not fit on the page"));
+  }
+
+  const std::uint64_t checkpoint = owner_->mutation_sequence();
+  const auto fail = [this, checkpoint](Error error) -> Status {
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    return std::unexpected(std::move(error));
+  };
+  const auto rebuild = [this, &cells, new_first, count, target_copy, &fail]() -> Status {
+    auto rebuilt = RebuildFromSnapshot(cells, new_first, count, target_copy);
+    if (!rebuilt.has_value()) {
+      return fail(std::move(rebuilt.error()));
+    }
+    return {};
+  };
+
+  // Mirrors SQLite pageFreeArray(): batch adjacent target-resident cells
+  // before returning their bytes to the page freeblock chain.
+  const auto free_range = [this, &cells, target](std::size_t first,
+                                                 std::size_t range_count) -> Result<std::size_t> {
+    std::array<std::size_t, 10> starts{};
+    std::array<std::size_t, 10> ends{};
+    std::size_t pending = 0U;
+    std::size_t freed = 0U;
+    const auto flush = [this, &starts, &ends, &pending]() -> Status {
+      for (std::size_t index = 0U; index < pending; ++index) {
+        auto status = FreeSpace(starts[index], ends[index] - starts[index]);
+        if (!status.has_value()) {
+          return status;
+        }
+      }
+      pending = 0U;
+      return {};
+    };
+
+    for (std::size_t index = first; index < first + range_count; ++index) {
+      auto offset = cells.OffsetWithinTarget(index, target);
+      if (!offset.has_value()) {
+        return std::unexpected(std::move(offset.error()));
+      }
+      if (!offset->has_value()) {
+        continue;
+      }
+      const std::size_t start = **offset;
+      const std::size_t size = cells.locator(index).size;
+      if (start < cell_pointer_offset_ || size > geometry_.usable_size().value() - start) {
+        return std::unexpected(Corruption("edited B-tree cell range exceeds the target page"));
+      }
+      const std::size_t end = start + size;
+      std::size_t adjacent = 0U;
+      for (; adjacent < pending; ++adjacent) {
+        if (starts[adjacent] == end) {
+          starts[adjacent] = start;
+          break;
+        }
+        if (ends[adjacent] == start) {
+          ends[adjacent] = end;
+          break;
+        }
+      }
+      if (adjacent == pending) {
+        if (pending == starts.size()) {
+          auto flushed = flush();
+          if (!flushed.has_value()) {
+            return std::unexpected(std::move(flushed.error()));
+          }
+        }
+        starts[pending] = start;
+        ends[pending] = end;
+        ++pending;
+      }
+      ++freed;
+    }
+    auto flushed = flush();
+    if (!flushed.has_value()) {
+      return std::unexpected(std::move(flushed.error()));
+    }
+    return freed;
+  };
+
+  // Mirrors SQLite pageInsertArray(). A false result selects rebuildPage()
+  // after the in-place layout cannot accommodate the requested cells.
+  const auto insert_range = [this, &cells, target, target_copy, pointer_end](
+                                std::size_t pointer, std::size_t first, std::size_t range_count,
+                                std::size_t& content) -> Result<bool> {
+    auto destination = Bytes();
+    if (!destination.has_value()) {
+      return std::unexpected(std::move(destination.error()));
+    }
+    for (std::size_t index = 0U; index < range_count; ++index) {
+      auto cell = cells.ResolveForTarget(first + index, target, target_copy);
+      if (!cell.has_value()) {
+        return std::unexpected(std::move(cell.error()));
+      }
+      std::optional<std::size_t> slot;
+      if (Load16(*destination, header_offset_ + 1U) != 0U) {
+        auto found = FindFreeblock(cell->size());
+        if (!found.has_value()) {
+          return std::unexpected(std::move(found.error()));
+        }
+        slot = *found;
+      }
+      if (slot.has_value() && *slot < pointer_end) {
+        return std::unexpected(Corruption("edited B-tree freeblock overlaps the pointer array"));
+      }
+      if (!slot.has_value()) {
+        if (content < pointer_end || cell->size() > content - pointer_end) {
+          return false;
+        }
+        content -= cell->size();
+        slot = content;
+      }
+      if (*slot > geometry_.usable_size().value() ||
+          cell->size() > geometry_.usable_size().value() - *slot || pointer > pointer_end ||
+          2U > pointer_end - pointer) {
+        return std::unexpected(Corruption("edited B-tree insertion range exceeds the page"));
+      }
+      owner_->NoteMutation();
+      std::memmove(destination->data() + static_cast<std::ptrdiff_t>(*slot), cell->data(),
+                   cell->size());
+      Store16(*destination, BigEndian16{.offset = pointer, .value = *slot});
+      pointer += 2U;
+    }
+    return true;
+  };
+
+  std::size_t stored_cells = cell_count_;
+  const std::size_t old_end = old_first + old_count;
+  const std::size_t new_end = new_first + count;
+  if (old_first < new_first) {
+    auto shifted = free_range(old_first, new_first - old_first);
+    if (!shifted.has_value()) {
+      return fail(std::move(shifted.error()));
+    }
+    if (*shifted > stored_cells) {
+      return fail(Corruption("edited B-tree prefix exceeds stored cells"));
+    }
+    if (*shifted != 0U) {
+      owner_->NoteMutation();
+      std::memmove(
+          bytes->data() + static_cast<std::ptrdiff_t>(cell_pointer_offset_),
+          bytes->data() + static_cast<std::ptrdiff_t>(cell_pointer_offset_ + *shifted * 2U),
+          (stored_cells - *shifted) * 2U);
+      stored_cells -= *shifted;
+    }
+  }
+  if (new_end < old_end) {
+    auto tail = free_range(new_end, old_end - new_end);
+    if (!tail.has_value()) {
+      return fail(std::move(tail.error()));
+    }
+    if (*tail > stored_cells) {
+      return fail(Corruption("edited B-tree suffix exceeds stored cells"));
+    }
+    stored_cells -= *tail;
+  }
+
+  std::size_t content = Load16(*bytes, header_offset_ + 5U);
+  if (content == 0U && geometry_.usable_size().value() == 65536U) {
+    content = 65536U;
+  }
+  if (content < pointer_end || content > geometry_.usable_size().value()) {
+    return rebuild();
+  }
+
+  if (new_first < old_first) {
+    const std::size_t add = std::min(count, old_first - new_first);
+    if (stored_cells > count || add > count - stored_cells) {
+      return fail(Corruption("edited B-tree prefix insertion is inconsistent"));
+    }
+    if (add != 0U) {
+      owner_->NoteMutation();
+      std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(cell_pointer_offset_ + add * 2U),
+                   bytes->data() + static_cast<std::ptrdiff_t>(cell_pointer_offset_),
+                   stored_cells * 2U);
+      auto inserted = insert_range(cell_pointer_offset_, new_first, add, content);
+      if (!inserted.has_value()) {
+        return fail(std::move(inserted.error()));
+      }
+      if (!*inserted) {
+        return rebuild();
+      }
+      stored_cells += add;
+    }
+  }
+
+  for (std::size_t index = 0U; index < staged_count_; ++index) {
+    const std::optional<StagedCell>& staged_cell = staged_cells_[index];
+    if (!staged_cell.has_value()) {
+      return fail(Corruption("staged B-tree cell state is inconsistent"));
+    }
+    const std::size_t global = old_first + staged_cell->index;
+    if (global < new_first || global >= new_end) {
+      continue;
+    }
+    const std::size_t destination_index = global - new_first;
+    if (destination_index > stored_cells || stored_cells >= count) {
+      return fail(Corruption("staged B-tree cell destination is inconsistent"));
+    }
+    if (stored_cells > destination_index) {
+      owner_->NoteMutation();
+      std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(cell_pointer_offset_ +
+                                                               (destination_index + 1U) * 2U),
+                   bytes->data() +
+                       static_cast<std::ptrdiff_t>(cell_pointer_offset_ + destination_index * 2U),
+                   (stored_cells - destination_index) * 2U);
+    }
+    auto inserted =
+        insert_range(cell_pointer_offset_ + destination_index * 2U, global, 1U, content);
+    if (!inserted.has_value()) {
+      return fail(std::move(inserted.error()));
+    }
+    if (!*inserted) {
+      return rebuild();
+    }
+    ++stored_cells;
+  }
+
+  if (stored_cells > count) {
+    return fail(Corruption("edited B-tree page retained too many cells"));
+  }
+  auto appended = insert_range(cell_pointer_offset_ + stored_cells * 2U, new_first + stored_cells,
+                               count - stored_cells, content);
+  if (!appended.has_value()) {
+    return fail(std::move(appended.error()));
+  }
+  if (!*appended) {
+    return rebuild();
+  }
+
+  Store16(*bytes, BigEndian16{.offset = header_offset_ + 3U, .value = count});
+  Store16(*bytes, BigEndian16{.offset = header_offset_ + 5U, .value = content});
+  cell_count_ = count;
+  free_bytes_ = geometry_.usable_size().value() - pointer_end - total_size;
+  ClearStagedCells();
+  return {};
+}
+
 void MutableBtreePage::ClearStagedCells() noexcept {
   staged_cells_.fill(std::nullopt);
   staged_count_ = 0;
@@ -1641,6 +2082,216 @@ Result<std::optional<std::size_t>> MutableBtreePage::FindFreeblock(std::size_t s
     return std::unexpected(Corruption("B-tree freeblock chain exceeds the usable region"));
   }
   return std::optional<std::size_t>{};
+}
+
+Result<CellArray> CellArray::Create(BtreePageGeometry geometry) {
+  const std::size_t maximum_page_cells = (geometry.page_size().value() - 8U) / 6U;
+  const std::size_t unaligned_maximum = 3U * (maximum_page_cells + kStagedCellSlots);
+  const std::size_t maximum_cells = (unaligned_maximum + 3U) & ~std::size_t{3U};
+  const std::size_t scratch_bytes =
+      maximum_cells * sizeof(CellLocator) + geometry.page_size().value();
+  if (scratch_bytes > 7U * geometry.page_size().value()) {
+    return std::unexpected(Corruption("CellArray exceeds SQLite's seven-page scratch bound"));
+  }
+  try {
+    std::vector<CellLocator> cells;
+    cells.reserve(maximum_cells);
+    ByteBuffer copied{geometry.page_size()};
+    return CellArray{geometry, maximum_cells, std::move(cells), std::move(copied)};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+CellArray::CellArray(BtreePageGeometry geometry, std::size_t maximum_cells,
+                     std::vector<CellLocator> cells, ByteBuffer copied_cells) noexcept
+    : geometry_(geometry),
+      maximum_cells_(maximum_cells),
+      cells_(std::move(cells)),
+      copied_cells_(std::move(copied_cells)) {
+  sources_[0] = copied_cells_.view();
+  source_count_ = 1U;
+}
+
+Status CellArray::AppendPage(const MutableBtreePage& page) {
+  if (page.geometry_.page_size() != geometry_.page_size() ||
+      page.geometry_.usable_size() != geometry_.usable_size()) {
+    return std::unexpected(Misuse("CellArray page uses different page geometry"));
+  }
+  auto bytes = page.Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  auto view = BtreePageView::Parse(*bytes, page.page_number_, geometry_);
+  if (!view.has_value()) {
+    return std::unexpected(std::move(view.error()));
+  }
+  auto source_slot = SourceSlot(*bytes);
+  if (!source_slot.has_value()) {
+    return std::unexpected(std::move(source_slot.error()));
+  }
+  std::size_t persisted = 0U;
+  std::size_t staged = 0U;
+  const std::size_t total = page.cell_count_ + page.staged_count_;
+  for (std::size_t logical = 0U; logical < total; ++logical) {
+    if (staged < page.staged_count_) {
+      const std::optional<StagedCell>& candidate = page.staged_cells_[staged];
+      if (!candidate.has_value()) {
+        return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+      }
+      if (candidate->index == logical) {
+        auto appended = AppendCopied(candidate->bytes, CellLocatorFlags::kStaged);
+        if (!appended.has_value()) {
+          return appended;
+        }
+        ++staged;
+        continue;
+      }
+      if (candidate->index < logical) {
+        return std::unexpected(Corruption("staged B-tree cells are unordered"));
+      }
+    }
+    if (persisted >= page.cell_count_) {
+      return std::unexpected(Corruption("staged B-tree cell indexes exceed page contents"));
+    }
+    auto offset = view->cell_offset(persisted);
+    auto cell = view->cell(persisted);
+    if (!offset.has_value()) {
+      return std::unexpected(std::move(offset.error()));
+    }
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    auto appended = AppendLocator(*source_slot, offset->value(), cell->encoded_size().value(),
+                                  CellLocatorFlags::kBorrowed);
+    if (!appended.has_value()) {
+      return appended;
+    }
+    ++persisted;
+  }
+  if (persisted != page.cell_count_ || staged != page.staged_count_) {
+    return std::unexpected(Corruption("B-tree page cells were not assembled completely"));
+  }
+  return {};
+}
+
+Status CellArray::AppendBorrowed(ByteView source, std::size_t offset, std::size_t size,
+                                 CellLocatorFlags flags) {
+  auto slot = SourceSlot(source);
+  if (!slot.has_value()) {
+    return std::unexpected(std::move(slot.error()));
+  }
+  return AppendLocator(*slot, offset, size, flags);
+}
+
+Status CellArray::AppendCopied(ByteView cell, CellLocatorFlags flags) {
+  if (cell.empty() || cell.size() > copied_cells_.size().value() - copied_size_) {
+    return std::unexpected(TooLarge("copied B-tree cells exceed divider scratch"));
+  }
+  std::memmove(copied_cells_.mutable_view().data() + static_cast<std::ptrdiff_t>(copied_size_),
+               cell.data(), cell.size());
+  auto appended = AppendLocator(0U, copied_size_, cell.size(), flags);
+  if (!appended.has_value()) {
+    return appended;
+  }
+  copied_size_ += cell.size();
+  return {};
+}
+
+Result<ByteView> CellArray::Cell(std::size_t index) const {
+  if (index >= cells_.size()) {
+    return std::unexpected(Misuse("CellArray index is out of range"));
+  }
+  const CellLocator& cell = cells_[index];
+  if (cell.source_slot >= source_count_) {
+    return std::unexpected(Corruption("CellArray source slot is invalid"));
+  }
+  const ByteView source = sources_[cell.source_slot];
+  if (cell.offset > source.size() || cell.size > source.size() - cell.offset) {
+    return std::unexpected(Corruption("CellArray cell exceeds its source"));
+  }
+  return source.subspan(cell.offset, cell.size);
+}
+
+Result<std::optional<std::size_t>> CellArray::OffsetWithinTarget(std::size_t index,
+                                                                 ByteView target) const {
+  auto cell = Cell(index);
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  const CellLocator& locator = cells_[index];
+  const ByteView source = sources_[locator.source_slot];
+  if (source.data() == target.data() && source.size() == target.size()) {
+    return std::optional<std::size_t>{locator.offset};
+  }
+  if (!cell->empty()) {
+    const std::less<> before;
+    const bool overlaps_target = before(cell->data(), target.data() + target.size()) &&
+                                 before(target.data(), cell->data() + cell->size());
+    if (overlaps_target) {
+      return std::unexpected(Corruption("CellArray source partially overlaps the edited page"));
+    }
+  }
+  return std::optional<std::size_t>{};
+}
+
+Result<std::uint8_t> CellArray::SourceSlot(ByteView source) {
+  for (std::size_t index = 0U; index < source_count_; ++index) {
+    if (sources_[index].data() == source.data() && sources_[index].size() == source.size()) {
+      return static_cast<std::uint8_t>(index);
+    }
+  }
+  if (source_count_ >= sources_.size()) {
+    return std::unexpected(TooLarge("CellArray exceeded its bounded source count"));
+  }
+  sources_[source_count_] = source;
+  return static_cast<std::uint8_t>(source_count_++);
+}
+
+Status CellArray::AppendLocator(std::uint8_t source_slot, std::size_t offset, std::size_t size,
+                                CellLocatorFlags flags) {
+  if (source_slot >= source_count_ || size == 0U ||
+      size > (std::numeric_limits<std::uint16_t>::max)() ||
+      offset > (std::numeric_limits<std::uint32_t>::max)()) {
+    return std::unexpected(Misuse("CellArray locator is not representable"));
+  }
+  if (cells_.size() >= maximum_cells_) {
+    return std::unexpected(TooLarge("CellArray exceeded SQLite's bounded cell count"));
+  }
+  const ByteView source = sources_[source_slot];
+  if (offset > source.size() || size > source.size() - offset) {
+    return std::unexpected(Corruption("CellArray locator exceeds its source"));
+  }
+  try {
+    cells_.push_back(CellLocator{
+        .offset = static_cast<std::uint32_t>(offset),
+        .size = static_cast<std::uint16_t>(size),
+        .source_slot = source_slot,
+        .flags = static_cast<std::uint8_t>(flags),
+    });
+    return {};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Result<ByteView> CellArray::ResolveForTarget(std::size_t index, ByteView target,
+                                             ByteView target_copy) const {
+  if (target.size() != target_copy.size()) {
+    return std::unexpected(Misuse("CellArray target copy has the wrong size"));
+  }
+  auto offset = OffsetWithinTarget(index, target);
+  if (!offset.has_value()) {
+    return std::unexpected(std::move(offset.error()));
+  }
+  if (offset->has_value()) {
+    return target_copy.subspan(**offset, cells_[index].size);
+  }
+  return Cell(index);
 }
 
 Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber root_page,
