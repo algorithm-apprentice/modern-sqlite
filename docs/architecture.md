@@ -161,6 +161,24 @@ SQLite's own opcode documentation states that VDBE bytecode is not a public
 API and changes between releases. Observable behavior, not internal opcode
 identity, is the compatibility contract.
 
+### Reference alignment levels
+
+ADR-0045 assigns each module one explicit alignment level:
+
+- **Reference-faithful mechanism:** persistent-format and durability-critical
+  code reproduces SQLite's constants, state transitions, mutation order,
+  bounded storage, ownership, and failure cleanup through Modern C++ types.
+- **Observable SQLite semantics:** SQL-facing layers retain the acyclic Modern
+  architecture and prove compatibility through differential behavior.
+- **Modern infrastructure:** internal ownership, error, instrumentation, and
+  container details may differ when they do not change persistent transitions
+  or observable semantics.
+
+The first compatible storage implementation does not invent alternative
+journal, pager, freelist, overflow, or B-tree balancing algorithms. This rule
+does not restore SQLite's source-level dependency cycles or internal VDBE
+layout.
+
 ## Target architecture
 
 Arrows point from a prerequisite to a dependent module.
