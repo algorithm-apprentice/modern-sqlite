@@ -174,6 +174,7 @@ class MutableBtreePage final {
                             std::size_t count, BtreeWriteWorkspace& workspace);
   [[nodiscard]] static Status BalanceQuick(MutableBtreePage& parent, MutableBtreePage& page,
                                            BtreeWriteWorkspace& workspace);
+  [[nodiscard]] static Result<MutableBtreePage> BalanceDeeper(MutableBtreePage& root);
 
   void ClearStagedCells() noexcept;
 
