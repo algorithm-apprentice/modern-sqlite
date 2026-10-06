@@ -23,6 +23,7 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
+#include "write_pager_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -656,6 +657,147 @@ TEST(WritePager, OpensReadWriteAndTransitionsThroughAnEmptyWriteTransaction) {
   EXPECT_TRUE(pager->EndRead().has_value());
 }
 
+TEST(WritePager, ClaimsOneWriteCoordinatorPerAdmittedGeneration) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  EXPECT_EQ(0U, pager->write_transaction_generation());
+
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::uint64_t first_generation = pager->write_transaction_generation();
+  EXPECT_GT(first_generation, 0U);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto duplicate = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kLocked, duplicate.error().code());
+
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_GT(pager->write_transaction_generation(), first_generation);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+
+  ASSERT_TRUE(pager->Rollback().has_value());
+  const std::uint64_t rolled_back_generation = pager->write_transaction_generation();
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  EXPECT_GT(pager->write_transaction_generation(), rolled_back_generation);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, FailedCommitKeepsTheWriteCoordinatorClaimLatched) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto writable = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(writable.has_value());
+    writable->mutable_bytes()[100] = std::byte{0x7f};
+  }
+  const std::uint64_t transaction_generation = pager->write_transaction_generation();
+  environment.main->failing_lock = DatabaseLock::kExclusive;
+  environment.main->lock_failures_remaining = 1;
+
+  const auto first = pager->Commit();
+
+  ASSERT_FALSE(first.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, first.error().code());
+  EXPECT_GT(pager->write_transaction_generation(), transaction_generation);
+  const auto reopened = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(reopened.has_value());
+  EXPECT_EQ(ErrorCode::kLocked, reopened.error().code());
+  const auto write = pager->WritePage(PageNumber{2});
+  ASSERT_FALSE(write.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, write.error().code());
+  const auto allocated = pager->AllocatePage();
+  ASSERT_FALSE(allocated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, allocated.error().code());
+  const auto late_savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(late_savepoint.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, late_savepoint.error().code());
+  const auto released = pager->ReleaseSavepoint(*savepoint);
+  ASSERT_FALSE(released.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, released.error().code());
+  const auto truncated = pager->TruncateImage(pager->page_count());
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, truncated.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, CoordinatorFailurePoisonsTheGenerationAndRollsBackExactly) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::vector<std::byte> committed = environment.main->bytes;
+
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto writable = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(writable.has_value());
+    writable->mutable_bytes()[100] = std::byte{0x5a};
+  }
+  constexpr ErrorCode failure_code = ErrorCode::kBusy;
+  pager->ReportWriteCoordinatorFailure(failure_code);
+  EXPECT_EQ(failure_code, pager->write_failure_code());
+
+  const auto blocked = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(failure_code, blocked.error().code());
+  const auto late_savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(late_savepoint.has_value());
+  EXPECT_EQ(failure_code, late_savepoint.error().code());
+  const auto committed_partial_image = pager->Commit();
+  ASSERT_FALSE(committed_partial_image.has_value());
+  EXPECT_EQ(failure_code, committed_partial_image.error().code());
+  const auto direct_write = pager->WritePage(PageNumber{1});
+  ASSERT_FALSE(direct_write.has_value());
+  EXPECT_EQ(failure_code, direct_write.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(committed, environment.main->bytes);
+}
+
+TEST(WritePager, EmptyInitializationRollbackCommitsAsANoOp) {
+  WritableEnvironment environment{std::vector<std::byte>{}};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  ASSERT_TRUE(test::InitializeEmptyBtreeImage(*pager).has_value());
+  environment.main->failing_lock = DatabaseLock::kExclusive;
+  environment.main->lock_failures_remaining = 1;
+  const auto failed_commit = pager->Commit();
+  ASSERT_FALSE(failed_commit.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, failed_commit.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_EQ(0U, pager->page_count());
+  const std::size_t database_writes = environment.main->write_count;
+  const std::size_t database_syncs = environment.main->sync_count;
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(database_writes, environment.main->write_count);
+  EXPECT_EQ(database_syncs, environment.main->sync_count);
+  EXPECT_TRUE(environment.main->bytes.empty());
+}
+
 TEST(WritePager, RejectsUnsupportedWriteFormatsBeforeReservedLock) {
   WritableEnvironment environment{
       MakeDatabaseImage(2, DatabaseImageFormat{.write_version = 2, .read_version = 1})};
@@ -1052,12 +1194,325 @@ TEST(WritePager, JournalRecordFailureNeverGrantsMutableAccessAndRequiresRollback
   ASSERT_FALSE(first.has_value());
   EXPECT_EQ(ErrorCode::kIo, first.error().code());
   EXPECT_EQ(PagerState::kWriterLocked, pager->state());
+  EXPECT_EQ(ErrorCode::kIo, pager->write_failure_code());
+  const auto claimed = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(claimed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, claimed.error().code());
   const auto second = pager->WritePage(PageNumber{2});
   ASSERT_FALSE(second.has_value());
   EXPECT_EQ(ErrorCode::kIo, second.error().code());
+  const auto allocated = pager->AllocatePage();
+  ASSERT_FALSE(allocated.has_value());
+  EXPECT_EQ(ErrorCode::kIo, allocated.error().code());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(savepoint.has_value());
+  EXPECT_EQ(ErrorCode::kIo, savepoint.error().code());
+  const auto truncated = pager->TruncateImage(1);
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kIo, truncated.error().code());
+  const auto committed = pager->Commit();
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, committed.error().code());
   EXPECT_EQ(0U, environment.main->write_count);
   ASSERT_TRUE(pager->Rollback().has_value());
   EXPECT_FALSE(environment.JournalPresent());
+}
+
+TEST(WritePager, PromotesTheSoleReadPinWithoutEvictionOrReread) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 0);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto read = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(read.has_value());
+    const PageFrame* const frame = &read->frame();
+    const std::size_t reads = environment.main->read_count;
+
+    auto write = pager->WritePage(std::move(*read));
+
+    ASSERT_TRUE(write.has_value());
+    EXPECT_EQ(frame, &write->frame());
+    EXPECT_EQ(reads, environment.main->read_count);
+    write->mutable_bytes()[100] = std::byte{0x6a};
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, RejectsReadPinPromotionWhileAnotherPinExists) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto first = pager->ReadPage(PageNumber{2});
+    auto second = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+
+    const auto promoted = pager->WritePage(std::move(*first));
+
+    ASSERT_FALSE(promoted.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, promoted.error().code());
+    EXPECT_EQ(PageNumber{2}, second->frame().page_number());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, PromotedReadPinJournalFailureReleasesTheCleanFrame) {
+  WritableEnvironment environment;
+  const std::shared_ptr<MemoryFileState> journal = environment.PrepareJournalFile();
+  journal->failing_write_attempt = 2;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  const PageFrame* frame = nullptr;
+  std::size_t reads = 0;
+  {
+    auto read = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(read.has_value());
+    frame = &read->frame();
+    reads = environment.main->read_count;
+
+    const auto promoted = pager->WritePage(std::move(*read));
+
+    ASSERT_FALSE(promoted.has_value());
+    EXPECT_EQ(ErrorCode::kIo, promoted.error().code());
+  }
+  {
+    auto read = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(frame, &read->frame());
+    EXPECT_FALSE(read->frame().dirty());
+    EXPECT_EQ(std::byte{2}, read->frame().bytes()[100]);
+    EXPECT_EQ(reads, environment.main->read_count);
+  }
+  EXPECT_EQ(ErrorCode::kIo, pager->write_failure_code());
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_FALSE(environment.JournalPresent());
+}
+
+TEST(WritePager, RejectsAConsumedReadPinWithoutDereferencingIt) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  auto read = pager->ReadPage(PageNumber{2});
+  ASSERT_TRUE(read.has_value());
+  {
+    const auto promoted = pager->WritePage(std::move(*read));
+    ASSERT_TRUE(promoted.has_value());
+  }
+
+  const auto repeated = pager->WritePage(std::move(*read));
+
+  ASSERT_FALSE(repeated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, repeated.error().code());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, RejectsForeignPermutationPinsBeforeOpeningTheJournal) {
+  WritableEnvironment environment{MakeDatabaseImage(3)};
+  WritableEnvironment foreign_environment{MakeDatabaseImage(3)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  std::unique_ptr<Pager> foreign_pager = OpenWritable(foreign_environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_NE(nullptr, foreign_pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(foreign_pager->BeginRead().has_value());
+  ASSERT_TRUE(foreign_pager->BeginWrite().has_value());
+
+  {
+    auto second = foreign_pager->WritePage(PageNumber{2});
+    auto third = foreign_pager->WritePage(PageNumber{3});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    std::array<PageNumberRekey, 2> rekeys{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+        PageNumberRekey{.pin = &*third, .final_page = PageNumber{2}},
+    };
+
+    const auto permuted = pager->PermutePageNumbers(rekeys);
+
+    ASSERT_FALSE(permuted.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, permuted.error().code());
+    EXPECT_EQ(PageNumber{2}, second->frame().page_number());
+    EXPECT_EQ(PageNumber{3}, third->frame().page_number());
+    EXPECT_FALSE(environment.JournalPresent());
+  }
+  ASSERT_TRUE(foreign_pager->Rollback().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, RejectsInvalidPermutationWithoutChangingPageNumbers) {
+  WritableEnvironment environment{MakeDatabaseImage(3)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto second = pager->WritePage(PageNumber{2});
+    auto third = pager->WritePage(PageNumber{3});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    std::array<PageNumberRekey, 2> rekeys{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+        PageNumberRekey{.pin = &*third, .final_page = PageNumber{3}},
+    };
+
+    const auto permuted = pager->PermutePageNumbers(rekeys);
+
+    ASSERT_FALSE(permuted.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, permuted.error().code());
+    EXPECT_EQ(PageNumber{2}, second->frame().page_number());
+    EXPECT_EQ(PageNumber{3}, third->frame().page_number());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, RejectsASinglePageMoveThatIsNotAPermutation) {
+  WritableEnvironment environment{MakeDatabaseImage(3)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto second = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(second.has_value());
+    std::array<PageNumberRekey, 1> rekeys{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+    };
+
+    const auto permuted = pager->PermutePageNumbers(rekeys);
+
+    ASSERT_FALSE(permuted.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, permuted.error().code());
+    EXPECT_EQ(PageNumber{2}, second->frame().page_number());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, PermutesCapturedDirtyPageNumbersAndSavepointRestoresThem) {
+  WritableEnvironment environment{MakeDatabaseImage(3)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+
+  {
+    auto second = pager->WritePage(PageNumber{2});
+    auto third = pager->WritePage(PageNumber{3});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    second->mutable_bytes()[100] = std::byte{0x22};
+    third->mutable_bytes()[100] = std::byte{0x33};
+    std::array<PageNumberRekey, 2> rekeys{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+        PageNumberRekey{.pin = &*third, .final_page = PageNumber{2}},
+    };
+
+    ASSERT_TRUE(pager->PermutePageNumbers(rekeys).has_value());
+    EXPECT_EQ(PageNumber{3}, second->frame().page_number());
+    EXPECT_EQ(PageNumber{2}, third->frame().page_number());
+    EXPECT_EQ(std::byte{0x22}, second->frame().bytes()[100]);
+    EXPECT_EQ(std::byte{0x33}, third->frame().bytes()[100]);
+  }
+
+  {
+    auto second = pager->ReadPage(PageNumber{2});
+    auto third = pager->ReadPage(PageNumber{3});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    EXPECT_EQ(std::byte{0x33}, second->frame().bytes()[100]);
+    EXPECT_EQ(std::byte{0x22}, third->frame().bytes()[100]);
+  }
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  {
+    auto second = pager->ReadPage(PageNumber{2});
+    auto third = pager->ReadPage(PageNumber{3});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    EXPECT_EQ(std::byte{2}, second->frame().bytes()[100]);
+    EXPECT_EQ(std::byte{3}, third->frame().bytes()[100]);
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, PermutesAThreePageCycleWithoutExposingTheLockingSentinel) {
+  WritableEnvironment environment{MakeDatabaseImage(4)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto second = pager->WritePage(PageNumber{2});
+    auto third = pager->WritePage(PageNumber{3});
+    auto fourth = pager->WritePage(PageNumber{4});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    ASSERT_TRUE(fourth.has_value());
+    second->mutable_bytes()[100] = std::byte{0x22};
+    third->mutable_bytes()[100] = std::byte{0x33};
+    fourth->mutable_bytes()[100] = std::byte{0x44};
+    std::array<PageNumberRekey, 3> rekeys{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+        PageNumberRekey{.pin = &*third, .final_page = PageNumber{4}},
+        PageNumberRekey{.pin = &*fourth, .final_page = PageNumber{2}},
+    };
+
+    ASSERT_TRUE(pager->PermutePageNumbers(rekeys).has_value());
+    EXPECT_EQ(PageNumber{3}, second->frame().page_number());
+    EXPECT_EQ(PageNumber{4}, third->frame().page_number());
+    EXPECT_EQ(PageNumber{2}, fourth->frame().page_number());
+  }
+  {
+    auto second = pager->ReadPage(PageNumber{2});
+    auto third = pager->ReadPage(PageNumber{3});
+    auto fourth = pager->ReadPage(PageNumber{4});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    ASSERT_TRUE(fourth.has_value());
+    EXPECT_EQ(std::byte{0x44}, second->frame().bytes()[100]);
+    EXPECT_EQ(std::byte{0x22}, third->frame().bytes()[100]);
+    EXPECT_EQ(std::byte{0x33}, fourth->frame().bytes()[100]);
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, ContentHistorySurvivesSavepointRollbackAndClearsWithOuterRollback) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(pager->MarkPageContentRequired(PageNumber{2}).has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  ASSERT_TRUE(pager->MarkPageContentRequired(PageNumber{1}).has_value());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_TRUE(pager->PageContentRequired(PageNumber{1}));
+  EXPECT_TRUE(pager->PageContentRequired(PageNumber{2}));
+  ASSERT_TRUE(pager->Rollback().has_value());
+
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  EXPECT_FALSE(pager->PageContentRequired(PageNumber{1}));
+  EXPECT_FALSE(pager->PageContentRequired(PageNumber{2}));
+  ASSERT_TRUE(pager->Rollback().has_value());
 }
 
 TEST(WritePager, JournalSyncFailurePermitsOnlyRollbackAndDoesNotWriteTheDatabase) {
@@ -1584,7 +2039,7 @@ TEST(WritePager, SavepointOnlyCommitFinalizesWithoutDatabaseIo) {
   EXPECT_EQ(PagerState::kReader, pager->state());
 }
 
-TEST(WritePager, GrowthCommitRequiresPageOneToPublishTheLogicalSize) {
+TEST(WritePager, GrowthCommitMismatchSealsTheGenerationUntilRollback) {
   WritableEnvironment environment;
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   ASSERT_NE(nullptr, pager);
@@ -1600,14 +2055,14 @@ TEST(WritePager, GrowthCommitRequiresPageOneToPublishTheLogicalSize) {
   ASSERT_FALSE(invalid.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, invalid.error().code());
   EXPECT_EQ(0U, environment.main->write_count);
-  {
-    auto header = pager->WritePage(PageNumber{1});
-    ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  3);
-  }
-  ASSERT_TRUE(pager->Commit().has_value());
-  EXPECT_EQ(kPageSize * 3U, environment.main->bytes.size());
+  const auto header = pager->WritePage(PageNumber{1});
+  ASSERT_FALSE(header.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, header.error().code());
+  const auto retried = pager->Commit();
+  ASSERT_FALSE(retried.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, retried.error().code());
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(kPageSize * 2U, environment.main->bytes.size());
 }
 
 TEST(WritePager, CommitRejectsPageSizeChangesOutsideTheActiveGeometry) {

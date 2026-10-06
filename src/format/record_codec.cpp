@@ -13,6 +13,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -54,16 +55,26 @@ struct RecordMeasurements {
   return format == RecordSchemaFormat::kFour;
 }
 
-[[nodiscard]] Error Misuse(std::string message) {
-  return Error::Create(ErrorCode::kMisuse, std::move(message));
+[[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
+  try {
+    return Error::Create(code, std::string{message});
+  } catch (const std::bad_alloc&) {
+    return Error::OutOfMemory();
+  } catch (const std::length_error&) {
+    return Error::OutOfMemory();
+  }
 }
 
-[[nodiscard]] Error Corruption(std::string message) {
-  return Error::Create(ErrorCode::kCorruption, std::move(message));
+[[nodiscard]] Error Misuse(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kMisuse, message);
 }
 
-[[nodiscard]] Error TooLarge(std::string message) {
-  return Error::Create(ErrorCode::kTooLarge, std::move(message));
+[[nodiscard]] Error Corruption(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kCorruption, message);
+}
+
+[[nodiscard]] Error TooLarge(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kTooLarge, message);
 }
 
 [[nodiscard]] Result<void> ValidateOptions(RecordCodecOptions options) {
@@ -76,11 +87,11 @@ struct RecordMeasurements {
 [[nodiscard]] Result<std::size_t> CheckedSizeSum(std::size_t left, std::size_t right,
                                                  std::string_view description) {
   if (right > std::numeric_limits<std::size_t>::max() - left) {
-    return std::unexpected(TooLarge(std::string{description}));
+    return std::unexpected(TooLarge(description));
   }
   const std::size_t sum = left + right;
   if (sum > kMaximumRecordSize) {
-    return std::unexpected(TooLarge(std::string{description}));
+    return std::unexpected(TooLarge(description));
   }
   return sum;
 }
@@ -283,6 +294,59 @@ void WriteSignedInteger(MutableByteView output, std::int64_t value) noexcept {
 [[nodiscard]] bool IsValidEqualPrefixResult(EqualPrefixResult result) noexcept {
   return result == EqualPrefixResult::kLess || result == EqualPrefixResult::kEquivalent ||
          result == EqualPrefixResult::kGreater;
+}
+
+void EncodeMeasuredRecord(std::span<const SqlValue> values, RecordCodecOptions options,
+                          const RecordMeasurements& measurements, MutableByteView output) {
+  auto encoded_header_size =
+      EncodeSqliteVarint(measurements.header_size, output.first(measurements.header_size));
+  assert(encoded_header_size.has_value());
+  std::size_t header_offset = encoded_header_size->value();
+  std::size_t body_offset = measurements.header_size;
+
+  for (const SqlValue& value : values) {
+    auto serial_type = SelectRecordSerialType(value, options);
+    assert(serial_type.has_value());
+    auto encoded_type = EncodeSqliteVarint(
+        serial_type->code(), output.subspan(header_offset, body_offset - header_offset));
+    assert(encoded_type.has_value());
+    header_offset += encoded_type->value();
+
+    const std::size_t payload_size = serial_type->payload_size().value();
+    const MutableByteView payload = output.subspan(body_offset, payload_size);
+    switch (value.type()) {
+      case SqlValueType::kNull:
+        break;
+      case SqlValueType::kInteger:
+        if (payload_size != 0) {
+          WriteSignedInteger(payload, Required(value.integer_value()));
+        }
+        break;
+      case SqlValueType::kReal: {
+        const auto bits = std::bit_cast<std::uint64_t>(Required(value.real_value()));
+        StoreBigEndian<std::uint64_t>(payload.first<sizeof(std::uint64_t)>(), bits);
+        break;
+      }
+      case SqlValueType::kText: {
+        const ByteView source = AsBytes(Required(value.text_value()).bytes());
+        if (!source.empty()) {
+          std::memcpy(payload.data(), source.data(), source.size());
+        }
+        break;
+      }
+      case SqlValueType::kBlob: {
+        const ByteView source = Required(value.blob_value());
+        if (!source.empty()) {
+          std::memcpy(payload.data(), source.data(), source.size());
+        }
+        break;
+      }
+    }
+    body_offset += payload_size;
+  }
+
+  assert(header_offset == measurements.header_size);
+  assert(body_offset == measurements.total_size);
 }
 
 }  // namespace
@@ -591,63 +655,26 @@ Result<ByteCount> EncodedRecordSize(std::span<const SqlValue> values, RecordCode
   return ByteCount{measurements->total_size};
 }
 
+Result<ByteCount> EncodeRecordInto(std::span<const SqlValue> values, MutableByteView destination,
+                                   RecordCodecOptions options) {
+  auto measurements = MeasureRecord(values, options);
+  if (!measurements.has_value()) {
+    return std::unexpected(std::move(measurements.error()));
+  }
+  if (destination.size() < measurements->total_size) {
+    return std::unexpected(Misuse("record destination is too small"));
+  }
+  EncodeMeasuredRecord(values, options, *measurements, destination.first(measurements->total_size));
+  return ByteCount{measurements->total_size};
+}
+
 Result<ByteBuffer> EncodeRecord(std::span<const SqlValue> values, RecordCodecOptions options) {
   auto measurements = MeasureRecord(values, options);
   if (!measurements.has_value()) {
     return std::unexpected(std::move(measurements.error()));
   }
-
   ByteBuffer encoded{ByteCount{measurements->total_size}};
-  const MutableByteView output = encoded.mutable_view();
-  auto encoded_header_size =
-      EncodeSqliteVarint(measurements->header_size, output.first(measurements->header_size));
-  assert(encoded_header_size.has_value());
-  std::size_t header_offset = encoded_header_size->value();
-  std::size_t body_offset = measurements->header_size;
-
-  for (const SqlValue& value : values) {
-    auto serial_type = SelectRecordSerialType(value, options);
-    assert(serial_type.has_value());
-    auto encoded_type = EncodeSqliteVarint(
-        serial_type->code(), output.subspan(header_offset, body_offset - header_offset));
-    assert(encoded_type.has_value());
-    header_offset += encoded_type->value();
-
-    const std::size_t payload_size = serial_type->payload_size().value();
-    const MutableByteView payload = output.subspan(body_offset, payload_size);
-    switch (value.type()) {
-      case SqlValueType::kNull:
-        break;
-      case SqlValueType::kInteger:
-        if (payload_size != 0) {
-          WriteSignedInteger(payload, Required(value.integer_value()));
-        }
-        break;
-      case SqlValueType::kReal: {
-        const auto bits = std::bit_cast<std::uint64_t>(Required(value.real_value()));
-        StoreBigEndian<std::uint64_t>(payload.first<sizeof(std::uint64_t)>(), bits);
-        break;
-      }
-      case SqlValueType::kText: {
-        const ByteView source = AsBytes(Required(value.text_value()).bytes());
-        if (!source.empty()) {
-          std::memcpy(payload.data(), source.data(), source.size());
-        }
-        break;
-      }
-      case SqlValueType::kBlob: {
-        const ByteView source = Required(value.blob_value());
-        if (!source.empty()) {
-          std::memcpy(payload.data(), source.data(), source.size());
-        }
-        break;
-      }
-    }
-    body_offset += payload_size;
-  }
-
-  assert(header_offset == measurements->header_size);
-  assert(body_offset == measurements->total_size);
+  EncodeMeasuredRecord(values, options, *measurements, encoded.mutable_view());
   return encoded;
 }
 

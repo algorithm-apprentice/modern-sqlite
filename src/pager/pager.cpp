@@ -11,6 +11,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -582,8 +583,14 @@ bool Pager::in_write_transaction() const noexcept {
 }
 
 Status Pager::StoredError() const {
-  return std::unexpected(Error::Create(persistent_error_.value_or(ErrorCode::kInternal),
-                                       "pager is in a persistent error state"));
+  try {
+    return std::unexpected(Error::Create(persistent_error_.value_or(ErrorCode::kInternal),
+                                         "pager is in a persistent error state"));
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 }  // namespace modern_sqlite
