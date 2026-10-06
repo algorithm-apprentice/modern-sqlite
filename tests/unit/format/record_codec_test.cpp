@@ -281,6 +281,32 @@ TEST(RecordCodec, ReportsTheExactEncodedSize) {
   EXPECT_EQ(encoded->size(), *measured);
 }
 
+TEST(RecordCodec, EncodesIntoCallerOwnedStorage) {
+  const std::array<SqlValue, 4> values{
+      SqlValue::Integer(128),
+      SqlValue::Real(3.25),
+      SqlValue::Text(std::string(58, 'x')),
+      SqlValue::Blob(Bytes({0x00, 0xff})),
+  };
+  const auto measured_result = EncodedRecordSize(values);
+  ASSERT_TRUE(measured_result.has_value());
+  const ByteCount measured = *measured_result;
+  std::vector<std::byte> storage(measured.value());
+
+  const auto written = EncodeRecordInto(values, storage);
+  const auto allocated = EncodeRecord(values);
+
+  ASSERT_TRUE(written.has_value());
+  ASSERT_TRUE(allocated.has_value());
+  EXPECT_EQ(measured, *written);
+  EXPECT_TRUE(std::ranges::equal(storage, allocated->view()));
+
+  const auto too_small =
+      EncodeRecordInto(values, MutableByteView{storage}.first(storage.size() - 1U));
+  ASSERT_FALSE(too_small.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, too_small.error().code());
+}
+
 TEST(RecordCodec, AcceptsSQLiteCompatibleOverlongVarints) {
   const ByteBuffer overlong_header = Bytes({0x80, 0x03, 0x00});
   const ByteBuffer overlong_serial_type = Bytes({0x03, 0x80, 0x00});

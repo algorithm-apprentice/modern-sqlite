@@ -111,6 +111,7 @@ set(
     src/session/read_session.cpp
     src/storage/btree/cursor.cpp
     src/storage/btree/page.cpp
+    src/storage/btree/writer.cpp
     src/storage/cache/page_cache.cpp
     src/storage/database_format.cpp
     src/storage/journal/journal.cpp

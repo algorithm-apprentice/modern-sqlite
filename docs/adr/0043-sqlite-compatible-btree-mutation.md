@@ -132,7 +132,8 @@ Exactly one B-tree write session may be opened for each admitted pager write
 transaction generation. The future transaction coordinator owns that session
 and hands out typed root handles. Opening a session requires an active pager
 write transaction. Opening an existing root additionally requires a nonzero
-root, a valid database header, and a root page of the expected kind.
+root, a valid database header, a root page not owned by the freelist, and a
+root page of the expected kind.
 
 ADR-0042's pager contract is extended with a monotonic
 `write_transaction_generation()` accessor and a non-allocating
@@ -148,6 +149,13 @@ step. This makes the first session core the only B-tree mutation authority for
 the transaction; destroying it requires successfully restoring a savepoint or
 ending the write transaction and beginning another before a new session can
 be opened.
+
+The pager also exposes its non-allocating write-failure code. A failed journal
+transaction rejects a coordinator claim even when no writable page pin was
+returned, and every existing B-tree session reports rollback-required from
+that pager state. This covers journal-record or spill failure after rollback
+state became mandatory but before the B-tree layer could record its first page
+mutation.
 
 The pager increments the generation, invalidating every existing session and
 handle:
@@ -168,23 +176,38 @@ the desired write transaction.
 
 Generation invalidation is deliberately separate from coordinator-claim
 release. A failed commit, full rollback, or savepoint rollback keeps the claim
-and rollback-required state latched even though the old handles are invalid.
-No new session can mutate the still-active transaction; the caller may only
-retry pager commit/rollback cleanup. A successful commit or full rollback ends
-the write transaction, and the next successful `BeginWrite()` clears the old
-claim while advancing the generation again. A successful savepoint rollback
-clears the claim only after playback and image restoration complete, allowing
-one new session in the restored transaction generation.
+and seals the invalidated generation even though the old handles are invalid.
+Direct pager mutation and late savepoints are blocked as well as new B-tree
+sessions; the caller may only retry commit, perform full rollback, or roll
+back to a savepoint that predates the attempt. A successful commit or full
+rollback ends the write transaction, and the next successful `BeginWrite()`
+clears the old claim while advancing the generation again. A successful
+savepoint rollback clears the seal and claim only after playback and image
+restoration complete, allowing one new session in the restored transaction
+generation.
 
 The uniquely claimed shared session owns one rollback-required state. A
 post-mutation failure through any handle prevents mutation through every
-handle in that transaction, and the persistent pager claim prevents callers
-from bypassing that state by destroying and reopening the session.
+handle in that transaction and reports the first code to the pager's
+coordinator-failure latch. The pager then rejects direct page mutation,
+commit, and new or released savepoints, so destroying the session or creating
+a savepoint after failure cannot launder a partial image. Full rollback or
+successful rollback to a savepoint created before the failure clears the
+pager latch; savepoint rollback also advances the generation and admits one
+new session for the restored image.
 Create and drop also maintain per-page root-incarnation counters. A handle
 captures its root's incarnation, and any successful drop invalidates all
 other handles to that root before the page can be reused for a new tree.
 This prevents a stale handle from mutating a different tree that later
-occupies the same page number.
+occupies the same page number. Root open traverses the persisted freelist and
+rejects both trunk and leaf pages, so a dropped root cannot be reopened from
+its still-parseable former B-tree bytes before reuse or from a later session.
+
+Root incarnations use a PMR-backed page-to-generation hash map. Tracking a
+previously unseen root allocates before clear/drop mutation begins; successful
+drop then increments an existing entry without allocating. Handle validation,
+drop invalidation, and large batches of distinct roots therefore remain
+expected constant-time per lookup.
 
 This node does not expose writable cursor positioning. Future VM operations
 need point insert, replace, and delete, not a second public navigation API.
@@ -202,6 +225,10 @@ The existing read cursors remain the read and verification boundary.
 - schema format 1 through 4; and
 - UTF-8 text encoding.
 
+Creation options validate `DatabaseSchemaFormat` as the explicit enum values
+1 through 4. Raw on-disk normalization rules do not apply to caller-provided
+creation enums, so zero can never be accepted and then persisted unchanged.
+
 It allocates page 1, writes the 100-byte SQLite database header, and
 initializes page 1 as an empty table leaf. The header publishes one logical
 page, rollback read/write versions, the standard 64/32/32 payload fractions,
@@ -218,12 +245,19 @@ Existing databases are writable only when:
 - the database text encoding is UTF-8; and
 - page 1 is a table B-tree root.
 
+The writer uses the pager's effective logical page count rather than requiring
+the raw header count to match it. SQLite permits a zero or stale raw page count
+when that field is not trusted by the change-counter pair. Any successful
+modified commit republishes the effective count at header offset 28 before the
+new change counter makes it authoritative.
+
 The auto-vacuum metadata checks exclude auto-vacuum and incremental-vacuum
-databases. The text-encoding check excludes UTF-16 databases until record
-encoding and index comparison support them. This node does not write pointer
-maps, relocate roots, or transcode record text. Rejecting those images with
-`kProtocol` before any page mutation is safer than silently producing an
-inconsistent file.
+databases. The text-encoding check uses the shared effective-encoding normalization, so
+raw zero and other values that normalize to UTF-8 remain writable. Effective
+UTF-16 databases remain excluded until record encoding and index comparison
+support them. This node does not write pointer maps, relocate roots, or
+transcode record text. Rejecting those images with `kProtocol` before any page
+mutation is safer than silently producing an inconsistent file.
 
 Reserved-byte databases remain supported. B-tree content, overflow payload,
 freelist trunks, and free-space calculations use the header's usable size;
@@ -277,6 +311,9 @@ local = K when K <= X, otherwise M
 where `U` is usable size, `M` is minimum local payload, and `X` is the
 page-kind maximum. A no-overflow cell is padded to SQLite's four-byte minimum.
 Payloads above `0x7fffffff` return `kTooLarge`.
+The four-byte minimum applies to the complete leaf cell only. Promotion strips
+leaf-only padding before adding an interior child pointer; demotion adds
+padding back only when the resulting leaf encoding needs it.
 
 Overflow pages are allocated before the referencing cell is published. Every
 overflow page stores the next-page number followed by up to `U - 4` payload
@@ -284,16 +321,37 @@ bytes; the final next pointer is zero. Existing overflow chains move between
 leaf, interior, sibling, and parent cells by moving their local cell encoding,
 not by copying the logical payload.
 
-Replacing or deleting a cell frees exactly the number of overflow pages
-implied by its logical and local payload sizes. Each next pointer is read and
-validated before its page is returned to the freelist. Premature termination,
+Replacing or deleting a cell first traverses and validates the complete
+overflow chain without mutating it, then frees exactly the collected pages.
+The validated page list remains owned by the operation across the tree edit,
+so release never retraverses potentially changed storage.
+Premature termination, excess length, duplicate pages or cycles,
 out-of-range references, locking-page references, or impossible chain length
-is `kCorruption`.
+is `kCorruption`. Clear and drop additionally reject one overflow page owned
+by multiple cells or simultaneously referenced as a B-tree page before
+freeing any page.
 
 ### 5. Centralize ordinary freelist allocation and release
 
 One internal allocator owns page-1 offsets 28, 32, and 36 and the freelist
 trunk format.
+
+The first allocator, root-open, clear, or drop operation in a write session
+validates the complete freelist into a session-owned unique ownership set.
+Validation checks every trunk and leaf reference, exact agreement with the
+header count, and duplicate ownership across trunks and leaves. Later
+allocation removes cached ownership only after the corresponding page-1
+mutation succeeds. Freeing reserves a new set entry before mutation and
+commits that reservation only after page 1 succeeds, avoiding a full freelist
+scan for every page operation without leaving an allocation boundary after
+persistent mutation.
+
+The ownership index is a PMR-backed hash set, giving expected constant-time
+duplicate checks, membership, allocation removal, and release insertion.
+Freeing reserves ownership by inserting before persistent mutation and uses a
+non-throwing rollback guard until page 1 publishes the new freelist state.
+Every B-tree page read for mutation and every collected overflow page is
+rejected if the cached freelist also owns it.
 
 Allocation follows pinned SQLite's ordinary `BTALLOC_ANY` path:
 
@@ -322,6 +380,9 @@ nearby/exact allocation, tail truncation, secure delete, pointer-map updates,
 or SQLite's no-content bitset. Reused pages are read and journaled through
 `Pager::WritePage()` before overwrite. That costs an avoidable read in some
 cases but preserves rollback correctness without speculative allocator state.
+Root open validates that the requested page is absent from every freelist
+trunk and leaf, including pages whose old B-tree bytes were not overwritten
+when appended to an existing trunk.
 
 ### 6. Search without retaining pins across mutation
 
@@ -329,6 +390,14 @@ Mutation search stores a fixed path of at most `kMaximumBtreeDepth` frames.
 Each frame contains only a page number and selected child slot. Page pins are
 released before a page on that path is requested writable, so read pins never
 alias write pins.
+
+Each search result also stores the immutable full root-to-leaf depth measured
+before mutation. This value is independent of the path vector, which is
+consumed during split and delete propagation. Table search obtains it when it
+reaches the target leaf. An exact interior-index delete measures it by
+descending to the predecessor leaf before replacing any cell. Every
+insertion-style re-entry from deletion and every transferred-predecessor
+search preserves or recomputes the same full depth.
 
 Table search binary-searches signed rowids and always descends to a leaf.
 An exact row may be replaced only in `kReplace` mode; `kInsertOnly` returns
@@ -343,16 +412,38 @@ count must equal the copied column count. An exact duplicate returns
 
 Overflow-backed index records use a reusable payload buffer. Before growing
 that buffer, the writer applies the same current-page-count feasibility bound
-as the read cursor.
+as the read cursor and rejects missing, special, or out-of-range first
+overflow references. A declared payload whose required overflow pages cannot
+fit in the current image's eligible page numbers returns `kCorruption` before
+logical-payload allocation. Page 1 and an in-image locking page are excluded
+from that upper bound.
+
+Every comparison-chain page is then checked for range, special-page status,
+cycles, and freelist ownership before its bytes are accepted. A free page that
+still contains parseable former overflow bytes is never treated as a live
+index key.
+
+Fully local index records are parsed directly from their borrowed cell bytes.
+Overflow records are assembled into retained session scratch, and index input
+records are encoded through the record codec's caller-owned destination API.
+Repeated comparisons and warmed point mutations therefore do not allocate a
+fresh logical-payload or encoded-record buffer.
 
 ### 7. Split overfull pages bottom-up
 
 An insertion or replacement first rebuilds its target page. If the page fits,
 no structural page is touched.
 
-An overfull non-root page is split into the original left page and one newly
-allocated right page. The split boundary minimizes used-byte imbalance while
-keeping both pages nonempty and valid.
+An overfull non-root page is split into the minimum number of valid pages:
+normally the original left page and one newly allocated right page, but three
+pages when SQLite's variable local-payload sizes leave no valid contiguous
+two-page boundary. A three-page split allocates two right pages and publishes
+two parent dividers. Boundaries minimize the largest page image and then
+used-byte imbalance while keeping every page nonempty and valid.
+
+Split planning builds one prefix sum of encoded cell sizes. Two-way candidates
+are evaluated in linear time and three-way boundary pairs in quadratic time;
+range-size calculation never rescans the cells inside each candidate.
 
 - A table leaf retains every row in a child. The parent divider is the
   greatest rowid retained on the left page.
@@ -360,19 +451,26 @@ keeping both pages nonempty and valid.
 - A table or index interior page promotes one divider and partitions its
   child pointers around that divider.
 
-The divider is inserted into the parent at the recorded child slot. The left
-page keeps the original page number, the new right page becomes the following
-child, and an overflowing parent is split in the same way. This continues to
-the root.
+The divider or dividers are inserted into the parent at the recorded child
+slot. The left page keeps the original page number, the new right pages become
+the following children, and an overflowing parent is split in the same way.
+This continues to the root.
 
-An overfull root keeps its page number. Two child pages are allocated, the
-root's logical contents are divided between them, and the root is rebuilt as
-an interior page with one divider. This is the Modern equivalent of SQLite's
-deepen-then-balance path.
+An overfull root keeps its page number. Two or three child pages are allocated,
+the root's logical contents are divided between them, and the root is rebuilt
+as an interior page with one or two dividers. This is the Modern equivalent of
+SQLite's deepen-then-balance path.
+
+Root deepening never creates a path beyond `kMaximumBtreeDepth`. The search
+result's immutable full depth records the pre-mutation limit; if split
+propagation reaches an already maximum-depth root, the operation returns
+`kTooLarge` and requires rollback for the lower-level splits already applied.
 
 Insertion does not redistribute across already valid siblings. Byte-balanced
-half-page splits provide bounded `O(log N)` mutation without importing
-SQLite's three-sibling and bulk-load optimization machinery. Sibling
+splits of only the overflowing page provide bounded `O(log N)` mutation
+without importing SQLite's adjacent three-sibling and bulk-load optimization
+machinery. The three-page fallback is a correctness requirement for
+indivisible variable-size cells, not sibling redistribution. Sibling
 redistribution remains part of deletion, where it is required to prevent
 empty or excessively sparse pages.
 
@@ -387,6 +485,11 @@ parent divider into scratch, and computes one of two outcomes:
 - merge into one page and free the right page when the combined image fits;
   or
 - redistribute into two byte-balanced pages and replace the parent divider.
+
+The selected sibling must be distinct from the current page, its parent, and
+every ancestor already retained in the mutation path. Duplicate child
+references are corruption and are rejected before either sibling is written
+or freed.
 
 For table leaves, the old parent divider is not row data and the replacement
 is recomputed from the left page's greatest rowid. For index leaves and all
@@ -422,6 +525,10 @@ the leaf occurrence being removed. Every failure after step 2 requires pager
 rollback. This preserves SQLite's predecessor semantics without retaining
 stale page pins or requiring an unserializable overfull page image.
 
+The removed and predecessor overflow chains are intersected through a
+PMR-backed ownership set, keeping the pre-mutation ownership check expected
+linear in their combined length.
+
 Table interior separators are upper bounds, not logical rows. A
 non-structural delete may leave a separator larger than the new maximum of its
 left subtree; that remains valid because it is still smaller than every row
@@ -433,7 +540,9 @@ affected separators.
 `Clear()` performs a bounded-depth post-order traversal:
 
 - validate every visited page kind and depth;
-- free every cell's overflow chain;
+- preflight every cell's complete, uniquely owned overflow chain;
+- reject overlap between overflow and B-tree pages;
+- free every validated overflow page;
 - free every non-root child page; and
 - rebuild the retained root as an empty leaf of the same tree kind.
 
@@ -454,6 +563,11 @@ requires transaction rollback.
 
 Public allocation boundaries translate `std::bad_alloc` to
 `ErrorCode::kOutOfMemory`.
+The complete table and index point-mutation bodies are allocation boundaries,
+so an exception cannot escape after split pages or predecessor replacements
+have been written. Promoted cells retain the session scratch resource rather
+than acquiring the process-default PMR resource during split planning;
+two-way fallback probes use an explicit same-resource deep clone.
 
 Each operation distinguishes pre-mutation failures from failures after the
 first persistent page or allocator change.
@@ -463,6 +577,8 @@ first persistent page or allocator change.
 - Once page allocation, overflow creation, freelist mutation, or page rebuild
   begins, any later error marks the shared session and every handle
   `requires_rollback()`.
+- A pager journal failure that independently requires full rollback has the
+  same effect even when the B-tree mutation sequence has not advanced.
 - A rollback-required session or handle returns its first error from every
   later mutating call.
 - The caller must roll back the pager transaction or an enclosing pager
@@ -474,6 +590,17 @@ transaction-coordinator node. Tests use explicit pager rollback to prove that
 every injected mid-mutation failure restores the original image.
 
 No destructor performs I/O, allocation, page mutation, or rollback.
+
+Error construction inside the B-tree module is itself non-throwing: if owning
+an error message exhausts memory, the API returns `kOutOfMemory`. Validation
+and stale-handle paths therefore preserve the typed-result contract even
+before a mutation body's ordinary allocation boundary begins.
+`InitializeDatabase()` additionally wraps its complete validation and geometry
+setup, including errors produced by lower format helpers, in the same
+allocation boundary.
+Existing table/index root opening likewise wraps freelist, pager, and page
+decoder validation before publishing a handle, so corrupt or out-of-range
+roots cannot leak allocation exceptions from lower-layer error construction.
 
 ### 11. Keep scratch reusable and mutation work bounded
 
@@ -507,6 +634,10 @@ The measurable initial contracts are:
   `O(depth + compared_overflow_page_visits + mutated_overflow_page_visits)`
   page visits, plus at most one B-tree sibling and the required freelist
   metadata per deletion level;
+- initial freelist validation and clear/drop ownership preflight perform
+  expected linear work rather than pairwise page comparisons;
+- two-way split selection is linear in cell count and the correctness-required
+  three-way fallback is quadratic;
 - no point operation scans or rebuilds the whole tree;
 - freelist reuse precedes physical append; and
 - every comparator, page read/write, split, merge, overflow page, and
@@ -532,6 +663,7 @@ Implementation proceeds red-first in the following groups.
 - append rejection at SQLite's `0xfffffffe` maximum page number;
 - clear retains an empty root;
 - drop frees non-page-1 roots and rejects page 1; and
+- dropped roots cannot be reopened while freelist-owned; and
 - corruption in freelist counts, trunks, leaves, and page references.
 
 Session-lifetime tests cover generation invalidation after commit, full
@@ -542,6 +674,11 @@ stale-handle rejection after drop followed by same-page root reuse.
 Failed commit, full-rollback, and savepoint-rollback attempts must retain the
 coordinator claim and reject a new session; successful savepoint rollback and
 the next write transaction must admit exactly one new session.
+Post-mutation failure must also reject commit and savepoints created after the
+failure, while rollback to a preexisting savepoint restores the image and
+admits a new session.
+Failed commit attempts must reject direct pager mutation and late savepoints
+without preventing commit retry or rollback to a preexisting savepoint.
 
 ### Table mutation model
 
@@ -549,9 +686,18 @@ the next write transaction must admit exactly one new session.
 - signed rowid ordering, including minimum and maximum values;
 - front, middle, and append insertion;
 - page split, recursive interior split, and root deepening;
+- adversarial local-payload sizes that require a three-page split because no
+  contiguous two-page boundary is valid;
+- exact three-child root structure and two-divider propagation from a
+  three-way non-root split;
+- maximum-depth split propagation rejected before a 21st level is published;
 - local and multi-page overflow payloads at every placement boundary;
+- cyclic overflow chains rejected before clear mutates the freelist;
+- B-tree child and overflow pages aliased by the freelist rejected before a
+  point mutation;
 - delete missing, first, middle, last, and interior-boundary rows;
 - sibling redistribution, merge, recursive parent repair, and root collapse;
+- duplicate sibling/path references rejected before delete rebalancing;
 - clear and root reuse; and
 - randomized operation sequences compared with `std::map`.
 
@@ -568,6 +714,9 @@ payload bytes, and checks freelist/page-count invariants.
 - leaf and interior insertion/deletion;
 - predecessor replacement of interior entries;
 - local and overflow-backed records;
+- overflow-backed predecessor transfer, exact remaining payloads, and freed
+  overflow-page reuse;
+- tiny leaf records promoted without carrying leaf-only padding;
 - overflow-backed records selected as binary-search comparison pivots;
 - recursive split, redistribution, merge, and collapse; and
 - randomized operation sequences compared with a reference ordered model.
@@ -580,10 +729,14 @@ and payload bytes.
 - failure before and after every page allocation, overflow write, freelist
   change, page rebuild, split, merge, clear, and drop boundary;
 - exact retryable versus rollback-required writer state;
+- independent pager-image and journal observations that exercise both known
+  pre-mutation and post-mutation OOM boundaries;
 - full pager rollback restores the byte-identical original image;
 - exhaustive allocation failure at session/root-handle open, scratch growth,
-  record encoding, payload copy, split planning, clear traversal setup, and
-  root creation;
+  index record encoding and predecessor decoding, payload copy, split
+  planning, clear traversal setup, and root creation;
+- stale-handle validation and duplicate coordinator-claim error construction
+  under allocation failure;
 - zero-allocation warmed local table insert/replace/delete; and
 - no logical-payload allocation when balance moves an existing overflow cell.
 
@@ -601,8 +754,8 @@ A conditional pinned-SQLite 3.54.0 executable will:
    expected model.
 
 Separate cases cover overflow payloads, enough inserts for multi-level trees,
-deletes that merge pages, clear, freelist reuse, and rollback after injected
-failure.
+overflow-backed interior predecessor deletion, tiny promoted records, deletes
+that merge pages, clear, freelist reuse, and rollback after injected failure.
 
 A second interoperability family begins with an empty pager and uses only
 Modern SQLite to:

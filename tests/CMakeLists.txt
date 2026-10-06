@@ -42,6 +42,7 @@ add_executable(
   unit/session/read_session_test.cpp
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
+  unit/storage/btree/writer_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp
@@ -235,6 +236,66 @@ set_tests_properties(
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_btree_writer_allocation_test
+  unit/storage/btree/writer_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_btree_writer_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+target_include_directories(
+  modern_sqlite_btree_writer_allocation_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/tests/unit/pager"
+)
+modern_sqlite_set_project_warnings(
+  modern_sqlite_btree_writer_allocation_test
+  PRIVATE
+)
+modern_sqlite_enable_clang_tidy(modern_sqlite_btree_writer_allocation_test)
+add_test(
+  NAME btree.writer_allocation
+  COMMAND modern_sqlite_btree_writer_allocation_test
+)
+set_tests_properties(
+  btree.writer_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_btree_writer_oom_test
+  unit/storage/btree/writer_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_btree_writer_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+target_include_directories(
+  modern_sqlite_btree_writer_oom_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/tests/unit/pager"
+)
+modern_sqlite_set_project_warnings(
+  modern_sqlite_btree_writer_oom_test
+  PRIVATE
+)
+modern_sqlite_enable_clang_tidy(modern_sqlite_btree_writer_oom_test)
+add_test(
+  NAME btree.writer_oom
+  COMMAND modern_sqlite_btree_writer_oom_test
+)
+set_tests_properties(
+  btree.writer_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 20
 )
 
 add_executable(
@@ -760,6 +821,34 @@ if(TARGET modern_sqlite_benchmark_sqlite)
   )
   set_tests_properties(
     compatibility.write_pager_sqlite
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
+
+  add_executable(
+    modern_sqlite_btree_write_sqlite_compatibility
+    compatibility/btree_write_sqlite_compatibility.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_btree_write_sqlite_compatibility
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(
+    modern_sqlite_btree_write_sqlite_compatibility
+    PRIVATE
+  )
+  modern_sqlite_enable_clang_tidy(
+    modern_sqlite_btree_write_sqlite_compatibility
+  )
+  add_test(
+    NAME compatibility.btree_write_sqlite
+    COMMAND modern_sqlite_btree_write_sqlite_compatibility
+  )
+  set_tests_properties(
+    compatibility.btree_write_sqlite
     PROPERTIES
       LABELS compatibility
       TIMEOUT 30

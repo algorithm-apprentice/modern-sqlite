@@ -23,6 +23,8 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/storage/btree/writer.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -611,6 +613,62 @@ class TemporaryDirectory final {
   return pager->Commit().has_value();
 }
 
+[[nodiscard]] bool InitializeBtreeDatabase(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 8);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  auto session = BtreeWriteSession::Open(*pager);
+  return session.has_value() && session->InitializeDatabase().has_value() &&
+         pager->Commit().has_value();
+}
+
+[[nodiscard]] bool CommitBtreeRows(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  auto session = BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return false;
+  }
+  auto writer = session->OpenTableBtree(PageNumber{1});
+  if (!writer.has_value()) {
+    return false;
+  }
+  constexpr std::array<std::byte, 32> kPayload{std::byte{0x5a}};
+  for (std::int64_t rowid = 1; rowid <= 100; ++rowid) {
+    if (!writer->Insert(rowid, kPayload).has_value()) {
+      return false;
+    }
+  }
+  return pager->Commit().has_value();
+}
+
+[[nodiscard]] std::optional<std::size_t> RecoverBtreeRowCount(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 8);
+  if (pager == nullptr || !pager->BeginRead().has_value()) {
+    return std::nullopt;
+  }
+  auto cursor = TableBtreeCursor::Open(*pager, PageNumber{1});
+  if (!cursor.has_value()) {
+    return std::nullopt;
+  }
+  auto valid = cursor->First();
+  if (!valid.has_value()) {
+    return std::nullopt;
+  }
+  std::size_t count = 0;
+  while (*valid) {
+    ++count;
+    valid = cursor->Next();
+    if (!valid.has_value()) {
+      return std::nullopt;
+    }
+  }
+  return count;
+}
+
 [[nodiscard]] bool CommitShrink(WritableEnvironment& environment) {
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -654,6 +712,165 @@ TEST(WritePager, OpensReadWriteAndTransitionsThroughAnEmptyWriteTransaction) {
   EXPECT_EQ(PagerState::kReader, pager->state());
   EXPECT_FALSE(environment.JournalPresent());
   EXPECT_TRUE(pager->EndRead().has_value());
+}
+
+TEST(WritePager, ClaimsOneWriteCoordinatorPerAdmittedGeneration) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  EXPECT_EQ(0U, pager->write_transaction_generation());
+
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::uint64_t first_generation = pager->write_transaction_generation();
+  EXPECT_GT(first_generation, 0U);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto duplicate = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kLocked, duplicate.error().code());
+
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_GT(pager->write_transaction_generation(), first_generation);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+
+  ASSERT_TRUE(pager->Rollback().has_value());
+  const std::uint64_t rolled_back_generation = pager->write_transaction_generation();
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  EXPECT_GT(pager->write_transaction_generation(), rolled_back_generation);
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, FailedCommitKeepsTheWriteCoordinatorClaimLatched) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto writable = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(writable.has_value());
+    writable->mutable_bytes()[100] = std::byte{0x7f};
+  }
+  const std::uint64_t transaction_generation = pager->write_transaction_generation();
+  environment.main->failing_lock = DatabaseLock::kExclusive;
+  environment.main->lock_failures_remaining = 1;
+
+  const auto first = pager->Commit();
+
+  ASSERT_FALSE(first.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, first.error().code());
+  EXPECT_GT(pager->write_transaction_generation(), transaction_generation);
+  const auto reopened = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(reopened.has_value());
+  EXPECT_EQ(ErrorCode::kLocked, reopened.error().code());
+  const auto write = pager->WritePage(PageNumber{2});
+  ASSERT_FALSE(write.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, write.error().code());
+  const auto allocated = pager->AllocatePage();
+  ASSERT_FALSE(allocated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, allocated.error().code());
+  const auto late_savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(late_savepoint.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, late_savepoint.error().code());
+  const auto released = pager->ReleaseSavepoint(*savepoint);
+  ASSERT_FALSE(released.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, released.error().code());
+  const auto truncated = pager->TruncateImage(pager->page_count());
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, truncated.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  ASSERT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, BtreeMutationFailurePoisonsTheSharedSessionAndRollsBackExactly) {
+  WritableEnvironment environment{std::vector<std::byte>{}};
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto session = BtreeWriteSession::Open(*pager);
+    ASSERT_TRUE(session.has_value());
+    ASSERT_TRUE(session->InitializeDatabase().has_value());
+  }
+  ASSERT_TRUE(pager->Commit().has_value());
+  const std::vector<std::byte> committed = environment.main->bytes;
+
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  auto session = BtreeWriteSession::Open(*pager);
+  ASSERT_TRUE(session.has_value());
+  auto writer = session->OpenTableBtree(PageNumber{1});
+  ASSERT_TRUE(writer.has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  environment.main->failing_lock = DatabaseLock::kExclusive;
+  environment.main->lock_failures_remaining = 1;
+  std::vector<std::byte> payload(6'000U, std::byte{0x5a});
+  const auto inserted = writer->Insert(1, payload);
+  ASSERT_FALSE(inserted.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, inserted.error().code());
+  const ErrorCode failure_code = inserted.error().code();
+  EXPECT_TRUE(session->requires_rollback());
+  EXPECT_TRUE(writer->requires_rollback());
+
+  constexpr std::array<std::byte, 1> kSmallPayload{std::byte{0x01}};
+  const auto blocked = writer->Insert(2, kSmallPayload);
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(failure_code, blocked.error().code());
+  const auto late_savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(late_savepoint.has_value());
+  EXPECT_EQ(failure_code, late_savepoint.error().code());
+  const auto committed_partial_image = pager->Commit();
+  ASSERT_FALSE(committed_partial_image.has_value());
+  EXPECT_EQ(failure_code, committed_partial_image.error().code());
+  const auto direct_write = pager->WritePage(PageNumber{1});
+  ASSERT_FALSE(direct_write.has_value());
+  EXPECT_EQ(failure_code, direct_write.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+  auto restored_session = BtreeWriteSession::Open(*pager);
+  ASSERT_TRUE(restored_session.has_value());
+  ASSERT_TRUE(restored_session->OpenTableBtree(PageNumber{1}).has_value());
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(committed, environment.main->bytes);
+}
+
+TEST(WritePager, EmptyInitializationRollbackCommitsAsANoOp) {
+  WritableEnvironment environment{std::vector<std::byte>{}};
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto session = BtreeWriteSession::Open(*pager);
+    ASSERT_TRUE(session.has_value());
+    ASSERT_TRUE(session->InitializeDatabase().has_value());
+  }
+  environment.main->failing_lock = DatabaseLock::kExclusive;
+  environment.main->lock_failures_remaining = 1;
+  const auto failed_commit = pager->Commit();
+  ASSERT_FALSE(failed_commit.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, failed_commit.error().code());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+  EXPECT_EQ(0U, pager->page_count());
+  const std::size_t database_writes = environment.main->write_count;
+  const std::size_t database_syncs = environment.main->sync_count;
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(database_writes, environment.main->write_count);
+  EXPECT_EQ(database_syncs, environment.main->sync_count);
+  EXPECT_TRUE(environment.main->bytes.empty());
 }
 
 TEST(WritePager, RejectsUnsupportedWriteFormatsBeforeReservedLock) {
@@ -1052,9 +1269,25 @@ TEST(WritePager, JournalRecordFailureNeverGrantsMutableAccessAndRequiresRollback
   ASSERT_FALSE(first.has_value());
   EXPECT_EQ(ErrorCode::kIo, first.error().code());
   EXPECT_EQ(PagerState::kWriterLocked, pager->state());
+  EXPECT_EQ(ErrorCode::kIo, pager->write_failure_code());
+  const auto claimed = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(claimed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, claimed.error().code());
   const auto second = pager->WritePage(PageNumber{2});
   ASSERT_FALSE(second.has_value());
   EXPECT_EQ(ErrorCode::kIo, second.error().code());
+  const auto allocated = pager->AllocatePage();
+  ASSERT_FALSE(allocated.has_value());
+  EXPECT_EQ(ErrorCode::kIo, allocated.error().code());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(savepoint.has_value());
+  EXPECT_EQ(ErrorCode::kIo, savepoint.error().code());
+  const auto truncated = pager->TruncateImage(1);
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kIo, truncated.error().code());
+  const auto committed = pager->Commit();
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, committed.error().code());
   EXPECT_EQ(0U, environment.main->write_count);
   ASSERT_TRUE(pager->Rollback().has_value());
   EXPECT_FALSE(environment.JournalPresent());
@@ -1584,7 +1817,7 @@ TEST(WritePager, SavepointOnlyCommitFinalizesWithoutDatabaseIo) {
   EXPECT_EQ(PagerState::kReader, pager->state());
 }
 
-TEST(WritePager, GrowthCommitRequiresPageOneToPublishTheLogicalSize) {
+TEST(WritePager, GrowthCommitMismatchSealsTheGenerationUntilRollback) {
   WritableEnvironment environment;
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   ASSERT_NE(nullptr, pager);
@@ -1600,14 +1833,14 @@ TEST(WritePager, GrowthCommitRequiresPageOneToPublishTheLogicalSize) {
   ASSERT_FALSE(invalid.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, invalid.error().code());
   EXPECT_EQ(0U, environment.main->write_count);
-  {
-    auto header = pager->WritePage(PageNumber{1});
-    ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  3);
-  }
-  ASSERT_TRUE(pager->Commit().has_value());
-  EXPECT_EQ(kPageSize * 3U, environment.main->bytes.size());
+  const auto header = pager->WritePage(PageNumber{1});
+  ASSERT_FALSE(header.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, header.error().code());
+  const auto retried = pager->Commit();
+  ASSERT_FALSE(retried.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, retried.error().code());
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(kPageSize * 2U, environment.main->bytes.size());
 }
 
 TEST(WritePager, CommitRejectsPageSizeChangesOutsideTheActiveGeometry) {
@@ -1866,6 +2099,37 @@ TEST(WritePager, EveryGrowthCommitCrashCutRecoversTheOldOrCommittedImage) {
     environment.Crash();
     environment.state->mutation_count = 0;
     ASSERT_TRUE(RecoverWritableImage(environment));
+    EXPECT_TRUE(environment.main->bytes == original || environment.main->bytes == committed);
+  }
+}
+
+TEST(WritePager, EveryBtreeCommitCrashCutRecoversTheOldOrCommittedTree) {
+  WritableEnvironment initialized{std::vector<std::byte>{}};
+  initialized.main->writes_are_durable = true;
+  ASSERT_TRUE(InitializeBtreeDatabase(initialized));
+  const std::vector<std::byte> original = initialized.main->bytes;
+
+  WritableEnvironment baseline{original};
+  baseline.main->writes_are_durable = true;
+  ASSERT_TRUE(CommitBtreeRows(baseline));
+  const std::vector<std::byte> committed = baseline.main->bytes;
+  const std::size_t mutation_count = baseline.state->mutation_count;
+  ASSERT_GT(mutation_count, 0U);
+
+  for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
+    SCOPED_TRACE(cut);
+    WritableEnvironment environment{original};
+    environment.main->writes_are_durable = true;
+    environment.state->fail_after_mutation = cut;
+
+    static_cast<void>(CommitBtreeRows(environment));
+
+    ASSERT_TRUE(environment.state->mutation_cut_triggered);
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    const auto row_count = RecoverBtreeRowCount(environment);
+    ASSERT_TRUE(row_count.has_value());
+    EXPECT_TRUE(*row_count == 0U || *row_count == 100U);
     EXPECT_TRUE(environment.main->bytes == original || environment.main->bytes == committed);
   }
 }

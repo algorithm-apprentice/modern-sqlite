@@ -605,8 +605,32 @@ target:
 - `CompletePlayback()` reparses page 1 when the restored image is nonempty and
   leaves the write transaction active.
 
+After successful savepoint playback, the pager recomputes net modification
+bookkeeping. In particular, when both the transaction-start and restored
+images are empty, `transaction_modified` and the cached change-counter update
+are cleared so a following commit takes the no-op journal-finalization path
+without database I/O.
+
 Nested savepoints, release, main-journal playback, and subjournal playback
 remain coordinator/backend responsibilities.
+
+Storage coordinators may report a post-mutation failure through the pager's
+non-allocating coordinator-failure latch. The first code remains authoritative.
+While latched, coordinator claiming, writable-page access, allocation,
+truncation, commit, and savepoint creation/release return that code. Full
+rollback remains legal. Rollback to a savepoint that already existed before
+the failure also remains legal because new savepoints cannot be created while
+latched; successful playback clears both the failure latch and coordinator
+claim only after the saved image has been restored. A failed rollback retains
+both.
+
+Commit, full-rollback, and savepoint-rollback attempts also seal the active
+write generation immediately before invalidating handles. If an attempt
+fails, ordinary writable-page access, allocation, truncation, coordinator
+claiming, and savepoint creation/release remain blocked. Commit retry, full
+rollback, and rollback to a savepoint that predates the attempt remain legal.
+Successful savepoint rollback clears the seal only after playback completes;
+successful terminal cleanup clears it with the rest of the write state.
 
 ### 13. Recover a hot journal before publishing a writable read snapshot
 
@@ -676,6 +700,12 @@ The pager classifies failures as follows:
   changed, rollback is required;
 - journal append/sync, database write, and database sync failures leave the
   write transaction failed and permit only rollback;
+- a storage-coordinator post-mutation failure latches its first code in the
+  pager, rejects commit and later mutation, and permits only full rollback or
+  rollback to an already-active savepoint;
+- a failed commit or rollback attempt seals the invalidated generation against
+  all ordinary mutation until commit/rollback cleanup or successful rollback
+  to an already-active savepoint;
 - rollback playback and journal commit/rollback finalization failures enter
   persistent `kError`;
 - post-commit physical truncation or SHARED-lock downgrade failures remain
@@ -691,6 +721,15 @@ authoritative source of truth.
 Public allocation boundaries translate `std::bad_alloc` to
 `ErrorCode::kOutOfMemory`. No broad exception catch converts unknown failures
 into success.
+
+The B-tree coordinator claim is one such complete boundary: duplicate,
+sealed-generation, persistent-error, and rollback-required error construction
+cannot leak an allocation exception.
+
+Pager write-state error construction uses the same non-throwing translation,
+so truncation, commit, savepoint creation/release, and persistent-error cleanup
+return `kOutOfMemory` rather than throwing while a transaction requires
+cleanup.
 
 ### 16. Make journal finalization exception-safe
 
@@ -794,7 +833,14 @@ Implementation will proceed red-first with focused tests in these groups.
 - transaction-new pages disappear on rollback;
 - savepoint rollback before and after spill;
 - nested release and rollback;
+- coordinator failure rejects late savepoint creation and commit, while
+  successful rollback to a preexisting savepoint admits exactly one new
+  coordinator;
+- failed commit attempts reject direct page mutation and late savepoints while
+  preserving commit retry and preexisting-savepoint rollback;
 - page-1 header refresh;
+- initialization rolled back to an initially empty image followed by no-op
+  commit;
 - hot recovery before snapshot publication;
 - two-handle hot-recovery contention releases both tentative SHARED locks so a
   later retry can recover;

@@ -145,7 +145,11 @@ class WritePagerFixedFile final : public File {
 
 class WritePagerFixedVfs final : public Vfs {
  public:
-  WritePagerFixedVfs() { InitializeDatabase(); }
+  explicit WritePagerFixedVfs(bool initialize_database = true) {
+    if (initialize_database) {
+      InitializeDatabase();
+    }
+  }
 
   [[nodiscard]] bool journal_present() const noexcept { return journal_.present; }
 

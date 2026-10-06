@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-btree-write",
+  "currentNode": "implement-transaction-coordinator",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

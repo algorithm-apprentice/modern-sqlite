@@ -19,6 +19,8 @@
 
 namespace modern_sqlite {
 
+class BtreeWriteSession;
+
 class DatabaseHeader final {
  public:
   [[nodiscard]] ByteCount page_size() const noexcept { return page_size_; }
@@ -174,6 +176,7 @@ class Pager final {
   [[nodiscard]] Status EndRead();
   [[nodiscard]] Status CleanupReadState();
   [[nodiscard]] Status BeginWrite();
+  [[nodiscard]] Status ClaimWriteCoordinator();
   [[nodiscard]] Status Commit();
   [[nodiscard]] Status Rollback();
   [[nodiscard]] Result<JournalSavepointId> CreateSavepoint();
@@ -190,12 +193,19 @@ class Pager final {
   [[nodiscard]] ByteCount page_size() const noexcept;
   [[nodiscard]] std::uint32_t page_count() const noexcept { return current_page_count_; }
   [[nodiscard]] std::uint64_t data_version() const noexcept { return data_version_; }
+  [[nodiscard]] std::uint64_t write_transaction_generation() const noexcept {
+    return write_transaction_generation_;
+  }
+  [[nodiscard]] std::optional<ErrorCode> write_failure_code() const noexcept;
+  void ReportWriteCoordinatorFailure(ErrorCode code) noexcept;
   [[nodiscard]] std::string_view path() const noexcept { return path_; }
   [[nodiscard]] PagerState state() const noexcept;
   [[nodiscard]] bool writable() const noexcept;
   [[nodiscard]] bool in_write_transaction() const noexcept;
 
  private:
+  friend class BtreeWriteSession;
+
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
   [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
   [[nodiscard]] Status CheckWal();
@@ -216,6 +226,7 @@ class Pager final {
   [[nodiscard]] Status RefreshCurrentHeader();
   [[nodiscard]] Status EnterError(Error error);
   [[nodiscard]] Status StoredError() const;
+  void AdvanceWriteTransactionGeneration() noexcept;
   void ResetWriteState() noexcept;
 
   Vfs* vfs_;
@@ -236,10 +247,12 @@ class Pager final {
   std::uint32_t current_page_count_ = 0;
   std::uint32_t transaction_start_page_count_ = 0;
   std::uint64_t data_version_ = 0;
+  std::uint64_t write_transaction_generation_ = 0;
   PagerState state_ = PagerState::kOpen;
   DatabaseLock database_lock_ = DatabaseLock::kNone;
   WriteCompletion completion_ = WriteCompletion::kNone;
   std::optional<ErrorCode> persistent_error_;
+  std::optional<ErrorCode> write_coordinator_failure_;
   bool has_seen_snapshot_ = false;
   bool transaction_modified_ = false;
   bool database_bytes_modified_ = false;
@@ -247,6 +260,8 @@ class Pager final {
   bool change_counter_updated_ = false;
   bool final_image_ = false;
   bool journal_finalized_ = false;
+  bool write_coordinator_claimed_ = false;
+  bool write_attempt_sealed_ = false;
 };
 
 }  // namespace modern_sqlite

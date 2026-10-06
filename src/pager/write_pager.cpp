@@ -7,7 +7,9 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
@@ -20,24 +22,38 @@ namespace {
 constexpr std::uint64_t kPendingByte = 0x40000000ULL;
 constexpr std::uint32_t kSqliteVersion = 3'054'000;
 
-[[nodiscard]] Error Misuse(std::string message) {
-  return Error::Create(ErrorCode::kMisuse, std::move(message));
+[[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
+  try {
+    return Error::Create(code, std::string{message});
+  } catch (const std::bad_alloc&) {
+    return Error::OutOfMemory();
+  } catch (const std::length_error&) {
+    return Error::OutOfMemory();
+  }
 }
 
-[[nodiscard]] Error Busy(std::string message) {
-  return Error::Create(ErrorCode::kBusy, std::move(message));
+[[nodiscard]] Error Misuse(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kMisuse, message);
 }
 
-[[nodiscard]] Error Protocol(std::string message) {
-  return Error::Create(ErrorCode::kProtocol, std::move(message));
+[[nodiscard]] Error Busy(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kBusy, message);
 }
 
-[[nodiscard]] Error TooLarge(std::string message) {
-  return Error::Create(ErrorCode::kTooLarge, std::move(message));
+[[nodiscard]] Error Locked(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kLocked, message);
 }
 
-[[nodiscard]] Error Internal(std::string message) {
-  return Error::Create(ErrorCode::kInternal, std::move(message));
+[[nodiscard]] Error Protocol(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kProtocol, message);
+}
+
+[[nodiscard]] Error TooLarge(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kTooLarge, message);
+}
+
+[[nodiscard]] Error Internal(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kInternal, message);
 }
 
 [[nodiscard]] std::uint32_t LockingPage(ByteCount page_size) noexcept {
@@ -236,7 +252,7 @@ Status Pager::BeginWrite() {
     return StoredError();
   }
   if (!writable()) {
-    return std::unexpected(Error::Create(ErrorCode::kReadOnly, "pager was not opened for writing"));
+    return std::unexpected(MakeError(ErrorCode::kReadOnly, "pager was not opened for writing"));
   }
   if (state_ != PagerState::kReader) {
     return std::unexpected(Misuse("write transaction requires reader state"));
@@ -261,8 +277,38 @@ Status Pager::BeginWrite() {
   final_image_ = false;
   journal_finalized_ = false;
   completion_ = WriteCompletion::kNone;
+  AdvanceWriteTransactionGeneration();
+  write_coordinator_claimed_ = false;
+  write_coordinator_failure_.reset();
+  write_attempt_sealed_ = false;
   state_ = PagerState::kWriterLocked;
   return {};
+}
+
+Status Pager::ClaimWriteCoordinator() {
+  try {
+    if (state_ == PagerState::kError) {
+      return StoredError();
+    }
+    if (!in_write_transaction() || state_ == PagerState::kWriterFinished) {
+      return std::unexpected(
+          Misuse("write coordinator claim requires a mutable write transaction"));
+    }
+    if (const auto failure = write_failure_code(); failure.has_value()) {
+      return std::unexpected(
+          MakeError(*failure, "write coordinator claim requires transaction rollback"));
+    }
+    if (write_coordinator_claimed_) {
+      return std::unexpected(Locked("the write transaction already has a coordinator"));
+    }
+    if (write_attempt_sealed_) {
+      return std::unexpected(Misuse("write coordinator claim requires commit or rollback cleanup"));
+    }
+    write_coordinator_claimed_ = true;
+    return {};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<WritePagePin> Pager::WritePage(PageNumber page_number) {
@@ -272,6 +318,12 @@ Result<WritePagePin> Pager::WritePage(PageNumber page_number) {
     }
     if (!in_write_transaction() || state_ == PagerState::kWriterFinished) {
       return std::unexpected(Misuse("writable page requires an active write transaction"));
+    }
+    if (const auto failure = write_failure_code(); failure.has_value()) {
+      return std::unexpected(MakeError(*failure, "writable page requires transaction rollback"));
+    }
+    if (write_attempt_sealed_) {
+      return std::unexpected(Misuse("writable page requires commit or rollback cleanup"));
     }
     if (final_image_) {
       return std::unexpected(Misuse("logical truncation has finalized the transaction image"));
@@ -319,6 +371,12 @@ Result<WritePagePin> Pager::AllocatePage() {
     }
     if (!in_write_transaction() || state_ == PagerState::kWriterFinished) {
       return std::unexpected(Misuse("page allocation requires an active write transaction"));
+    }
+    if (const auto failure = write_failure_code(); failure.has_value()) {
+      return std::unexpected(MakeError(*failure, "page allocation requires transaction rollback"));
+    }
+    if (write_attempt_sealed_) {
+      return std::unexpected(Misuse("page allocation requires commit or rollback cleanup"));
     }
     if (final_image_) {
       return std::unexpected(Misuse("logical truncation has finalized the transaction image"));
@@ -388,6 +446,12 @@ Status Pager::TruncateImage(std::uint32_t page_count) {
   if (!in_write_transaction() || state_ == PagerState::kWriterFinished) {
     return std::unexpected(Misuse("logical truncation requires an active write transaction"));
   }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "logical truncation requires transaction rollback"));
+  }
+  if (write_attempt_sealed_) {
+    return std::unexpected(Misuse("logical truncation requires commit or rollback cleanup"));
+  }
   if (final_image_) {
     return std::unexpected(Misuse("logical truncation already finalized the transaction image"));
   }
@@ -442,6 +506,12 @@ Result<JournalSavepointId> Pager::CreateSavepoint() {
   if (!in_write_transaction() || state_ == PagerState::kWriterFinished || final_image_) {
     return std::unexpected(Misuse("savepoint creation requires a mutable write transaction"));
   }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "savepoint creation requires transaction rollback"));
+  }
+  if (write_attempt_sealed_) {
+    return std::unexpected(Misuse("savepoint creation requires commit or rollback cleanup"));
+  }
   if (cache_ != nullptr && cache_->exclusive_pin_count() != 0U) {
     return std::unexpected(Busy("savepoint creation requires all write pins to be released"));
   }
@@ -460,6 +530,12 @@ Status Pager::ReleaseSavepoint(JournalSavepointId savepoint) {
       journal_transaction_ == nullptr) {
     return std::unexpected(Misuse("savepoint release requires a mutable write transaction"));
   }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "savepoint release requires transaction rollback"));
+  }
+  if (write_attempt_sealed_) {
+    return std::unexpected(Misuse("savepoint release requires commit or rollback cleanup"));
+  }
   return journal_transaction_->ReleaseSavepoint(savepoint);
 }
 
@@ -475,6 +551,8 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
     return std::unexpected(Busy("savepoint rollback requires all page pins to be released"));
   }
 
+  write_attempt_sealed_ = true;
+  AdvanceWriteTransactionGeneration();
   RecoveryTarget target{*this, database_bytes_modified_};
   auto rolled_back = journal_transaction_->RollbackToSavepoint(savepoint, target);
   if (!rolled_back.has_value()) {
@@ -487,8 +565,20 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
     change_counter_updated_ = false;
   }
   image_size_changed_ = current_page_count_ != transaction_start_page_count_;
-  state_ = database_bytes_modified_ ? PagerState::kWriterDatabaseModified
-                                    : PagerState::kWriterCacheModified;
+  const bool restored_empty_transaction =
+      current_page_count_ == 0U && transaction_start_page_count_ == 0U;
+  if (restored_empty_transaction) {
+    transaction_modified_ = false;
+    change_counter_updated_ = false;
+    state_ =
+        database_bytes_modified_ ? PagerState::kWriterDatabaseModified : PagerState::kWriterLocked;
+  } else {
+    state_ = database_bytes_modified_ ? PagerState::kWriterDatabaseModified
+                                      : PagerState::kWriterCacheModified;
+  }
+  write_coordinator_failure_.reset();
+  write_attempt_sealed_ = false;
+  write_coordinator_claimed_ = false;
   return {};
 }
 
@@ -505,10 +595,15 @@ Status Pager::Commit() {
   if (!in_write_transaction()) {
     return std::unexpected(Misuse("commit requires an active write transaction"));
   }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "commit requires transaction rollback"));
+  }
   if (cache_ != nullptr && cache_->pin_count() != 0) {
     return std::unexpected(Busy("commit requires all page pins to be released"));
   }
 
+  write_attempt_sealed_ = true;
+  AdvanceWriteTransactionGeneration();
   if (!transaction_modified_) {
     if (journal_transaction_ != nullptr) {
       RecoveryTarget target{*this, false};
@@ -586,6 +681,8 @@ Status Pager::Rollback() {
     return std::unexpected(Busy("rollback requires all page pins to be released"));
   }
 
+  write_attempt_sealed_ = true;
+  AdvanceWriteTransactionGeneration();
   if (journal_transaction_ != nullptr) {
     RecoveryTarget target{*this, database_bytes_modified_};
     auto rolled_back = journal_transaction_->Rollback(target);
@@ -673,7 +770,7 @@ Status Pager::EnsureJournalTransaction() {
       return {};
     }
     const ErrorCode code = journal_transaction_->failure_code().value_or(ErrorCode::kInternal);
-    return std::unexpected(Error::Create(code, "journal transaction requires full rollback"));
+    return std::unexpected(MakeError(code, "journal transaction requires full rollback"));
   }
   if (rollback_journal_ == nullptr || journal_sector_size_.value() == 0) {
     return std::unexpected(Internal("writable pager has no rollback journal"));
@@ -689,6 +786,27 @@ Status Pager::EnsureJournalTransaction() {
   }
   journal_transaction_ = std::move(*begun);
   return {};
+}
+
+std::optional<ErrorCode> Pager::write_failure_code() const noexcept {
+  if (write_coordinator_failure_.has_value()) {
+    return write_coordinator_failure_;
+  }
+  if (journal_transaction_ == nullptr) {
+    return std::nullopt;
+  }
+  const JournalTransactionState journal_state = journal_transaction_->state();
+  if (journal_state != JournalTransactionState::kFailed &&
+      journal_state != JournalTransactionState::kError) {
+    return std::nullopt;
+  }
+  return journal_transaction_->failure_code().value_or(ErrorCode::kInternal);
+}
+
+void Pager::ReportWriteCoordinatorFailure(ErrorCode code) noexcept {
+  if (!write_coordinator_failure_.has_value()) {
+    write_coordinator_failure_ = code;
+  }
 }
 
 Status Pager::CaptureSector(PageNumber page_number, const PageCache::Pin& target,
@@ -852,6 +970,10 @@ Status Pager::UpdateChangeCounter() {
       return std::unexpected(Misuse("page 1 logical page count does not match the pager image"));
     }
   }
+  StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, sizeof(std::uint32_t)>{mutable_bytes->data() + 28,
+                                                  sizeof(std::uint32_t)},
+      current_page_count_);
 
   const auto current_counter =
       LoadBigEndian<std::uint32_t>(std::span<const std::byte, sizeof(std::uint32_t)>{
@@ -971,6 +1093,10 @@ void Pager::ResetWriteState() noexcept {
   change_counter_updated_ = false;
   final_image_ = false;
   journal_finalized_ = false;
+  write_coordinator_failure_.reset();
+  write_attempt_sealed_ = false;
 }
+
+void Pager::AdvanceWriteTransactionGeneration() noexcept { ++write_transaction_generation_; }
 
 }  // namespace modern_sqlite
