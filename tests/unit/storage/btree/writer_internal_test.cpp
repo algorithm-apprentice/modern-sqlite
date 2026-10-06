@@ -181,6 +181,23 @@ void WriteOverflowIndexLeaf(MutableByteView bytes, ByteView record, PageNumber f
   return cell;
 }
 
+struct TableLeafSpec {
+  std::int64_t rowid;
+  std::size_t payload_size;
+};
+
+[[nodiscard]] Status InsertTableLeafCell(MutableBtreePage& page, std::size_t index,
+                                         TableLeafSpec spec, MutableByteView staged_copy,
+                                         BtreeWriteWorkspace& workspace) {
+  const ByteBuffer cell = TableLeafCell(spec.rowid, spec.payload_size);
+  return page.InsertCell(index, cell.view(), std::nullopt, staged_copy, workspace);
+}
+
+[[nodiscard]] Status AppendTableLeafCell(CellArray& cells, TableLeafSpec spec) {
+  const ByteBuffer cell = TableLeafCell(spec.rowid, spec.payload_size);
+  return cells.AppendCopied(cell.view());
+}
+
 [[nodiscard]] ByteBuffer CellImagePage(ByteView cell, BtreePageType type,
                                        BtreePageGeometry geometry) {
   ByteBuffer page{geometry.page_size()};
@@ -851,16 +868,16 @@ TEST(CellArray, EnforcesTheReferenceMaximumWithoutGrowingAfterCreation) {
   const BtreePageGeometry geometry =
       TakeValue(BtreePageGeometry::Create(ByteCount{512}, ByteCount{512}));
   CellArray cells = TakeValue(CellArray::Create(geometry));
-  const std::vector<std::byte> cell = TableLeafCell(1, 0U);
+  const ByteBuffer cell = TableLeafCell(1, 0U);
   const std::size_t maximum_page_cells = (geometry.page_size().value() - 8U) / 6U;
   const std::size_t maximum_cells =
       (3U * (maximum_page_cells + kStagedCellSlots) + 3U) & ~std::size_t{3U};
 
   for (std::size_t index = 0U; index < maximum_cells; ++index) {
-    RequireStatus(cells.AppendBorrowed(cell, 0U, cell.size()));
+    RequireStatus(cells.AppendBorrowed(cell.view(), 0U, cell.size().value()));
   }
 
-  const auto overflow = cells.AppendBorrowed(cell, 0U, cell.size());
+  const auto overflow = cells.AppendBorrowed(cell.view(), 0U, cell.size().value());
   ASSERT_FALSE(overflow.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, overflow.error().code());
   EXPECT_EQ(maximum_cells, cells.size());
@@ -881,18 +898,15 @@ TEST(MutableBtreePage, RejectsRebuildCellsFromDifferentPageGeometryWithoutMutati
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
     MutableBtreePage page = TakeValue(MutableBtreePage::Open(owner, slot, page_geometry));
     CellArray cells = TakeValue(CellArray::Create(other_geometry));
-    const std::vector<std::byte> cell = TableLeafCell(1, 0U);
-    RequireStatus(cells.AppendCopied(cell));
-    const std::vector<std::byte> before{
-        TakeValue(owner.Frame(slot)).get().bytes().begin(),
-        TakeValue(owner.Frame(slot)).get().bytes().end(),
-    };
+    const ByteBuffer cell = TableLeafCell(1, 0U);
+    RequireStatus(cells.AppendCopied(cell.view()));
+    const ByteBuffer before = ByteBuffer::CopyOf(TakeValue(owner.Frame(slot)).get().bytes());
 
     const auto rebuilt = page.Rebuild(cells, 0U, 1U, workspace);
 
     ASSERT_FALSE(rebuilt.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, rebuilt.error().code());
-    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(slot)).get().bytes()));
+    EXPECT_TRUE(std::ranges::equal(before.view(), TakeValue(owner.Frame(slot)).get().bytes()));
   }
   RequireStatus(pager->Rollback());
 }
@@ -909,11 +923,11 @@ TEST(MutableBtreePage, RebuildsAliasedPageOneCellsWithoutChangingTheDatabaseHead
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
     MutableBtreePage page = TakeValue(MutableBtreePage::Open(owner, slot, geometry));
-    const std::vector<std::byte> one = TableLeafCell(1, 20U);
-    const std::vector<std::byte> two = TableLeafCell(2, 24U);
-    const std::vector<std::byte> three = TableLeafCell(3, 28U);
-    RequireStatus(page.InsertCell(0U, one, std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, three, std::nullopt, {}, workspace));
+    const ByteBuffer one = TableLeafCell(1, 20U);
+    const ByteBuffer two = TableLeafCell(2, 24U);
+    const ByteBuffer three = TableLeafCell(3, 28U);
+    RequireStatus(page.InsertCell(0U, one.view(), std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, three.view(), std::nullopt, {}, workspace));
 
     const ByteView before = TakeValue(owner.Frame(slot)).get().bytes();
     std::array<std::byte, 100> database_header{};
@@ -926,7 +940,7 @@ TEST(MutableBtreePage, RebuildsAliasedPageOneCellsWithoutChangingTheDatabaseHead
     CellArray cells = TakeValue(CellArray::Create(geometry));
     RequireStatus(
         cells.AppendBorrowed(before, first_offset.value(), first_cell.encoded_size().value()));
-    RequireStatus(cells.AppendCopied(two));
+    RequireStatus(cells.AppendCopied(two.view()));
     RequireStatus(
         cells.AppendBorrowed(before, third_offset.value(), third_cell.encoded_size().value()));
 
@@ -962,7 +976,8 @@ TEST(MutableBtreePage, RejectsPartiallyOverlappingRebuildSourcesWithoutMutation)
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    RequireStatus(page.InsertCell(0U, TableLeafCell(1, 20U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(page, 0U, TableLeafSpec{.rowid = 1, .payload_size = 20U}, {},
+                                      workspace));
     const ByteView bytes = TakeValue(owner.Frame(slot)).get().bytes();
     const BtreePageView parsed = TakeValue(BtreePageView::Parse(bytes, PageNumber{2}, geometry));
     const std::size_t offset = TakeValue(parsed.cell_offset(0U)).value();
@@ -971,13 +986,13 @@ TEST(MutableBtreePage, RejectsPartiallyOverlappingRebuildSourcesWithoutMutation)
     ASSERT_LE(offset + size, bytes.size());
     CellArray cells = TakeValue(CellArray::Create(geometry));
     RequireStatus(cells.AppendBorrowed(bytes.subspan(offset - 1U, size + 1U), 1U, size));
-    const std::vector<std::byte> before{bytes.begin(), bytes.end()};
+    const ByteBuffer before = ByteBuffer::CopyOf(bytes);
 
     const auto rebuilt = page.Rebuild(cells, 0U, 1U, workspace);
 
     ASSERT_FALSE(rebuilt.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, rebuilt.error().code());
-    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(slot)).get().bytes()));
+    EXPECT_TRUE(std::ranges::equal(before.view(), TakeValue(owner.Frame(slot)).get().bytes()));
   }
   RequireStatus(pager->Rollback());
 }
@@ -1037,13 +1052,14 @@ TEST(MutableBtreePage, EditsAnOverfullPageByMaterializingAStagedCell) {
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    const std::vector<std::byte> one = TableLeafCell(1, 230U);
-    const std::vector<std::byte> two = TableLeafCell(2, 11U);
-    const std::vector<std::byte> three = TableLeafCell(3, 250U);
+    const ByteBuffer one = TableLeafCell(1, 230U);
+    const ByteBuffer two = TableLeafCell(2, 11U);
+    const ByteBuffer three = TableLeafCell(3, 250U);
     std::array<std::byte, 32> staged_copy{};
-    RequireStatus(page.InsertCell(0U, one, std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, three, std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, two, std::nullopt, MutableByteView{staged_copy}, workspace));
+    RequireStatus(page.InsertCell(0U, one.view(), std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, three.view(), std::nullopt, {}, workspace));
+    RequireStatus(
+        page.InsertCell(1U, two.view(), std::nullopt, MutableByteView{staged_copy}, workspace));
     ASSERT_EQ(1U, page.staged_count());
 
     CellArray cells = TakeValue(CellArray::Create(geometry));
@@ -1079,10 +1095,12 @@ TEST(MutableBtreePage, PrependsCellsThroughTheEditFastPath) {
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    RequireStatus(page.InsertCell(0U, TableLeafCell(2, 20U), std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, TableLeafCell(3, 24U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(page, 0U, TableLeafSpec{.rowid = 2, .payload_size = 20U}, {},
+                                      workspace));
+    RequireStatus(InsertTableLeafCell(page, 1U, TableLeafSpec{.rowid = 3, .payload_size = 24U}, {},
+                                      workspace));
     CellArray cells = TakeValue(CellArray::Create(geometry));
-    RequireStatus(cells.AppendCopied(TableLeafCell(1, 16U)));
+    RequireStatus(AppendTableLeafCell(cells, TableLeafSpec{.rowid = 1, .payload_size = 16U}));
     RequireStatus(cells.AppendPage(page));
 
     RequireStatus(page.Edit(cells, 1U, 0U, 3U, workspace));
@@ -1114,9 +1132,12 @@ TEST(MutableBtreePage, DropsPrefixCellsThroughTheEditFastPath) {
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    RequireStatus(page.InsertCell(0U, TableLeafCell(1, 16U), std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, TableLeafCell(2, 20U), std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(2U, TableLeafCell(3, 24U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(page, 0U, TableLeafSpec{.rowid = 1, .payload_size = 16U}, {},
+                                      workspace));
+    RequireStatus(InsertTableLeafCell(page, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U}, {},
+                                      workspace));
+    RequireStatus(InsertTableLeafCell(page, 2U, TableLeafSpec{.rowid = 3, .payload_size = 24U}, {},
+                                      workspace));
     CellArray cells = TakeValue(CellArray::Create(geometry));
     RequireStatus(cells.AppendPage(page));
 
@@ -1148,26 +1169,23 @@ TEST(MutableBtreePage, PreservesTheEditFastPathByteForByteWhenTheRangeIsUnchange
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    const std::vector<std::byte> one = TableLeafCell(1, 80U);
-    const std::vector<std::byte> two = TableLeafCell(2, 60U);
-    const std::vector<std::byte> three = TableLeafCell(3, 40U);
-    RequireStatus(page.InsertCell(0U, one, std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, two, std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(2U, three, std::nullopt, {}, workspace));
+    const ByteBuffer one = TableLeafCell(1, 80U);
+    const ByteBuffer two = TableLeafCell(2, 60U);
+    const ByteBuffer three = TableLeafCell(3, 40U);
+    RequireStatus(page.InsertCell(0U, one.view(), std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, two.view(), std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(2U, three.view(), std::nullopt, {}, workspace));
     RequireStatus(page.DropCell(1U));
     const BtreePageView fragmented = TakeValue(
         BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
     EXPECT_TRUE(TakeValue(fragmented.AnalyzeFreeSpace()).freeblocks().Next().has_value());
     CellArray cells = TakeValue(CellArray::Create(geometry));
     RequireStatus(cells.AppendPage(page));
-    const std::vector<std::byte> before{
-        TakeValue(owner.Frame(slot)).get().bytes().begin(),
-        TakeValue(owner.Frame(slot)).get().bytes().end(),
-    };
+    const ByteBuffer before = ByteBuffer::CopyOf(TakeValue(owner.Frame(slot)).get().bytes());
 
     RequireStatus(page.Edit(cells, 0U, 0U, cells.size(), workspace));
 
-    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(slot)).get().bytes()));
+    EXPECT_TRUE(std::ranges::equal(before.view(), TakeValue(owner.Frame(slot)).get().bytes()));
   }
   RequireStatus(pager->Rollback());
 }
@@ -1189,13 +1207,15 @@ TEST(MutableBtreePage, RebuildsWhenTheEditFastPathCannotExtendThePointerArray) {
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
     MutableBtreePage page =
         TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
-    RequireStatus(page.InsertCell(0U, TableLeafCell(1, 170U), std::nullopt, {}, workspace));
-    RequireStatus(page.InsertCell(1U, TableLeafCell(2, 170U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(page, 0U, TableLeafSpec{.rowid = 1, .payload_size = 170U}, {},
+                                      workspace));
+    RequireStatus(InsertTableLeafCell(page, 1U, TableLeafSpec{.rowid = 2, .payload_size = 170U}, {},
+                                      workspace));
     CellArray cells = TakeValue(CellArray::Create(geometry));
     RequireStatus(cells.AppendPage(page));
     constexpr std::size_t kNewCellCount = 80U;
     for (std::int64_t rowid = 10; rowid < 90; ++rowid) {
-      RequireStatus(cells.AppendCopied(TableLeafCell(rowid, 0U)));
+      RequireStatus(AppendTableLeafCell(cells, TableLeafSpec{.rowid = rowid, .payload_size = 0U}));
     }
 
     RequireStatus(page.Edit(cells, 0U, 2U, kNewCellCount, workspace));
