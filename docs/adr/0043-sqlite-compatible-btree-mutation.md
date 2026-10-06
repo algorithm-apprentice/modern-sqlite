@@ -1,6 +1,6 @@
 # ADR-0043: SQLite-Compatible B-Tree Mutation
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0044
 
 ## Context
 
