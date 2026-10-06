@@ -120,7 +120,6 @@ jobs:
       - name: Configure quality build
         run: |
           cmake --preset clang-tidy \
-            -DMODERN_SQLITE_ENABLE_CLANG_TIDY=OFF \
             -DMODERN_SQLITE_CLANG_FORMAT_EXECUTABLE="$PWD/.quality-tools/bin/clang-format" \
             -DMODERN_SQLITE_CLANG_TIDY_EXECUTABLE="$(brew --prefix llvm)/bin/clang-tidy"
       - name: Check changed translation units
@@ -130,6 +129,7 @@ jobs:
           --base-ref "origin/${{ github.base_ref }}"
           --build-directory build/clang-tidy
           --jobs 3
+          --smoke-source src/base/bytes.cpp
       - name: Check formatting
         run: cmake --build --preset clang-tidy --target check-format
 

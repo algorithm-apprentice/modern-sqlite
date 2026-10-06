@@ -86,6 +86,8 @@ Any failure blocks merging and new feature work until its root cause is fixed.
 - CMake emits strict `-std=c++23` or the compiler-equivalent flag.
 - Pull requests run clang-tidy for changed translation units. Cross-compiler
   Debug and Release builds cover header and build-configuration changes.
+- Every pull request also analyzes one stable smoke translation unit so
+  workflow-only changes exercise the real clang-tidy command path.
 - `main` always runs the full clang-tidy target. A pull request may request the
   same full target with the `full-quality` label.
 - Pull requests require GCC Release, macOS Debug and Release, sanitizers, and
