@@ -119,6 +119,10 @@ It contains:
 - fixed arrays for the at-most-three old and five new balance siblings; and
 - temporary overflow-page pins.
 
+Each owned page also retains its fixed page-local staged-cell slots. Reopening
+a mutable facade from a cursor frame therefore preserves staged ancestor
+dividers, while releasing the owner slot clears those borrowed views.
+
 The owner performs a bounded linear lookup by page number. It does not use a
 hash table.
 
@@ -513,6 +517,11 @@ B-tree functions:
 - release all pins and operation-local scratch;
 - clear page-local overflow slots when required; and
 - mark the pager transaction rollback-required after persistent mutation.
+
+The mutation owner records the operation-start checkpoint. `balance()` uses
+that checkpoint, rather than a checkpoint taken after the local edit, so a
+later allocation or I/O failure cannot leave an earlier insert/delete change
+committable.
 
 They do not retry through a failed allocator arena.
 

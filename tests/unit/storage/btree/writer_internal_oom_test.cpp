@@ -537,6 +537,79 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] Outcome RunCursorBalance(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
+                                                                 pager->header()->usable_size());
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  if (!geometry.has_value() || !workspace.has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer payload = FilledBuffer(380U, std::byte{0x4d});
+  modern_sqlite::ByteBuffer staged_cell{geometry->page_size()};
+
+  modern_sqlite::ErrorCode error = modern_sqlite::ErrorCode::kGeneric;
+  bool succeeded = false;
+  bool cursor_state_valid = false;
+  bool failure_latched = false;
+  std::size_t allocations = 0U;
+  {
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
+        owner, modern_sqlite::PageNumber{1}, true);
+    if (!cursor.has_value() || !cursor->PromoteCurrent().has_value()) {
+      return {};
+    }
+    auto root = modern_sqlite::btree_internal::MutableBtreePage::Open(
+        owner, cursor->current_owner_slot(), *geometry);
+    const auto old_cell = modern_sqlite::btree_internal::FillTableLeafCell(
+        owner, *geometry, *workspace, 1, payload.view());
+    if (!root.has_value() || !old_cell.has_value() ||
+        !root->InsertCell(0U, old_cell->bytes, std::nullopt, {}, *workspace).has_value()) {
+      return {};
+    }
+    const auto new_cell = modern_sqlite::btree_internal::FillTableLeafCell(
+        owner, *geometry, *workspace, 2, payload.view());
+    if (!new_cell.has_value() ||
+        !root->InsertCell(1U, new_cell->bytes, std::nullopt, staged_cell.mutable_view(), *workspace)
+             .has_value()) {
+      return {};
+    }
+
+    Arm(failure);
+    const auto balanced = cursor->Balance(std::move(*root), *workspace);
+    allocations = Disarm();
+    succeeded = balanced.has_value();
+    error = balanced.has_value() ? modern_sqlite::ErrorCode::kGeneric : balanced.error().code();
+    cursor_state_valid =
+        balanced.has_value()
+            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
+            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+    failure_latched = balanced.has_value() ||
+                      pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
+  }
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = cursor_state_valid && failure_latched && rolled_back &&
+                         std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
 [[nodiscard]] Outcome RunRootDeepening(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
@@ -671,20 +744,23 @@ int main() try {
   if (!ExhaustAllocations(RunNonrootBalance)) {
     return 8;
   }
-  if (!ExhaustAllocations(RunRootDeepening)) {
+  if (!ExhaustAllocations(RunCursorBalance)) {
     return 9;
   }
-  if (!ExhaustAllocations(RunOverflowSeek)) {
+  if (!ExhaustAllocations(RunRootDeepening)) {
     return 10;
   }
-  if (!ExhaustAllocations(RunOverflowFormat)) {
+  if (!ExhaustAllocations(RunOverflowSeek)) {
     return 11;
   }
-  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+  if (!ExhaustAllocations(RunOverflowFormat)) {
     return 12;
+  }
+  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+    return 13;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 13;
+  return 14;
 }
