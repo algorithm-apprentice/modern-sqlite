@@ -198,6 +198,39 @@ struct TableLeafSpec {
   return cells.AppendCopied(cell.view());
 }
 
+[[nodiscard]] ByteBuffer TableLeafCellWithRowid(ByteView encoded_rowid, std::size_t payload_size) {
+  std::array<std::byte, 9> encoded_payload{};
+  const auto payload_header = EncodeSqliteVarint(payload_size, MutableByteView{encoded_payload});
+  if (!payload_header.has_value() || encoded_rowid.empty()) {
+    throw std::runtime_error("failed to encode test table cell");
+  }
+  const std::size_t encoded_size =
+      std::max<std::size_t>(4U, payload_header->value() + encoded_rowid.size() + payload_size);
+  ByteBuffer cell{ByteCount{encoded_size}};
+  const MutableByteView bytes = cell.mutable_view();
+  std::ranges::copy(std::span{encoded_payload}.first(payload_header->value()), bytes.begin());
+  std::ranges::copy(encoded_rowid,
+                    bytes.begin() + static_cast<std::ptrdiff_t>(payload_header->value()));
+  std::ranges::fill(bytes.subspan(payload_header->value() + encoded_rowid.size(), payload_size),
+                    std::byte{0x5a});
+  return cell;
+}
+
+[[nodiscard]] ByteBuffer TableInteriorCell(PageNumber left_child, std::int64_t rowid) {
+  std::array<std::byte, 9> encoded_rowid{};
+  const auto rowid_header =
+      EncodeSqliteVarint(std::bit_cast<std::uint64_t>(rowid), MutableByteView{encoded_rowid});
+  if (!rowid_header.has_value()) {
+    throw std::runtime_error("failed to encode test table divider");
+  }
+  ByteBuffer cell{ByteCount{sizeof(std::uint32_t) + rowid_header->value()}};
+  const MutableByteView bytes = cell.mutable_view();
+  Store32(bytes, 0U, left_child.value());
+  std::ranges::copy(std::span{encoded_rowid}.first(rowid_header->value()),
+                    bytes.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+  return cell;
+}
+
 [[nodiscard]] ByteBuffer CellImagePage(ByteView cell, BtreePageType type,
                                        BtreePageGeometry geometry) {
   ByteBuffer page{geometry.page_size()};
@@ -1493,6 +1526,223 @@ TEST(MutableBtreePage, RejectsMalformedFreeblocksWithoutMutation) {
     ASSERT_FALSE(malformed.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, malformed.error().code());
     EXPECT_TRUE(std::ranges::equal(before.view(), TakeValue(owner.Frame(slot)).get().bytes()));
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeBalance, QuickBalanceMovesTheRightmostOverflowCellToANewSibling) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    ASSERT_EQ(PageNumber{2}, parent_allocation.page_number);
+    ASSERT_EQ(PageNumber{3}, leaf_allocation.page_number);
+    MutableBtreePage parent = TakeValue(MutableBtreePage::Initialize(
+        owner, parent_allocation.owner_slot, geometry, BtreePageType::kInteriorTable));
+    MutableBtreePage leaf = TakeValue(MutableBtreePage::Initialize(
+        owner, leaf_allocation.owner_slot, geometry, BtreePageType::kLeafTable));
+    RequireStatus(parent.SetRightmostChild(leaf.page_number()));
+    RequireStatus(InsertTableLeafCell(leaf, 0U, TableLeafSpec{.rowid = 1, .payload_size = 477U}, {},
+                                      workspace));
+    std::array<std::byte, 32> staged_copy{};
+    RequireStatus(InsertTableLeafCell(leaf, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
+    ASSERT_EQ(1U, leaf.staged_count());
+
+    RequireStatus(MutableBtreePage::BalanceQuick(parent, leaf, workspace));
+
+    EXPECT_EQ(4U, pager->page_count());
+    EXPECT_EQ(1U, leaf.cell_count());
+    EXPECT_EQ(1U, leaf.staged_count());
+    const BtreePageView parent_view = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(parent_allocation.owner_slot)).get().bytes(),
+                             parent.page_number(), geometry));
+    ASSERT_EQ(1U, parent_view.cell_count());
+    EXPECT_EQ(PageNumber{4}, parent_view.rightmost_child().value_or(PageNumber{}));
+    const BtreeCellView divider = TakeValue(parent_view.cell(0U));
+    EXPECT_EQ(leaf.page_number(), divider.left_child().value_or(PageNumber{}));
+    EXPECT_EQ(1, divider.rowid());
+    const auto new_page_pin = TakeValue(pager->ReadPage(PageNumber{4}));
+    const BtreePageView new_page =
+        TakeValue(BtreePageView::Parse(new_page_pin.frame().bytes(), PageNumber{4}, geometry));
+    ASSERT_EQ(BtreePageType::kLeafTable, new_page.type());
+    ASSERT_EQ(1U, new_page.cell_count());
+    EXPECT_EQ(2, TakeValue(new_page.cell(0U)).rowid());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeBalance, QuickBalancePreservesTheRawDividerRowidEncoding) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage parent = TakeValue(MutableBtreePage::Initialize(
+        owner, parent_allocation.owner_slot, geometry, BtreePageType::kInteriorTable));
+    MutableBtreePage leaf = TakeValue(MutableBtreePage::Initialize(
+        owner, leaf_allocation.owner_slot, geometry, BtreePageType::kLeafTable));
+    RequireStatus(parent.SetRightmostChild(leaf.page_number()));
+    const std::array<std::byte, 9> overlong_rowid{
+        std::byte{0x80}, std::byte{0x80}, std::byte{0x80}, std::byte{0x80}, std::byte{0x80},
+        std::byte{0x80}, std::byte{0x80}, std::byte{0x80}, std::byte{0x01},
+    };
+    const ByteBuffer old_cell = TableLeafCellWithRowid(overlong_rowid, 468U);
+    RequireStatus(leaf.InsertCell(0U, old_cell.view(), std::nullopt, {}, workspace));
+    std::array<std::byte, 32> staged_copy{};
+    RequireStatus(InsertTableLeafCell(leaf, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
+
+    RequireStatus(MutableBtreePage::BalanceQuick(parent, leaf, workspace));
+
+    const ByteView parent_bytes =
+        TakeValue(owner.Frame(parent_allocation.owner_slot)).get().bytes();
+    const BtreePageView parent_view =
+        TakeValue(BtreePageView::Parse(parent_bytes, parent.page_number(), geometry));
+    const std::size_t divider_offset = TakeValue(parent_view.cell_offset(0U)).value();
+    const BtreeCellView divider = TakeValue(parent_view.cell(0U));
+    ASSERT_EQ(13U, divider.encoded_size().value());
+    EXPECT_EQ(1, divider.rowid());
+    EXPECT_TRUE(std::ranges::equal(
+        overlong_rowid,
+        parent_bytes.subspan(divider_offset + sizeof(std::uint32_t), overlong_rowid.size())));
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeBalance, QuickBalanceStagesAParentDividerForTheNextUpwardBalance) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage parent = TakeValue(MutableBtreePage::Initialize(
+        owner, parent_allocation.owner_slot, geometry, BtreePageType::kInteriorTable));
+    MutableBtreePage leaf = TakeValue(MutableBtreePage::Initialize(
+        owner, leaf_allocation.owner_slot, geometry, BtreePageType::kLeafTable));
+    RequireStatus(parent.SetRightmostChild(leaf.page_number()));
+    const ByteBuffer large_divider = TableInteriorCell(leaf.page_number(), -1);
+    ASSERT_EQ(ByteCount{13}, large_divider.size());
+    for (std::size_t index = 0U; index < 33U; ++index) {
+      RequireStatus(
+          parent.InsertCell(index, large_divider.view(), leaf.page_number(), {}, workspace));
+    }
+    ASSERT_EQ(5U, parent.free_bytes());
+    RequireStatus(InsertTableLeafCell(leaf, 0U, TableLeafSpec{.rowid = 1, .payload_size = 477U}, {},
+                                      workspace));
+    std::array<std::byte, 32> staged_copy{};
+    RequireStatus(InsertTableLeafCell(leaf, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
+
+    RequireStatus(MutableBtreePage::BalanceQuick(parent, leaf, workspace));
+
+    EXPECT_EQ(33U, parent.cell_count());
+    ASSERT_EQ(1U, parent.staged_count());
+    const std::optional<StagedCell> staged = parent.staged_cell(0U);
+    ASSERT_TRUE(staged.has_value());
+    EXPECT_EQ(33U, staged->index);
+    const ByteBuffer divider_page =
+        CellImagePage(staged->bytes, BtreePageType::kInteriorTable, geometry);
+    const BtreeCellView divider = TakeValue(
+        TakeValue(BtreePageView::Parse(divider_page.view(), PageNumber{98}, geometry)).cell(0U));
+    EXPECT_EQ(leaf.page_number(), divider.left_child().value_or(PageNumber{}));
+    EXPECT_EQ(1, divider.rowid());
+    const BtreePageView parent_view = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(parent_allocation.owner_slot)).get().bytes(),
+                             parent.page_number(), geometry));
+    EXPECT_EQ(PageNumber{4}, parent_view.rightmost_child().value_or(PageNumber{}));
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeBalance, QuickBalanceRejectsANonIncreasingOverflowBeforeAllocation) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage parent = TakeValue(MutableBtreePage::Initialize(
+        owner, parent_allocation.owner_slot, geometry, BtreePageType::kInteriorTable));
+    MutableBtreePage leaf = TakeValue(MutableBtreePage::Initialize(
+        owner, leaf_allocation.owner_slot, geometry, BtreePageType::kLeafTable));
+    RequireStatus(parent.SetRightmostChild(leaf.page_number()));
+    RequireStatus(InsertTableLeafCell(leaf, 0U, TableLeafSpec{.rowid = 2, .payload_size = 477U}, {},
+                                      workspace));
+    std::array<std::byte, 32> staged_copy{};
+    RequireStatus(InsertTableLeafCell(leaf, 1U, TableLeafSpec{.rowid = 1, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
+    const ByteBuffer parent_before =
+        ByteBuffer::CopyOf(TakeValue(owner.Frame(parent_allocation.owner_slot)).get().bytes());
+    const ByteBuffer leaf_before =
+        ByteBuffer::CopyOf(TakeValue(owner.Frame(leaf_allocation.owner_slot)).get().bytes());
+
+    const auto balanced = MutableBtreePage::BalanceQuick(parent, leaf, workspace);
+
+    ASSERT_FALSE(balanced.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, balanced.error().code());
+    EXPECT_EQ(3U, pager->page_count());
+    EXPECT_TRUE(std::ranges::equal(
+        parent_before.view(), TakeValue(owner.Frame(parent_allocation.owner_slot)).get().bytes()));
+    EXPECT_TRUE(std::ranges::equal(
+        leaf_before.view(), TakeValue(owner.Frame(leaf_allocation.owner_slot)).get().bytes()));
+    EXPECT_FALSE(pager->write_failure_code().has_value());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeBalance, QuickBalanceRejectsPageOneAsTheParent) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const std::size_t parent_slot = TakeValue(owner.Borrow(PageNumber{1}));
+    MutableBtreePage parent = TakeValue(MutableBtreePage::Open(owner, parent_slot, geometry));
+    RequireStatus(parent.Zero(BtreePageType::kInteriorTable));
+    MutableBtreePage leaf = TakeValue(MutableBtreePage::Initialize(
+        owner, leaf_allocation.owner_slot, geometry, BtreePageType::kLeafTable));
+    RequireStatus(parent.SetRightmostChild(leaf.page_number()));
+    RequireStatus(InsertTableLeafCell(leaf, 0U, TableLeafSpec{.rowid = 1, .payload_size = 477U}, {},
+                                      workspace));
+    std::array<std::byte, 32> staged_copy{};
+    RequireStatus(InsertTableLeafCell(leaf, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
+
+    const auto balanced = MutableBtreePage::BalanceQuick(parent, leaf, workspace);
+
+    ASSERT_FALSE(balanced.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, balanced.error().code());
+    EXPECT_EQ(2U, pager->page_count());
   }
   RequireStatus(pager->Rollback());
 }
