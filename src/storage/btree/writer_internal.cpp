@@ -247,6 +247,8 @@ Result<std::size_t> MutationPageOwner::AcquireRead(PageNumber page_number) {
   OwnedPage& page = pages_[*slot];
   page.page_number = page_number;
   page.pin.emplace<ReadPagePin>(std::move(*pin));
+  page.staged_cells.fill(std::nullopt);
+  page.staged_count = 0U;
   ++size_;
   return *slot;
 }
@@ -270,6 +272,8 @@ Result<std::size_t> MutationPageOwner::AcquireWrite(PageNumber page_number) {
   OwnedPage& page = pages_[*slot];
   page.page_number = page_number;
   page.pin.emplace<WritePagePin>(std::move(*pin));
+  page.staged_cells.fill(std::nullopt);
+  page.staged_count = 0U;
   ++size_;
   return *slot;
 }
@@ -290,6 +294,8 @@ Result<std::size_t> MutationPageOwner::AllocatePage() {
   OwnedPage& page = pages_[*slot];
   page.page_number = pin->frame().page_number();
   page.pin.emplace<WritePagePin>(std::move(*pin));
+  page.staged_cells.fill(std::nullopt);
+  page.staged_count = 0U;
   ++size_;
   return *slot;
 }
@@ -327,6 +333,8 @@ Status MutationPageOwner::Promote(std::size_t slot) {
   ReadPagePin read_pin = std::move(*read);
   page.pin.emplace<std::monostate>();
   page.page_number = PageNumber{};
+  page.staged_cells.fill(std::nullopt);
+  page.staged_count = 0U;
   --size_;
 
   auto promoted = pager_->WritePage(std::move(read_pin));
@@ -3044,6 +3052,9 @@ Status MutableBtreePage::Edit(const CellArray& cells, std::size_t old_first, std
 }
 
 void MutableBtreePage::ClearStagedCells() noexcept {
+  if (owner_ == nullptr) {
+    return;
+  }
   staged_cells_.fill(std::nullopt);
   staged_count_ = 0;
 }
@@ -3057,7 +3068,7 @@ bool MutableBtreePage::is_table() const noexcept {
 }
 
 std::optional<StagedCell> MutableBtreePage::staged_cell(std::size_t slot) const noexcept {
-  return slot < staged_cells_.size() ? staged_cells_[slot] : std::nullopt;
+  return owner_ != nullptr && slot < staged_cells_.size() ? staged_cells_[slot] : std::nullopt;
 }
 
 MutableBtreePage::MutableBtreePage(MutationPageOwner& owner, std::size_t owner_slot,
@@ -3071,7 +3082,9 @@ MutableBtreePage::MutableBtreePage(MutationPageOwner& owner, std::size_t owner_s
       header_offset_(metadata.header_offset),
       cell_pointer_offset_(metadata.cell_pointer_offset),
       cell_count_(metadata.cell_count),
-      free_bytes_(metadata.free_bytes) {}
+      free_bytes_(metadata.free_bytes),
+      staged_cells_(owner.pages_[owner_slot].staged_cells),
+      staged_count_(owner.pages_[owner_slot].staged_count) {}
 
 MutableBtreePage::MutableBtreePage(MutableBtreePage&& other) noexcept
     : owner_(std::exchange(other.owner_, nullptr)),
@@ -3084,9 +3097,7 @@ MutableBtreePage::MutableBtreePage(MutableBtreePage&& other) noexcept
       cell_count_(std::exchange(other.cell_count_, 0U)),
       free_bytes_(std::exchange(other.free_bytes_, 0U)),
       staged_cells_(other.staged_cells_),
-      staged_count_(std::exchange(other.staged_count_, 0U)) {
-  other.staged_cells_.fill(std::nullopt);
-}
+      staged_count_(other.staged_count_) {}
 
 Result<MutableByteView> MutableBtreePage::Bytes() {
   if (owner_ == nullptr) {
@@ -3927,6 +3938,140 @@ Status WritableCursor::PromoteCurrent() {
     EnterFault();
     return promoted;
   }
+  return {};
+}
+
+Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace) {
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  if (frame_count_ == 0U || page.owner_ != owner_ ||
+      page.owner_slot_ != frames_[frame_count_ - 1U].owner_slot ||
+      page.geometry_.page_size() != geometry_.page_size() ||
+      page.geometry_.usable_size() != geometry_.usable_size() || page.is_table() != table_) {
+    return std::unexpected(Misuse("balanced page does not match the writable cursor"));
+  }
+  auto current_frame = owner_->Frame(page.owner_slot_);
+  if (!current_frame.has_value()) {
+    return std::unexpected(std::move(current_frame.error()));
+  }
+  if (current_frame->get().page_number() != page.page_number_ ||
+      !owner_->IsWritable(page.owner_slot_)) {
+    return std::unexpected(Misuse("balanced page is not the cursor's writable page"));
+  }
+
+  std::optional<ByteBuffer> retained_parent_overflow;
+  std::optional<MutableBtreePage> current;
+  current.emplace(std::move(page));
+  bool quick_called = false;
+  bool deeper_called = false;
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &current, checkpoint](Error error) -> Status {
+    if (current.has_value()) {
+      current->ClearStagedCells();
+    }
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  while (true) {
+    if (!current.has_value()) {
+      return fail(Internal("writable cursor balance lost its current page"));
+    }
+    if (current->staged_count_ == 0U &&
+        current->free_bytes_ * 3U <= geometry_.usable_size().value() * 2U) {
+      break;
+    }
+
+    if (frame_count_ == 1U) {
+      if (current->staged_count_ == 0U) {
+        break;
+      }
+      if (deeper_called) {
+        return fail(Corruption("writable cursor deepened its root more than once"));
+      }
+      auto child = MutableBtreePage::BalanceDeeper(*current);
+      if (!child.has_value()) {
+        return fail(std::move(child.error()));
+      }
+      deeper_called = true;
+      frames_[0].child_index = 0U;
+      frames_[1] = Frame{
+          .owner_slot = child->owner_slot_,
+          .child_index = 0U,
+      };
+      frame_count_ = 2U;
+      current_index_ = 0U;
+      current.reset();
+      current.emplace(std::move(*child));
+      continue;
+    }
+
+    const std::size_t parent_frame_index = frame_count_ - 2U;
+    const std::size_t parent_slot = frames_[parent_frame_index].owner_slot;
+    const std::size_t child_index = frames_[parent_frame_index].child_index;
+    auto promoted = owner_->Promote(parent_slot);
+    if (!promoted.has_value()) {
+      return fail(std::move(promoted.error()));
+    }
+    auto opened_parent = MutableBtreePage::Open(*owner_, parent_slot, geometry_);
+    if (!opened_parent.has_value()) {
+      return fail(std::move(opened_parent.error()));
+    }
+    MutableBtreePage parent = std::move(*opened_parent);
+
+    const std::optional<StagedCell>& first_staged = current->staged_cells_[0];
+    const bool quick = current->type_ == BtreePageType::kLeafTable &&
+                       current->staged_count_ == 1U && first_staged.has_value() &&
+                       first_staged->index == current->cell_count_ &&
+                       parent.page_number_ != PageNumber{1} && parent.staged_count_ == 0U &&
+                       parent.cell_count_ == child_index;
+    Status balanced;
+    std::optional<ByteBuffer> next_parent_overflow;
+    if (quick) {
+      if (quick_called) {
+        parent.ClearStagedCells();
+        return fail(Corruption("writable cursor used quick balance more than once"));
+      }
+      quick_called = true;
+      balanced = MutableBtreePage::BalanceQuick(parent, *current, workspace);
+    } else {
+      try {
+        next_parent_overflow.emplace(geometry_.page_size());
+      } catch (const std::bad_alloc&) {
+        parent.ClearStagedCells();
+        return fail(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        parent.ClearStagedCells();
+        return fail(Error::OutOfMemory());
+      }
+      balanced = MutableBtreePage::BalanceNonroot(parent, *current, child_index,
+                                                  next_parent_overflow->mutable_view(), workspace,
+                                                  frame_count_ == 2U);
+    }
+    if (!balanced.has_value()) {
+      parent.ClearStagedCells();
+      return fail(std::move(balanced.error()));
+    }
+
+    current->ClearStagedCells();
+    current.reset();
+    owner_->Release(frames_[frame_count_ - 1U].owner_slot);
+    --frame_count_;
+    current_index_ = frames_[frame_count_ - 1U].child_index;
+    current.emplace(std::move(parent));
+
+    if (next_parent_overflow.has_value()) {
+      retained_parent_overflow.reset();
+      retained_parent_overflow.emplace(std::move(*next_parent_overflow));
+    }
+  }
+
+  current->ClearStagedCells();
+  current_index_ = 0U;
+  state_ = WritableCursorState::kInvalid;
   return {};
 }
 

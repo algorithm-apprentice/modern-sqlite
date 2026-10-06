@@ -25,6 +25,12 @@ inline constexpr std::size_t kMaximumMutationPages = 32;
 inline constexpr std::size_t kStagedCellSlots = 4;
 inline constexpr std::size_t kMaximumCellSources = 6;
 
+struct StagedCell {
+  std::size_t index;
+  ByteView bytes;
+  MutableByteView writable_bytes;
+};
+
 struct MutationPageRekey {
   std::size_t owner_slot;
   PageNumber final_page;
@@ -56,19 +62,27 @@ class MutationPageOwner final {
   [[nodiscard]] std::size_t size() const noexcept { return size_; }
   [[nodiscard]] Pager& pager() const noexcept { return *pager_; }
   [[nodiscard]] std::uint64_t mutation_sequence() const noexcept { return mutation_sequence_; }
+  [[nodiscard]] std::uint64_t operation_checkpoint() const noexcept {
+    return operation_checkpoint_;
+  }
   void NoteMutation() noexcept { ++mutation_sequence_; }
   void MarkRollbackRequiredAfter(ErrorCode code, std::uint64_t checkpoint) noexcept;
 
  private:
+  friend class MutableBtreePage;
+
   struct OwnedPage {
     PageNumber page_number;
     std::variant<std::monostate, ReadPagePin, WritePagePin> pin;
+    std::array<std::optional<StagedCell>, kStagedCellSlots> staged_cells{};
+    std::size_t staged_count = 0;
   };
 
   [[nodiscard]] Result<std::size_t> EmptySlot() const;
 
   Pager* pager_;
   std::uint64_t generation_;
+  std::uint64_t operation_checkpoint_ = 0;
   std::array<OwnedPage, kMaximumMutationPages> pages_{};
   std::size_t size_ = 0;
   std::uint64_t mutation_sequence_ = 0;
@@ -124,12 +138,6 @@ class BtreeWriteWorkspace final {
 
   ByteBuffer cell_scratch_;
   ByteBuffer rebuild_scratch_;
-};
-
-struct StagedCell {
-  std::size_t index;
-  ByteView bytes;
-  MutableByteView writable_bytes;
 };
 
 enum class CellLocatorFlags : std::uint8_t {
@@ -195,13 +203,16 @@ class MutableBtreePage final {
   [[nodiscard]] bool is_table() const noexcept;
   [[nodiscard]] std::size_t cell_count() const noexcept { return cell_count_; }
   [[nodiscard]] std::size_t free_bytes() const noexcept { return free_bytes_; }
-  [[nodiscard]] std::size_t staged_count() const noexcept { return staged_count_; }
+  [[nodiscard]] std::size_t staged_count() const noexcept {
+    return owner_ == nullptr ? 0U : staged_count_;
+  }
   [[nodiscard]] std::optional<StagedCell> staged_cell(std::size_t slot) const noexcept;
   [[nodiscard]] std::size_t header_offset() const noexcept { return header_offset_; }
   [[nodiscard]] std::size_t cell_pointer_offset() const noexcept { return cell_pointer_offset_; }
 
  private:
   friend class CellArray;
+  friend class WritableCursor;
 
   struct Metadata {
     std::size_t header_offset;
@@ -232,8 +243,8 @@ class MutableBtreePage final {
   std::size_t cell_pointer_offset_;
   std::size_t cell_count_;
   std::size_t free_bytes_;
-  std::array<std::optional<StagedCell>, kStagedCellSlots> staged_cells_{};
-  std::size_t staged_count_ = 0;
+  std::array<std::optional<StagedCell>, kStagedCellSlots>& staged_cells_;
+  std::size_t& staged_count_;
 };
 
 class CellArray final {
@@ -323,6 +334,7 @@ class WritableCursor final {
                                                   std::vector<std::byte>& scratch);
   [[nodiscard]] Result<BtreePageView> CurrentPage() const;
   [[nodiscard]] Status PromoteCurrent();
+  [[nodiscard]] Status Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
