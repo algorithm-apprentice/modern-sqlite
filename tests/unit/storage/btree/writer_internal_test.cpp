@@ -1759,22 +1759,19 @@ TEST(BtreeBalance, DeepensAnOverfullLeafRootAndTransfersItsStagedCell) {
     MutationPageOwner owner{*pager};
     const std::size_t root_slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
     MutableBtreePage root = TakeValue(MutableBtreePage::Open(owner, root_slot, geometry));
-    RequireStatus(root.InsertCell(0U, TableLeafCell(1, 380U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(root, 0U, TableLeafSpec{.rowid = 1, .payload_size = 380U}, {},
+                                      workspace));
     std::array<std::byte, 32> staged_copy{};
-    RequireStatus(root.InsertCell(1U, TableLeafCell(2, 20U), std::nullopt,
-                                  MutableByteView{staged_copy}, workspace));
+    RequireStatus(InsertTableLeafCell(root, 1U, TableLeafSpec{.rowid = 2, .payload_size = 20U},
+                                      MutableByteView{staged_copy}, workspace));
     const ByteView root_before = TakeValue(owner.Frame(root_slot)).get().bytes();
     const BtreePageView root_before_view =
         TakeValue(BtreePageView::Parse(root_before, PageNumber{1}, geometry));
     const std::size_t copied_prefix_size = 108U + root_before_view.cell_count() * 2U;
-    const std::vector<std::byte> copied_prefix{
-        root_before.subspan(100U, copied_prefix_size).begin(),
-        root_before.subspan(100U, copied_prefix_size).end(),
-    };
-    const std::vector<std::byte> cell_content{
-        root_before.subspan(root_before_view.cell_content_offset().value()).begin(),
-        root_before.subspan(root_before_view.cell_content_offset().value()).end(),
-    };
+    const ByteBuffer copied_prefix =
+        ByteBuffer::CopyOf(root_before.subspan(100U, copied_prefix_size));
+    const ByteBuffer cell_content =
+        ByteBuffer::CopyOf(root_before.subspan(root_before_view.cell_content_offset().value()));
     std::array<std::byte, 100> expected_header{};
     std::ranges::copy(root_before.first<100>(), expected_header.begin());
     Store32(MutableByteView{expected_header}, 28U, 2U);
@@ -1800,18 +1797,20 @@ TEST(BtreeBalance, DeepensAnOverfullLeafRootAndTransfersItsStagedCell) {
     EXPECT_EQ(1, TakeValue(child_view.cell(0U)).rowid());
     const ByteView child_bytes =
         TakeValue(owner.Frame(TakeValue(owner.Borrow(child.page_number())))).get().bytes();
-    EXPECT_TRUE(std::ranges::equal(copied_prefix, child_bytes.first(copied_prefix.size())));
-    EXPECT_TRUE(std::ranges::equal(cell_content,
+    EXPECT_TRUE(
+        std::ranges::equal(copied_prefix.view(), child_bytes.first(copied_prefix.size().value())));
+    EXPECT_TRUE(std::ranges::equal(cell_content.view(),
                                    child_bytes.subspan(child_view.cell_content_offset().value())));
     ASSERT_EQ(1U, child.staged_count());
     const std::optional<StagedCell> staged = child.staged_cell(0U);
     ASSERT_TRUE(staged.has_value());
     EXPECT_EQ(1U, staged->index);
-    const std::vector<std::byte> staged_page =
+    const ByteBuffer staged_page =
         CellImagePage(staged->bytes, BtreePageType::kLeafTable, geometry);
     EXPECT_EQ(
         2,
-        TakeValue(TakeValue(BtreePageView::Parse(staged_page, PageNumber{98}, geometry)).cell(0U))
+        TakeValue(
+            TakeValue(BtreePageView::Parse(staged_page.view(), PageNumber{98}, geometry)).cell(0U))
             .rowid());
   }
   RequireStatus(pager->Rollback());
@@ -1832,15 +1831,15 @@ TEST(BtreeBalance, DeepensAnInteriorRootWithoutChangingTheChildPageKind) {
     MutableBtreePage root = TakeValue(MutableBtreePage::Initialize(
         owner, root_allocation.owner_slot, geometry, BtreePageType::kInteriorTable));
     RequireStatus(root.SetRightmostChild(existing_child.page_number));
-    const std::vector<std::byte> large_divider = TableInteriorCell(existing_child.page_number, -1);
+    const ByteBuffer large_divider = TableInteriorCell(existing_child.page_number, -1);
     for (std::size_t index = 0U; index < 33U; ++index) {
       RequireStatus(
-          root.InsertCell(index, large_divider, existing_child.page_number, {}, workspace));
+          root.InsertCell(index, large_divider.view(), existing_child.page_number, {}, workspace));
     }
     std::array<std::byte, 16> staged_copy{};
-    RequireStatus(root.InsertCell(33U, TableInteriorCell(existing_child.page_number, 1),
-                                  existing_child.page_number, MutableByteView{staged_copy},
-                                  workspace));
+    const ByteBuffer staged_divider = TableInteriorCell(existing_child.page_number, 1);
+    RequireStatus(root.InsertCell(33U, staged_divider.view(), existing_child.page_number,
+                                  MutableByteView{staged_copy}, workspace));
     ASSERT_EQ(1U, root.staged_count());
 
     const MutableBtreePage child = TakeValue(MutableBtreePage::BalanceDeeper(root));
@@ -1875,7 +1874,8 @@ TEST(BtreeBalance, RejectsRootDeepeningWhenAStagedCellAliasesTheRootPage) {
     MutationPageOwner owner{*pager};
     const std::size_t root_slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
     MutableBtreePage root = TakeValue(MutableBtreePage::Open(owner, root_slot, geometry));
-    RequireStatus(root.InsertCell(0U, TableLeafCell(1, 380U), std::nullopt, {}, workspace));
+    RequireStatus(InsertTableLeafCell(root, 0U, TableLeafSpec{.rowid = 1, .payload_size = 380U}, {},
+                                      workspace));
     const ByteView root_bytes = TakeValue(owner.Frame(root_slot)).get().bytes();
     const BtreePageView root_view =
         TakeValue(BtreePageView::Parse(root_bytes, PageNumber{1}, geometry));
@@ -1884,14 +1884,14 @@ TEST(BtreeBalance, RejectsRootDeepeningWhenAStagedCellAliasesTheRootPage) {
     RequireStatus(root.InsertCell(1U, root_bytes.subspan(cell_offset, cell_size), std::nullopt, {},
                                   workspace));
     ASSERT_EQ(1U, root.staged_count());
-    const std::vector<std::byte> before{root_bytes.begin(), root_bytes.end()};
+    const ByteBuffer before = ByteBuffer::CopyOf(root_bytes);
 
     const auto deepened = MutableBtreePage::BalanceDeeper(root);
 
     ASSERT_FALSE(deepened.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, deepened.error().code());
     EXPECT_EQ(1U, pager->page_count());
-    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(root_slot)).get().bytes()));
+    EXPECT_TRUE(std::ranges::equal(before.view(), TakeValue(owner.Frame(root_slot)).get().bytes()));
     EXPECT_FALSE(pager->write_failure_code().has_value());
   }
   RequireStatus(pager->Rollback());
