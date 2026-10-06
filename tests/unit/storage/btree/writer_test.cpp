@@ -116,6 +116,7 @@ void PatchDatabaseU32(const TemporaryDatabase& database, DatabaseU32Patch patch)
                                                    .empty_database_page_size = ByteCount{512},
                                                    .cache_capacity_pages = 32,
                                                },
+                                           .journal = RollbackJournalOptions{},
                                        }));
 }
 
