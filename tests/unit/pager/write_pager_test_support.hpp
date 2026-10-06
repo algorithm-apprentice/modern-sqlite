@@ -29,19 +29,22 @@ inline constexpr std::string_view kWritePagerDatabasePath = "/allocation/write-p
 inline constexpr std::string_view kWritePagerJournalPath = "/allocation/write-pager.db-journal";
 inline constexpr std::string_view kWritePagerWalPath = "/allocation/write-pager.db-wal";
 
-struct WritePagerFixedFileState {
-  std::array<std::byte, kWritePagerFileCapacity> bytes{};
+template <std::size_t Capacity>
+struct WritePagerFileState {
+  std::array<std::byte, Capacity> bytes{};
   std::size_t size = 0;
   bool present = false;
   DatabaseLock lock = DatabaseLock::kNone;
+  std::optional<FileSize> reported_size;
 };
 
-class WritePagerFixedFile final : public File {
+template <std::size_t Capacity>
+class WritePagerMemoryFile final : public File {
  public:
-  WritePagerFixedFile(WritePagerFixedFileState& state, bool delete_on_close) noexcept
+  WritePagerMemoryFile(WritePagerFileState<Capacity>& state, bool delete_on_close) noexcept
       : state_(&state), delete_on_close_(delete_on_close) {}
 
-  ~WritePagerFixedFile() override {
+  ~WritePagerMemoryFile() override {
     state_->lock = DatabaseLock::kNone;
     if (delete_on_close_) {
       state_->present = false;
@@ -66,11 +69,11 @@ class WritePagerFixedFile final : public File {
   }
 
   [[nodiscard]] Status DoWriteAt(ByteView source, FileOffset offset) override {
-    if (offset.value() > kWritePagerFileCapacity) {
+    if (offset.value() > Capacity) {
       return std::unexpected(Error::Create(ErrorCode::kFull, "fixed-file capacity exceeded"));
     }
     const std::size_t start = static_cast<std::size_t>(offset.value());
-    if (source.size() > kWritePagerFileCapacity - start) {
+    if (source.size() > Capacity - start) {
       return std::unexpected(Error::Create(ErrorCode::kFull, "fixed-file capacity exceeded"));
     }
     const std::size_t end = start + source.size();
@@ -86,7 +89,7 @@ class WritePagerFixedFile final : public File {
   }
 
   [[nodiscard]] Status DoTruncate(FileSize size) override {
-    if (size.value() > kWritePagerFileCapacity) {
+    if (size.value() > Capacity) {
       return std::unexpected(Error::Create(ErrorCode::kFull, "fixed-file capacity exceeded"));
     }
     const std::size_t next_size = static_cast<std::size_t>(size.value());
@@ -102,7 +105,9 @@ class WritePagerFixedFile final : public File {
 
   [[nodiscard]] Status DoSync(SyncOptions) override { return {}; }
 
-  [[nodiscard]] Result<FileSize> DoSize() override { return FileSize{state_->size}; }
+  [[nodiscard]] Result<FileSize> DoSize() override {
+    return state_->reported_size.value_or(FileSize{state_->size});
+  }
 
   [[nodiscard]] Status DoLock(DatabaseLock lock) override {
     state_->lock = lock;
@@ -139,13 +144,18 @@ class WritePagerFixedFile final : public File {
 
   [[nodiscard]] Status DoUnmapSharedMemory(SharedMemoryUnmapMode) override { return {}; }
 
-  WritePagerFixedFileState* state_;
+  WritePagerFileState<Capacity>* state_;
   bool delete_on_close_;
 };
 
-class WritePagerFixedVfs final : public Vfs {
+template <std::size_t Capacity>
+class WritePagerMemoryVfs final : public Vfs {
  public:
-  WritePagerFixedVfs() { InitializeDatabase(); }
+  explicit WritePagerMemoryVfs(bool initialize_database = true) {
+    if (initialize_database) {
+      InitializeDatabase();
+    }
+  }
 
   [[nodiscard]] bool journal_present() const noexcept { return journal_.present; }
 
@@ -153,6 +163,11 @@ class WritePagerFixedVfs final : public Vfs {
 
   [[nodiscard]] ByteView database_bytes() const noexcept {
     return ByteView{main_.bytes}.first(main_.size);
+  }
+
+  void SetReportedPageCount(std::uint32_t page_count) noexcept {
+    Store32(28U, page_count);
+    main_.reported_size = FileSize{static_cast<std::uint64_t>(page_count) * kWritePagerPageSize};
   }
 
  private:
@@ -189,7 +204,7 @@ class WritePagerFixedVfs final : public Vfs {
 
   [[nodiscard]] Result<OpenedFile> DoOpen(std::optional<std::string_view> path,
                                           FileOpenOptions options) override {
-    WritePagerFixedFileState* state = nullptr;
+    WritePagerFileState<Capacity>* state = nullptr;
     if (!path.has_value()) {
       state = &subjournal_;
     } else if (*path == kWritePagerDatabasePath) {
@@ -209,7 +224,7 @@ class WritePagerFixedVfs final : public Vfs {
     }
     try {
       return OpenedFile{
-          .file = std::make_unique<WritePagerFixedFile>(*state, options.delete_on_close),
+          .file = std::make_unique<WritePagerMemoryFile<Capacity>>(*state, options.delete_on_close),
           .access = options.access,
       };
     } catch (const std::bad_alloc&) {
@@ -261,13 +276,51 @@ class WritePagerFixedVfs final : public Vfs {
 
   [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override { return ByteCount{512}; }
 
-  WritePagerFixedFileState main_;
-  WritePagerFixedFileState journal_;
-  WritePagerFixedFileState subjournal_;
-  WritePagerFixedFileState wal_;
+  WritePagerFileState<Capacity> main_;
+  WritePagerFileState<Capacity> journal_;
+  WritePagerFileState<Capacity> subjournal_;
+  WritePagerFileState<Capacity> wal_;
 };
 
-[[nodiscard]] inline std::unique_ptr<Pager> OpenWritePager(WritePagerFixedVfs& vfs,
+using WritePagerFixedVfs = WritePagerMemoryVfs<kWritePagerFileCapacity>;
+
+[[nodiscard]] inline Status InitializeEmptyBtreeImage(Pager& pager) {
+  if (!pager.in_write_transaction() || pager.page_count() != 0U) {
+    return std::unexpected(
+        Error::Create(ErrorCode::kMisuse, "test image requires an empty writer"));
+  }
+  auto page = pager.AllocatePage();
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  const MutableByteView bytes = page->mutable_bytes();
+  static constexpr std::array<std::byte, 16> kMagic{
+      std::byte{0x53}, std::byte{0x51}, std::byte{0x4c}, std::byte{0x69},
+      std::byte{0x74}, std::byte{0x65}, std::byte{0x20}, std::byte{0x66},
+      std::byte{0x6f}, std::byte{0x72}, std::byte{0x6d}, std::byte{0x61},
+      std::byte{0x74}, std::byte{0x20}, std::byte{0x33}, std::byte{0},
+  };
+  std::ranges::copy(kMagic, bytes.begin());
+  const auto encoded_size = static_cast<std::uint16_t>(
+      pager.page_size().value() == 65536U ? 1U : pager.page_size().value());
+  StoreBigEndian<std::uint16_t>(std::span<std::byte, 2>{bytes.data() + 16U, 2U}, encoded_size);
+  bytes[18] = std::byte{1};
+  bytes[19] = std::byte{1};
+  bytes[21] = std::byte{64};
+  bytes[22] = std::byte{32};
+  bytes[23] = std::byte{32};
+  StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{bytes.data() + 28U, 4U}, 1U);
+  StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{bytes.data() + 44U, 4U}, 4U);
+  StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{bytes.data() + 56U, 4U}, 1U);
+  bytes[100] = std::byte{0x0d};
+  const auto content_offset = static_cast<std::uint16_t>(
+      pager.page_size().value() == 65536U ? 0U : pager.page_size().value());
+  StoreBigEndian<std::uint16_t>(std::span<std::byte, 2>{bytes.data() + 105U, 2U}, content_offset);
+  return {};
+}
+
+template <std::size_t Capacity>
+[[nodiscard]] inline std::unique_ptr<Pager> OpenWritePager(WritePagerMemoryVfs<Capacity>& vfs,
                                                            std::size_t cache_pages) {
   auto opened =
       Pager::OpenWritable(vfs, kWritePagerInputPath,

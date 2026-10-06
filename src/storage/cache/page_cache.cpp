@@ -1,7 +1,9 @@
 #include "modern_sqlite/storage/cache/page_cache.hpp"
 
 #include <cassert>
+#include <exception>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,6 +19,10 @@ namespace {
 
 [[nodiscard]] Error Busy(std::string message) {
   return Error::Create(ErrorCode::kBusy, std::move(message));
+}
+
+[[nodiscard]] Error Internal(std::string message) {
+  return Error::Create(ErrorCode::kInternal, std::move(message));
 }
 
 }  // namespace
@@ -291,6 +297,81 @@ PageCache::Pin PageCache::Acquire(Entry& entry, bool exclusive) noexcept {
   ++entry.pin_count;
   ++total_pin_count_;
   return Pin{*this, entry, exclusive};
+}
+
+bool PageCache::OwnsPinForPager(const Pin& pin) const noexcept {
+  return pin.cache_ == this && pin.entry_ != nullptr;
+}
+
+Status PageCache::PromoteExclusiveForPager(Pin& pin) {
+  if (pin.cache_ != this || pin.entry_ == nullptr) {
+    return std::unexpected(Misuse("page promotion requires a pin from this cache"));
+  }
+  if (pin.exclusive_) {
+    return {};
+  }
+  Entry& entry = *pin.entry_;
+  if (entry.pin_count != 1U || entry.exclusively_pinned) {
+    return std::unexpected(Busy("page promotion requires the sole read pin"));
+  }
+  entry.exclusively_pinned = true;
+  pin.exclusive_ = true;
+  ++exclusive_pin_count_;
+  return {};
+}
+
+Status PageCache::RekeyExclusiveForPager(Pin& pin, PageNumber new_page) {
+  if (pin.cache_ != this || pin.entry_ == nullptr || !pin.exclusive_) {
+    return std::unexpected(Misuse("page rekey requires an exclusive pin from this cache"));
+  }
+  if (new_page.value() == 0U) {
+    return std::unexpected(Misuse("page rekey target must be nonzero"));
+  }
+  Entry& entry = *pin.entry_;
+  if (!entry.frame.dirty_) {
+    return std::unexpected(Misuse("page rekey requires a dirty frame"));
+  }
+  if (entry.frame.page_number_ == new_page) {
+    return {};
+  }
+  if (pages_.contains(new_page.value())) {
+    return std::unexpected(Busy("page rekey target already exists"));
+  }
+
+  const std::uint32_t old_page = entry.frame.page_number_.value();
+  auto node = pages_.extract(old_page);
+  if (node.empty()) {
+    return std::unexpected(Internal("page rekey source is absent from the cache"));
+  }
+  node.key() = new_page.value();
+  try {
+    auto inserted = pages_.insert(std::move(node));
+    if (!inserted.inserted) {
+      auto rejected = std::move(inserted.node);
+      rejected.key() = old_page;
+      const auto restored = pages_.insert(std::move(rejected));
+      if (!restored.inserted) {
+        std::terminate();
+      }
+      return std::unexpected(Internal("page rekey insertion failed"));
+    }
+  } catch (const std::bad_alloc&) {
+    if (node.empty()) {
+      std::terminate();
+    }
+    node.key() = old_page;
+    try {
+      const auto restored = pages_.insert(std::move(node));
+      if (!restored.inserted) {
+        std::terminate();
+      }
+    } catch (const std::bad_alloc&) {
+      std::terminate();
+    }
+    return std::unexpected(Error::OutOfMemory());
+  }
+  entry.frame.page_number_ = new_page;
+  return {};
 }
 
 void PageCache::Release(Entry& entry) noexcept {

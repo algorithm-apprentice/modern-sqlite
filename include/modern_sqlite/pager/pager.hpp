@@ -16,8 +16,11 @@
 #include "modern_sqlite/storage/cache/page_cache.hpp"
 #include "modern_sqlite/storage/journal/journal.hpp"
 #include "modern_sqlite/storage/journal/rollback_journal.hpp"
+#include "modern_sqlite/storage/page_bitvec.hpp"
 
 namespace modern_sqlite {
+
+class BtreeWriteSession;
 
 class DatabaseHeader final {
  public:
@@ -134,6 +137,11 @@ class WritePagePin final {
   PageCache::Pin pin_;
 };
 
+struct PageNumberRekey {
+  WritePagePin* pin;
+  PageNumber final_page;
+};
+
 // Externally serialized. The VFS must outlive the pager, and the pager must
 // outlive every page pin returned by ReadPage().
 class Pager final {
@@ -174,12 +182,15 @@ class Pager final {
   [[nodiscard]] Status EndRead();
   [[nodiscard]] Status CleanupReadState();
   [[nodiscard]] Status BeginWrite();
+  [[nodiscard]] Status ClaimWriteCoordinator();
   [[nodiscard]] Status Commit();
   [[nodiscard]] Status Rollback();
   [[nodiscard]] Result<JournalSavepointId> CreateSavepoint();
   [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Result<WritePagePin> WritePage(PageNumber page_number);
+  [[nodiscard]] Result<WritePagePin> WritePage(ReadPagePin&& pin);
+  [[nodiscard]] Status PermutePageNumbers(std::span<const PageNumberRekey> pages);
   [[nodiscard]] Result<WritePagePin> AllocatePage();
   [[nodiscard]] Status TruncateImage(std::uint32_t page_count);
   [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
@@ -190,12 +201,21 @@ class Pager final {
   [[nodiscard]] ByteCount page_size() const noexcept;
   [[nodiscard]] std::uint32_t page_count() const noexcept { return current_page_count_; }
   [[nodiscard]] std::uint64_t data_version() const noexcept { return data_version_; }
+  [[nodiscard]] std::uint64_t write_transaction_generation() const noexcept {
+    return write_transaction_generation_;
+  }
+  [[nodiscard]] std::optional<ErrorCode> write_failure_code() const noexcept;
+  void ReportWriteCoordinatorFailure(ErrorCode code) noexcept;
+  [[nodiscard]] Status MarkPageContentRequired(PageNumber page_number);
+  [[nodiscard]] bool PageContentRequired(PageNumber page_number) const noexcept;
   [[nodiscard]] std::string_view path() const noexcept { return path_; }
   [[nodiscard]] PagerState state() const noexcept;
   [[nodiscard]] bool writable() const noexcept;
   [[nodiscard]] bool in_write_transaction() const noexcept;
 
  private:
+  friend class BtreeWriteSession;
+
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
   [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
   [[nodiscard]] Status CheckWal();
@@ -216,6 +236,7 @@ class Pager final {
   [[nodiscard]] Status RefreshCurrentHeader();
   [[nodiscard]] Status EnterError(Error error);
   [[nodiscard]] Status StoredError() const;
+  void AdvanceWriteTransactionGeneration() noexcept;
   void ResetWriteState() noexcept;
 
   Vfs* vfs_;
@@ -229,6 +250,7 @@ class Pager final {
   ByteCount journal_sector_size_;
   std::unique_ptr<PageCache> cache_;
   std::unique_ptr<JournalTransaction> journal_transaction_;
+  std::optional<PageBitvec> page_content_required_;
   std::optional<std::array<std::byte, 16>> last_change_token_;
   std::optional<DatabaseHeader> current_header_;
   std::optional<DatabaseHeader> transaction_start_header_;
@@ -236,10 +258,12 @@ class Pager final {
   std::uint32_t current_page_count_ = 0;
   std::uint32_t transaction_start_page_count_ = 0;
   std::uint64_t data_version_ = 0;
+  std::uint64_t write_transaction_generation_ = 0;
   PagerState state_ = PagerState::kOpen;
   DatabaseLock database_lock_ = DatabaseLock::kNone;
   WriteCompletion completion_ = WriteCompletion::kNone;
   std::optional<ErrorCode> persistent_error_;
+  std::optional<ErrorCode> write_coordinator_failure_;
   bool has_seen_snapshot_ = false;
   bool transaction_modified_ = false;
   bool database_bytes_modified_ = false;
@@ -247,6 +271,8 @@ class Pager final {
   bool change_counter_updated_ = false;
   bool final_image_ = false;
   bool journal_finalized_ = false;
+  bool write_coordinator_claimed_ = false;
+  bool write_attempt_sealed_ = false;
 };
 
 }  // namespace modern_sqlite
