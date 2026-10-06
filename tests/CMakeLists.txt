@@ -46,6 +46,7 @@ add_executable(
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp
   unit/storage/journal/rollback_journal_test.cpp
+  unit/storage/page_bitvec_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
@@ -75,6 +76,24 @@ gtest_discover_tests(
     LABELS unit
     TIMEOUT 10
 )
+
+foreach(kind allocation oom)
+  add_executable(
+    modern_sqlite_page_bitvec_${kind}_test
+    unit/storage/page_bitvec_${kind}_test.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_page_bitvec_${kind}_test
+    PRIVATE modern_sqlite::modern_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_page_bitvec_${kind}_test PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_page_bitvec_${kind}_test)
+  add_test(
+    NAME storage.page_bitvec_${kind}
+    COMMAND modern_sqlite_page_bitvec_${kind}_test
+  )
+  set_tests_properties(storage.page_bitvec_${kind} PROPERTIES LABELS unit TIMEOUT 10)
+endforeach()
 
 add_executable(
   modern_sqlite_read_session_model_test
