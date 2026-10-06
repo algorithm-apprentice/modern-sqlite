@@ -14,6 +14,7 @@
 namespace modern_sqlite {
 
 class PageCache;
+class Pager;
 
 class PageFrame final {
  public:
@@ -28,6 +29,8 @@ class PageFrame final {
   [[nodiscard]] bool dirty() const noexcept { return dirty_; }
 
  private:
+  friend class Pager;
+
   friend class PageCache;
 
   PageFrame(PageNumber page_number, ByteBuffer bytes) noexcept
@@ -56,6 +59,8 @@ struct PageCachePressure {
 // byte views obtained from a pin remain valid only while that pin lives.
 class PageCache final {
  private:
+  friend class Pager;
+
   struct Entry;
   struct ConstructionKey final {};
 
@@ -150,6 +155,9 @@ class PageCache final {
   using PageMap = std::unordered_map<std::uint32_t, Entry, PageNumberHash>;
 
   [[nodiscard]] Pin Acquire(Entry& entry, bool exclusive) noexcept;
+  [[nodiscard]] bool OwnsPinForPager(const Pin& pin) const noexcept;
+  [[nodiscard]] Status PromoteExclusiveForPager(Pin& pin);
+  [[nodiscard]] Status RekeyExclusiveForPager(Pin& pin, PageNumber new_page);
   void Release(Entry& entry) noexcept;
   void MarkDirty(Entry& entry) noexcept;
   void MarkClean(Entry& entry) noexcept;

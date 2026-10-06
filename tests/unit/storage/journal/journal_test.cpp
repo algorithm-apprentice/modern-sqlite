@@ -358,6 +358,21 @@ TEST(JournalTransaction, ReportsWhetherTransactionOrSavepointCaptureIsStillRequi
   EXPECT_FALSE(transaction->NeedsCapture(PageNumber{5}));
 }
 
+TEST(JournalTransaction, EmptyScopesRetainNoPageMembership) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend, 0);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{1}));
+  const auto savepoint = transaction->CreateSavepoint(0);
+  ASSERT_TRUE(savepoint.has_value());
+  EXPECT_FALSE(transaction->NeedsCapture(PageNumber{1}));
+  ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+  EXPECT_TRUE(backend.transaction_pages.empty());
+  EXPECT_TRUE(backend.savepoint_pages.empty());
+}
+
 TEST(JournalTransaction, ValidatesPageImagesAndRejectsTheLockingPage) {
   RecordingBackend backend;
   std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);

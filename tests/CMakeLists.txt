@@ -47,6 +47,7 @@ add_executable(
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp
   unit/storage/journal/rollback_journal_test.cpp
+  unit/storage/page_bitvec_test.cpp
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
@@ -142,6 +143,50 @@ add_test(
 )
 set_tests_properties(
   bytecode.program_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_page_bitvec_allocation_test
+  unit/storage/page_bitvec_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_page_bitvec_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_page_bitvec_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_page_bitvec_allocation_test)
+add_test(
+  NAME storage.page_bitvec_allocation
+  COMMAND modern_sqlite_page_bitvec_allocation_test
+)
+set_tests_properties(
+  storage.page_bitvec_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_page_bitvec_oom_test
+  unit/storage/page_bitvec_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_page_bitvec_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_page_bitvec_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_page_bitvec_oom_test)
+add_test(
+  NAME storage.page_bitvec_oom
+  COMMAND modern_sqlite_page_bitvec_oom_test
+)
+set_tests_properties(
+  storage.page_bitvec_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10

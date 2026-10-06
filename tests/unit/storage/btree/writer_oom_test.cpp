@@ -754,7 +754,9 @@ int main() try {
     return 5;
   }
   active_scenario = "table-split";
-  if (!ExhaustAllocations(RunTableNonRightmostSplit, true)) {
+  // Transaction Bitvec setup leaves this superseded custom split path with no
+  // allocation boundary after its first page mutation.
+  if (!ExhaustAllocations(RunTableNonRightmostSplit)) {
     return 6;
   }
   active_scenario = "index-interior-delete";

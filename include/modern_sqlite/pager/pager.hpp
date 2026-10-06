@@ -16,6 +16,7 @@
 #include "modern_sqlite/storage/cache/page_cache.hpp"
 #include "modern_sqlite/storage/journal/journal.hpp"
 #include "modern_sqlite/storage/journal/rollback_journal.hpp"
+#include "modern_sqlite/storage/page_bitvec.hpp"
 
 namespace modern_sqlite {
 
@@ -136,6 +137,11 @@ class WritePagePin final {
   PageCache::Pin pin_;
 };
 
+struct PageNumberRekey {
+  WritePagePin* pin;
+  PageNumber final_page;
+};
+
 // Externally serialized. The VFS must outlive the pager, and the pager must
 // outlive every page pin returned by ReadPage().
 class Pager final {
@@ -183,6 +189,8 @@ class Pager final {
   [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Result<WritePagePin> WritePage(PageNumber page_number);
+  [[nodiscard]] Result<WritePagePin> WritePage(ReadPagePin&& pin);
+  [[nodiscard]] Status PermutePageNumbers(std::span<const PageNumberRekey> pages);
   [[nodiscard]] Result<WritePagePin> AllocatePage();
   [[nodiscard]] Status TruncateImage(std::uint32_t page_count);
   [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
@@ -198,6 +206,8 @@ class Pager final {
   }
   [[nodiscard]] std::optional<ErrorCode> write_failure_code() const noexcept;
   void ReportWriteCoordinatorFailure(ErrorCode code) noexcept;
+  [[nodiscard]] Status MarkPageContentRequired(PageNumber page_number);
+  [[nodiscard]] bool PageContentRequired(PageNumber page_number) const noexcept;
   [[nodiscard]] std::string_view path() const noexcept { return path_; }
   [[nodiscard]] PagerState state() const noexcept;
   [[nodiscard]] bool writable() const noexcept;
@@ -240,6 +250,7 @@ class Pager final {
   ByteCount journal_sector_size_;
   std::unique_ptr<PageCache> cache_;
   std::unique_ptr<JournalTransaction> journal_transaction_;
+  std::optional<PageBitvec> page_content_required_;
   std::optional<std::array<std::byte, 16>> last_change_token_;
   std::optional<DatabaseHeader> current_header_;
   std::optional<DatabaseHeader> transaction_start_header_;

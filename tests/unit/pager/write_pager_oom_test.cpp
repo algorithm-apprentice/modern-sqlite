@@ -1,5 +1,7 @@
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <new>
@@ -194,6 +196,99 @@ template <typename T>
       .invariant_holds = rolled_back && pager->state() == modern_sqlite::PagerState::kReader &&
                          HasOriginalDatabase(vfs),
   };
+}
+
+[[nodiscard]] ScenarioOutcome RunPromotedFirstWrite(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  auto read = pager->ReadPage(modern_sqlite::PageNumber{2});
+  if (!read.has_value()) {
+    return {};
+  }
+
+  Arm(failure);
+  auto page = pager->WritePage(std::move(*read));
+  const std::size_t allocations = Disarm();
+  const modern_sqlite::ErrorCode error = ErrorCodeOf(page);
+  page = std::unexpected(
+      modern_sqlite::Error::Create(modern_sqlite::ErrorCode::kGeneric, "release test pin"));
+  const bool rolled_back = pager->Rollback().has_value();
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = error == modern_sqlite::ErrorCode::kGeneric,
+      .error = error,
+      .invariant_holds = rolled_back && pager->state() == modern_sqlite::PagerState::kReader &&
+                         HasOriginalDatabase(vfs),
+  };
+}
+
+[[nodiscard]] ScenarioOutcome RunContentHistory(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+
+  Arm(failure);
+  modern_sqlite::Status marked;
+  for (std::uint32_t index = 0; index < 90U && marked.has_value(); ++index) {
+    marked =
+        pager->MarkPageContentRequired(modern_sqlite::PageNumber{1U + index % pager->page_count()});
+  }
+  const std::size_t allocations = Disarm();
+  bool invariant = true;
+  if (!marked.has_value()) {
+    invariant = pager->MarkPageContentRequired(modern_sqlite::PageNumber{1}).has_value() &&
+                pager->PageContentRequired(modern_sqlite::PageNumber{1});
+  }
+  invariant = invariant && pager->Rollback().has_value() && HasOriginalDatabase(vfs);
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = marked.has_value(),
+      .error = ErrorCodeOf(marked),
+      .invariant_holds = invariant,
+  };
+}
+
+[[nodiscard]] bool PermutationDoesNotAllocate() {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+
+  bool invariant = false;
+  {
+    auto first = pager->WritePage(modern_sqlite::PageNumber{1});
+    auto second = pager->WritePage(modern_sqlite::PageNumber{2});
+    if (!first.has_value() || !second.has_value()) {
+      return false;
+    }
+    std::array<modern_sqlite::PageNumberRekey, 2> rekeys{
+        modern_sqlite::PageNumberRekey{
+            .pin = &*first,
+            .final_page = modern_sqlite::PageNumber{2},
+        },
+        modern_sqlite::PageNumberRekey{
+            .pin = &*second,
+            .final_page = modern_sqlite::PageNumber{1},
+        },
+    };
+
+    Arm(0);
+    const auto permuted = pager->PermutePageNumbers(rekeys);
+    const std::size_t allocations = Disarm();
+    invariant = permuted.has_value() && allocations == 0U &&
+                first->frame().page_number() == modern_sqlite::PageNumber{2} &&
+                second->frame().page_number() == modern_sqlite::PageNumber{1};
+  }
+  return invariant && pager->Rollback().has_value() && HasOriginalDatabase(vfs);
 }
 
 [[nodiscard]] ScenarioOutcome RunCommitWithPageOneMiss(std::optional<std::size_t> failure) {
@@ -425,26 +520,35 @@ int main() try {
   if (!ExhaustAllocations(RunFirstWrite)) {
     return 4;
   }
-  if (!ExhaustAllocations(RunCommitWithPageOneMiss)) {
+  if (!ExhaustAllocations(RunPromotedFirstWrite)) {
     return 5;
   }
-  if (!ExhaustAllocations(RunAllocatePage)) {
+  if (!PermutationDoesNotAllocate()) {
     return 6;
   }
-  if (!ExhaustAllocations(RunCreateSavepoint)) {
+  if (!ExhaustAllocations(RunCommitWithPageOneMiss)) {
     return 7;
   }
-  if (!ExhaustAllocations(RunSavepointRollback)) {
+  if (!ExhaustAllocations(RunAllocatePage)) {
     return 8;
   }
-  if (!ExhaustAllocations(RunFullRollback)) {
+  if (!ExhaustAllocations(RunCreateSavepoint)) {
     return 9;
   }
-  if (!ExhaustAllocations(RunHotRecovery)) {
+  if (!ExhaustAllocations(RunSavepointRollback)) {
     return 10;
+  }
+  if (!ExhaustAllocations(RunFullRollback)) {
+    return 11;
+  }
+  if (!ExhaustAllocations(RunHotRecovery)) {
+    return 12;
+  }
+  if (!ExhaustAllocations(RunContentHistory)) {
+    return 13;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 11;
+  return 14;
 }
