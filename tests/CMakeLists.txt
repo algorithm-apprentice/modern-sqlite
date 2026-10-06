@@ -42,6 +42,7 @@ add_executable(
   unit/session/read_session_test.cpp
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
+  unit/storage/btree/writer_internal_test.cpp
   unit/storage/btree/writer_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
@@ -65,6 +66,12 @@ target_link_libraries(
   PRIVATE
     modern_sqlite::modern_sqlite
     GTest::gtest_main
+)
+target_include_directories(
+  modern_sqlite_unit_tests
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}
 )
 modern_sqlite_set_project_warnings(modern_sqlite_unit_tests PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_unit_tests)
@@ -311,6 +318,34 @@ set_tests_properties(
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_btree_writer_internal_oom_test
+  unit/storage/btree/writer_internal_oom_test.cpp
+)
+target_include_directories(
+  modern_sqlite_btree_writer_internal_oom_test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}
+)
+target_link_libraries(
+  modern_sqlite_btree_writer_internal_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_btree_writer_internal_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_btree_writer_internal_oom_test)
+add_test(
+  NAME btree.writer_internal_oom
+  COMMAND modern_sqlite_btree_writer_internal_oom_test
+)
+set_tests_properties(
+  btree.writer_internal_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 20
 )
 
 add_executable(
