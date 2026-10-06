@@ -117,6 +117,7 @@ set(
     src/storage/database_format.cpp
     src/storage/journal/journal.cpp
     src/storage/journal/rollback_journal.cpp
+    src/storage/page_bitvec.cpp
     src/syntax/ast.cpp
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
@@ -502,6 +503,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/database_format.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/journal/journal.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/journal/rollback_journal.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/page_bitvec.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/page_number.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/ast.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
@@ -538,6 +540,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/storage/database_format.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/journal/journal.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/journal/rollback_journal.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/page_bitvec.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
@@ -595,6 +598,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/page_bitvec_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/page_bitvec_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/page_bitvec_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/rollback_journal_test_support.hpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/ast_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
