@@ -25,6 +25,11 @@ inline constexpr std::size_t kMaximumMutationPages = 32;
 inline constexpr std::size_t kStagedCellSlots = 4;
 inline constexpr std::size_t kMaximumCellSources = 6;
 
+struct MutationPageRekey {
+  std::size_t owner_slot;
+  PageNumber final_page;
+};
+
 class MutationPageOwner final {
  public:
   explicit MutationPageOwner(Pager& pager) noexcept;
@@ -41,6 +46,7 @@ class MutationPageOwner final {
   [[nodiscard]] Result<std::size_t> AllocatePage();
   [[nodiscard]] Result<std::size_t> Borrow(PageNumber page_number) const;
   [[nodiscard]] Status Promote(std::size_t slot);
+  [[nodiscard]] Status PermutePageNumbers(std::span<const MutationPageRekey> pages);
   void Release(std::size_t slot) noexcept;
 
   [[nodiscard]] Result<std::reference_wrapper<const PageFrame>> Frame(std::size_t slot) const;
@@ -123,6 +129,7 @@ class BtreeWriteWorkspace final {
 struct StagedCell {
   std::size_t index;
   ByteView bytes;
+  MutableByteView writable_bytes;
 };
 
 enum class CellLocatorFlags : std::uint8_t {
@@ -174,6 +181,10 @@ class MutableBtreePage final {
                             std::size_t count, BtreeWriteWorkspace& workspace);
   [[nodiscard]] static Status BalanceQuick(MutableBtreePage& parent, MutableBtreePage& page,
                                            BtreeWriteWorkspace& workspace);
+  [[nodiscard]] static Status BalanceNonroot(MutableBtreePage& parent, MutableBtreePage& page,
+                                             std::size_t parent_child_index,
+                                             MutableByteView parent_overflow,
+                                             BtreeWriteWorkspace& workspace, bool parent_is_root);
   [[nodiscard]] static Result<MutableBtreePage> BalanceDeeper(MutableBtreePage& root);
 
   void ClearStagedCells() noexcept;
@@ -204,6 +215,9 @@ class MutableBtreePage final {
 
   [[nodiscard]] Result<MutableByteView> Bytes();
   [[nodiscard]] Result<ByteView> Bytes() const;
+  [[nodiscard]] Result<ByteView> LogicalCell(std::size_t index) const;
+  [[nodiscard]] Status DropLogicalCell(std::size_t index);
+  [[nodiscard]] Status SetChildAt(std::size_t child_index, PageNumber child);
   [[nodiscard]] Status RebuildFromSnapshot(const CellArray& cells, std::size_t first,
                                            std::size_t count, ByteView target_copy);
   [[nodiscard]] Status ValidateCellImage(ByteView cell, std::optional<PageNumber> left_child) const;
@@ -233,10 +247,9 @@ class CellArray final {
   ~CellArray() = default;
 
   [[nodiscard]] Status AppendPage(const MutableBtreePage& page);
-  [[nodiscard]] Status AppendBorrowed(ByteView source, std::size_t offset, std::size_t size,
-                                      CellLocatorFlags flags = CellLocatorFlags::kBorrowed);
-  [[nodiscard]] Status AppendCopied(ByteView cell,
-                                    CellLocatorFlags flags = CellLocatorFlags::kCopied);
+  [[nodiscard]] Status AppendPage(ByteView page, PageNumber page_number);
+  [[nodiscard]] Status AppendBorrowed(ByteView source, std::size_t offset, std::size_t size);
+  [[nodiscard]] Status AppendCopied(ByteView cell);
   [[nodiscard]] Result<ByteView> Cell(std::size_t index) const;
 
   [[nodiscard]] std::size_t size() const noexcept { return cells_.size(); }
@@ -252,6 +265,7 @@ class CellArray final {
             ByteBuffer copied_cells) noexcept;
 
   [[nodiscard]] Result<std::uint8_t> SourceSlot(ByteView source);
+  [[nodiscard]] Status AppendStaged(ByteView cell);
   [[nodiscard]] Status AppendLocator(std::uint8_t source_slot, std::size_t offset, std::size_t size,
                                      CellLocatorFlags flags);
   [[nodiscard]] Result<std::optional<std::size_t>> OffsetWithinTarget(std::size_t index,
@@ -266,6 +280,8 @@ class CellArray final {
   std::size_t copied_size_ = 0;
   std::array<ByteView, kMaximumCellSources> sources_{};
   std::size_t source_count_ = 0;
+  std::array<ByteView, kStagedCellSlots> staged_sources_{};
+  std::size_t staged_source_count_ = 0;
 };
 
 enum class WritableCursorState : std::uint8_t {

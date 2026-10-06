@@ -1,15 +1,19 @@
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <new>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <utility>
 #include <vector>
 
 #include "modern_sqlite/base/bytes.hpp"
+#include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
@@ -69,6 +73,26 @@ struct Outcome {
   modern_sqlite::ByteBuffer buffer{modern_sqlite::ByteCount{size}};
   std::ranges::fill(buffer.mutable_view(), value);
   return buffer;
+}
+
+[[nodiscard]] modern_sqlite::ByteBuffer TableDivider(modern_sqlite::PageNumber left_child,
+                                                     std::int64_t rowid) {
+  std::array<std::byte, 9> encoded_rowid{};
+  const auto encoded = modern_sqlite::EncodeSqliteVarint(
+      std::bit_cast<std::uint64_t>(rowid), modern_sqlite::MutableByteView{encoded_rowid});
+  if (!encoded.has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer cell{
+      modern_sqlite::ByteCount{sizeof(std::uint32_t) + encoded->value()}};
+  modern_sqlite::StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, sizeof(std::uint32_t)>{cell.mutable_view().data(),
+                                                  sizeof(std::uint32_t)},
+      left_child.value());
+  std::ranges::copy(
+      std::span{encoded_rowid}.first(encoded->value()),
+      cell.mutable_view().begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+  return cell;
 }
 
 template <typename Runner>
@@ -412,6 +436,107 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] Outcome RunNonrootBalance(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
+                                                                 pager->header()->usable_size());
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  if (!geometry.has_value() || !workspace.has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer parent_overflow{geometry->page_size()};
+  const modern_sqlite::ByteBuffer payload = FilledBuffer(160U, std::byte{0x3c});
+
+  modern_sqlite::ErrorCode error = modern_sqlite::ErrorCode::kGeneric;
+  bool succeeded = false;
+  std::size_t allocations = 0U;
+  {
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    const auto parent_allocation =
+        modern_sqlite::btree_internal::AllocateBtreePage(owner, *geometry);
+    const auto left_allocation = modern_sqlite::btree_internal::AllocateBtreePage(owner, *geometry);
+    const auto middle_allocation =
+        modern_sqlite::btree_internal::AllocateBtreePage(owner, *geometry);
+    const auto right_allocation =
+        modern_sqlite::btree_internal::AllocateBtreePage(owner, *geometry);
+    if (!parent_allocation.has_value() || !left_allocation.has_value() ||
+        !middle_allocation.has_value() || !right_allocation.has_value()) {
+      return {};
+    }
+    auto parent = modern_sqlite::btree_internal::MutableBtreePage::Initialize(
+        owner, parent_allocation->owner_slot, *geometry,
+        modern_sqlite::BtreePageType::kInteriorTable);
+    auto left = modern_sqlite::btree_internal::MutableBtreePage::Initialize(
+        owner, left_allocation->owner_slot, *geometry, modern_sqlite::BtreePageType::kLeafTable);
+    auto middle = modern_sqlite::btree_internal::MutableBtreePage::Initialize(
+        owner, middle_allocation->owner_slot, *geometry, modern_sqlite::BtreePageType::kLeafTable);
+    auto right = modern_sqlite::btree_internal::MutableBtreePage::Initialize(
+        owner, right_allocation->owner_slot, *geometry, modern_sqlite::BtreePageType::kLeafTable);
+    if (!parent.has_value() || !left.has_value() || !middle.has_value() || !right.has_value()) {
+      return {};
+    }
+    struct CellSpec {
+      std::size_t index;
+      std::int64_t rowid;
+    };
+    const auto insert = [&](modern_sqlite::btree_internal::MutableBtreePage& target,
+                            CellSpec spec) -> modern_sqlite::Status {
+      const auto cell = modern_sqlite::btree_internal::FillTableLeafCell(
+          owner, *geometry, *workspace, spec.rowid, payload.view());
+      if (!cell.has_value()) {
+        return std::unexpected(cell.error());
+      }
+      return target.InsertCell(spec.index, cell->bytes, std::nullopt, {}, *workspace);
+    };
+    if (!insert(*left, CellSpec{.index = 0U, .rowid = 1}).has_value() ||
+        !insert(*left, CellSpec{.index = 1U, .rowid = 2}).has_value() ||
+        !insert(*middle, CellSpec{.index = 0U, .rowid = 3}).has_value() ||
+        !insert(*middle, CellSpec{.index = 1U, .rowid = 4}).has_value() ||
+        !insert(*right, CellSpec{.index = 0U, .rowid = 5}).has_value() ||
+        !insert(*right, CellSpec{.index = 1U, .rowid = 6}).has_value()) {
+      return {};
+    }
+    const modern_sqlite::ByteBuffer left_divider = TableDivider(left->page_number(), 2);
+    const modern_sqlite::ByteBuffer middle_divider = TableDivider(middle->page_number(), 4);
+    if (left_divider.size().value() == 0U || middle_divider.size().value() == 0U ||
+        !parent->InsertCell(0U, left_divider.view(), left->page_number(), {}, *workspace)
+             .has_value() ||
+        !parent->InsertCell(1U, middle_divider.view(), middle->page_number(), {}, *workspace)
+             .has_value() ||
+        !parent->SetRightmostChild(right->page_number()).has_value()) {
+      return {};
+    }
+    owner.Release(left_allocation->owner_slot);
+    owner.Release(right_allocation->owner_slot);
+
+    Arm(failure);
+    const auto balanced = modern_sqlite::btree_internal::MutableBtreePage::BalanceNonroot(
+        *parent, *middle, 1U, parent_overflow.mutable_view(), *workspace, false);
+    allocations = Disarm();
+    succeeded = balanced.has_value();
+    error = balanced.has_value() ? modern_sqlite::ErrorCode::kGeneric : balanced.error().code();
+  }
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
 [[nodiscard]] Outcome RunRootDeepening(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
@@ -543,20 +668,23 @@ int main() try {
   if (!ExhaustAllocations(RunQuickBalance)) {
     return 7;
   }
-  if (!ExhaustAllocations(RunRootDeepening)) {
+  if (!ExhaustAllocations(RunNonrootBalance)) {
     return 8;
   }
-  if (!ExhaustAllocations(RunOverflowSeek)) {
+  if (!ExhaustAllocations(RunRootDeepening)) {
     return 9;
   }
-  if (!ExhaustAllocations(RunOverflowFormat)) {
+  if (!ExhaustAllocations(RunOverflowSeek)) {
     return 10;
   }
-  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+  if (!ExhaustAllocations(RunOverflowFormat)) {
     return 11;
+  }
+  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+    return 12;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 12;
+  return 13;
 }
