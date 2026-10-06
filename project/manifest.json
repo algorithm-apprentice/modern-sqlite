@@ -17,7 +17,12 @@
     "documentationFirst": true,
     "testDrivenDevelopment": true,
     "sequentialNodes": true,
-    "onePullRequestPerNode": true,
+    "onePullRequestPerNode": false,
+    "orderedStackedPullRequestsForOversizedNodes": true,
+    "autonomousExecution": true,
+    "mergeAfterRequiredGates": true,
+    "canonicalPatternAuditRequired": true,
+    "strictStandardCpp": true,
     "designReviewRequired": true,
     "codeReviewRequired": true,
     "performanceBaselineRequiredForSensitiveNodes": true

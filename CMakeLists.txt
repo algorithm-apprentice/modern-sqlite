@@ -7,6 +7,8 @@ project(
   LANGUAGES CXX
 )
 
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(
   MODERN_SQLITE_BUILD_TESTS
   "Build Modern SQLite tests"
