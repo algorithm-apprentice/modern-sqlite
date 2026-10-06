@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   build-and-test:
+    name: build-and-test (${{ matrix.os }}, ${{ matrix.preset }})
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +127,7 @@ jobs:
         run: cmake --build --preset clang-tidy --target check-format
 
   read-performance-contract:
+    name: read-performance-contract (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
