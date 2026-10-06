@@ -23,6 +23,7 @@ namespace modern_sqlite::btree_internal {
 
 inline constexpr std::size_t kMaximumMutationPages = 32;
 inline constexpr std::size_t kStagedCellSlots = 4;
+inline constexpr std::size_t kMaximumCellSources = 6;
 
 class MutationPageOwner final {
  public:
@@ -124,6 +125,22 @@ struct StagedCell {
   ByteView bytes;
 };
 
+enum class CellLocatorFlags : std::uint8_t {
+  kBorrowed = 0,
+  kCopied = 1,
+  kStaged = 2,
+};
+
+struct CellLocator {
+  std::uint32_t offset;
+  std::uint16_t size;
+  std::uint8_t source_slot;
+  std::uint8_t flags;
+};
+static_assert(sizeof(CellLocator) == 8);
+
+class CellArray;
+
 class MutableBtreePage final {
  public:
   [[nodiscard]] static Result<MutableBtreePage> Open(MutationPageOwner& owner,
@@ -150,6 +167,10 @@ class MutableBtreePage final {
   [[nodiscard]] Status InsertCell(std::size_t index, ByteView cell,
                                   std::optional<PageNumber> left_child, MutableByteView staged_copy,
                                   BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status Rebuild(const CellArray& cells, std::size_t first, std::size_t count,
+                               BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status Edit(const CellArray& cells, std::size_t old_first, std::size_t new_first,
+                            std::size_t count, BtreeWriteWorkspace& workspace);
 
   void ClearStagedCells() noexcept;
 
@@ -165,6 +186,8 @@ class MutableBtreePage final {
   [[nodiscard]] std::size_t cell_pointer_offset() const noexcept { return cell_pointer_offset_; }
 
  private:
+  friend class CellArray;
+
   struct Metadata {
     std::size_t header_offset;
     std::size_t cell_pointer_offset;
@@ -177,6 +200,8 @@ class MutableBtreePage final {
 
   [[nodiscard]] Result<MutableByteView> Bytes();
   [[nodiscard]] Result<ByteView> Bytes() const;
+  [[nodiscard]] Status RebuildFromSnapshot(const CellArray& cells, std::size_t first,
+                                           std::size_t count, ByteView target_copy);
   [[nodiscard]] Status ValidateCellImage(ByteView cell, std::optional<PageNumber> left_child) const;
   [[nodiscard]] Result<std::optional<std::size_t>> FindFreeblock(std::size_t size);
 
@@ -191,6 +216,52 @@ class MutableBtreePage final {
   std::size_t free_bytes_;
   std::array<std::optional<StagedCell>, kStagedCellSlots> staged_cells_{};
   std::size_t staged_count_ = 0;
+};
+
+class CellArray final {
+ public:
+  [[nodiscard]] static Result<CellArray> Create(BtreePageGeometry geometry);
+
+  CellArray(const CellArray&) = delete;
+  CellArray& operator=(const CellArray&) = delete;
+  CellArray(CellArray&&) noexcept = default;
+  CellArray& operator=(CellArray&&) noexcept = default;
+  ~CellArray() = default;
+
+  [[nodiscard]] Status AppendPage(const MutableBtreePage& page);
+  [[nodiscard]] Status AppendBorrowed(ByteView source, std::size_t offset, std::size_t size,
+                                      CellLocatorFlags flags = CellLocatorFlags::kBorrowed);
+  [[nodiscard]] Status AppendCopied(ByteView cell,
+                                    CellLocatorFlags flags = CellLocatorFlags::kCopied);
+  [[nodiscard]] Result<ByteView> Cell(std::size_t index) const;
+
+  [[nodiscard]] std::size_t size() const noexcept { return cells_.size(); }
+  [[nodiscard]] const CellLocator& locator(std::size_t index) const noexcept {
+    return cells_[index];
+  }
+  [[nodiscard]] std::size_t source_count() const noexcept { return source_count_; }
+
+ private:
+  friend class MutableBtreePage;
+
+  CellArray(BtreePageGeometry geometry, std::size_t maximum_cells, std::vector<CellLocator> cells,
+            ByteBuffer copied_cells) noexcept;
+
+  [[nodiscard]] Result<std::uint8_t> SourceSlot(ByteView source);
+  [[nodiscard]] Status AppendLocator(std::uint8_t source_slot, std::size_t offset, std::size_t size,
+                                     CellLocatorFlags flags);
+  [[nodiscard]] Result<std::optional<std::size_t>> OffsetWithinTarget(std::size_t index,
+                                                                      ByteView target) const;
+  [[nodiscard]] Result<ByteView> ResolveForTarget(std::size_t index, ByteView target,
+                                                  ByteView target_copy) const;
+
+  BtreePageGeometry geometry_;
+  std::size_t maximum_cells_;
+  std::vector<CellLocator> cells_;
+  ByteBuffer copied_cells_;
+  std::size_t copied_size_ = 0;
+  std::array<ByteView, kMaximumCellSources> sources_{};
+  std::size_t source_count_ = 0;
 };
 
 enum class WritableCursorState : std::uint8_t {
