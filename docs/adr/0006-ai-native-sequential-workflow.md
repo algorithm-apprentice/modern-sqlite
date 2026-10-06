@@ -31,6 +31,9 @@ The repository will provide all six AI-native capabilities:
 Only one DAG node is implemented at a time. Each node is delivered in one
 coherent pull request and must be reviewed before the next node begins.
 
+The one-pull-request-per-node rule is superseded for oversized nodes by
+ADR-0046. Sequential node development remains unchanged.
+
 The bootstrap node will add validation that:
 
 - The module graph is acyclic.

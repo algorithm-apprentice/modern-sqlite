@@ -25,7 +25,7 @@ require an IDE-specific project format as the source of truth.
 - Dependency acquisition is explicit and reproducible. Ordinary builds must
   never float to a newer dependency revision.
 - Clang and GCC are supported on Linux; Apple Clang is supported on macOS.
-- `clang-format` defines source formatting.
+- `clang-format` 23.1.2 defines source formatting on every platform.
 - `clang-tidy`, compiler warnings, ASan, UBSan, and TSan are separate explicit
   validation configurations rather than implicit best-effort checks.
 - Selecting zero tests is an error in repository automation.
