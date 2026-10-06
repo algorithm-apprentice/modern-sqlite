@@ -240,7 +240,7 @@ class BtreeMutationCore final {
     PageNumber page_;
   };
 
-  BtreeMutationCore(Pager& pager, std::uint64_t generation) noexcept
+  BtreeMutationCore(Pager& pager, std::uint64_t generation)
       : pager_(&pager),
         generation_(generation),
         index_payload_scratch_(&scratch_pool_),
