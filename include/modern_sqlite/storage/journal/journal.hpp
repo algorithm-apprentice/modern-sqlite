@@ -7,11 +7,11 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <unordered_set>
 #include <vector>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/storage/page_bitvec.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
 namespace modern_sqlite {
@@ -146,7 +146,7 @@ class JournalTransaction final {
 
   struct SavepointState {
     JournalSavepoint savepoint;
-    std::unordered_set<std::uint32_t> pages;
+    std::optional<PageBitvec> pages;
     bool rewind_subjournal_on_release = true;
   };
 
@@ -155,7 +155,8 @@ class JournalTransaction final {
       JournalBackend& backend, JournalTransactionInfo info);
 
   JournalTransaction(ConstructionKey, JournalBackend& backend, JournalTransactionInfo info,
-                     std::uint64_t owner_token) noexcept;
+                     std::uint64_t owner_token,
+                     std::optional<PageBitvec> transaction_pages) noexcept;
   JournalTransaction(const JournalTransaction&) = delete;
   JournalTransaction& operator=(const JournalTransaction&) = delete;
   JournalTransaction(JournalTransaction&&) = delete;
@@ -198,7 +199,7 @@ class JournalTransaction final {
   JournalBackend* backend_;
   JournalTransactionInfo info_;
   std::uint64_t owner_token_;
-  std::unordered_set<std::uint32_t> transaction_pages_;
+  std::optional<PageBitvec> transaction_pages_;
   std::vector<SavepointState> savepoints_;
   std::uint64_t next_savepoint_id_ = 1;
   JournalTransactionState state_ = JournalTransactionState::kActive;

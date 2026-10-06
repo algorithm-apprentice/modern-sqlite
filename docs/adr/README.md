@@ -46,3 +46,6 @@ their corresponding implementation begins.
 40. [ADR-0040: Journal Contracts and Durable Ordering](0040-journal-contracts.md)
 41. [ADR-0041: SQLite-Compatible DELETE-Mode Rollback Journal](0041-sqlite-compatible-rollback-journal.md)
 42. [ADR-0042: Rollback-Mode Writable Pager](0042-rollback-mode-writable-pager.md)
+43. [ADR-0043: SQLite-Compatible B-Tree Mutation](0043-sqlite-compatible-btree-mutation.md)
+44. [ADR-0044: Reference-Faithful SQLite B-Tree Mutation](0044-reference-faithful-btree-mutation.md)
+45. [ADR-0045: Existing-Module SQLite Reference Alignment](0045-existing-module-reference-alignment.md)

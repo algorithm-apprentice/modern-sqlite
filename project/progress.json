@@ -34,8 +34,9 @@
     "build-read-compatibility-harness",
     "build-read-performance-baseline",
     "implement-journal-contracts",
-    "implement-rollback-journal"
+    "implement-rollback-journal",
+    "implement-write-pager"
   ],
-  "activeNode": "implement-write-pager",
-  "activeNodeState": "review_pending"
+  "activeNode": "implement-btree-write",
+  "activeNodeState": "in_progress"
 }

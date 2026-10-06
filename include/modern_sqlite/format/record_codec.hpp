@@ -122,6 +122,9 @@ class RecordView final {
 
 [[nodiscard]] Result<ByteCount> EncodedRecordSize(std::span<const SqlValue> values,
                                                   RecordCodecOptions options = {});
+[[nodiscard]] Result<ByteCount> EncodeRecordInto(std::span<const SqlValue> values,
+                                                 MutableByteView destination,
+                                                 RecordCodecOptions options = {});
 [[nodiscard]] Result<ByteBuffer> EncodeRecord(std::span<const SqlValue> values,
                                               RecordCodecOptions options = {});
 [[nodiscard]] Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded,

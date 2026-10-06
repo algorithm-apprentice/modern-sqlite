@@ -116,6 +116,7 @@ int main() {
   }
   std::unique_ptr<modern_sqlite::JournalTransaction> transaction = std::move(*begun);
   const std::array<std::byte, 512> page{};
+  const std::size_t first_capture_before = allocation_count.load(std::memory_order_relaxed);
   if (!transaction
            ->CapturePage(modern_sqlite::JournalPageImage{
                .page_number = modern_sqlite::PageNumber{1},
@@ -123,6 +124,10 @@ int main() {
            })
            .has_value() ||
       !transaction->SyncJournal().has_value()) {
+    return 1;
+  }
+  const std::size_t first_capture_after = allocation_count.load(std::memory_order_relaxed);
+  if (first_capture_after != first_capture_before) {
     return 1;
   }
 

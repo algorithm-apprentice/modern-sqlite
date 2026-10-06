@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-05
+- Amended by: ADR-0045 replaces hash-set page membership and savepoint
+  duplicate suppression with the shared SQLite-style PageBitvec.
 
 ## Context
 
@@ -189,12 +191,11 @@ One sub-journal image therefore serves all active savepoints that need the
 same current page state, matching SQLite. The same mutation never writes both
 a main-journal image and a redundant sub-journal image.
 
-The initial implementation uses `std::unordered_set<std::uint32_t>` for
-sparse membership and `std::vector` for the nested savepoint stack. This
-avoids allocating a bitmap proportional to the largest database page number.
-Duplicate captures and state notifications perform no allocation. Replacing
-this baseline with a SQLite-style adaptive bit vector requires measured
-write-path evidence.
+ADR-0045 supersedes the original hash-set membership baseline. Transaction
+membership, savepoint membership, and savepoint-playback duplicate
+suppression use the shared SQLite-style adaptive PageBitvec. The nested
+savepoint stack remains a typed `std::vector`, matching SQLite's ordered
+resizable savepoint array without importing its C ownership.
 
 Allocation failure while publishing membership returns `kOutOfMemory` and
 makes the transaction failed. A record may already have been appended, but
@@ -563,5 +564,5 @@ belong to the concrete rollback-journal node.
   rollback while preserving its required pre-playback journal sync.
 - Repeated journal-sync epochs support deterministic dirty-page spill without
   moving cache replacement policy into the journal layer.
-- Sparse standard-library membership is a measurable baseline, not a claim
-  of parity with SQLite's adaptive bit vector.
+- Page membership and savepoint duplicate suppression use SQLite's adaptive
+  bit-vector mechanism through a shared typed storage primitive.

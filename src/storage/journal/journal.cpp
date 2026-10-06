@@ -10,7 +10,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 
 namespace modern_sqlite {
@@ -43,6 +42,31 @@ constexpr std::uint64_t kPendingByte = 0x40000000ULL;
 [[nodiscard]] std::uint32_t LockingPage(ByteCount page_size) noexcept {
   return static_cast<std::uint32_t>((kPendingByte / static_cast<std::uint64_t>(page_size.value())) +
                                     1U);
+}
+
+[[nodiscard]] Status InitializePageSet(std::optional<PageBitvec>& pages, std::uint32_t page_count) {
+  if (page_count == 0U) {
+    pages.reset();
+    return {};
+  }
+  auto created = PageBitvec::Create(page_count);
+  if (!created.has_value()) {
+    return std::unexpected(std::move(created.error()));
+  }
+  pages.emplace(std::move(*created));
+  return {};
+}
+
+[[nodiscard]] bool ContainsPage(const std::optional<PageBitvec>& pages,
+                                PageNumber page_number) noexcept {
+  return pages.has_value() && pages->Test(page_number);
+}
+
+[[nodiscard]] Status SetPage(std::optional<PageBitvec>& pages, PageNumber page_number) {
+  if (!pages.has_value()) {
+    return std::unexpected(Internal("journal page set is absent for a nonempty scope"));
+  }
+  return pages->Set(page_number);
 }
 
 [[nodiscard]] Result<std::uint64_t> AllocateTransactionToken() {
@@ -101,6 +125,15 @@ struct PlaybackExpectation {
     return valid_info;
   }
 
+  const bool suppress_duplicates = info->kind == JournalPlaybackKind::kSavepointRollback;
+  std::optional<PageBitvec> restored_pages;
+  if (suppress_duplicates) {
+    auto initialized = InitializePageSet(restored_pages, info->original_page_count);
+    if (!initialized.has_value()) {
+      return initialized;
+    }
+  }
+
   target_started = true;
   auto prepared = target.PreparePlayback(*info);
   if (!prepared.has_value()) {
@@ -111,8 +144,6 @@ struct PlaybackExpectation {
     return std::unexpected(std::move(resized.error()));
   }
 
-  std::unordered_set<std::uint32_t> restored_pages;
-  const bool suppress_duplicates = info->kind == JournalPlaybackKind::kSavepointRollback;
   while (true) {
     auto next = playback.Next();
     if (!next.has_value()) {
@@ -133,14 +164,12 @@ struct PlaybackExpectation {
     }
 
     if (suppress_duplicates) {
-      bool inserted = false;
-      try {
-        inserted = restored_pages.insert(page_number).second;
-      } catch (const std::bad_alloc&) {
-        return std::unexpected(Error::OutOfMemory());
-      }
-      if (!inserted) {
+      if (ContainsPage(restored_pages, image.page_number)) {
         continue;
+      }
+      auto marked = SetPage(restored_pages, image.page_number);
+      if (!marked.has_value()) {
+        return marked;
       }
     }
 
@@ -184,8 +213,14 @@ Result<std::unique_ptr<JournalTransaction>> JournalTransaction::Begin(JournalBac
       return std::unexpected(std::move(owner_token.error()));
     }
 
-    auto transaction =
-        std::make_unique<JournalTransaction>(ConstructionKey{}, backend, info, *owner_token);
+    std::optional<PageBitvec> transaction_pages;
+    auto initialized = InitializePageSet(transaction_pages, info.original_page_count);
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+
+    auto transaction = std::make_unique<JournalTransaction>(
+        ConstructionKey{}, backend, info, *owner_token, std::move(transaction_pages));
     auto begun = backend.DoBegin(info);
     if (!begun.has_value()) {
       return std::unexpected(std::move(begun.error()));
@@ -197,9 +232,12 @@ Result<std::unique_ptr<JournalTransaction>> JournalTransaction::Begin(JournalBac
 }
 
 JournalTransaction::JournalTransaction(ConstructionKey, JournalBackend& backend,
-                                       JournalTransactionInfo info,
-                                       std::uint64_t owner_token) noexcept
-    : backend_(&backend), info_(info), owner_token_(owner_token) {}
+                                       JournalTransactionInfo info, std::uint64_t owner_token,
+                                       std::optional<PageBitvec> transaction_pages) noexcept
+    : backend_(&backend),
+      info_(info),
+      owner_token_(owner_token),
+      transaction_pages_(std::move(transaction_pages)) {}
 
 Status JournalTransaction::CapturePage(JournalPageImage image) {
   auto active = RequireActive();
@@ -214,12 +252,13 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
   }
 
   const std::uint32_t page_number = image.page_number.value();
-  const bool needs_transaction =
-      page_number <= info_.original_page_count && !transaction_pages_.contains(page_number);
+  const bool needs_transaction = page_number <= info_.original_page_count &&
+                                 !ContainsPage(transaction_pages_, image.page_number);
   std::optional<std::size_t> first_savepoint_needing_image;
   for (std::size_t index = 0; index < savepoints_.size(); ++index) {
     const SavepointState& state = savepoints_[index];
-    if (page_number <= state.savepoint.original_page_count && !state.pages.contains(page_number)) {
+    if (page_number <= state.savepoint.original_page_count &&
+        !ContainsPage(state.pages, image.page_number)) {
       first_savepoint_needing_image = index;
       break;
     }
@@ -235,16 +274,23 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
       return std::unexpected(std::move(appended.error()));
     }
 
-    try {
-      transaction_pages_.insert(page_number);
-      for (SavepointState& state : savepoints_) {
-        if (page_number <= state.savepoint.original_page_count) {
-          state.pages.insert(page_number);
+    std::optional<Error> set_error;
+    auto marked = SetPage(transaction_pages_, image.page_number);
+    if (!marked.has_value()) {
+      set_error.emplace(std::move(marked.error()));
+    }
+    for (SavepointState& state : savepoints_) {
+      if (page_number <= state.savepoint.original_page_count) {
+        marked = SetPage(state.pages, image.page_number);
+        if (!marked.has_value() && !set_error.has_value()) {
+          set_error.emplace(std::move(marked.error()));
         }
       }
-    } catch (const std::bad_alloc&) {
-      EnterFailed(ErrorCode::kOutOfMemory);
-      return std::unexpected(Error::OutOfMemory());
+    }
+    if (set_error.has_value()) {
+      const ErrorCode code = set_error->code();
+      EnterFailed(code);
+      return std::unexpected(std::move(*set_error));
     }
     return {};
   }
@@ -263,15 +309,19 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
        ++index) {
     savepoints_[index].rewind_subjournal_on_release = false;
   }
-  try {
-    for (SavepointState& state : savepoints_) {
-      if (page_number <= state.savepoint.original_page_count) {
-        state.pages.insert(page_number);
+  std::optional<Error> set_error;
+  for (SavepointState& state : savepoints_) {
+    if (page_number <= state.savepoint.original_page_count) {
+      auto marked = SetPage(state.pages, image.page_number);
+      if (!marked.has_value() && !set_error.has_value()) {
+        set_error.emplace(std::move(marked.error()));
       }
     }
-  } catch (const std::bad_alloc&) {
-    EnterFailed(ErrorCode::kOutOfMemory);
-    return std::unexpected(Error::OutOfMemory());
+  }
+  if (set_error.has_value()) {
+    const ErrorCode code = set_error->code();
+    EnterFailed(code);
+    return std::unexpected(std::move(*set_error));
   }
   return {};
 }
@@ -282,11 +332,11 @@ bool JournalTransaction::NeedsCapture(PageNumber page_number) const noexcept {
   }
 
   const std::uint32_t page = page_number.value();
-  if (page <= info_.original_page_count && !transaction_pages_.contains(page)) {
+  if (page <= info_.original_page_count && !ContainsPage(transaction_pages_, page_number)) {
     return true;
   }
-  return std::ranges::any_of(savepoints_, [page](const SavepointState& state) {
-    return page <= state.savepoint.original_page_count && !state.pages.contains(page);
+  return std::ranges::any_of(savepoints_, [page, page_number](const SavepointState& state) {
+    return page <= state.savepoint.original_page_count && !ContainsPage(state.pages, page_number);
   });
 }
 
@@ -303,10 +353,17 @@ Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t cur
       .id = JournalSavepointId{owner_token_, next_savepoint_id_},
       .original_page_count = current_page_count,
   };
+  std::optional<PageBitvec> pages;
+  auto initialized = InitializePageSet(pages, current_page_count);
+  if (!initialized.has_value()) {
+    const ErrorCode code = initialized.error().code();
+    EnterFailed(code);
+    return std::unexpected(std::move(initialized.error()));
+  }
   try {
     savepoints_.push_back(SavepointState{
         .savepoint = savepoint,
-        .pages = {},
+        .pages = std::move(pages),
         .rewind_subjournal_on_release = true,
     });
   } catch (const std::bad_alloc&) {
@@ -458,7 +515,7 @@ Status JournalTransaction::AuthorizeDatabaseWrite(PageNumber page_number) {
       continue;
     }
     const auto current_page = static_cast<std::uint32_t>(current);
-    if (!transaction_pages_.contains(current_page)) {
+    if (!ContainsPage(transaction_pages_, PageNumber{current_page})) {
       return std::unexpected(
           Misuse("database write sector contains a page absent from the main journal"));
     }
@@ -483,12 +540,12 @@ Status JournalTransaction::AuthorizeDatabaseResize(std::span<const PageNumber> r
       return std::unexpected(Misuse("database resize requires valid rollback page numbers"));
     }
     const std::uint32_t page = page_number.value();
-    if (page <= info_.original_page_count && !transaction_pages_.contains(page)) {
+    if (page <= info_.original_page_count && !ContainsPage(transaction_pages_, page_number)) {
       return std::unexpected(
           Misuse("database resize rollback page is absent from the main journal"));
     }
     for (const SavepointState& state : savepoints_) {
-      if (page <= state.savepoint.original_page_count && !state.pages.contains(page)) {
+      if (page <= state.savepoint.original_page_count && !ContainsPage(state.pages, page_number)) {
         return std::unexpected(
             Misuse("database resize rollback page is absent from a savepoint journal"));
       }
