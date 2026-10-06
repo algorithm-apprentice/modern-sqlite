@@ -84,9 +84,10 @@ Any failure blocks merging and new feature work until its root cause is fixed.
 - `AGENTS.md` carries the canonical-pattern and byte-ownership rules.
 - CI runs `tools/check_engineering_discipline.py`.
 - CMake emits strict `-std=c++23` or the compiler-equivalent flag.
-- Pull requests run clang-tidy for changed translation units. Header, CMake,
-  and clang-tidy configuration changes fall back to the full target; `main`
-  always runs the full target.
+- Pull requests run clang-tidy for changed translation units. Cross-compiler
+  Debug and Release builds cover header and build-configuration changes.
+- `main` always runs the full clang-tidy target. A pull request may request the
+  same full target with the `full-quality` label.
 - Review checks pattern reuse in addition to local functional correctness.
 - Project graph validation and all existing correctness gates remain required.
 

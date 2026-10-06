@@ -12,9 +12,6 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FULL_CHECK_SUFFIXES = {".h", ".hpp", ".hh", ".hxx"}
-FULL_CHECK_NAMES = {"CMakeLists.txt", ".clang-tidy"}
-FULL_CHECK_PREFIXES = ("cmake/",)
 SOURCE_SUFFIXES = {".cc", ".cpp", ".cxx"}
 
 
@@ -45,18 +42,6 @@ def changed_files(base_ref: str) -> list[Path]:
     return [Path(line) for line in result.stdout.splitlines() if line]
 
 
-def requires_full_check(paths: list[Path]) -> bool:
-    for path in paths:
-        text = path.as_posix()
-        if path.suffix in FULL_CHECK_SUFFIXES:
-            return True
-        if path.name in FULL_CHECK_NAMES:
-            return True
-        if text.startswith(FULL_CHECK_PREFIXES):
-            return True
-    return False
-
-
 def compile_commands(build_directory: Path) -> dict[Path, dict[str, object]]:
     database_path = ROOT / build_directory / "compile_commands.json"
     entries = json.loads(database_path.read_text(encoding="utf-8"))
@@ -80,10 +65,6 @@ def run_clang_tidy(path: Path, build_directory: Path) -> tuple[Path, int]:
 def main() -> int:
     args = parse_arguments()
     paths = changed_files(args.base_ref)
-    if requires_full_check(paths):
-        print("Headers or build configuration changed; full clang-tidy is required.")
-        return 2
-
     database = compile_commands(args.build_directory)
     sources = [
         (ROOT / path).resolve()
