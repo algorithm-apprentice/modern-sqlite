@@ -167,10 +167,13 @@ class MutableBtreePage final {
   [[nodiscard]] Status InsertCell(std::size_t index, ByteView cell,
                                   std::optional<PageNumber> left_child, MutableByteView staged_copy,
                                   BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status SetRightmostChild(PageNumber child);
   [[nodiscard]] Status Rebuild(const CellArray& cells, std::size_t first, std::size_t count,
                                BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status Edit(const CellArray& cells, std::size_t old_first, std::size_t new_first,
                             std::size_t count, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] static Status BalanceQuick(MutableBtreePage& parent, MutableBtreePage& page,
+                                           BtreeWriteWorkspace& workspace);
 
   void ClearStagedCells() noexcept;
 

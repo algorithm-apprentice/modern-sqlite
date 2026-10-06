@@ -1466,6 +1466,22 @@ Status MutableBtreePage::InsertCell(std::size_t index, ByteView cell,
   return {};
 }
 
+Status MutableBtreePage::SetRightmostChild(PageNumber child) {
+  if (is_leaf()) {
+    return std::unexpected(Misuse("leaf B-tree pages have no rightmost child"));
+  }
+  if (!IsValidPageReference(child, geometry_)) {
+    return std::unexpected(Corruption("B-tree page has an invalid rightmost child"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  owner_->NoteMutation();
+  Store32(*bytes, header_offset_ + 8U, child.value());
+  return {};
+}
+
 Status MutableBtreePage::Rebuild(const CellArray& cells, std::size_t first, std::size_t count,
                                  BtreeWriteWorkspace& workspace) {
   if (cells.geometry_.page_size() != geometry_.page_size() ||
@@ -1562,6 +1578,147 @@ Status MutableBtreePage::RebuildFromSnapshot(const CellArray& cells, std::size_t
   cell_count_ = count;
   free_bytes_ = content - pointer_end;
   ClearStagedCells();
+  return {};
+}
+
+Status MutableBtreePage::BalanceQuick(MutableBtreePage& parent, MutableBtreePage& page,
+                                      BtreeWriteWorkspace& workspace) {
+  if (parent.owner_ == nullptr || page.owner_ == nullptr) {
+    return std::unexpected(Misuse("quick balance requires live mutable B-tree pages"));
+  }
+  if (parent.owner_ != page.owner_ || parent.owner_slot_ == page.owner_slot_ ||
+      parent.geometry_.page_size() != page.geometry_.page_size() ||
+      parent.geometry_.usable_size() != page.geometry_.usable_size()) {
+    return std::unexpected(Misuse("quick balance pages do not share one mutation owner"));
+  }
+  if (parent.page_number_ == PageNumber{1} || parent.type_ != BtreePageType::kInteriorTable ||
+      page.type_ != BtreePageType::kLeafTable) {
+    return std::unexpected(Misuse("quick balance requires a non-root table parent and leaf"));
+  }
+  if (parent.staged_count_ != 0U || page.cell_count_ == 0U || page.staged_count_ != 1U) {
+    return std::unexpected(Corruption("quick balance staged-cell state is invalid"));
+  }
+  const StagedCell staged_cell =
+      page.staged_cells_[0].value_or(StagedCell{.index = 0U, .bytes = {}});
+  if (staged_cell.bytes.empty() || staged_cell.index != page.cell_count_) {
+    return std::unexpected(Corruption("quick balance staged-cell state is invalid"));
+  }
+
+  auto parent_bytes = parent.Bytes();
+  if (!parent_bytes.has_value()) {
+    return std::unexpected(std::move(parent_bytes.error()));
+  }
+  auto parent_view = BtreePageView::Parse(*parent_bytes, parent.page_number_, parent.geometry_);
+  if (!parent_view.has_value()) {
+    return std::unexpected(std::move(parent_view.error()));
+  }
+  if (parent_view->rightmost_child() != page.page_number_) {
+    return std::unexpected(Corruption("quick balance leaf is not the parent's rightmost child"));
+  }
+
+  auto page_bytes = page.Bytes();
+  if (!page_bytes.has_value()) {
+    return std::unexpected(std::move(page_bytes.error()));
+  }
+  auto page_view = BtreePageView::Parse(*page_bytes, page.page_number_, page.geometry_);
+  if (!page_view.has_value()) {
+    return std::unexpected(std::move(page_view.error()));
+  }
+  auto last_offset = page_view->cell_offset(page.cell_count_ - 1U);
+  auto last_cell = page_view->cell(page.cell_count_ - 1U);
+  if (!last_offset.has_value()) {
+    return std::unexpected(std::move(last_offset.error()));
+  }
+  if (!last_cell.has_value()) {
+    return std::unexpected(std::move(last_cell.error()));
+  }
+  const ByteView last_bytes =
+      page_bytes->subspan(last_offset->value(), last_cell->encoded_size().value());
+  const ByteView staged_bytes = staged_cell.bytes;
+  auto staged_valid = page.ValidateCellImage(staged_bytes, std::nullopt);
+  if (!staged_valid.has_value()) {
+    return staged_valid;
+  }
+
+  struct TableLeafKey {
+    std::int64_t value;
+    ByteView encoded;
+  };
+  const auto table_leaf_key = [](ByteView cell) -> Result<TableLeafKey> {
+    const auto payload = DecodeSqliteVarint(cell);
+    if (!payload.has_value() || payload->bytes_consumed.value() >= cell.size()) {
+      return std::unexpected(Corruption("quick balance table payload header is invalid"));
+    }
+    const ByteView rowid_bytes = cell.subspan(payload->bytes_consumed.value());
+    const auto rowid = DecodeSqliteVarint(rowid_bytes);
+    if (!rowid.has_value()) {
+      return std::unexpected(Corruption("quick balance table rowid is truncated"));
+    }
+    return TableLeafKey{
+        .value = std::bit_cast<std::int64_t>(rowid->value),
+        .encoded = rowid_bytes.first(rowid->bytes_consumed.value()),
+    };
+  };
+  auto old_key = table_leaf_key(last_bytes);
+  if (!old_key.has_value()) {
+    return std::unexpected(std::move(old_key.error()));
+  }
+  auto new_key = table_leaf_key(staged_bytes);
+  if (!new_key.has_value()) {
+    return std::unexpected(std::move(new_key.error()));
+  }
+  if (new_key->value <= old_key->value) {
+    return std::unexpected(Corruption("quick balance overflow cell is not the largest table key"));
+  }
+
+  auto cells = CellArray::Create(page.geometry_);
+  if (!cells.has_value()) {
+    return std::unexpected(std::move(cells.error()));
+  }
+  auto appended = cells->AppendPage(page);
+  if (!appended.has_value()) {
+    return appended;
+  }
+  const MutableByteView divider = workspace.cell_scratch_with_prefix();
+  if (divider.size() < sizeof(std::uint32_t) + old_key->encoded.size()) {
+    return std::unexpected(Misuse("quick balance divider scratch is too small"));
+  }
+
+  MutationPageOwner& owner = *page.owner_;
+  const std::uint64_t checkpoint = owner.mutation_sequence();
+  const auto fail = [&owner, checkpoint](Error error) -> Status {
+    owner.MarkRollbackRequiredAfter(error.code(), checkpoint);
+    return std::unexpected(std::move(error));
+  };
+  auto allocated = AllocateBtreePage(owner, page.geometry_);
+  if (!allocated.has_value()) {
+    return fail(std::move(allocated.error()));
+  }
+  const TemporaryOwnedPage new_page_lease{owner, allocated->page_number, true};
+  auto new_page = MutableBtreePage::Initialize(owner, allocated->owner_slot, page.geometry_,
+                                               BtreePageType::kLeafTable);
+  if (!new_page.has_value()) {
+    return fail(std::move(new_page.error()));
+  }
+  auto rebuilt = new_page->Rebuild(*cells, page.cell_count_, 1U, workspace);
+  if (!rebuilt.has_value()) {
+    return fail(std::move(rebuilt.error()));
+  }
+
+  Store32(divider, 0U, page.page_number_.value());
+  std::ranges::copy(old_key->encoded,
+                    divider.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+  const ByteView divider_cell =
+      ByteView{divider}.first(sizeof(std::uint32_t) + old_key->encoded.size());
+  auto inserted =
+      parent.InsertCell(parent.cell_count_, divider_cell, page.page_number_, divider, workspace);
+  auto rightmost = parent.SetRightmostChild(allocated->page_number);
+  if (!inserted.has_value()) {
+    return fail(std::move(inserted.error()));
+  }
+  if (!rightmost.has_value()) {
+    return fail(std::move(rightmost.error()));
+  }
   return {};
 }
 
