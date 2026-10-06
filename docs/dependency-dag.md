@@ -9,6 +9,11 @@ to develop multiple nodes in parallel.
 Only one node is developed at a time. Independent ready nodes remain pending
 until the current node is complete and reviewed.
 
+An oversized node may be delivered as ordered stacked pull requests. Each PR
+contains one coherent slice, depends only on earlier slices of the same node,
+and passes its own design, test, review, and validation gates. The next DAG
+node remains blocked until every slice of the active node is complete.
+
 The machine-readable source is `project/module-graph.json`. This document
 explains the canonical linearization and completion gates.
 
