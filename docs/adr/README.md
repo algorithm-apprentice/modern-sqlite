@@ -48,4 +48,5 @@ their corresponding implementation begins.
 42. [ADR-0042: Rollback-Mode Writable Pager](0042-rollback-mode-writable-pager.md)
 43. [ADR-0043: SQLite-Compatible B-Tree Mutation](0043-sqlite-compatible-btree-mutation.md)
 44. [ADR-0044: Reference-Faithful SQLite B-Tree Mutation](0044-reference-faithful-btree-mutation.md)
+45. [ADR-0045: Existing-Module SQLite Reference Alignment](0045-existing-module-reference-alignment.md)
 46. [ADR-0046: Canonical Engineering and Reviewable Delivery](0046-canonical-engineering-and-reviewable-delivery.md)

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-write-pager",
+  "currentNode": "implement-btree-write",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

@@ -30,7 +30,12 @@ appear in a well-formed persistent database record.
   and nominal SQL storage class.
 - Encoding uses two passes:
   - determine every serial type and the exact header/body sizes; then
-  - allocate one `ByteBuffer` and write the complete record.
+  - write the complete record either into caller-owned mutable bytes or into
+    one newly allocated `ByteBuffer`.
+- `EncodeRecordInto` returns the exact bytes written and rejects a destination
+  smaller than `EncodedRecordSize` with `ErrorCode::kMisuse`. This allows
+  performance-sensitive callers to retain and reuse storage without
+  duplicating the persistent encoding rules.
 - INTEGER payloads use the smallest SQLite signed width: 1, 2, 3, 4, 6, or
   8 bytes. Schema format 4 uses serial types 8 and 9 for 0 and 1.
 - REAL payloads preserve their IEEE 754 binary64 bit pattern in big-endian
@@ -64,6 +69,9 @@ appear in a well-formed persistent database record.
   configuration returns `ErrorCode::kMisuse`, out-of-range field access
   returns `ErrorCode::kOutOfRange`, and unrepresentable output sizes return
   `ErrorCode::kTooLarge`.
+- Codec error construction is non-throwing. If owning an error message cannot
+  allocate, including `EncodeRecordInto` destination validation, the API
+  returns `ErrorCode::kOutOfMemory`.
 - Index comparison accepts:
   - a validated encoded record;
   - a borrowed unpacked search-key prefix;
@@ -85,6 +93,8 @@ appear in a well-formed persistent database record.
 - B-tree lookup and VM column extraction share one independently fuzzable
   format contract without a dependency cycle.
 - Validated record iteration and index comparison perform no heap allocation.
+- Callers that retain an encoding buffer can encode repeated records without
+  allocating a new `ByteBuffer`.
 - Random field lookup is linear in the field index; hot consumers should use
   `RecordCursor` for one sequential pass.
 - Eager decoding is intentionally more expensive because it creates
