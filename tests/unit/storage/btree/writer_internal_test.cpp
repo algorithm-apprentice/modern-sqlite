@@ -11,6 +11,7 @@
 #include <ranges>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,27 @@ void WriteOverflowIndexLeaf(MutableByteView bytes, ByteView record, PageNumber f
   Store32(bytes, cell_offset + size->value() + local, first_overflow.value());
 }
 
+[[nodiscard]] std::vector<std::byte> TableLeafCell(std::int64_t rowid, std::size_t payload_size) {
+  std::array<std::byte, 9> encoded_payload{};
+  std::array<std::byte, 9> encoded_rowid{};
+  const auto payload_header = EncodeSqliteVarint(payload_size, MutableByteView{encoded_payload});
+  const auto rowid_header =
+      EncodeSqliteVarint(std::bit_cast<std::uint64_t>(rowid), MutableByteView{encoded_rowid});
+  if (!payload_header.has_value() || !rowid_header.has_value()) {
+    throw std::runtime_error("failed to encode test table cell");
+  }
+  const std::size_t encoded_size =
+      std::max<std::size_t>(4U, payload_header->value() + rowid_header->value() + payload_size);
+  std::vector<std::byte> cell(encoded_size, std::byte{0});
+  std::ranges::copy(std::span{encoded_payload}.first(payload_header->value()), cell.begin());
+  std::ranges::copy(std::span{encoded_rowid}.first(rowid_header->value()),
+                    cell.begin() + static_cast<std::ptrdiff_t>(payload_header->value()));
+  std::ranges::fill(
+      std::span{cell}.subspan(payload_header->value() + rowid_header->value(), payload_size),
+      static_cast<std::byte>(static_cast<std::uint64_t>(rowid) & 0xffU));
+  return cell;
+}
+
 [[nodiscard]] std::unique_ptr<Pager> OpenInitialized(test::WritePagerFixedVfs& vfs) {
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -252,6 +274,289 @@ TEST(MutationPageOwner, RejectsUseAfterWriteGenerationChanges) {
   const auto stale = owner.AcquireRead(PageNumber{2});
   ASSERT_FALSE(stale.has_value());
   EXPECT_EQ(ErrorCode::kSchemaChanged, stale.error().code());
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, AllocatesRetainedSQLiteScratchWithTheFourBytePrefix) {
+  static_assert(!std::is_copy_constructible_v<MutableBtreePage>);
+  static_assert(!std::is_copy_assignable_v<MutableBtreePage>);
+
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+
+  ASSERT_EQ(516U, workspace.cell_scratch_with_prefix().size());
+  ASSERT_EQ(512U, workspace.cell_scratch().size());
+  ASSERT_EQ(512U, workspace.rebuild_scratch().size());
+  EXPECT_EQ(workspace.cell_scratch_with_prefix().data() + 4U, workspace.cell_scratch().data());
+  EXPECT_TRUE(std::ranges::all_of(workspace.cell_scratch_with_prefix().first(4U),
+                                  [](std::byte value) { return value == std::byte{0}; }));
+}
+
+TEST(MutableBtreePage, PreservesFragmentsAcrossTheFastDefragmentPath) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    MutableBtreePage page =
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
+    const std::vector<std::byte> larger = TableLeafCell(1, 20U);
+    const std::vector<std::byte> smaller = TableLeafCell(1, 18U);
+    const std::vector<std::byte> middle = TableLeafCell(2, 30U);
+    const std::vector<std::byte> tail = TableLeafCell(3, 30U);
+    RequireStatus(page.InsertCell(0U, larger, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, middle, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(2U, tail, std::nullopt, {}, workspace));
+    RequireStatus(page.DropCell(0U));
+    RequireStatus(page.InsertCell(0U, smaller, std::nullopt, {}, workspace));
+    RequireStatus(page.DropCell(1U));
+    const std::size_t free_before = page.free_bytes();
+
+    RequireStatus(page.Defragment(2U, workspace));
+
+    const auto parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    EXPECT_EQ(ByteCount{2}, parsed.fragmented_free_bytes());
+    EXPECT_EQ(free_before, TakeValue(parsed.AnalyzeFreeSpace()).total().value());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, MovesWithoutDuplicatingTheFacade) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    MutableBtreePage source =
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
+    const MutableBtreePage destination{std::move(source)};
+    EXPECT_EQ(BtreePageType::kLeafTable, destination.type());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, InitializesAndZerosOrdinaryAndPageOneHeaders) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t page_two_slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    const MutableBtreePage page = TakeValue(
+        MutableBtreePage::Initialize(owner, page_two_slot, geometry, BtreePageType::kLeafIndex));
+    EXPECT_EQ(BtreePageType::kLeafIndex, page.type());
+    EXPECT_EQ(0U, page.header_offset());
+    EXPECT_EQ(8U, page.cell_pointer_offset());
+    EXPECT_EQ(504U, page.free_bytes());
+    const auto parsed = TakeValue(BtreePageView::Parse(
+        TakeValue(owner.Frame(page_two_slot)).get().bytes(), PageNumber{2}, geometry));
+    EXPECT_EQ(BtreePageType::kLeafIndex, parsed.type());
+
+    const std::size_t page_one_slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
+    const ByteView before = TakeValue(owner.Frame(page_one_slot)).get().bytes();
+    std::array<std::byte, 100> header{};
+    std::ranges::copy(before.first(header.size()), header.begin());
+    MutableBtreePage page_one = TakeValue(MutableBtreePage::Open(owner, page_one_slot, geometry));
+    RequireStatus(page_one.Zero(BtreePageType::kLeafTable));
+    EXPECT_EQ(100U, page_one.header_offset());
+    EXPECT_TRUE(std::ranges::equal(
+        header, TakeValue(owner.Frame(page_one_slot)).get().bytes().first<100>()));
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, InsertsDropsCoalescesAndResetsAnEmptyLeaf) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    MutableBtreePage page =
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
+    const std::vector<std::byte> one = TableLeafCell(1, 20U);
+    const std::vector<std::byte> two = TableLeafCell(2, 24U);
+    const std::vector<std::byte> three = TableLeafCell(3, 28U);
+    RequireStatus(page.InsertCell(0U, one, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, two, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(2U, three, std::nullopt, {}, workspace));
+    EXPECT_EQ(3U, page.cell_count());
+    auto parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    const std::size_t freed_offset = TakeValue(parsed.cell_offset(1U)).value();
+
+    RequireStatus(page.DropCell(1U));
+    EXPECT_EQ(2U, page.cell_count());
+    parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    const auto free = TakeValue(parsed.AnalyzeFreeSpace());
+    EXPECT_TRUE(free.freeblocks().Next().has_value());
+    EXPECT_EQ(1, TakeValue(parsed.cell(0)).rowid());
+    EXPECT_EQ(3, TakeValue(parsed.cell(1)).rowid());
+
+    RequireStatus(page.InsertCell(1U, two, std::nullopt, {}, workspace));
+    parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    EXPECT_EQ(freed_offset, TakeValue(parsed.cell_offset(1U)).value());
+    EXPECT_EQ(2, TakeValue(parsed.cell(1U)).rowid());
+
+    RequireStatus(page.DropCell(2U));
+    RequireStatus(page.DropCell(1U));
+    RequireStatus(page.DropCell(0U));
+    EXPECT_EQ(0U, page.cell_count());
+    EXPECT_EQ(geometry.usable_size().value() - 8U, page.free_bytes());
+    parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    EXPECT_EQ(geometry.usable_size(), parsed.cell_content_offset());
+    EXPECT_FALSE(TakeValue(parsed.AnalyzeFreeSpace()).freeblocks().Next().has_value());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, DefragmentsFreeblocksIntoOneUnallocatedRegion) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    MutableBtreePage page =
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
+    const std::vector<std::byte> one = TableLeafCell(1, 90U);
+    const std::vector<std::byte> two = TableLeafCell(2, 90U);
+    const std::vector<std::byte> three = TableLeafCell(3, 90U);
+    RequireStatus(page.InsertCell(0U, one, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, two, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(2U, three, std::nullopt, {}, workspace));
+    RequireStatus(page.DropCell(1U));
+    RequireStatus(page.Defragment(0U, workspace));
+
+    const auto parsed = TakeValue(
+        BtreePageView::Parse(TakeValue(owner.Frame(slot)).get().bytes(), PageNumber{2}, geometry));
+    EXPECT_FALSE(TakeValue(parsed.AnalyzeFreeSpace()).freeblocks().Next().has_value());
+    EXPECT_EQ(ByteCount{0}, parsed.fragmented_free_bytes());
+    EXPECT_EQ(1, TakeValue(parsed.cell(0)).rowid());
+    EXPECT_EQ(3, TakeValue(parsed.cell(1)).rowid());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, StagesThreeSequentialOverflowCellsAndProtectsTheFourthSlot) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    MutableBtreePage page =
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable));
+    const std::vector<std::byte> first = TableLeafCell(1, 230U);
+    const std::vector<std::byte> second = TableLeafCell(2, 250U);
+    RequireStatus(page.InsertCell(0U, first, std::nullopt, {}, workspace));
+    RequireStatus(page.InsertCell(1U, second, std::nullopt, {}, workspace));
+    const std::vector<std::byte> staged = TableLeafCell(3, 11U);
+    std::array<std::array<std::byte, 16>, 4> copies{};
+    const std::vector<std::byte> before{
+        TakeValue(owner.Frame(slot)).get().bytes().begin(),
+        TakeValue(owner.Frame(slot)).get().bytes().end(),
+    };
+    for (std::size_t index = 0; index < 3U; ++index) {
+      RequireStatus(page.InsertCell(2U + index, staged, std::nullopt,
+                                    MutableByteView{copies[index]}, workspace));
+    }
+    const auto fourth =
+        page.InsertCell(5U, staged, std::nullopt, MutableByteView{copies[3]}, workspace);
+    ASSERT_FALSE(fourth.has_value());
+    EXPECT_EQ(ErrorCode::kTooLarge, fourth.error().code());
+    EXPECT_EQ(3U, page.staged_count());
+    EXPECT_EQ(2U, page.cell_count());
+    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(slot)).get().bytes()));
+    for (std::size_t index = 0; index < 3U; ++index) {
+      const auto cell = page.staged_cell(index);
+      ASSERT_TRUE(cell.has_value());
+      EXPECT_EQ(2U + index, cell->index);
+      EXPECT_TRUE(std::ranges::equal(staged, cell->bytes));
+    }
+    page.ClearStagedCells();
+    EXPECT_EQ(0U, page.staged_count());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutableBtreePage, RejectsMalformedFreeblocksWithoutMutation) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    EXPECT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    static_cast<void>(
+        TakeValue(MutableBtreePage::Initialize(owner, slot, geometry, BtreePageType::kLeafTable)));
+    const MutableByteView bytes = TakeValue(owner.MutableBytes(slot));
+    Store16(bytes, 1U, 200U);
+    const std::vector<std::byte> before{bytes.begin(), bytes.end()};
+
+    const auto malformed = MutableBtreePage::Open(owner, slot, geometry);
+
+    ASSERT_FALSE(malformed.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed.error().code());
+    EXPECT_TRUE(std::ranges::equal(before, TakeValue(owner.Frame(slot)).get().bytes()));
+  }
   RequireStatus(pager->Rollback());
 }
 

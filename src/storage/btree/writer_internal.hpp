@@ -22,6 +22,7 @@
 namespace modern_sqlite::btree_internal {
 
 inline constexpr std::size_t kMaximumMutationPages = 32;
+inline constexpr std::size_t kStagedCellSlots = 4;
 
 class MutationPageOwner final {
  public:
@@ -59,6 +60,99 @@ class MutationPageOwner final {
   std::uint64_t generation_;
   std::array<OwnedPage, kMaximumMutationPages> pages_{};
   std::size_t size_ = 0;
+};
+
+class BtreeWriteWorkspace final {
+ public:
+  [[nodiscard]] static Result<BtreeWriteWorkspace> Create(ByteCount page_size);
+
+  BtreeWriteWorkspace(const BtreeWriteWorkspace&) = delete;
+  BtreeWriteWorkspace& operator=(const BtreeWriteWorkspace&) = delete;
+  BtreeWriteWorkspace(BtreeWriteWorkspace&&) noexcept = default;
+  BtreeWriteWorkspace& operator=(BtreeWriteWorkspace&&) noexcept = default;
+  ~BtreeWriteWorkspace() = default;
+
+  [[nodiscard]] MutableByteView cell_scratch_with_prefix() noexcept;
+  [[nodiscard]] MutableByteView cell_scratch() noexcept;
+  [[nodiscard]] MutableByteView rebuild_scratch() noexcept;
+
+ private:
+  BtreeWriteWorkspace(ByteBuffer cell_scratch, ByteBuffer rebuild_scratch) noexcept;
+
+  ByteBuffer cell_scratch_;
+  ByteBuffer rebuild_scratch_;
+};
+
+struct StagedCell {
+  std::size_t index;
+  ByteView bytes;
+};
+
+class MutableBtreePage final {
+ public:
+  [[nodiscard]] static Result<MutableBtreePage> Open(MutationPageOwner& owner,
+                                                     std::size_t owner_slot,
+                                                     BtreePageGeometry geometry);
+  [[nodiscard]] static Result<MutableBtreePage> Initialize(MutationPageOwner& owner,
+                                                           std::size_t owner_slot,
+                                                           BtreePageGeometry geometry,
+                                                           BtreePageType type);
+
+  MutableBtreePage(const MutableBtreePage&) = delete;
+  MutableBtreePage& operator=(const MutableBtreePage&) = delete;
+  MutableBtreePage(MutableBtreePage&& other) noexcept;
+  MutableBtreePage& operator=(MutableBtreePage&&) = delete;
+  ~MutableBtreePage() = default;
+
+  [[nodiscard]] Status Zero(BtreePageType type);
+  [[nodiscard]] Status Defragment(std::size_t maximum_fragments, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Result<std::size_t> AllocateSpace(std::size_t size, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status FreeSpace(std::size_t offset, std::size_t size);
+  [[nodiscard]] Status DropCell(std::size_t index);
+  [[nodiscard]] Status InsertCell(std::size_t index, ByteView cell,
+                                  std::optional<PageNumber> left_child, MutableByteView staged_copy,
+                                  BtreeWriteWorkspace& workspace);
+
+  void ClearStagedCells() noexcept;
+
+  [[nodiscard]] PageNumber page_number() const noexcept { return page_number_; }
+  [[nodiscard]] BtreePageType type() const noexcept { return type_; }
+  [[nodiscard]] bool is_leaf() const noexcept;
+  [[nodiscard]] bool is_table() const noexcept;
+  [[nodiscard]] std::size_t cell_count() const noexcept { return cell_count_; }
+  [[nodiscard]] std::size_t free_bytes() const noexcept { return free_bytes_; }
+  [[nodiscard]] std::size_t staged_count() const noexcept { return staged_count_; }
+  [[nodiscard]] std::optional<StagedCell> staged_cell(std::size_t slot) const noexcept;
+  [[nodiscard]] std::size_t header_offset() const noexcept { return header_offset_; }
+  [[nodiscard]] std::size_t cell_pointer_offset() const noexcept { return cell_pointer_offset_; }
+
+ private:
+  struct Metadata {
+    std::size_t header_offset;
+    std::size_t cell_pointer_offset;
+    std::size_t cell_count;
+    std::size_t free_bytes;
+  };
+
+  MutableBtreePage(MutationPageOwner& owner, std::size_t owner_slot, BtreePageGeometry geometry,
+                   PageNumber page_number, BtreePageType type, Metadata metadata) noexcept;
+
+  [[nodiscard]] Result<MutableByteView> Bytes();
+  [[nodiscard]] Result<ByteView> Bytes() const;
+  [[nodiscard]] Status ValidateCellImage(ByteView cell, std::optional<PageNumber> left_child) const;
+  [[nodiscard]] Result<std::optional<std::size_t>> FindFreeblock(std::size_t size);
+
+  MutationPageOwner* owner_;
+  std::size_t owner_slot_;
+  BtreePageGeometry geometry_;
+  PageNumber page_number_;
+  BtreePageType type_;
+  std::size_t header_offset_;
+  std::size_t cell_pointer_offset_;
+  std::size_t cell_count_;
+  std::size_t free_bytes_;
+  std::array<std::optional<StagedCell>, kStagedCellSlots> staged_cells_{};
+  std::size_t staged_count_ = 0;
 };
 
 enum class WritableCursorState : std::uint8_t {

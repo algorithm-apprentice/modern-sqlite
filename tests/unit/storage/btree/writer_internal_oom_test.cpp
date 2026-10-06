@@ -152,19 +152,37 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 
 int main() try {
+  Arm(std::nullopt);
+  const auto baseline_workspace =
+      modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(modern_sqlite::ByteCount{512});
+  const std::size_t workspace_allocations = Disarm();
+  if (!baseline_workspace.has_value() || workspace_allocations == 0U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < workspace_allocations; ++failure) {
+    Arm(failure);
+    const auto workspace =
+        modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(modern_sqlite::ByteCount{512});
+    (void)Disarm();
+    if (workspace.has_value() ||
+        workspace.error().code() != modern_sqlite::ErrorCode::kOutOfMemory) {
+      return 2;
+    }
+  }
+
   const Outcome baseline = RunOverflowSeek(std::nullopt);
   if (!baseline.succeeded || !baseline.invariant_holds || baseline.allocations == 0U) {
-    return 1;
+    return 3;
   }
   for (std::size_t failure = 0; failure < baseline.allocations; ++failure) {
     const Outcome outcome = RunOverflowSeek(failure);
     if (outcome.succeeded || outcome.error != modern_sqlite::ErrorCode::kOutOfMemory ||
         !outcome.invariant_holds) {
-      return 2;
+      return 4;
     }
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 3;
+  return 5;
 }
