@@ -487,7 +487,9 @@ struct PageOneMetadata {
 
   try {
     PageOwnershipSet pages{core.scratch_resource()};
-    pages.reserve(metadata->freelist_page_count);
+    if (metadata->freelist_page_count != 0U) {
+      pages.reserve(metadata->freelist_page_count);
+    }
     PageNumber trunk_page = metadata->first_freelist_trunk;
     while (trunk_page.value() != 0U) {
       if (trunk_page == PageNumber{1} || trunk_page == geometry->locking_page() ||
