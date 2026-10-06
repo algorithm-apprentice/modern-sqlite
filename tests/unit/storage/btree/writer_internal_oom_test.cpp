@@ -275,6 +275,68 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] bool CellArrayPageEditingAllocatesNothing() {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
+                                                                 pager->header()->usable_size());
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  if (!geometry.has_value() || !workspace.has_value()) {
+    return false;
+  }
+  auto cells = modern_sqlite::btree_internal::CellArray::Create(*geometry);
+  if (!cells.has_value()) {
+    return false;
+  }
+
+  bool succeeded = false;
+  std::size_t allocations = 0U;
+  {
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    auto slot = owner.AcquireWrite(modern_sqlite::PageNumber{1});
+    if (!slot.has_value()) {
+      return false;
+    }
+    auto page = modern_sqlite::btree_internal::MutableBtreePage::Open(owner, *slot, *geometry);
+    const std::array<std::byte, 4> payload{
+        std::byte{0x10},
+        std::byte{0x20},
+        std::byte{0x30},
+        std::byte{0x40},
+    };
+    const auto formatted =
+        modern_sqlite::btree_internal::FillTableLeafCell(owner, *geometry, *workspace, 1, payload);
+    if (!page.has_value() || !formatted.has_value() ||
+        !page->InsertCell(0U, formatted->bytes, std::nullopt, {}, *workspace).has_value()) {
+      return false;
+    }
+
+    Arm(std::nullopt);
+    const auto appended = cells->AppendPage(*page);
+    bool edited = false;
+    if (appended.has_value()) {
+      edited = page->Edit(*cells, 0U, 0U, cells->size(), *workspace).has_value();
+    }
+    bool copied = false;
+    if (edited) {
+      copied = cells->AppendCopied(formatted->bytes).has_value();
+    }
+    bool rebuilt = false;
+    if (copied) {
+      rebuilt = page->Rebuild(*cells, 0U, cells->size(), *workspace).has_value();
+    }
+    allocations = Disarm();
+    succeeded = appended.has_value() && copied && rebuilt && edited;
+  }
+  return succeeded && allocations == 0U && pager->Rollback().has_value();
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -314,17 +376,39 @@ int main() try {
     }
   }
 
-  if (!ExhaustAllocations(RunOverflowSeek)) {
+  const auto geometry = modern_sqlite::BtreePageGeometry::Create(modern_sqlite::ByteCount{512},
+                                                                 modern_sqlite::ByteCount{512});
+  if (!geometry.has_value()) {
     return 3;
   }
-  if (!ExhaustAllocations(RunOverflowFormat)) {
+  Arm(std::nullopt);
+  const auto baseline_cells = modern_sqlite::btree_internal::CellArray::Create(*geometry);
+  const std::size_t cell_array_allocations = Disarm();
+  if (!baseline_cells.has_value() || cell_array_allocations == 0U) {
     return 4;
   }
+  for (std::size_t failure = 0; failure < cell_array_allocations; ++failure) {
+    Arm(failure);
+    const auto cells = modern_sqlite::btree_internal::CellArray::Create(*geometry);
+    (void)Disarm();
+    if (cells.has_value() || cells.error().code() != modern_sqlite::ErrorCode::kOutOfMemory) {
+      return 5;
+    }
+  }
+  if (!CellArrayPageEditingAllocatesNothing()) {
+    return 6;
+  }
+  if (!ExhaustAllocations(RunOverflowSeek)) {
+    return 7;
+  }
+  if (!ExhaustAllocations(RunOverflowFormat)) {
+    return 8;
+  }
   if (!ExhaustAllocations(RunFreelistLeafMark)) {
-    return 5;
+    return 9;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 6;
+  return 10;
 }
