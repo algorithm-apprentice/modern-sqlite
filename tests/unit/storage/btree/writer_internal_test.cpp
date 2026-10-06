@@ -198,27 +198,34 @@ void WriteOverflowIndexLeaf(MutableByteView bytes, ByteView record, PageNumber f
   if (!rowid_header.has_value()) {
     throw std::runtime_error("failed to encode test table divider");
   }
-  std::vector<std::byte> cell(sizeof(std::uint32_t) + rowid_header->value());
+  std::array<std::byte, sizeof(std::uint32_t) + 9U> cell{};
   Store32(MutableByteView{cell}, 0U, left_child.value());
   std::ranges::copy(std::span{encoded_rowid}.first(rowid_header->value()),
                     cell.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
-  return cell;
+  return {
+      cell.begin(),
+      cell.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t) + rowid_header->value()),
+  };
 }
 
-[[nodiscard]] std::vector<std::byte> CellImagePage(ByteView cell, BtreePageType type,
-                                                   BtreePageGeometry geometry) {
-  std::vector<std::byte> page(geometry.page_size().value(), std::byte{0});
-  page[0] = static_cast<std::byte>(type);
-  Store16(MutableByteView{page}, 3U, 1U);
+[[nodiscard]] ByteBuffer CellImagePage(ByteView cell, BtreePageType type,
+                                       BtreePageGeometry geometry) {
+  ByteBuffer page{geometry.page_size()};
+  const MutableByteView bytes = page.mutable_view();
+  if (bytes.size() < 12U || cell.size() > geometry.usable_size().value() - 12U) {
+    throw std::runtime_error("test cell image does not fit its page");
+  }
+  bytes[0] = static_cast<std::byte>(type);
+  Store16(bytes, 3U, 1U);
   const bool leaf = type == BtreePageType::kLeafIndex || type == BtreePageType::kLeafTable;
   const std::size_t header_size = leaf ? 8U : 12U;
   if (!leaf) {
-    Store32(MutableByteView{page}, 8U, 99U);
+    Store32(bytes, 8U, 99U);
   }
   const std::size_t offset = geometry.usable_size().value() - cell.size();
-  Store16(MutableByteView{page}, 5U, static_cast<std::uint16_t>(offset));
-  Store16(MutableByteView{page}, header_size, static_cast<std::uint16_t>(offset));
-  std::ranges::copy(cell, page.begin() + static_cast<std::ptrdiff_t>(offset));
+  Store16(bytes, 5U, static_cast<std::uint16_t>(offset));
+  Store16(bytes, header_size, static_cast<std::uint16_t>(offset));
+  std::ranges::copy(cell, bytes.begin() + static_cast<std::ptrdiff_t>(offset));
   return page;
 }
 
@@ -600,10 +607,9 @@ TEST(BtreeOverflow, FormatsLocalTableAndInteriorIndexCellsInRetainedScratch) {
         TakeValue(FillTableLeafCell(owner, geometry, workspace, -7, payload));
     EXPECT_EQ(0U, table.first_overflow_page.has_value());
     EXPECT_GE(table.bytes.size(), 4U);
-    const std::vector<std::byte> table_page =
-        CellImagePage(table.bytes, BtreePageType::kLeafTable, geometry);
+    const ByteBuffer table_page = CellImagePage(table.bytes, BtreePageType::kLeafTable, geometry);
     const auto parsed_table =
-        TakeValue(BtreePageView::Parse(ByteView{table_page}, PageNumber{98}, geometry));
+        TakeValue(BtreePageView::Parse(table_page.view(), PageNumber{98}, geometry));
     const BtreeCellView table_cell = TakeValue(parsed_table.cell(0U));
     EXPECT_EQ(-7, table_cell.rowid().value_or(0));
     EXPECT_TRUE(std::ranges::equal(payload, table_cell.local_payload()));
@@ -611,10 +617,10 @@ TEST(BtreeOverflow, FormatsLocalTableAndInteriorIndexCellsInRetainedScratch) {
     const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(42)}));
     const FormattedCell index = TakeValue(FillIndexCell(
         owner, geometry, workspace, record.view(), BtreePageType::kInteriorIndex, PageNumber{7}));
-    const std::vector<std::byte> index_page =
+    const ByteBuffer index_page =
         CellImagePage(index.bytes, BtreePageType::kInteriorIndex, geometry);
     const auto parsed_index =
-        TakeValue(BtreePageView::Parse(ByteView{index_page}, PageNumber{98}, geometry));
+        TakeValue(BtreePageView::Parse(index_page.view(), PageNumber{98}, geometry));
     const BtreeCellView index_cell = TakeValue(parsed_index.cell(0U));
     EXPECT_EQ(PageNumber{7}, index_cell.left_child().value_or(PageNumber{}));
     EXPECT_TRUE(std::ranges::equal(record.view(), index_cell.local_payload()));
@@ -639,10 +645,10 @@ TEST(BtreeOverflow, WritesAndClearsAReferenceOrderedOverflowChain) {
     const FormattedCell formatted =
         TakeValue(FillTableLeafCell(owner, geometry, workspace, 9, payload));
     ASSERT_TRUE(formatted.first_overflow_page.has_value());
-    const std::vector<std::byte> cell_page =
+    const ByteBuffer cell_page =
         CellImagePage(formatted.bytes, BtreePageType::kLeafTable, geometry);
     const auto parsed_cell =
-        TakeValue(BtreePageView::Parse(ByteView{cell_page}, PageNumber{98}, geometry));
+        TakeValue(BtreePageView::Parse(cell_page.view(), PageNumber{98}, geometry));
     const BtreeCellView cell = TakeValue(parsed_cell.cell(0U));
     ASSERT_TRUE(cell.first_overflow_page().has_value());
     EXPECT_EQ(payload.size(), cell.payload_size().value());
@@ -687,8 +693,9 @@ TEST(BtreeOverflow, ClearsMoreThanThirtyFreelistTrunksWithBoundedPins) {
   {
     MutationPageOwner owner{*pager};
     const auto formatted = TakeValue(FillTableLeafCell(owner, geometry, workspace, 1, payload));
-    const auto cell_page = CellImagePage(formatted.bytes, BtreePageType::kLeafTable, geometry);
-    const auto parsed = TakeValue(BtreePageView::Parse(cell_page, PageNumber{98}, geometry));
+    const ByteBuffer cell_page =
+        CellImagePage(formatted.bytes, BtreePageType::kLeafTable, geometry);
+    const auto parsed = TakeValue(BtreePageView::Parse(cell_page.view(), PageNumber{98}, geometry));
     const auto cell = TakeValue(parsed.cell(0U));
 
     RequireStatus(ClearCellOverflow(owner, geometry, cell));
@@ -1628,10 +1635,10 @@ TEST(BtreeBalance, QuickBalanceStagesAParentDividerForTheNextUpwardBalance) {
     const std::optional<StagedCell> staged = parent.staged_cell(0U);
     ASSERT_TRUE(staged.has_value());
     EXPECT_EQ(33U, staged->index);
-    const std::vector<std::byte> divider_page =
+    const ByteBuffer divider_page =
         CellImagePage(staged->bytes, BtreePageType::kInteriorTable, geometry);
-    const BtreeCellView divider =
-        TakeValue(TakeValue(BtreePageView::Parse(divider_page, PageNumber{98}, geometry)).cell(0U));
+    const BtreeCellView divider = TakeValue(
+        TakeValue(BtreePageView::Parse(divider_page.view(), PageNumber{98}, geometry)).cell(0U));
     EXPECT_EQ(leaf.page_number(), divider.left_child().value_or(PageNumber{}));
     EXPECT_EQ(1, divider.rowid());
     const BtreePageView parent_view = TakeValue(
