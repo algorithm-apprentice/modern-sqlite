@@ -21,6 +21,10 @@ concurrency:
 jobs:
   build-and-test:
     name: build-and-test (${{ matrix.os }}, ${{ matrix.preset }})
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPRESS: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -41,38 +45,61 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         if: github.event_name == 'push' || matrix.run_on_pr
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: github.event_name == 'push' || matrix.run_on_pr
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-${{ matrix.preset }}-
       - name: Install Ninja on Linux
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+        run: sudo apt-get update && sudo apt-get install --yes ccache ninja-build
       - name: Install Ninja on macOS
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'macOS'
-        run: brew install ninja
+        run: brew install ccache ninja
       - name: Configure
         if: github.event_name == 'push' || matrix.run_on_pr
-        run: cmake --preset "${{ matrix.preset }}"
+        run: >
+          cmake --preset "${{ matrix.preset }}"
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         if: github.event_name == 'push' || matrix.run_on_pr
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 3
       - name: Test
         if: github.event_name == 'push' || matrix.run_on_pr
         run: ctest --preset "${{ matrix.preset }}" --parallel 2
+      - name: Report compiler cache
+        if: github.event_name == 'push' || matrix.run_on_pr
+        run: ccache --show-stats
 
   sanitizer:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPRESS: "true"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-asan-ubsan-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-asan-ubsan-
       - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+        run: sudo apt-get update && sudo apt-get install --yes ccache ninja-build
       - name: Configure
-        run: cmake --preset asan-ubsan
+        run: cmake --preset asan-ubsan -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build --preset asan-ubsan --parallel 3
       - name: Test
         run: ctest --preset asan-ubsan
+      - name: Report compiler cache
+        run: ccache --show-stats
 
   quality:
     runs-on: ubuntu-latest
@@ -128,6 +155,10 @@ jobs:
 
   read-performance-contract:
     name: read-performance-contract (${{ matrix.os }})
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPRESS: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -140,6 +171,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         if: github.event_name == 'push' || matrix.run_on_pr
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: github.event_name == 'push' || matrix.run_on_pr
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-release-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-release-
       - name: Validate committed read baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
@@ -158,12 +195,12 @@ jobs:
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes ninja-build tcl
+        run: sudo apt-get update && sudo apt-get install --yes ccache ninja-build tcl
       - name: Install benchmark tools on macOS
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'macOS'
-        run: brew install ninja
+        run: brew install ccache ninja
       - name: Verify pinned SQLite checkout
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
@@ -187,6 +224,8 @@ jobs:
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
           cmake --preset benchmark \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DMODERN_SQLITE_PINNED_SQLITE_C="$GITHUB_WORKSPACE/sqlite-build/sqlite3.c" \
             -DMODERN_SQLITE_PINNED_SQLITE_H="$GITHUB_WORKSPACE/sqlite-build/sqlite3.h"
       - name: Build benchmark contracts
@@ -206,3 +245,6 @@ jobs:
           ctest --test-dir build/benchmark \
             --output-on-failure \
             -R '^(performance\.read_(benchmark_cli|fixture_regeneration)|compatibility\.(rollback_journal_fixture_regeneration|write_pager_sqlite))$'
+      - name: Report compiler cache
+        if: github.event_name == 'push' || matrix.run_on_pr
+        run: ccache --show-stats

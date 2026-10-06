@@ -93,6 +93,8 @@ Any failure blocks merging and new feature work until its root cause is fixed.
   contract run on `main`.
 - CI cancels superseded runs for the same pull request. Benchmark jobs build
   only the binaries required by their selected contract tests.
+- Compatible compiler/configuration pairs use isolated ccache namespaces.
+  Debug, Release, sanitizer, and operating-system caches are never mixed.
 - Review checks pattern reuse in addition to local functional correctness.
 - Project graph validation and all existing correctness gates remain required.
 
