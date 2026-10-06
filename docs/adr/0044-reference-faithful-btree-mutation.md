@@ -275,9 +275,11 @@ struct CellLocator {
 static_assert(sizeof(CellLocator) == 8);
 ```
 
-`source_slot` identifies one pinned sibling, the parent, or copied scratch.
-`offset` is relative to that source's stable byte buffer. `flags` distinguishes
-borrowed page bytes from owned divider/overflow copies.
+`source_slot` identifies one pinned sibling or copied-divider scratch.
+Staged-cell locators use a separate fixed source array that borrows the
+operation-owned staged buffers without consuming divider scratch. `offset` is
+relative to the selected stable byte buffer. `flags` distinguishes borrowed
+page bytes, copied dividers, and borrowed staged cells.
 
 The operation owns:
 
@@ -420,7 +422,8 @@ After local insert or delete:
 - the required right-to-left balancing adjustment;
 - reuse of old pages before allocation of new pages;
 - ascending page-number reassignment through the required pager rekey seam;
-- divider reconstruction, including tiny leaf padding;
+- divider reconstruction, including tiny leaf padding and canonical
+  table-rowid varints (unlike `balance_quick()`'s raw rowid preservation);
 - dependency-safe two-pass page editing;
 - root shallowing; and
 - freeing surplus old sibling pages.

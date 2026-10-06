@@ -48,6 +48,10 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
   return MakeError(ErrorCode::kTooLarge, message);
 }
 
+[[nodiscard]] Error Internal(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kInternal, message);
+}
+
 [[nodiscard]] Error SchemaChanged(std::string_view message) noexcept {
   return MakeError(ErrorCode::kSchemaChanged, message);
 }
@@ -332,6 +336,50 @@ Status MutationPageOwner::Promote(std::size_t slot) {
   page.page_number = page_number;
   page.pin.emplace<WritePagePin>(std::move(*promoted));
   ++size_;
+  return {};
+}
+
+Status MutationPageOwner::PermutePageNumbers(std::span<const MutationPageRekey> pages) {
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  if (pages.size() > 5U) {
+    return std::unexpected(Misuse("mutation page permutation supports at most five pages"));
+  }
+
+  std::array<PageNumberRekey, 5> pager_rekeys{};
+  bool changes_page_number = false;
+  for (std::size_t index = 0U; index < pages.size(); ++index) {
+    const MutationPageRekey& rekey = pages[index];
+    if (rekey.owner_slot >= pages_.size()) {
+      return std::unexpected(Misuse("mutation page permutation slot is out of range"));
+    }
+    auto* pin = std::get_if<WritePagePin>(&pages_[rekey.owner_slot].pin);
+    if (pin == nullptr) {
+      return std::unexpected(Misuse("mutation page permutation requires writable owned pages"));
+    }
+    pager_rekeys[index] = PageNumberRekey{
+        .pin = pin,
+        .final_page = rekey.final_page,
+    };
+    changes_page_number = changes_page_number || pin->frame().page_number() != rekey.final_page;
+  }
+
+  auto permuted = pager_->PermutePageNumbers(std::span{pager_rekeys}.first(pages.size()));
+  if (!permuted.has_value()) {
+    return permuted;
+  }
+  for (const MutationPageRekey& rekey : pages) {
+    const auto* pin = std::get_if<WritePagePin>(&pages_[rekey.owner_slot].pin);
+    if (pin == nullptr) {
+      return std::unexpected(Internal("mutation page permutation lost a writable pin"));
+    }
+    pages_[rekey.owner_slot].page_number = pin->frame().page_number();
+  }
+  if (changes_page_number) {
+    NoteMutation();
+  }
   return {};
 }
 
@@ -1409,12 +1457,14 @@ Status MutableBtreePage::InsertCell(std::size_t index, ByteView cell,
       return std::unexpected(TooLarge("B-tree page exceeded SQLite's staged-cell bound"));
     }
     ByteView staged = cell;
+    MutableByteView writable_staged;
     if (!staged_copy.empty()) {
       if (staged_copy.size() < cell.size()) {
         return std::unexpected(Misuse("staged B-tree cell buffer is too small"));
       }
       std::memmove(staged_copy.data(), cell.data(), cell.size());
-      staged = ByteView{staged_copy.first(cell.size())};
+      writable_staged = staged_copy.first(cell.size());
+      staged = ByteView{writable_staged};
     }
     if (left_child.has_value()) {
       if (staged_copy.empty()) {
@@ -1424,8 +1474,8 @@ Status MutableBtreePage::InsertCell(std::size_t index, ByteView cell,
       Store32(staged_copy, 0U, left_child->value());
     }
     if (staged_count_ != 0U) {
-      const StagedCell prior =
-          staged_cells_[staged_count_ - 1U].value_or(StagedCell{.index = 0U, .bytes = {}});
+      const StagedCell prior = staged_cells_[staged_count_ - 1U].value_or(
+          StagedCell{.index = 0U, .bytes = {}, .writable_bytes = {}});
       if (prior.bytes.empty()) {
         return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
       }
@@ -1436,6 +1486,7 @@ Status MutableBtreePage::InsertCell(std::size_t index, ByteView cell,
     staged_cells_[staged_count_] = StagedCell{
         .index = index,
         .bytes = staged,
+        .writable_bytes = writable_staged,
     };
     ++staged_count_;
     return {};
@@ -1488,7 +1539,7 @@ Status MutableBtreePage::Rebuild(const CellArray& cells, std::size_t first, std:
       cells.geometry_.usable_size() != geometry_.usable_size()) {
     return std::unexpected(Misuse("rebuilt B-tree cells use different page geometry"));
   }
-  if (count == 0U || first > cells.size() || count > cells.size() - first) {
+  if (first > cells.size() || count > cells.size() - first) {
     return std::unexpected(Misuse("rebuilt B-tree cell range is invalid"));
   }
   const std::size_t maximum_cells = (geometry_.page_size().value() - 8U) / 6U;
@@ -1513,7 +1564,7 @@ Status MutableBtreePage::RebuildFromSnapshot(const CellArray& cells, std::size_t
       cells.geometry_.usable_size() != geometry_.usable_size()) {
     return std::unexpected(Misuse("rebuilt B-tree cells use different page geometry"));
   }
-  if (count == 0U || first > cells.size() || count > cells.size() - first) {
+  if (first > cells.size() || count > cells.size() - first) {
     return std::unexpected(Misuse("rebuilt B-tree cell range is invalid"));
   }
   const std::size_t maximum_cells = (geometry_.page_size().value() - 8U) / 6U;
@@ -1599,7 +1650,7 @@ Status MutableBtreePage::BalanceQuick(MutableBtreePage& parent, MutableBtreePage
     return std::unexpected(Corruption("quick balance staged-cell state is invalid"));
   }
   const StagedCell staged_cell =
-      page.staged_cells_[0].value_or(StagedCell{.index = 0U, .bytes = {}});
+      page.staged_cells_[0].value_or(StagedCell{.index = 0U, .bytes = {}, .writable_bytes = {}});
   if (staged_cell.bytes.empty() || staged_cell.index != page.cell_count_) {
     return std::unexpected(Corruption("quick balance staged-cell state is invalid"));
   }
@@ -1722,6 +1773,801 @@ Status MutableBtreePage::BalanceQuick(MutableBtreePage& parent, MutableBtreePage
   return {};
 }
 
+Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePage& page,
+                                        std::size_t parent_child_index,
+                                        MutableByteView parent_overflow,
+                                        BtreeWriteWorkspace& workspace, bool parent_is_root) {
+  constexpr std::size_t kNeighborCount = 1U;
+  constexpr std::size_t kMaximumOldPages = kNeighborCount * 2U + 1U;
+  constexpr std::size_t kMaximumNewPages = kMaximumOldPages + 2U;
+
+  if (parent.owner_ == nullptr || page.owner_ == nullptr) {
+    return std::unexpected(Misuse("non-root balance requires live mutable B-tree pages"));
+  }
+  if (parent.owner_ != page.owner_ || parent.owner_slot_ == page.owner_slot_ ||
+      parent.geometry_.page_size() != page.geometry_.page_size() ||
+      parent.geometry_.usable_size() != page.geometry_.usable_size()) {
+    return std::unexpected(Misuse("non-root balance pages do not share one mutation owner"));
+  }
+  if (parent.is_leaf() || parent.type_ != (page.is_table() ? BtreePageType::kInteriorTable
+                                                           : BtreePageType::kInteriorIndex)) {
+    return std::unexpected(Misuse("non-root balance parent and child page kinds do not match"));
+  }
+  if (parent_overflow.size() != parent.geometry_.page_size().value()) {
+    return std::unexpected(Misuse("non-root balance parent overflow storage has the wrong size"));
+  }
+
+  const std::size_t parent_cell_count = parent.cell_count_ + parent.staged_count_;
+  if (parent_child_index > parent_cell_count) {
+    return std::unexpected(Misuse("non-root balance child index is out of range"));
+  }
+  if (parent.staged_count_ > 1U) {
+    return std::unexpected(Corruption("non-root balance parent has too many staged cells"));
+  }
+  if (parent.staged_count_ == 1U) {
+    const std::optional<StagedCell>& staged = parent.staged_cells_[0];
+    if (!staged.has_value() || staged->index != parent_child_index) {
+      return std::unexpected(
+          Corruption("non-root balance parent staged cell is at the wrong index"));
+    }
+  }
+
+  auto parent_bytes = parent.Bytes();
+  auto page_bytes = page.Bytes();
+  if (!parent_bytes.has_value()) {
+    return std::unexpected(std::move(parent_bytes.error()));
+  }
+  if (!page_bytes.has_value()) {
+    return std::unexpected(std::move(page_bytes.error()));
+  }
+  const std::less<> before;
+  const auto overlaps = [&before](ByteView left, ByteView right) noexcept {
+    return !left.empty() && !right.empty() &&
+           before(left.data(), right.data() + static_cast<std::ptrdiff_t>(right.size())) &&
+           before(right.data(), left.data() + static_cast<std::ptrdiff_t>(left.size()));
+  };
+  if (overlaps(ByteView{parent_overflow}, *parent_bytes) ||
+      overlaps(ByteView{parent_overflow}, *page_bytes)) {
+    return std::unexpected(
+        Misuse("non-root balance parent overflow storage aliases a balanced page"));
+  }
+  for (std::size_t index = 0U; index < parent.staged_count_; ++index) {
+    const std::optional<StagedCell>& staged = parent.staged_cells_[index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("non-root balance parent staged state is inconsistent"));
+    }
+    if (overlaps(ByteView{parent_overflow}, staged->bytes)) {
+      return std::unexpected(
+          Misuse("non-root balance parent overflow storage aliases a staged divider"));
+    }
+  }
+  for (std::size_t index = 0U; index < page.staged_count_; ++index) {
+    const std::optional<StagedCell>& staged = page.staged_cells_[index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("non-root balance child staged state is inconsistent"));
+    }
+    if (overlaps(ByteView{parent_overflow}, staged->bytes)) {
+      return std::unexpected(
+          Misuse("non-root balance parent overflow storage aliases a staged child cell"));
+    }
+  }
+
+  auto parent_view = BtreePageView::Parse(*parent_bytes, parent.page_number_, parent.geometry_);
+  if (!parent_view.has_value()) {
+    return std::unexpected(std::move(parent_view.error()));
+  }
+
+  const auto child_at = [&parent, &parent_view,
+                         parent_cell_count](std::size_t child_index) -> Result<PageNumber> {
+    if (child_index > parent_cell_count) {
+      return std::unexpected(Misuse("non-root balance child slot is out of range"));
+    }
+    PageNumber child;
+    if (child_index == parent_cell_count) {
+      child = parent_view->rightmost_child().value_or(PageNumber{});
+    } else {
+      auto cell = parent.LogicalCell(child_index);
+      if (!cell.has_value()) {
+        return std::unexpected(std::move(cell.error()));
+      }
+      if (cell->size() < sizeof(std::uint32_t)) {
+        return std::unexpected(Corruption("non-root balance parent divider is truncated"));
+      }
+      child = PageNumber{Load32(*cell, 0U)};
+    }
+    if (!IsValidPageReference(child, parent.geometry_) || child == parent.page_number_) {
+      return std::unexpected(Corruption("non-root balance parent has an invalid child"));
+    }
+    return child;
+  };
+
+  auto current_child = child_at(parent_child_index);
+  if (!current_child.has_value()) {
+    return std::unexpected(std::move(current_child.error()));
+  }
+  if (*current_child != page.page_number_) {
+    return std::unexpected(Corruption("non-root balance page is not the selected parent child"));
+  }
+
+  // SQLite balance_nonroot(): NN=1 selects at most three adjacent children,
+  // borrowing both neighbors from one side at the edges.
+  std::size_t first_divider = 0U;
+  std::size_t old_page_count = 0U;
+  if (parent_cell_count < 2U) {
+    old_page_count = parent_cell_count + 1U;
+  } else {
+    if (parent_child_index == 0U) {
+      first_divider = 0U;
+    } else if (parent_child_index == parent_cell_count) {
+      first_divider = parent_cell_count - 2U;
+    } else {
+      first_divider = parent_child_index - 1U;
+    }
+    old_page_count = kMaximumOldPages;
+  }
+  if (old_page_count == 0U || old_page_count > kMaximumOldPages ||
+      parent_child_index < first_divider || parent_child_index >= first_divider + old_page_count) {
+    return std::unexpected(Corruption("non-root balance sibling selection is inconsistent"));
+  }
+
+  MutationPageOwner& owner = *parent.owner_;
+  const std::uint64_t checkpoint = owner.mutation_sequence();
+  const auto fail = [&owner, checkpoint](Error error) -> Status {
+    owner.MarkRollbackRequiredAfter(error.code(), checkpoint);
+    return std::unexpected(std::move(error));
+  };
+
+  class TemporarySlots final {
+   public:
+    explicit TemporarySlots(MutationPageOwner& owner) noexcept : owner_(&owner) {}
+    TemporarySlots(const TemporarySlots&) = delete;
+    TemporarySlots& operator=(const TemporarySlots&) = delete;
+    ~TemporarySlots() {
+      for (std::size_t index = count_; index > 0U; --index) {
+        const std::size_t slot = slots_[index - 1U];
+        if (owner_->Frame(slot).has_value()) {
+          owner_->Release(slot);
+        }
+      }
+    }
+
+    [[nodiscard]] Status Add(std::size_t slot) {
+      if (count_ >= slots_.size()) {
+        return std::unexpected(
+            TooLarge("non-root balance exceeded its temporary page ownership bound"));
+      }
+      slots_[count_++] = slot;
+      return {};
+    }
+
+   private:
+    MutationPageOwner* owner_;
+    std::array<std::size_t, kMaximumNewPages> slots_{};
+    std::size_t count_ = 0U;
+  };
+  TemporarySlots temporary_slots{owner};
+
+  // Copy dividers before dropLogicalCell() reuses their first four bytes as
+  // freeblock metadata. The caller buffer also retains any new parent overflow.
+  std::array<std::size_t, kMaximumOldPages - 1U> divider_offsets{};
+  std::array<std::size_t, kMaximumOldPages - 1U> divider_sizes{};
+  std::size_t copied_divider_bytes = 0U;
+  for (std::size_t index = 0U; index + 1U < old_page_count; ++index) {
+    auto divider = parent.LogicalCell(first_divider + index);
+    if (!divider.has_value()) {
+      return fail(std::move(divider.error()));
+    }
+    if (divider->size() < sizeof(std::uint32_t) ||
+        divider->size() > parent_overflow.size() - copied_divider_bytes) {
+      return fail(Corruption("non-root balance divider copies exceed one page"));
+    }
+    divider_offsets[index] = copied_divider_bytes;
+    divider_sizes[index] = divider->size();
+    std::memmove(parent_overflow.data() + static_cast<std::ptrdiff_t>(copied_divider_bytes),
+                 divider->data(), divider->size());
+    copied_divider_bytes += divider->size();
+  }
+
+  std::array<PageNumber, kMaximumOldPages> old_page_numbers{};
+  std::array<std::size_t, kMaximumOldPages> old_slots{};
+  std::array<bool, kMaximumOldPages> old_is_current{};
+  std::array<std::optional<BtreePageView>, kMaximumOldPages> old_views{};
+  std::array<std::size_t, kMaximumOldPages> old_free_bytes{};
+  std::size_t current_old_index = old_page_count;
+  for (std::size_t index = old_page_count; index > 0U; --index) {
+    const std::size_t old_index = index - 1U;
+    auto child = child_at(first_divider + old_index);
+    if (!child.has_value()) {
+      return fail(std::move(child.error()));
+    }
+    old_page_numbers[old_index] = *child;
+    if (*child == page.page_number_) {
+      if (current_old_index != old_page_count) {
+        return fail(Corruption("non-root balance selected the current page more than once"));
+      }
+      current_old_index = old_index;
+      old_slots[old_index] = page.owner_slot_;
+      old_is_current[old_index] = true;
+    } else {
+      if (owner.Find(*child).has_value()) {
+        return fail(Corruption("non-root balance sibling aliases another mutation page"));
+      }
+      auto acquired = owner.AcquireRead(*child);
+      if (!acquired.has_value()) {
+        return fail(std::move(acquired.error()));
+      }
+      auto retained = temporary_slots.Add(*acquired);
+      if (!retained.has_value()) {
+        owner.Release(*acquired);
+        return fail(std::move(retained.error()));
+      }
+      old_slots[old_index] = *acquired;
+    }
+
+    auto frame = owner.Frame(old_slots[old_index]);
+    if (!frame.has_value()) {
+      return fail(std::move(frame.error()));
+    }
+    auto view = BtreePageView::Parse(frame->get().bytes(), *child, parent.geometry_);
+    if (!view.has_value()) {
+      return fail(std::move(view.error()));
+    }
+    if (view->type() != page.type_ || child->value() == 1U) {
+      return fail(Corruption("non-root balance siblings have inconsistent page kinds"));
+    }
+    auto free_space = view->AnalyzeFreeSpace();
+    if (!free_space.has_value()) {
+      return fail(std::move(free_space.error()));
+    }
+    old_free_bytes[old_index] = free_space->total().value();
+    old_views[old_index] = *view;
+  }
+  if (current_old_index == old_page_count) {
+    return fail(Corruption("non-root balance did not select the current page"));
+  }
+
+  std::optional<PageNumber> original_rightmost_child;
+  if (!page.is_leaf()) {
+    const std::optional<BtreePageView>& last_old_view = old_views[old_page_count - 1U];
+    if (!last_old_view.has_value()) {
+      return fail(Internal("non-root balance lost its final sibling view"));
+    }
+    original_rightmost_child = last_old_view->rightmost_child();
+    if (!original_rightmost_child.has_value() ||
+        !IsValidPageReference(*original_rightmost_child, page.geometry_)) {
+      return fail(Corruption("non-root balance interior sibling has no rightmost child"));
+    }
+  }
+
+  for (std::size_t index = old_page_count - 1U; index > 0U; --index) {
+    auto dropped = parent.DropLogicalCell(first_divider + index - 1U);
+    if (!dropped.has_value()) {
+      return fail(std::move(dropped.error()));
+    }
+  }
+
+  auto cells = CellArray::Create(page.geometry_);
+  if (!cells.has_value()) {
+    return fail(std::move(cells.error()));
+  }
+  const bool leaf_data = page.type_ == BtreePageType::kLeafTable;
+  const std::size_t leaf_correction = page.is_leaf() ? sizeof(std::uint32_t) : 0U;
+  const std::size_t usable_space = page.geometry_.usable_size().value() - 12U + leaf_correction;
+  const auto signed_usable_space = static_cast<std::int64_t>(usable_space);
+  std::array<std::size_t, kMaximumNewPages> old_cell_ends{};
+  std::array<std::size_t, kMaximumNewPages> new_cell_ends{};
+  std::array<std::int64_t, kMaximumNewPages> new_sizes{};
+
+  for (std::size_t index = 0U; index < old_page_count; ++index) {
+    const std::size_t cells_before = cells->size();
+    Status appended;
+    if (old_is_current[index]) {
+      appended = cells->AppendPage(page);
+    } else {
+      auto frame = owner.Frame(old_slots[index]);
+      if (!frame.has_value()) {
+        return fail(std::move(frame.error()));
+      }
+      appended = cells->AppendPage(frame->get().bytes(), old_page_numbers[index]);
+    }
+    if (!appended.has_value()) {
+      return fail(std::move(appended.error()));
+    }
+    const std::optional<BtreePageView>& old_view = old_views[index];
+    if (!old_view.has_value()) {
+      return fail(Internal("non-root balance lost a sibling view"));
+    }
+    const std::size_t logical_count =
+        old_view->cell_count() + (old_is_current[index] ? page.staged_count_ : 0U);
+    if (cells->size() - cells_before != logical_count) {
+      return fail(Corruption("non-root balance assembled the wrong sibling cell count"));
+    }
+    old_cell_ends[index] = cells->size();
+    new_cell_ends[index] = cells->size();
+    if (old_free_bytes[index] > usable_space) {
+      return fail(Corruption("non-root balance sibling free space exceeds its page"));
+    }
+    new_sizes[index] = static_cast<std::int64_t>(usable_space - old_free_bytes[index]);
+    if (old_is_current[index]) {
+      for (std::size_t staged_index = 0U; staged_index < page.staged_count_; ++staged_index) {
+        const std::optional<StagedCell>& staged = page.staged_cells_[staged_index];
+        if (!staged.has_value() ||
+            staged->bytes.size() >
+                static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max)() - 2)) {
+          return fail(Corruption("non-root balance staged cell size is inconsistent"));
+        }
+        new_sizes[index] += static_cast<std::int64_t>(staged->bytes.size() + 2U);
+      }
+    }
+
+    if (index + 1U < old_page_count && !leaf_data) {
+      const MutableByteView divider =
+          parent_overflow.subspan(divider_offsets[index], divider_sizes[index]);
+      if (page.is_leaf()) {
+        if (divider.size() < sizeof(std::uint32_t)) {
+          return fail(Corruption("non-root balance leaf divider is truncated"));
+        }
+        const std::size_t stripped_size = divider.size() - sizeof(std::uint32_t);
+        const std::size_t leaf_size = std::max<std::size_t>(4U, stripped_size);
+        Status copied;
+        if (leaf_size == stripped_size) {
+          copied = cells->AppendCopied(ByteView{divider}.subspan(sizeof(std::uint32_t)));
+        } else {
+          std::array<std::byte, 4> padded{};
+          std::ranges::copy(ByteView{divider}.subspan(sizeof(std::uint32_t)), padded.begin());
+          copied = cells->AppendCopied(padded);
+        }
+        if (!copied.has_value()) {
+          return fail(std::move(copied.error()));
+        }
+      } else {
+        const std::optional<PageNumber> rightmost = old_view->rightmost_child();
+        if (!rightmost.has_value() || !IsValidPageReference(*rightmost, page.geometry_)) {
+          return fail(Corruption("non-root balance interior sibling has no rightmost child"));
+        }
+        Store32(divider, 0U, rightmost->value());
+        auto copied = cells->AppendCopied(ByteView{divider});
+        if (!copied.has_value()) {
+          return fail(std::move(copied.error()));
+        }
+      }
+    }
+  }
+
+  const auto cell_cost = [&cells](std::size_t index) -> Result<std::size_t> {
+    if (index >= cells->size()) {
+      return std::unexpected(Corruption("non-root balance cell index is out of range"));
+    }
+    return static_cast<std::size_t>(cells->locator(index).size) + 2U;
+  };
+
+  // First reproduce SQLite's left-biased packing. Signed totals are required:
+  // a page may temporarily lend more bytes than it originally contained.
+  std::size_t new_page_count = old_page_count;
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    while (new_sizes[index] > signed_usable_space) {
+      if (new_cell_ends[index] == 0U) {
+        return fail(Corruption("non-root balance cannot move a cell from an empty page"));
+      }
+      if (index + 1U >= new_page_count) {
+        if (new_page_count >= kMaximumNewPages) {
+          return fail(Corruption("non-root balance requires too many output pages"));
+        }
+        new_sizes[new_page_count] = 0;
+        new_cell_ends[new_page_count] = cells->size();
+        ++new_page_count;
+      }
+      auto removed = cell_cost(new_cell_ends[index] - 1U);
+      if (!removed.has_value()) {
+        return fail(std::move(removed.error()));
+      }
+      const auto removed_size = static_cast<std::int64_t>(*removed);
+      if (removed_size > new_sizes[index]) {
+        return fail(Corruption("non-root balance page size accounting underflows"));
+      }
+      new_sizes[index] -= removed_size;
+      std::size_t transferred = *removed;
+      if (!leaf_data) {
+        if (new_cell_ends[index] < cells->size()) {
+          auto divider = cell_cost(new_cell_ends[index]);
+          if (!divider.has_value()) {
+            return fail(std::move(divider.error()));
+          }
+          transferred = *divider;
+        } else {
+          transferred = 0U;
+        }
+      }
+      new_sizes[index + 1U] += static_cast<std::int64_t>(transferred);
+      --new_cell_ends[index];
+    }
+
+    while (new_cell_ends[index] < cells->size()) {
+      auto added = cell_cost(new_cell_ends[index]);
+      if (!added.has_value()) {
+        return fail(std::move(added.error()));
+      }
+      const auto added_size = static_cast<std::int64_t>(*added);
+      if (new_sizes[index] + added_size > signed_usable_space) {
+        break;
+      }
+      new_sizes[index] += added_size;
+      ++new_cell_ends[index];
+      std::size_t transferred = *added;
+      if (!leaf_data) {
+        if (new_cell_ends[index] < cells->size()) {
+          auto divider = cell_cost(new_cell_ends[index]);
+          if (!divider.has_value()) {
+            return fail(std::move(divider.error()));
+          }
+          transferred = *divider;
+        } else {
+          transferred = 0U;
+        }
+      }
+      new_sizes[index + 1U] -= static_cast<std::int64_t>(transferred);
+    }
+    if (new_cell_ends[index] >= cells->size()) {
+      new_page_count = index + 1U;
+    } else if (new_cell_ends[index] <= (index == 0U ? 0U : new_cell_ends[index - 1U])) {
+      return fail(Corruption("non-root balance produced an empty interior sibling"));
+    }
+  }
+
+  // The right-to-left adjustment is mandatory; without it the final sibling
+  // may be empty even though the initial packing fits.
+  for (std::size_t index = new_page_count; index > 1U; --index) {
+    const std::size_t right_index = index - 1U;
+    std::int64_t right_size = new_sizes[right_index];
+    std::int64_t left_size = new_sizes[right_index - 1U];
+    if (new_cell_ends[right_index - 1U] == 0U) {
+      return fail(Corruption("non-root balance left sibling has no boundary cell"));
+    }
+    std::ptrdiff_t rightmost_left =
+        static_cast<std::ptrdiff_t>(new_cell_ends[right_index - 1U]) - 1;
+    std::ptrdiff_t first_right =
+        rightmost_left + 1 - static_cast<std::ptrdiff_t>(leaf_data ? 1U : 0U);
+    while (rightmost_left >= 0 && first_right >= 0 &&
+           static_cast<std::size_t>(first_right) < cells->size()) {
+      auto rightmost_cost = cell_cost(static_cast<std::size_t>(rightmost_left));
+      auto divider_cost = cell_cost(static_cast<std::size_t>(first_right));
+      if (!rightmost_cost.has_value()) {
+        return fail(std::move(rightmost_cost.error()));
+      }
+      if (!divider_cost.has_value()) {
+        return fail(std::move(divider_cost.error()));
+      }
+      const auto rightmost_size = static_cast<std::int64_t>(*rightmost_cost - 2U);
+      const auto divider_size = static_cast<std::int64_t>(*divider_cost - 2U);
+      const std::int64_t left_reserve =
+          rightmost_size + (right_index + 1U == new_page_count ? 0 : 2);
+      if (right_size != 0 && right_size + divider_size + 2 > left_size - left_reserve) {
+        break;
+      }
+      right_size += divider_size + 2;
+      left_size -= rightmost_size + 2;
+      new_cell_ends[right_index - 1U] = static_cast<std::size_t>(rightmost_left);
+      --rightmost_left;
+      --first_right;
+    }
+    new_sizes[right_index] = right_size;
+    new_sizes[right_index - 1U] = left_size;
+    if (right_size < 0 || left_size < 0) {
+      return fail(Corruption("non-root balance produced a negative page size"));
+    }
+    if (new_cell_ends[right_index - 1U] <=
+        (right_index > 1U ? new_cell_ends[right_index - 2U] : 0U)) {
+      return fail(Corruption("non-root balance right adjustment emptied a sibling"));
+    }
+  }
+
+  if (new_cell_ends[0] == 0U &&
+      !(parent.page_number_ == PageNumber{1} && parent_cell_count == 0U)) {
+    return fail(Corruption("non-root balance produced an empty first sibling"));
+  }
+
+  // Reuse old pages first, allocate only the surplus, then assign ascending
+  // page numbers through Pager's allocation-free permutation seam.
+  std::array<std::size_t, kMaximumNewPages> new_slots{};
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    if (index < old_page_count) {
+      new_slots[index] = old_slots[index];
+      auto promoted = owner.Promote(new_slots[index]);
+      if (!promoted.has_value()) {
+        return fail(std::move(promoted.error()));
+      }
+    } else {
+      auto allocated = AllocateBtreePage(owner, page.geometry_);
+      if (!allocated.has_value()) {
+        return fail(std::move(allocated.error()));
+      }
+      auto retained = temporary_slots.Add(allocated->owner_slot);
+      if (!retained.has_value()) {
+        owner.Release(allocated->owner_slot);
+        return fail(std::move(retained.error()));
+      }
+      new_slots[index] = allocated->owner_slot;
+      old_cell_ends[index] = cells->size();
+    }
+  }
+
+  std::array<PageNumber, kMaximumNewPages> sorted_page_numbers{};
+  std::array<MutationPageRekey, kMaximumNewPages> rekeys{};
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    auto frame = owner.Frame(new_slots[index]);
+    if (!frame.has_value()) {
+      return fail(std::move(frame.error()));
+    }
+    sorted_page_numbers[index] = frame->get().page_number();
+  }
+  std::ranges::sort(std::span{sorted_page_numbers}.first(new_page_count));
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    rekeys[index] = MutationPageRekey{
+        .owner_slot = new_slots[index],
+        .final_page = sorted_page_numbers[index],
+    };
+  }
+  auto permuted = owner.PermutePageNumbers(std::span{rekeys}.first(new_page_count));
+  if (!permuted.has_value()) {
+    return fail(std::move(permuted.error()));
+  }
+  auto current_frame = owner.Frame(page.owner_slot_);
+  if (!current_frame.has_value()) {
+    return fail(std::move(current_frame.error()));
+  }
+  page.page_number_ = current_frame->get().page_number();
+
+  std::array<std::optional<MutableBtreePage>, kMaximumNewPages> page_storage{};
+  std::array<MutableBtreePage*, kMaximumNewPages> new_pages{};
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    if (new_slots[index] == page.owner_slot_) {
+      new_pages[index] = &page;
+      continue;
+    }
+    Result<MutableBtreePage> opened =
+        index < old_page_count
+            ? MutableBtreePage::Open(owner, new_slots[index], page.geometry_)
+            : MutableBtreePage::Initialize(owner, new_slots[index], page.geometry_, page.type_);
+    if (!opened.has_value()) {
+      return fail(std::move(opened.error()));
+    }
+    MutableBtreePage& stored = page_storage[index].emplace(std::move(*opened));
+    new_pages[index] = &stored;
+  }
+
+  auto linked = parent.SetChildAt(first_divider, new_pages[new_page_count - 1U]->page_number_);
+  if (!linked.has_value()) {
+    return fail(std::move(linked.error()));
+  }
+  if (original_rightmost_child.has_value()) {
+    auto rightmost = new_pages[new_page_count - 1U]->SetRightmostChild(*original_rightmost_child);
+    if (!rightmost.has_value()) {
+      return fail(std::move(rightmost.error()));
+    }
+  }
+
+  const auto table_leaf_rowid = [](ByteView cell) -> Result<std::uint64_t> {
+    const auto payload = DecodeSqliteVarint(cell);
+    if (!payload.has_value() || payload->bytes_consumed.value() >= cell.size()) {
+      return std::unexpected(Corruption("non-root balance table leaf header is invalid"));
+    }
+    const ByteView encoded = cell.subspan(payload->bytes_consumed.value());
+    const auto rowid = DecodeSqliteVarint(encoded);
+    if (!rowid.has_value()) {
+      return std::unexpected(Corruption("non-root balance table rowid is truncated"));
+    }
+    return rowid->value;
+  };
+  const auto index_unpadded_size = [&page](ByteView cell) -> Result<std::size_t> {
+    const auto payload = DecodeSqliteVarint(cell);
+    if (!payload.has_value() || payload->value > kMaximumPayloadSize) {
+      return std::unexpected(Corruption("non-root balance index payload header is invalid"));
+    }
+    const std::size_t local =
+        LocalPayloadSize(page.geometry_, BtreePageType::kLeafIndex, payload->value);
+    const std::size_t size = payload->bytes_consumed.value() + local +
+                             (local < payload->value ? sizeof(std::uint32_t) : 0U);
+    if (size > cell.size() || std::max<std::size_t>(4U, size) != cell.size()) {
+      return std::unexpected(Corruption("non-root balance index cell size is inconsistent"));
+    }
+    return size;
+  };
+
+  // Rebuild parent dividers before editing siblings, while every CellArray
+  // source is still intact.
+  std::size_t output_offset = 0U;
+  for (std::size_t index = 0U; index + 1U < new_page_count; ++index) {
+    const std::size_t boundary = new_cell_ends[index];
+    if (boundary >= cells->size()) {
+      return fail(Corruption("non-root balance divider index is out of range"));
+    }
+    ByteView divider;
+    if (!page.is_leaf()) {
+      auto boundary_cell = cells->Cell(boundary);
+      if (!boundary_cell.has_value() || boundary_cell->size() < sizeof(std::uint32_t)) {
+        return fail(boundary_cell.has_value()
+                        ? Corruption("non-root balance interior divider is truncated")
+                        : std::move(boundary_cell.error()));
+      }
+      const PageNumber right_child{Load32(*boundary_cell, 0U)};
+      auto rightmost = new_pages[index]->SetRightmostChild(right_child);
+      if (!rightmost.has_value()) {
+        return fail(std::move(rightmost.error()));
+      }
+      divider = *boundary_cell;
+    } else if (leaf_data) {
+      if (boundary == 0U) {
+        return fail(Corruption("non-root balance table divider has no left cell"));
+      }
+      auto boundary_cell = cells->Cell(boundary - 1U);
+      if (!boundary_cell.has_value()) {
+        return fail(std::move(boundary_cell.error()));
+      }
+      auto rowid = table_leaf_rowid(*boundary_cell);
+      if (!rowid.has_value()) {
+        return fail(std::move(rowid.error()));
+      }
+      std::array<std::byte, 9> encoded_rowid{};
+      auto encoded = EncodeSqliteVarint(*rowid, MutableByteView{encoded_rowid});
+      if (!encoded.has_value()) {
+        return fail(Internal("non-root balance table rowid could not be encoded"));
+      }
+      const std::size_t divider_size = sizeof(std::uint32_t) + encoded->value();
+      if (divider_size > parent_overflow.size() - output_offset) {
+        return fail(Corruption("non-root balance parent dividers exceed one page"));
+      }
+      const MutableByteView output = parent_overflow.subspan(output_offset, divider_size);
+      Store32(output, 0U, new_pages[index]->page_number_.value());
+      std::ranges::copy(std::span{encoded_rowid}.first(encoded->value()),
+                        output.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+      divider = ByteView{output};
+    } else {
+      auto boundary_cell = cells->Cell(boundary);
+      if (!boundary_cell.has_value()) {
+        return fail(std::move(boundary_cell.error()));
+      }
+      auto unpadded_size = index_unpadded_size(*boundary_cell);
+      if (!unpadded_size.has_value()) {
+        return fail(std::move(unpadded_size.error()));
+      }
+      const std::size_t divider_size = sizeof(std::uint32_t) + *unpadded_size;
+      if (divider_size > parent_overflow.size() - output_offset) {
+        return fail(Corruption("non-root balance parent dividers exceed one page"));
+      }
+      const MutableByteView output = parent_overflow.subspan(output_offset, divider_size);
+      Store32(output, 0U, new_pages[index]->page_number_.value());
+      std::ranges::copy(boundary_cell->first(*unpadded_size),
+                        output.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+      divider = ByteView{output};
+    }
+
+    if (divider.size() > parent_overflow.size() - output_offset) {
+      return fail(Corruption("non-root balance parent dividers exceed one page"));
+    }
+    const MutableByteView staged_copy = parent_overflow.subspan(output_offset, divider.size());
+    auto inserted = parent.InsertCell(first_divider + index, divider,
+                                      new_pages[index]->page_number_, staged_copy, workspace);
+    if (!inserted.has_value()) {
+      return fail(std::move(inserted.error()));
+    }
+    output_offset += divider.size();
+  }
+
+  // SQLite's down-then-up pass avoids overwriting a page that still supplies
+  // cells to a neighbor.
+  std::array<bool, kMaximumNewPages> edited{};
+  const auto signed_page_count = static_cast<std::ptrdiff_t>(new_page_count);
+  for (std::ptrdiff_t pass = 1 - signed_page_count; pass < signed_page_count; ++pass) {
+    const auto page_index = static_cast<std::size_t>(pass < 0 ? -pass : pass);
+    if (edited[page_index]) {
+      continue;
+    }
+    const bool left_dependency_satisfied =
+        page_index == 0U || old_cell_ends[page_index - 1U] >= new_cell_ends[page_index - 1U] ||
+        edited[page_index - 1U];
+    if (pass < 0 && !left_dependency_satisfied) {
+      continue;
+    }
+    const bool right_dependency_satisfied =
+        new_cell_ends[page_index] >= old_cell_ends[page_index] ||
+        (page_index + 1U < new_page_count && edited[page_index + 1U]);
+    if (!left_dependency_satisfied || !right_dependency_satisfied) {
+      return fail(Corruption("non-root balance page edit dependency is inconsistent"));
+    }
+
+    const std::size_t old_first =
+        page_index == 0U
+            ? 0U
+            : (page_index < old_page_count ? old_cell_ends[page_index - 1U] + (leaf_data ? 0U : 1U)
+                                           : cells->size());
+    const std::size_t new_first =
+        page_index == 0U ? 0U : new_cell_ends[page_index - 1U] + (leaf_data ? 0U : 1U);
+    if (new_cell_ends[page_index] < new_first) {
+      return fail(Corruption("non-root balance page cell range is inverted"));
+    }
+    const std::size_t count = new_cell_ends[page_index] - new_first;
+    auto edited_page = new_pages[page_index]->Edit(*cells, old_first, new_first, count, workspace);
+    if (!edited_page.has_value()) {
+      return fail(std::move(edited_page.error()));
+    }
+    edited[page_index] = true;
+  }
+  for (std::size_t index = 0U; index < new_page_count; ++index) {
+    if (!edited[index]) {
+      return fail(Corruption("non-root balance did not edit every output page"));
+    }
+  }
+
+  // balance-shallower: defragment before copying because page 1 has a
+  // 100-byte database-header prefix that ordinary child pages do not.
+  if (parent_is_root && parent.cell_count_ + parent.staged_count_ == 0U &&
+      parent.header_offset_ <= new_pages[0]->free_bytes_) {
+    if (new_page_count != 1U) {
+      return fail(Corruption("non-root balance empty root has multiple children"));
+    }
+    auto defragmented = new_pages[0]->Defragment(0U, workspace);
+    if (!defragmented.has_value()) {
+      return fail(std::move(defragmented.error()));
+    }
+    auto child_bytes = new_pages[0]->Bytes();
+    auto target_bytes = parent.Bytes();
+    if (!child_bytes.has_value()) {
+      return fail(std::move(child_bytes.error()));
+    }
+    if (!target_bytes.has_value()) {
+      return fail(std::move(target_bytes.error()));
+    }
+    std::size_t content = Load16(*child_bytes, new_pages[0]->header_offset_ + 5U);
+    if (content == 0U && parent.geometry_.usable_size().value() == 65536U) {
+      content = 65536U;
+    }
+    const std::size_t prefix = new_pages[0]->cell_pointer_offset_ + new_pages[0]->cell_count_ * 2U;
+    if (content > parent.geometry_.usable_size().value() || prefix > content ||
+        parent.header_offset_ > parent.geometry_.usable_size().value() - prefix) {
+      return fail(Corruption("non-root balance child cannot be copied into the root"));
+    }
+    owner.NoteMutation();
+    std::memmove(target_bytes->data() + static_cast<std::ptrdiff_t>(content),
+                 child_bytes->data() + static_cast<std::ptrdiff_t>(content),
+                 parent.geometry_.usable_size().value() - content);
+    std::memmove(target_bytes->data() + static_cast<std::ptrdiff_t>(parent.header_offset_),
+                 child_bytes->data() + static_cast<std::ptrdiff_t>(new_pages[0]->header_offset_),
+                 prefix);
+    auto root_view = BtreePageView::Parse(*target_bytes, parent.page_number_, parent.geometry_);
+    if (!root_view.has_value()) {
+      return fail(std::move(root_view.error()));
+    }
+    auto root_free = root_view->AnalyzeFreeSpace();
+    if (!root_free.has_value()) {
+      return fail(std::move(root_free.error()));
+    }
+    parent.type_ = root_view->type();
+    parent.cell_pointer_offset_ = parent.header_offset_ + (root_view->is_leaf() ? 8U : 12U);
+    parent.cell_count_ = root_view->cell_count();
+    parent.free_bytes_ = root_free->total().value();
+    parent.ClearStagedCells();
+    auto freed = FreeBtreePage(owner, parent.geometry_, new_pages[0]->page_number_);
+    if (!freed.has_value()) {
+      return fail(std::move(freed.error()));
+    }
+  }
+
+  for (std::size_t index = new_page_count; index < old_page_count; ++index) {
+    auto frame = owner.Frame(old_slots[index]);
+    if (!frame.has_value()) {
+      return fail(std::move(frame.error()));
+    }
+    auto freed = FreeBtreePage(owner, parent.geometry_, frame->get().page_number());
+    if (!freed.has_value()) {
+      return fail(std::move(freed.error()));
+    }
+    if (old_is_current[index]) {
+      page.ClearStagedCells();
+    }
+  }
+  return {};
+}
+
 Result<MutableBtreePage> MutableBtreePage::BalanceDeeper(MutableBtreePage& root) {
   if (root.owner_ == nullptr) {
     return std::unexpected(Misuse("root deepening requires a live mutable B-tree page"));
@@ -1744,8 +2590,8 @@ Result<MutableBtreePage> MutableBtreePage::BalanceDeeper(MutableBtreePage& root)
 
   std::optional<std::size_t> previous_staged_index;
   for (std::size_t index = 0U; index < root.staged_count_; ++index) {
-    const StagedCell staged =
-        root.staged_cells_[index].value_or(StagedCell{.index = 0U, .bytes = {}});
+    const StagedCell staged = root.staged_cells_[index].value_or(
+        StagedCell{.index = 0U, .bytes = {}, .writable_bytes = {}});
     if (staged.bytes.empty() || staged.index > root.cell_count_ + index ||
         (previous_staged_index.has_value() && staged.index != *previous_staged_index + 1U)) {
       return std::unexpected(Corruption("root staged-cell state is inconsistent"));
@@ -1862,7 +2708,7 @@ Status MutableBtreePage::Edit(const CellArray& cells, std::size_t old_first, std
     return std::unexpected(Misuse("edited B-tree cells use different page geometry"));
   }
   const std::size_t old_count = cell_count_ + staged_count_;
-  if (old_first > cells.size() || old_count > cells.size() - old_first || count == 0U ||
+  if (old_first > cells.size() || old_count > cells.size() - old_first ||
       new_first > cells.size() || count > cells.size() - new_first) {
     return std::unexpected(Misuse("edited B-tree cell range is invalid"));
   }
@@ -2260,6 +3106,150 @@ Result<ByteView> MutableBtreePage::Bytes() const {
   return frame->get().bytes();
 }
 
+Result<ByteView> MutableBtreePage::LogicalCell(std::size_t index) const {
+  if (index >= cell_count_ + staged_count_) {
+    return std::unexpected(Misuse("logical B-tree cell index is out of range"));
+  }
+  std::size_t persisted_index = index;
+  for (std::size_t staged_index = 0U; staged_index < staged_count_; ++staged_index) {
+    const std::optional<StagedCell>& staged = staged_cells_[staged_index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+    }
+    if (staged->index == index) {
+      return staged->bytes;
+    }
+    if (staged->index < index) {
+      if (persisted_index == 0U) {
+        return std::unexpected(Corruption("staged B-tree cell indexes are inconsistent"));
+      }
+      --persisted_index;
+    }
+  }
+  if (persisted_index >= cell_count_) {
+    return std::unexpected(Corruption("logical B-tree cell does not map to persisted storage"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  auto page = BtreePageView::Parse(*bytes, page_number_, geometry_);
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  auto offset = page->cell_offset(persisted_index);
+  auto cell = page->cell(persisted_index);
+  if (!offset.has_value()) {
+    return std::unexpected(std::move(offset.error()));
+  }
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  return bytes->subspan(offset->value(), cell->encoded_size().value());
+}
+
+Status MutableBtreePage::DropLogicalCell(std::size_t index) {
+  if (index >= cell_count_ + staged_count_) {
+    return std::unexpected(Misuse("dropped logical B-tree cell index is out of range"));
+  }
+  std::size_t persisted_index = index;
+  for (std::size_t staged_index = 0U; staged_index < staged_count_; ++staged_index) {
+    std::optional<StagedCell>& staged = staged_cells_[staged_index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+    }
+    if (staged->index == index) {
+      for (std::size_t move = staged_index; move + 1U < staged_count_; ++move) {
+        staged_cells_[move] = staged_cells_[move + 1U];
+        std::optional<StagedCell>& moved = staged_cells_[move];
+        if (moved.has_value()) {
+          --moved->index;
+        }
+      }
+      staged_cells_[staged_count_ - 1U] = std::nullopt;
+      --staged_count_;
+      return {};
+    }
+    if (staged->index < index) {
+      if (persisted_index == 0U) {
+        return std::unexpected(Corruption("staged B-tree cell indexes are inconsistent"));
+      }
+      --persisted_index;
+    }
+  }
+  auto dropped = DropCell(persisted_index);
+  if (!dropped.has_value()) {
+    return dropped;
+  }
+  for (std::size_t staged_index = 0U; staged_index < staged_count_; ++staged_index) {
+    std::optional<StagedCell>& staged = staged_cells_[staged_index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+    }
+    if (staged->index > index) {
+      --staged->index;
+    }
+  }
+  return {};
+}
+
+Status MutableBtreePage::SetChildAt(std::size_t child_index, PageNumber child) {
+  if (is_leaf()) {
+    return std::unexpected(Misuse("leaf B-tree pages have no child slots"));
+  }
+  if (!IsValidPageReference(child, geometry_)) {
+    return std::unexpected(Corruption("B-tree page has an invalid child reference"));
+  }
+  const std::size_t logical_count = cell_count_ + staged_count_;
+  if (child_index > logical_count) {
+    return std::unexpected(Misuse("B-tree child slot is out of range"));
+  }
+  if (child_index == logical_count) {
+    return SetRightmostChild(child);
+  }
+
+  std::size_t persisted_index = child_index;
+  for (std::size_t staged_index = 0U; staged_index < staged_count_; ++staged_index) {
+    std::optional<StagedCell>& staged = staged_cells_[staged_index];
+    if (!staged.has_value()) {
+      return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
+    }
+    if (staged->index == child_index) {
+      if (staged->writable_bytes.size() < sizeof(std::uint32_t) ||
+          staged->bytes.size() != staged->writable_bytes.size()) {
+        return std::unexpected(
+            Corruption("staged interior B-tree cell has no writable child prefix"));
+      }
+      Store32(staged->writable_bytes, 0U, child.value());
+      return {};
+    }
+    if (staged->index < child_index) {
+      if (persisted_index == 0U) {
+        return std::unexpected(Corruption("staged B-tree cell indexes are inconsistent"));
+      }
+      --persisted_index;
+    }
+  }
+  if (persisted_index >= cell_count_) {
+    return std::unexpected(Corruption("B-tree child slot does not map to persisted storage"));
+  }
+  auto bytes = Bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
+  auto page = BtreePageView::Parse(*bytes, page_number_, geometry_);
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  auto offset = page->cell_offset(persisted_index);
+  if (!offset.has_value()) {
+    return std::unexpected(std::move(offset.error()));
+  }
+  owner_->NoteMutation();
+  Store32(*bytes, offset->value(), child.value());
+  return {};
+}
+
 Status MutableBtreePage::ValidateCellImage(ByteView cell,
                                            std::optional<PageNumber> left_child) const {
   if (cell.size() < 4U || cell.size() >= geometry_.usable_size().value() - 8U) {
@@ -2432,7 +3422,7 @@ Status CellArray::AppendPage(const MutableBtreePage& page) {
         return std::unexpected(Corruption("staged B-tree cell state is inconsistent"));
       }
       if (candidate->index == logical) {
-        auto appended = AppendCopied(candidate->bytes, CellLocatorFlags::kStaged);
+        auto appended = AppendStaged(candidate->bytes);
         if (!appended.has_value()) {
           return appended;
         }
@@ -2467,22 +3457,51 @@ Status CellArray::AppendPage(const MutableBtreePage& page) {
   return {};
 }
 
-Status CellArray::AppendBorrowed(ByteView source, std::size_t offset, std::size_t size,
-                                 CellLocatorFlags flags) {
+Status CellArray::AppendPage(ByteView page, PageNumber page_number) {
+  if (page.size() != geometry_.page_size().value()) {
+    return std::unexpected(Misuse("CellArray page image uses different page geometry"));
+  }
+  auto view = BtreePageView::Parse(page, page_number, geometry_);
+  if (!view.has_value()) {
+    return std::unexpected(std::move(view.error()));
+  }
+  auto source_slot = SourceSlot(page);
+  if (!source_slot.has_value()) {
+    return std::unexpected(std::move(source_slot.error()));
+  }
+  for (std::size_t index = 0U; index < view->cell_count(); ++index) {
+    auto offset = view->cell_offset(index);
+    auto cell = view->cell(index);
+    if (!offset.has_value()) {
+      return std::unexpected(std::move(offset.error()));
+    }
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    auto appended = AppendLocator(*source_slot, offset->value(), cell->encoded_size().value(),
+                                  CellLocatorFlags::kBorrowed);
+    if (!appended.has_value()) {
+      return appended;
+    }
+  }
+  return {};
+}
+
+Status CellArray::AppendBorrowed(ByteView source, std::size_t offset, std::size_t size) {
   auto slot = SourceSlot(source);
   if (!slot.has_value()) {
     return std::unexpected(std::move(slot.error()));
   }
-  return AppendLocator(*slot, offset, size, flags);
+  return AppendLocator(*slot, offset, size, CellLocatorFlags::kBorrowed);
 }
 
-Status CellArray::AppendCopied(ByteView cell, CellLocatorFlags flags) {
+Status CellArray::AppendCopied(ByteView cell) {
   if (cell.empty() || cell.size() > copied_cells_.size().value() - copied_size_) {
     return std::unexpected(TooLarge("copied B-tree cells exceed divider scratch"));
   }
   std::memmove(copied_cells_.mutable_view().data() + static_cast<std::ptrdiff_t>(copied_size_),
                cell.data(), cell.size());
-  auto appended = AppendLocator(0U, copied_size_, cell.size(), flags);
+  auto appended = AppendLocator(0U, copied_size_, cell.size(), CellLocatorFlags::kCopied);
   if (!appended.has_value()) {
     return appended;
   }
@@ -2495,10 +3514,18 @@ Result<ByteView> CellArray::Cell(std::size_t index) const {
     return std::unexpected(Misuse("CellArray index is out of range"));
   }
   const CellLocator& cell = cells_[index];
-  if (cell.source_slot >= source_count_) {
-    return std::unexpected(Corruption("CellArray source slot is invalid"));
+  ByteView source;
+  if (cell.flags == static_cast<std::uint8_t>(CellLocatorFlags::kStaged)) {
+    if (cell.source_slot >= staged_source_count_) {
+      return std::unexpected(Corruption("CellArray staged source slot is invalid"));
+    }
+    source = staged_sources_[cell.source_slot];
+  } else {
+    if (cell.source_slot >= source_count_) {
+      return std::unexpected(Corruption("CellArray source slot is invalid"));
+    }
+    source = sources_[cell.source_slot];
   }
-  const ByteView source = sources_[cell.source_slot];
   if (cell.offset > source.size() || cell.size > source.size() - cell.offset) {
     return std::unexpected(Corruption("CellArray cell exceeds its source"));
   }
@@ -2512,7 +3539,9 @@ Result<std::optional<std::size_t>> CellArray::OffsetWithinTarget(std::size_t ind
     return std::unexpected(std::move(cell.error()));
   }
   const CellLocator& locator = cells_[index];
-  const ByteView source = sources_[locator.source_slot];
+  const ByteView source = locator.flags == static_cast<std::uint8_t>(CellLocatorFlags::kStaged)
+                              ? staged_sources_[locator.source_slot]
+                              : sources_[locator.source_slot];
   if (source.data() == target.data() && source.size() == target.size()) {
     return std::optional<std::size_t>{locator.offset};
   }
@@ -2540,8 +3569,42 @@ Result<std::uint8_t> CellArray::SourceSlot(ByteView source) {
   return static_cast<std::uint8_t>(source_count_++);
 }
 
+Status CellArray::AppendStaged(ByteView cell) {
+  if (cell.empty() || cell.size() > (std::numeric_limits<std::uint16_t>::max)()) {
+    return std::unexpected(Misuse("CellArray staged cell is not representable"));
+  }
+  if (staged_source_count_ >= staged_sources_.size()) {
+    return std::unexpected(TooLarge("CellArray exceeded SQLite's staged-cell bound"));
+  }
+  if (cells_.size() >= maximum_cells_) {
+    return std::unexpected(TooLarge("CellArray exceeded SQLite's bounded cell count"));
+  }
+  const auto source_slot = static_cast<std::uint8_t>(staged_source_count_);
+  staged_sources_[staged_source_count_++] = cell;
+  try {
+    cells_.push_back(CellLocator{
+        .offset = 0U,
+        .size = static_cast<std::uint16_t>(cell.size()),
+        .source_slot = source_slot,
+        .flags = static_cast<std::uint8_t>(CellLocatorFlags::kStaged),
+    });
+    return {};
+  } catch (const std::bad_alloc&) {
+    --staged_source_count_;
+    staged_sources_[staged_source_count_] = {};
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    --staged_source_count_;
+    staged_sources_[staged_source_count_] = {};
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
 Status CellArray::AppendLocator(std::uint8_t source_slot, std::size_t offset, std::size_t size,
                                 CellLocatorFlags flags) {
+  if (flags == CellLocatorFlags::kStaged) {
+    return std::unexpected(Misuse("staged CellArray locators use dedicated bounded sources"));
+  }
   if (source_slot >= source_count_ || size == 0U ||
       size > (std::numeric_limits<std::uint16_t>::max)() ||
       offset > (std::numeric_limits<std::uint32_t>::max)()) {
