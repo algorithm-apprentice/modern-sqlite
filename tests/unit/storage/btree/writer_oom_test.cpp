@@ -2,7 +2,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -24,6 +26,8 @@ namespace {
 
 std::atomic<std::size_t> allocation_index = 0;
 std::optional<std::size_t> failing_allocation;
+const char* active_scenario = "startup";
+std::size_t active_failure = (std::numeric_limits<std::size_t>::max)();
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
@@ -51,6 +55,7 @@ std::optional<std::size_t> failing_allocation;
 void Arm(std::optional<std::size_t> failure) noexcept {
   allocation_index.store(0, std::memory_order_relaxed);
   failing_allocation = failure;
+  active_failure = failure.value_or((std::numeric_limits<std::size_t>::max)());
 }
 
 [[nodiscard]] std::size_t Disarm() noexcept {
@@ -721,39 +726,58 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 
 int main() try {
+  std::set_terminate([] {
+    static_cast<void>(std::fputs("btree writer OOM terminate: scenario=", stderr));
+    static_cast<void>(std::fputs(active_scenario, stderr));
+    static_cast<void>(std::fputs(" failure=", stderr));
+    static_cast<void>(std::fprintf(stderr, "%zu\n", active_failure));
+    std::_Exit(99);
+  });
+  active_scenario = "session-open";
   if (!ExhaustAllocations(RunSessionOpen)) {
     return 1;
   }
+  active_scenario = "root-open";
   if (!ExhaustAllocations(RunRootOpen)) {
     return 2;
   }
+  active_scenario = "create-root";
   if (!ExhaustAllocations(RunCreateRoot)) {
     return 3;
   }
+  active_scenario = "overflow-insert";
   if (!ExhaustAllocations(RunOverflowInsert, true)) {
     return 4;
   }
+  active_scenario = "index-insert";
   if (!ExhaustAllocations(RunIndexInsert, true)) {
     return 5;
   }
+  active_scenario = "table-split";
   if (!ExhaustAllocations(RunTableNonRightmostSplit, true)) {
     return 6;
   }
+  active_scenario = "index-interior-delete";
   if (!ExhaustAllocations(RunIndexInteriorDelete, true)) {
     return 7;
   }
+  active_scenario = "stale-writer-error";
   if (!ValidateStaleWriterErrorBoundary()) {
     return 8;
   }
+  active_scenario = "coordinator-claim-error";
   if (!ValidateCoordinatorClaimErrorBoundary()) {
     return 9;
   }
+  active_scenario = "record-destination-error";
   if (!ValidateRecordDestinationErrorBoundary()) {
     return 10;
   }
+  active_scenario = "initialization-geometry-error";
   if (!ValidateInitializationGeometryErrorBoundary()) {
     return 11;
   }
+  active_scenario = "invalid-root-error";
   if (!ValidateInvalidRootErrorBoundary()) {
     return 12;
   }

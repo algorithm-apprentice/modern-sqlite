@@ -1426,10 +1426,15 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
     return std::unexpected(Misuse("table rowid cannot be encoded"));
   }
   try {
-    std::pmr::vector<std::byte> encoded(sizeof(std::uint32_t) + rowid_bytes->value(), resource);
-    Store32(MutableByteView{encoded}, 0U, left_child.value());
+    std::array<std::byte, sizeof(std::uint32_t) + 9U> bytes{};
+    Store32(MutableByteView{bytes}, 0U, left_child.value());
     std::ranges::copy(std::span{rowid_varint}.first(rowid_bytes->value()),
-                      encoded.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+                      bytes.begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+    std::pmr::vector<std::byte> encoded(
+        bytes.begin(),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(sizeof(std::uint32_t) + rowid_bytes->value()),
+        resource);
     return CellImage{
         .encoded = std::move(encoded),
         .left_child = left_child,
