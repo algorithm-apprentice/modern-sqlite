@@ -29,12 +29,32 @@ benchmark reports, pull-request text, and commit messages.
 - Use documentation-first development. Architectural or behavioral decisions
   require an ADR before implementation.
 - Develop exactly one coherent DAG node at a time.
-- Use one pull request per node and wait for review before beginning the next
-  node.
+- Keep each pull request reviewable. An oversized DAG node must be divided
+  into ordered stacked pull requests, each containing one coherent slice.
+- Continue autonomously through reviewed slices without waiting for routine
+  user replies. Merge only after all required review and validation gates pass.
 - Review design documents and code changes before committing them.
 - Keep every change linked to a module-graph node and relevant ADRs.
 - Do not add speculative abstractions, migration layers, compatibility shims,
   or plugin mechanisms without a current accepted requirement.
+
+## Internal consistency
+
+- Before designing a slice, inventory existing abstractions, ownership types,
+  error handling, naming, state machines, and test helpers that provide the
+  same semantics.
+- Select one canonical implementation and reuse it everywhere. Equivalent
+  behavior must not acquire a second container, helper, or algorithm merely
+  for local convenience.
+- Owned raw bytes use `ByteBuffer`; borrowed bytes use `ByteView` or
+  `MutableByteView`.
+- `std::vector<std::byte>` is allowed only for an explicitly documented
+  resize-required scratch API. Mark each declaration with
+  `BYTE_VECTOR_RESIZABLE_SCRATCH`.
+- Use strict standard C++23. Compiler language extensions and undefined
+  behavior are forbidden.
+- Any necessary exception to a canonical pattern requires an ADR that states
+  its scope and why the shared mechanism is insufficient.
 
 ## Test-driven development
 

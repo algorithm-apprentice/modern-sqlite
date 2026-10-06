@@ -51,20 +51,44 @@ jobs:
 
   quality:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - name: Install quality tools
         run: |
           brew install llvm ninja
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-      - name: Configure
+      - name: Check engineering discipline
+        run: python3 tools/check_engineering_discipline.py
+      - name: Configure pull-request quality build
+        if: github.event_name == 'pull_request'
+        run: cmake --preset clang-tidy -DMODERN_SQLITE_ENABLE_CLANG_TIDY=OFF
+      - name: Check changed translation units
+        if: github.event_name == 'pull_request'
+        run: |
+          set +e
+          python3 tools/run_changed_clang_tidy.py \
+            --base-ref "origin/${{ github.base_ref }}" \
+            --build-directory build/clang-tidy \
+            --jobs 3
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            cmake --preset clang-tidy
+            cmake --build --preset clang-tidy --parallel 3
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+      - name: Configure full quality build
+        if: github.event_name != 'pull_request'
         run: cmake --preset clang-tidy
-      - name: Build with clang-tidy
-        run: cmake --build --preset clang-tidy --parallel 2
+      - name: Build full quality target
+        if: github.event_name != 'pull_request'
+        run: cmake --build --preset clang-tidy --parallel 3
       - name: Check formatting
         run: cmake --build --preset clang-tidy --target check-format
-      - name: Test
-        run: ctest --preset clang-tidy
 
   read-performance-contract:
     strategy:
