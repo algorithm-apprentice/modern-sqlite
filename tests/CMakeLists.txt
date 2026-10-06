@@ -42,6 +42,7 @@ add_executable(
   unit/session/read_session_test.cpp
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
+  unit/storage/btree/writer_internal_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp
@@ -58,6 +59,7 @@ target_include_directories(
   modern_sqlite_unit_tests
   PRIVATE
     "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
 )
 target_link_libraries(
   modern_sqlite_unit_tests
@@ -94,6 +96,26 @@ foreach(kind allocation oom)
   )
   set_tests_properties(storage.page_bitvec_${kind} PROPERTIES LABELS unit TIMEOUT 10)
 endforeach()
+
+add_executable(
+  modern_sqlite_btree_writer_internal_oom_test
+  unit/storage/btree/writer_internal_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_btree_writer_internal_oom_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+target_include_directories(
+  modern_sqlite_btree_writer_internal_oom_test
+  PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src"
+)
+modern_sqlite_set_project_warnings(modern_sqlite_btree_writer_internal_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_btree_writer_internal_oom_test)
+add_test(
+  NAME btree.writer_internal_oom
+  COMMAND modern_sqlite_btree_writer_internal_oom_test
+)
+set_tests_properties(btree.writer_internal_oom PROPERTIES LABELS unit TIMEOUT 20)
 
 add_executable(
   modern_sqlite_read_session_model_test
