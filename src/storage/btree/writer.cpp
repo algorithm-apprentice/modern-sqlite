@@ -1084,6 +1084,7 @@ struct PageOneMetadata {
     }
     return CellImage{
         .encoded = std::move(encoded),
+        .left_child = std::nullopt,
         .rowid = rowid,
         .payload_size = payload.size(),
         .first_overflow_page = first_overflow_page,
@@ -1250,6 +1251,7 @@ struct PageOneMetadata {
     return CellImage{
         .encoded = std::move(encoded),
         .left_child = left_child,
+        .rowid = std::nullopt,
         .payload_size = payload.size(),
         .first_overflow_page = first_overflow_page,
     };
@@ -1432,6 +1434,8 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
         .encoded = std::move(encoded),
         .left_child = left_child,
         .rowid = rowid,
+        .payload_size = 0U,
+        .first_overflow_page = std::nullopt,
     };
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
@@ -1489,11 +1493,13 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
     NodeImage left{
         .page_number = node.page_number,
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage right{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     std::optional<CellImage> divider;
@@ -1631,16 +1637,19 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
     NodeImage left{
         .page_number = node.page_number,
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage middle{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage right{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     if (node.is_leaf()) {
@@ -1784,6 +1793,7 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
   NodeImage replacement_root{
       .page_number = plan->pages.front().page_number,
       .type = BtreePageType::kInteriorTable,
+      .rightmost_child = std::nullopt,
       .cells = std::pmr::vector<CellImage>{core.scratch_resource()},
   };
   try {
@@ -2218,11 +2228,13 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
     NodeImage left{
         .page_number = node.page_number,
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage right{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     left.cells.reserve(promoted);
@@ -2322,16 +2334,19 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
     NodeImage left{
         .page_number = node.page_number,
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage middle{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     NodeImage right{
         .page_number = PageNumber{},
         .type = node.type,
+        .rightmost_child = std::nullopt,
         .cells = std::pmr::vector<CellImage>{node.cells.get_allocator().resource()},
     };
     left.cells.reserve(first);
@@ -2432,6 +2447,7 @@ void SetLeftChild(CellImage& cell, PageNumber child) noexcept {
   NodeImage replacement_root{
       .page_number = plan->pages.front().page_number,
       .type = BtreePageType::kInteriorIndex,
+      .rightmost_child = std::nullopt,
       .cells = std::pmr::vector<CellImage>{core.scratch_resource()},
   };
   try {
@@ -2991,6 +3007,7 @@ struct ClearPlan {
   const NodeImage empty_root{
       .page_number = root_page,
       .type = table ? BtreePageType::kLeafTable : BtreePageType::kLeafIndex,
+      .rightmost_child = std::nullopt,
       .cells = std::pmr::vector<CellImage>{core.scratch_resource()},
   };
   auto written = WriteNode(core, empty_root);
@@ -3311,6 +3328,7 @@ Result<TableBtreeWriter> BtreeWriteSession::CreateTableBtree() {
   const NodeImage node{
       .page_number = root_page,
       .type = BtreePageType::kLeafTable,
+      .rightmost_child = std::nullopt,
       .cells = std::pmr::vector<CellImage>{impl_->core->scratch_resource()},
   };
   auto written = WriteNode(*impl_->core, node);
@@ -3352,6 +3370,7 @@ Result<IndexBtreeWriter> BtreeWriteSession::CreateIndexBtree(
   const NodeImage node{
       .page_number = root_page,
       .type = BtreePageType::kLeafIndex,
+      .rightmost_child = std::nullopt,
       .cells = std::pmr::vector<CellImage>{impl_->core->scratch_resource()},
   };
   auto written = WriteNode(*impl_->core, node);
