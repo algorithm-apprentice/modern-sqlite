@@ -88,6 +88,11 @@ Any failure blocks merging and new feature work until its root cause is fixed.
   Debug and Release builds cover header and build-configuration changes.
 - `main` always runs the full clang-tidy target. A pull request may request the
   same full target with the `full-quality` label.
+- Pull requests require GCC Release, macOS Debug and Release, sanitizers, and
+  the Ubuntu performance contract. GCC Debug and the macOS performance
+  contract run on `main`.
+- CI cancels superseded runs for the same pull request. Benchmark jobs build
+  only the binaries required by their selected contract tests.
 - Review checks pattern reuse in addition to local functional correctness.
 - Project graph validation and all existing correctness gates remain required.
 
