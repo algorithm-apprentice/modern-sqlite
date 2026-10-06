@@ -62,7 +62,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install quality tools
-        run: sudo apt-get update && sudo apt-get install --yes clang-format clang-tidy ninja-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-tidy ninja-build
+          python3 -m venv .quality-tools
+          .quality-tools/bin/pip install clang-format==23.1.2
+          echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"
       - name: Check engineering discipline
         run: python3 tools/check_engineering_discipline.py
       - name: Configure quality build
@@ -86,7 +91,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install quality tools
-        run: sudo apt-get update && sudo apt-get install --yes clang-format clang-tidy ninja-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-tidy ninja-build
+          python3 -m venv .quality-tools
+          .quality-tools/bin/pip install clang-format==23.1.2
+          echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"
       - name: Check engineering discipline
         run: python3 tools/check_engineering_discipline.py
       - name: Configure
