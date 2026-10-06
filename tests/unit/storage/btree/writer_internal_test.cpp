@@ -1784,11 +1784,12 @@ TEST(BtreeBalance, DeepensAnOverfullLeafRootAndTransfersItsStagedCell) {
     const std::optional<StagedCell> staged = child.staged_cell(0U);
     ASSERT_TRUE(staged.has_value());
     EXPECT_EQ(1U, staged->index);
-    const std::vector<std::byte> staged_page =
+    const ByteBuffer staged_page =
         CellImagePage(staged->bytes, BtreePageType::kLeafTable, geometry);
     EXPECT_EQ(
         2,
-        TakeValue(TakeValue(BtreePageView::Parse(staged_page, PageNumber{98}, geometry)).cell(0U))
+        TakeValue(
+            TakeValue(BtreePageView::Parse(staged_page.view(), PageNumber{98}, geometry)).cell(0U))
             .rowid());
   }
   RequireStatus(pager->Rollback());
