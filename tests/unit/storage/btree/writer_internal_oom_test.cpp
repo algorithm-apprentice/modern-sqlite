@@ -346,7 +346,8 @@ template <typename Runner>
       !pager->Commit().has_value()) {
     return {};
   }
-  const std::vector<std::byte> original{vfs.database_bytes().begin(), vfs.database_bytes().end()};
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
@@ -356,8 +357,8 @@ template <typename Runner>
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
-  const std::vector<std::byte> old_payload(477U, std::byte{0x31});
-  const std::vector<std::byte> new_payload(20U, std::byte{0x72});
+  const modern_sqlite::ByteBuffer old_payload = FilledBuffer(477U, std::byte{0x31});
+  const modern_sqlite::ByteBuffer new_payload = FilledBuffer(20U, std::byte{0x72});
 
   modern_sqlite::ErrorCode error = modern_sqlite::ErrorCode::kGeneric;
   bool succeeded = false;
@@ -380,13 +381,13 @@ template <typename Runner>
       return {};
     }
     const auto old_cell = modern_sqlite::btree_internal::FillTableLeafCell(
-        owner, *geometry, *workspace, 1, old_payload);
+        owner, *geometry, *workspace, 1, old_payload.view());
     if (!old_cell.has_value() ||
         !leaf->InsertCell(0U, old_cell->bytes, std::nullopt, {}, *workspace).has_value()) {
       return {};
     }
     const auto new_cell = modern_sqlite::btree_internal::FillTableLeafCell(
-        owner, *geometry, *workspace, 2, new_payload);
+        owner, *geometry, *workspace, 2, new_payload.view());
     std::array<std::byte, 32> staged_copy{};
     if (!new_cell.has_value() ||
         !leaf->InsertCell(1U, new_cell->bytes, std::nullopt,
@@ -407,7 +408,7 @@ template <typename Runner>
       .allocations = allocations,
       .succeeded = succeeded,
       .error = error,
-      .invariant_holds = rolled_back && std::ranges::equal(original, vfs.database_bytes()),
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
   };
 }
 
