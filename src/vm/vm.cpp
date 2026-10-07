@@ -1191,10 +1191,7 @@ struct Vm::Impl {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    Status validated = ValidateSchema();
-    if (!validated.has_value()) {
-      return std::unexpected(std::move(validated.error()));
-    }
+    record_options_.schema_format = DatabaseSchemaFormat::kFour;
     return std::nullopt;
   }
 

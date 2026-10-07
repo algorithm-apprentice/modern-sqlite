@@ -725,6 +725,31 @@ count or last-insert-rowid event. The later lowering slice uses the existing
 write-cursor, generated-rowid, record-build, and insert-only instructions for
 the `sqlite_schema` row itself.
 
+CREATE TABLE lowering emits an eight-register program:
+
+- registers 0 through 4 are the contiguous schema-record values
+  `table`, object name, owning table name, created root page, and canonical
+  CREATE SQL;
+- register 5 is the generated `sqlite_schema` rowid;
+- register 6 is the encoded schema record; and
+- register 7 receives the incremented schema cookie.
+
+The program:
+
+1. ensures an empty database is initialized;
+2. creates the new table root directly into schema field register 3;
+3. loads the four text constants plus a NULL rowid input;
+4. opens a write descriptor for root page 1 with the five
+   `sqlite_schema` field affinities;
+5. generates the schema rowid, builds and insert-only writes the schema
+   record, and closes the cursor;
+6. increments the schema cookie; and
+7. halts with no result columns or user mutation results.
+
+`PhysicalCreateTableMutation::no_op` lowers to a CREATE-kind write program
+containing only `Halt`; it owns no cursor, constant, or root-creation
+instruction.
+
 Persistent format code still performs no filesystem I/O.
 
 Prepared statements compiled against the old catalog generation reprepare
