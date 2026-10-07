@@ -129,6 +129,12 @@ class CoordinatorState final {
 
   [[nodiscard]] bool statement_active() const noexcept { return active_.has_value(); }
 
+  [[nodiscard]] std::size_t savepoint_count() const noexcept { return savepoints_.size(); }
+
+  [[nodiscard]] PagerState pager_state() const noexcept { return pager_->state(); }
+
+  [[nodiscard]] TransactionWorkCounters work_counters() const noexcept { return counters_; }
+
   [[nodiscard]] Result<std::uint64_t> ReserveStatementToken(TransactionStatementOptions options) {
     if (terminal_phase_ != TerminalPhase::kNone) {
       return std::unexpected(Misuse("transaction cleanup must finish before a new statement"));
@@ -195,6 +201,7 @@ class CoordinatorState final {
     if (!begun_read.has_value()) {
       return begun_read;
     }
+    ++counters_.pager_read_begins;
     auto begun_write = pager_->BeginWrite();
     if (!begun_write.has_value()) {
       Error primary = std::move(begun_write.error());
@@ -204,6 +211,7 @@ class CoordinatorState final {
       }
       return std::unexpected(std::move(primary));
     }
+    ++counters_.pager_write_begins;
     transaction_state_ = TransactionState::kExplicit;
     return {};
   }
@@ -274,6 +282,7 @@ class CoordinatorState final {
       if (!created.has_value()) {
         return AutomaticFullRollback(std::move(created.error()));
       }
+      ++counters_.pager_savepoint_creates;
       pager_id = *created;
     }
     savepoints_.push_back(NamedSavepoint{
@@ -312,6 +321,7 @@ class CoordinatorState final {
       if (!released.has_value()) {
         return AutomaticFullRollback(std::move(released.error()));
       }
+      ++counters_.pager_savepoint_releases;
     }
     savepoints_.erase(savepoints_.begin() + static_cast<std::ptrdiff_t>(*found), savepoints_.end());
     return {};
@@ -339,6 +349,7 @@ class CoordinatorState final {
       if (!rolled_back.has_value()) {
         return AutomaticFullRollback(std::move(rolled_back.error()));
       }
+      ++counters_.pager_savepoint_rollbacks;
       terminal_phase_ = TerminalPhase::kNone;
     }
     savepoints_.erase(savepoints_.begin() + static_cast<std::ptrdiff_t>(*found + 1U),
@@ -360,6 +371,7 @@ class CoordinatorState final {
       if (!read.has_value()) {
         return read;
       }
+      ++counters_.pager_read_begins;
     }
 
     if (options.access == StatementAccess::kRead) {
@@ -387,6 +399,7 @@ class CoordinatorState final {
         }
         return std::unexpected(std::move(primary));
       }
+      ++counters_.pager_write_begins;
     }
     auto materialized = MaterializeSavepoints();
     if (!materialized.has_value()) {
@@ -399,6 +412,7 @@ class CoordinatorState final {
       if (!created.has_value()) {
         return AutomaticFullRollback(std::move(created.error()));
       }
+      ++counters_.pager_savepoint_creates;
       statement_savepoint = *created;
     }
 
@@ -412,12 +426,14 @@ class CoordinatorState final {
             primary = CombineErrors(primary, released.error(), "statement savepoint cleanup");
             return AutomaticFullRollback(std::move(primary));
           }
+          ++counters_.pager_savepoint_releases;
         } else if (implicit) {
           return AutomaticFullRollback(std::move(primary));
         }
         return std::unexpected(std::move(primary));
       }
       writer_ = std::move(*opened);
+      ++counters_.btree_writer_opens;
     }
     auto epoch = writer_->BeginManagedStatement();
     if (!epoch.has_value()) {
@@ -482,6 +498,7 @@ class CoordinatorState final {
         if (!released.has_value()) {
           return AutomaticFullRollback(std::move(released.error()));
         }
+        ++counters_.pager_savepoint_releases;
       }
       active_.reset();
       return {};
@@ -529,10 +546,12 @@ class CoordinatorState final {
     if (!rolled_back.has_value()) {
       return AutomaticFullRollback(std::move(rolled_back.error()));
     }
+    ++counters_.pager_savepoint_rollbacks;
     auto released = pager_->ReleaseSavepoint(*active->savepoint);
     if (!released.has_value()) {
       return AutomaticFullRollback(std::move(released.error()));
     }
+    ++counters_.pager_savepoint_releases;
     active_.reset();
     return {};
   }
@@ -608,6 +627,7 @@ class CoordinatorState final {
       if (!created.has_value()) {
         return AutomaticFullRollback(std::move(created.error()));
       }
+      ++counters_.pager_savepoint_creates;
       savepoint.pager_id = *created;
     }
     return {};
@@ -704,6 +724,7 @@ class CoordinatorState final {
       }
       return committed;
     }
+    ++counters_.pager_commits;
     terminal_phase_ = TerminalPhase::kCommitCleanup;
     return FinishReadCleanup();
   }
@@ -728,6 +749,7 @@ class CoordinatorState final {
       terminal_phase_ = TerminalPhase::kRollbackAttempt;
       return rolled_back;
     }
+    ++counters_.pager_rollbacks;
     terminal_phase_ = TerminalPhase::kRollbackCleanup;
     return FinishReadCleanup();
   }
@@ -760,6 +782,7 @@ class CoordinatorState final {
   std::uint64_t next_statement_token_ = 0;
   TransactionState transaction_state_ = TransactionState::kAutocommit;
   TerminalPhase terminal_phase_ = TerminalPhase::kNone;
+  TransactionWorkCounters counters_;
 };
 
 }  // namespace transaction_detail
@@ -877,6 +900,18 @@ TransactionState TransactionCoordinator::state() const noexcept {
 
 bool TransactionCoordinator::statement_active() const noexcept {
   return state_ != nullptr && state_->statement_active();
+}
+
+std::size_t TransactionCoordinator::savepoint_count() const noexcept {
+  return state_ == nullptr ? 0U : state_->savepoint_count();
+}
+
+std::optional<PagerState> TransactionCoordinator::pager_state() const noexcept {
+  return state_ == nullptr ? std::nullopt : std::optional<PagerState>{state_->pager_state()};
+}
+
+TransactionWorkCounters TransactionCoordinator::work_counters() const noexcept {
+  return state_ == nullptr ? TransactionWorkCounters{} : state_->work_counters();
 }
 
 Status TransactionCoordinator::Begin(TransactionMode mode) {

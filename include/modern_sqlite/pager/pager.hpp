@@ -22,6 +22,10 @@ namespace modern_sqlite {
 
 class BtreeWriteSession;
 
+namespace btree_internal {
+class BtreeWriterCore;
+}
+
 class DatabaseHeader final {
  public:
   [[nodiscard]] ByteCount page_size() const noexcept { return page_size_; }
@@ -95,6 +99,14 @@ enum class PagerState : std::uint8_t {
 };
 
 class Pager;
+
+namespace pager_internal {
+
+struct PagerLifetime final {
+  Pager* pager;
+};
+
+}  // namespace pager_internal
 
 class ReadPagePin final {
  public:
@@ -217,6 +229,11 @@ class Pager final {
 
  private:
   friend class BtreeWriteSession;
+  friend class btree_internal::BtreeWriterCore;
+
+  [[nodiscard]] std::shared_ptr<pager_internal::PagerLifetime> lifetime_token() const noexcept {
+    return lifetime_token_;
+  }
 
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
   [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
@@ -273,6 +290,7 @@ class Pager final {
   bool change_counter_updated_ = false;
   bool final_image_ = false;
   bool journal_finalized_ = false;
+  std::shared_ptr<pager_internal::PagerLifetime> lifetime_token_;
   bool write_coordinator_claimed_ = false;
   bool write_attempt_sealed_ = false;
 };

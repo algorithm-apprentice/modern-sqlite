@@ -1,12 +1,17 @@
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <new>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <utility>
 
+#include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
@@ -229,6 +234,58 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] std::optional<modern_sqlite::ByteBuffer> MakeFixture() {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  auto opened = OpenCoordinator(vfs);
+  if (!opened.has_value()) {
+    return std::nullopt;
+  }
+  auto statement = opened->BeginStatement(modern_sqlite::TransactionStatementOptions{
+      .access = modern_sqlite::StatementAccess::kWrite,
+  });
+  if (!statement.has_value() || statement->writer() == nullptr ||
+      !statement->writer()->InitializeDatabase().has_value() || !statement->Succeed().has_value()) {
+    return std::nullopt;
+  }
+  return modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+}
+
+[[nodiscard]] std::optional<std::size_t> MeasureBatchAllocations(modern_sqlite::ByteView fixture,
+                                                                 bool explicit_transaction) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  vfs.LoadDatabase(fixture);
+  auto opened = OpenCoordinator(vfs);
+  if (!opened.has_value() || (explicit_transaction && !opened->Begin().has_value())) {
+    return std::nullopt;
+  }
+
+  Arm(std::nullopt);
+  for (std::int64_t rowid = 2; rowid <= 4; ++rowid) {
+    auto statement = opened->BeginStatement(modern_sqlite::TransactionStatementOptions{
+        .access = modern_sqlite::StatementAccess::kWrite,
+    });
+    if (!statement.has_value() || statement->writer() == nullptr) {
+      static_cast<void>(Disarm());
+      return std::nullopt;
+    }
+    auto table = statement->writer()->OpenTableBtree(modern_sqlite::PageNumber{1});
+    std::array<std::byte, 8> payload{};
+    std::ranges::fill(payload, static_cast<std::byte>(rowid));
+    if (!table.has_value() || !table->Insert(rowid, payload).has_value() ||
+        !statement->Succeed().has_value()) {
+      static_cast<void>(Disarm());
+      return std::nullopt;
+    }
+  }
+  if (explicit_transaction && !opened->Commit().has_value()) {
+    static_cast<void>(Disarm());
+    return std::nullopt;
+  }
+  return Disarm();
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -248,7 +305,7 @@ void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memo
 void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 
-int main() {
+int main() try {
   if (!ExhaustAllocations(RunOpen)) {
     return 1;
   }
@@ -264,5 +321,19 @@ int main() {
   if (!ExhaustAllocations(RunMaterializedSavepoint)) {
     return 5;
   }
+  const auto fixture = MakeFixture();
+  if (!fixture.has_value()) {
+    return 6;
+  }
+  const auto implicit_allocations = MeasureBatchAllocations(fixture->view(), false);
+  const auto explicit_allocations = MeasureBatchAllocations(fixture->view(), true);
+  if (!implicit_allocations.has_value() || !explicit_allocations.has_value() ||
+      *implicit_allocations == 0U || *explicit_allocations == 0U ||
+      *explicit_allocations >= *implicit_allocations) {
+    return 7;
+  }
   return 0;
+} catch (...) {
+  failing_allocation.reset();
+  return 8;
 }

@@ -103,6 +103,7 @@ class BtreeWriterCore final {
                   std::optional<BtreePageGeometry> geometry, RecordCodecOptions record_options,
                   bool managed) noexcept
       : pager_(&pager),
+        pager_lifetime_(pager.lifetime_token()),
         generation_(generation),
         workspace_(std::move(workspace)),
         geometry_(geometry),
@@ -111,12 +112,13 @@ class BtreeWriterCore final {
         statement_active_(!managed) {}
 
   [[nodiscard]] Status CheckTransaction() const {
-    if (pager_ == nullptr || !pager_->in_write_transaction() ||
-        pager_->write_transaction_generation() != generation_) {
+    const Pager* const pager = LivePager();
+    if (pager == nullptr || !pager->in_write_transaction() ||
+        pager->write_transaction_generation() != generation_) {
       return std::unexpected(
           SchemaChanged("B-tree writer belongs to an obsolete write transaction"));
     }
-    if (const auto failure = pager_->write_failure_code(); failure.has_value()) {
+    if (const auto failure = pager->write_failure_code(); failure.has_value()) {
       return std::unexpected(MakeError(*failure, "B-tree writer requires transaction rollback"));
     }
     return {};
@@ -161,7 +163,8 @@ class BtreeWriterCore final {
   [[nodiscard]] std::uint64_t statement_epoch() const noexcept { return statement_epoch_; }
 
   [[nodiscard]] bool requires_rollback() const noexcept {
-    return pager_ != nullptr && pager_->write_failure_code().has_value();
+    const Pager* const pager = LivePager();
+    return pager != nullptr && pager->write_failure_code().has_value();
   }
 
   [[nodiscard]] Result<BtreePageGeometry> geometry() const {
@@ -337,6 +340,10 @@ class BtreeWriterCore final {
   }
 
  private:
+  [[nodiscard]] Pager* LivePager() const noexcept {
+    return pager_lifetime_ != nullptr && pager_lifetime_->pager == pager_ ? pager_ : nullptr;
+  }
+
   [[nodiscard]] Result<std::uint64_t> TrackRoot(PageNumber root_page, bool recreate) {
     try {
       auto [entry, inserted] = root_incarnations_.try_emplace(root_page.value(), 0U);
@@ -403,6 +410,7 @@ class BtreeWriterCore final {
   }
 
   Pager* pager_;
+  std::shared_ptr<pager_internal::PagerLifetime> pager_lifetime_;
   std::uint64_t generation_;
   BtreeWriteWorkspace workspace_;
   std::optional<BtreePageGeometry> geometry_;

@@ -219,9 +219,14 @@ Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> 
       options_(options),
       file_properties_(file_properties),
       rollback_journal_(std::move(rollback_journal)),
-      journal_sector_size_(journal_sector_size) {}
+      journal_sector_size_(journal_sector_size),
+      lifetime_token_(std::make_shared<pager_internal::PagerLifetime>(
+          pager_internal::PagerLifetime{.pager = this})) {}
 
-Pager::~Pager() { assert(cache_ == nullptr || cache_->pin_count() == 0); }
+Pager::~Pager() {
+  lifetime_token_->pager = nullptr;
+  assert(cache_ == nullptr || cache_->pin_count() == 0);
+}
 
 Status Pager::BeginRead() {
   if (state_ == PagerState::kError) {
