@@ -39,5 +39,5 @@
     "implement-btree-write"
   ],
   "activeNode": "implement-transaction-coordinator",
-  "activeNodeState": "review_pending"
+  "activeNodeState": "in_progress"
 }
