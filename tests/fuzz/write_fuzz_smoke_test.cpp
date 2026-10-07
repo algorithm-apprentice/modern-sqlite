@@ -87,8 +87,43 @@ namespace {
   return true;
 }
 
+struct DatabaseCorpusInputs {
+  const std::filesystem::path& directory;
+  const std::filesystem::path& valid_fixture;
+};
+
+[[nodiscard]] bool ReplayDatabaseCorpus(const DatabaseCorpusInputs& inputs) {
+  const auto files = CorpusFiles(inputs.directory);
+  if (!files.has_value()) {
+    return false;
+  }
+  for (const std::filesystem::path& path : files.value()) {
+    const auto bytes = ReadFile(path);
+    if (!bytes.has_value()) {
+      return false;
+    }
+    modern_sqlite::fuzz::RunWriteDatabaseImageInput(bytes.value());
+  }
+  const auto valid = ReadFile(inputs.valid_fixture);
+  if (!valid.has_value()) {
+    return false;
+  }
+  modern_sqlite::fuzz::RunWriteDatabaseImageInput({});
+  modern_sqlite::fuzz::RunWriteDatabaseImageInput(valid.value());
+  std::vector<std::uint8_t> oversized(std::size_t{1024} * 1024U + 1U,
+                                      static_cast<std::uint8_t>(0xffU));
+  modern_sqlite::fuzz::RunWriteDatabaseImageInput(oversized);
+  return true;
+}
+
 [[nodiscard]] int Run(int argument_count, char* const* arguments) {
-  return argument_count == 2 && ReplayCorpus(arguments[1]) ? 0 : 1;
+  return argument_count == 4 && ReplayCorpus(arguments[1]) &&
+                 ReplayDatabaseCorpus({
+                     .directory = arguments[2],
+                     .valid_fixture = arguments[3],
+                 })
+             ? 0
+             : 1;
 }
 
 }  // namespace

@@ -210,6 +210,7 @@ set_tests_properties(
 
 add_executable(
   modern_sqlite_write_fuzz_smoke_test
+  fuzz/write_database_image_fuzz.cpp
   fuzz/write_sql_fuzz.cpp
   fuzz/write_fuzz_smoke_test.cpp
 )
@@ -225,6 +226,8 @@ add_test(
   COMMAND
     modern_sqlite_write_fuzz_smoke_test
     "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/write_sql"
+    "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/write_database"
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db"
 )
 set_tests_properties(
   fuzz.write_smoke

@@ -119,7 +119,8 @@
       "targets": [
         "modern_sqlite_read_sql_fuzz",
         "modern_sqlite_read_database_fuzz",
-        "modern_sqlite_write_sql_fuzz"
+        "modern_sqlite_write_sql_fuzz",
+        "modern_sqlite_write_database_fuzz"
       ]
     }
   ],

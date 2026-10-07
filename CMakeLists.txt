@@ -233,12 +233,19 @@ if(MODERN_SQLITE_BUILD_FUZZERS)
     tests/fuzz/write_sql_fuzzer_main.cpp
   )
 
+  add_executable(
+    modern_sqlite_write_database_fuzz
+    tests/fuzz/write_database_image_fuzz.cpp
+    tests/fuzz/write_database_image_fuzzer_main.cpp
+  )
+
   foreach(
     fuzz_target
     IN ITEMS
       modern_sqlite_read_sql_fuzz
       modern_sqlite_read_database_fuzz
       modern_sqlite_write_sql_fuzz
+      modern_sqlite_write_database_fuzz
   )
     target_link_libraries(
       "${fuzz_target}"
@@ -653,7 +660,10 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz_support.hpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz_smoke_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/write_database_image_fuzz.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/write_database_image_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_sql_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_sql_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/model/read_session_model_test.cpp"
