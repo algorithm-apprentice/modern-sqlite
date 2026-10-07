@@ -4134,9 +4134,104 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
   if (!formatted.has_value()) {
     return fail(std::move(formatted.error()));
   }
+  return InsertFormattedCell(std::move(page), seek->insertion_index, seek->exact, formatted->bytes,
+                             std::nullopt, workspace);
+}
 
-  const std::size_t insertion_index = seek->insertion_index;
+Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> key,
+                                   std::span<const IndexColumnOrder> columns,
+                                   RecordCodecOptions options, BtreeInsertMode mode,
+                                   std::vector<std::byte>& seek_scratch,
+                                   BtreeWriteWorkspace& workspace) {
+  if (table_) {
+    return std::unexpected(Misuse("index insertion requires an index B-tree cursor"));
+  }
+  if (key.empty() || key.size() != columns.size()) {
+    return std::unexpected(Misuse("index insertion requires a complete comparison key"));
+  }
+  auto record_view = RecordView::Parse(record, options);
+  if (!record_view.has_value()) {
+    return std::unexpected(std::move(record_view.error()));
+  }
+  auto stored_comparison = CompareIndexRecord(*record_view, key, columns);
+  if (!stored_comparison.has_value()) {
+    return std::unexpected(std::move(stored_comparison.error()));
+  }
+  if (stored_comparison->ordering != std::weak_ordering::equivalent) {
+    return std::unexpected(Misuse("index record does not match its comparison key"));
+  }
+
+  auto seek = SeekIndex(key, columns, options, seek_scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (seek->exact && mode == BtreeInsertMode::kInsertOnly) {
+    return std::unexpected(Constraint("index key already exists"));
+  }
+
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return promoted;
+  }
+  auto opened = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage page = std::move(*opened);
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Status {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  std::optional<PageNumber> left_child;
   if (seek->exact) {
+    auto view = CurrentPage();
+    if (!view.has_value()) {
+      return fail(std::move(view.error()));
+    }
+    auto old_cell = view->cell(seek->insertion_index);
+    if (!old_cell.has_value()) {
+      return fail(std::move(old_cell.error()));
+    }
+    left_child = old_cell->left_child();
+    if (old_cell->payload_size().value() == record.size()) {
+      auto overwritten = page.OverwritePayload(seek->insertion_index, record, workspace);
+      if (!overwritten.has_value()) {
+        return fail(std::move(overwritten.error()));
+      }
+      current_index_ = 0U;
+      state_ = WritableCursorState::kInvalid;
+      return {};
+    }
+  } else if (!page.is_leaf()) {
+    return fail(Corruption("new index entry did not resolve to a leaf page"));
+  }
+
+  auto formatted = FillIndexCell(*owner_, geometry_, workspace, record, page.type_, left_child);
+  if (!formatted.has_value()) {
+    return fail(std::move(formatted.error()));
+  }
+  return InsertFormattedCell(std::move(page), seek->insertion_index, seek->exact, formatted->bytes,
+                             left_child, workspace);
+}
+
+Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t insertion_index,
+                                           bool replacing, ByteView cell,
+                                           std::optional<PageNumber> left_child,
+                                           BtreeWriteWorkspace& workspace) {
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Status {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  if (replacing) {
     auto bytes = page.Bytes();
     if (!bytes.has_value()) {
       return fail(std::move(bytes.error()));
@@ -4154,15 +4249,15 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
       return fail(std::move(old_cell.error()));
     }
 
-    if (old_cell->encoded_size().value() == formatted->bytes.size() &&
+    if (old_cell->encoded_size().value() == cell.size() &&
         old_cell->local_payload().size() == old_cell->payload_size().value()) {
-      auto valid = page.ValidateCellImage(formatted->bytes, std::nullopt);
+      auto valid = page.ValidateCellImage(cell, left_child);
       if (!valid.has_value()) {
         return fail(std::move(valid.error()));
       }
       owner_->NoteMutation();
-      std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(old_offset->value()),
-                   formatted->bytes.data(), formatted->bytes.size());
+      std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(old_offset->value()), cell.data(),
+                   cell.size());
       current_index_ = 0U;
       state_ = WritableCursorState::kInvalid;
       return {};
@@ -4178,7 +4273,15 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
     }
   }
 
-  auto inserted = page.InsertCell(insertion_index, formatted->bytes, std::nullopt, {}, workspace);
+  MutableByteView staged_copy;
+  if (left_child.has_value()) {
+    const MutableByteView scratch = workspace.cell_scratch_with_prefix();
+    if (cell.data() != scratch.data() || cell.size() > scratch.size()) {
+      return fail(Misuse("staged interior index cell is not retained in writable scratch"));
+    }
+    staged_copy = scratch.first(cell.size());
+  }
+  auto inserted = page.InsertCell(insertion_index, cell, left_child, staged_copy, workspace);
   if (!inserted.has_value()) {
     return fail(std::move(inserted.error()));
   }
