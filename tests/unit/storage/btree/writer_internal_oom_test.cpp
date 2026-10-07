@@ -758,6 +758,113 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] Outcome RunIndexInsert(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
+                                                                 pager->header()->usable_size());
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  if (!geometry.has_value() || !workspace.has_value()) {
+    return {};
+  }
+  modern_sqlite::PageNumber root_page;
+  {
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    const auto root = modern_sqlite::btree_internal::AllocateBtreePage(owner, *geometry);
+    if (!root.has_value() ||
+        !modern_sqlite::btree_internal::MutableBtreePage::Initialize(
+             owner, root->owner_slot, *geometry, modern_sqlite::BtreePageType::kLeafIndex)
+             .has_value()) {
+      return {};
+    }
+    root_page = root->page_number;
+  }
+  const modern_sqlite::RecordCodecOptions options{
+      .schema_format = modern_sqlite::RecordSchemaFormat::kFour,
+  };
+  const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
+  };
+  const auto make_key = [](std::uint8_t marker) {
+    modern_sqlite::ByteBuffer blob{modern_sqlite::ByteCount{90}};
+    std::ranges::fill(blob.mutable_view(), static_cast<std::byte>(marker));
+    return std::array<modern_sqlite::SqlValue, 1>{
+        modern_sqlite::SqlValue::Blob(std::move(blob)),
+    };
+  };
+  for (std::uint8_t marker = 1U; marker <= 5U; ++marker) {
+    std::array<modern_sqlite::SqlValue, 1> key = make_key(marker);
+    const auto record = modern_sqlite::EncodeRecord(key, options);
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    ResizablePayloadScratch scratch;
+    if (!record.has_value() || !cursor.has_value() ||
+        !cursor
+             ->InsertIndex(record->view(), key, columns, options,
+                           modern_sqlite::btree_internal::BtreeInsertMode::kInsertOnly, scratch,
+                           *workspace)
+             .has_value()) {
+      return {};
+    }
+  }
+  if (!pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  std::array<modern_sqlite::SqlValue, 1> key = make_key(6U);
+  const auto record = modern_sqlite::EncodeRecord(key, options);
+  if (!record.has_value()) {
+    return {};
+  }
+
+  modern_sqlite::ErrorCode error = modern_sqlite::ErrorCode::kGeneric;
+  bool succeeded = false;
+  bool cursor_state_valid = false;
+  bool failure_latched = false;
+  std::size_t allocations = 0U;
+  {
+    modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    if (!cursor.has_value()) {
+      return {};
+    }
+    ResizablePayloadScratch scratch;
+
+    Arm(failure);
+    const auto inserted = cursor->InsertIndex(
+        record->view(), key, columns, options,
+        modern_sqlite::btree_internal::BtreeInsertMode::kInsertOnly, scratch, *workspace);
+    allocations = Disarm();
+    succeeded = inserted.has_value();
+    error = inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+    cursor_state_valid =
+        inserted.has_value()
+            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
+            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+    failure_latched = inserted.has_value() ||
+                      owner.mutation_sequence() == owner.operation_checkpoint() ||
+                      pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
+  }
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = cursor_state_valid && failure_latched && rolled_back &&
+                         std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
 [[nodiscard]] Outcome RunRootDeepening(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
@@ -901,20 +1008,23 @@ int main() try {
   if (!ExhaustAllocations(RunTableReplace)) {
     return 11;
   }
-  if (!ExhaustAllocations(RunRootDeepening)) {
+  if (!ExhaustAllocations(RunIndexInsert)) {
     return 12;
   }
-  if (!ExhaustAllocations(RunOverflowSeek)) {
+  if (!ExhaustAllocations(RunRootDeepening)) {
     return 13;
   }
-  if (!ExhaustAllocations(RunOverflowFormat)) {
+  if (!ExhaustAllocations(RunOverflowSeek)) {
     return 14;
   }
-  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+  if (!ExhaustAllocations(RunOverflowFormat)) {
     return 15;
+  }
+  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+    return 16;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 16;
+  return 17;
 }

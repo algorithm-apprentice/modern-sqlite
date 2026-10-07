@@ -342,6 +342,11 @@ class WritableCursor final {
   [[nodiscard]] Status Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status InsertTable(std::int64_t rowid, ByteView payload, BtreeInsertMode mode,
                                    BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status InsertIndex(ByteView record, std::span<const SqlValue> key,
+                                   std::span<const IndexColumnOrder> columns,
+                                   RecordCodecOptions options, BtreeInsertMode mode,
+                                   std::vector<std::byte>& seek_scratch,
+                                   BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
@@ -365,6 +370,10 @@ class WritableCursor final {
                                            std::size_t child_index) const;
   [[nodiscard]] Result<ByteView> ReadCellPayload(const BtreeCellView& cell,
                                                  std::vector<std::byte>& scratch);
+  [[nodiscard]] Status InsertFormattedCell(MutableBtreePage page, std::size_t insertion_index,
+                                           bool replacing, ByteView cell,
+                                           std::optional<PageNumber> left_child,
+                                           BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status Descend(std::size_t child_index, const BtreePageView& parent);
   void ReleaseDescendants() noexcept;
   void EnterFault() noexcept;
