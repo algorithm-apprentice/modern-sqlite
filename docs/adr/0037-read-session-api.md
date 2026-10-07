@@ -276,7 +276,7 @@ SyntaxTree
   -> BindSelectStatement
   -> BuildLogicalPlan
   -> OptimizeLogicalPlan
-  -> LowerReadPlan
+  -> LowerPlan
   -> Vm::Create
 ```
 

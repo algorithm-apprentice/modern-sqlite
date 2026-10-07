@@ -1,9 +1,10 @@
-#include "modern_sqlite/lowering/read_lowering.hpp"
+#include "modern_sqlite/lowering/plan_lowering.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -19,7 +20,7 @@ namespace modern_sqlite {
 namespace {
 
 template <typename T>
-using LoweringResult = std::expected<T, ReadLoweringError>;
+using LoweringResult = std::expected<T, PlanLoweringError>;
 
 template <typename Optional>
 [[nodiscard]] decltype(auto) AssumeValue(Optional& value) noexcept {
@@ -33,18 +34,25 @@ template <typename Optional>
   return *value;  // NOLINT(bugprone-unchecked-optional-access)
 }
 
-[[nodiscard]] ReadLoweringError InternalFailure(std::string detail) {
-  return ReadLoweringError{
-      .code = ReadLoweringErrorCode::kInternalInvariant,
+[[nodiscard]] PlanLoweringError InternalFailure(std::string detail) {
+  return PlanLoweringError{
+      .code = PlanLoweringErrorCode::kInternalInvariant,
       .detail = std::move(detail),
   };
 }
 
-[[nodiscard]] ReadLoweringError ProgramFailure(ProgramError error, std::string detail) {
-  return ReadLoweringError{
+[[nodiscard]] PlanLoweringError UnsupportedFailure(std::string detail) {
+  return PlanLoweringError{
+      .code = PlanLoweringErrorCode::kUnsupportedPlan,
+      .detail = std::move(detail),
+  };
+}
+
+[[nodiscard]] PlanLoweringError ProgramFailure(ProgramError error, std::string detail) {
+  return PlanLoweringError{
       .code = error.base_error_code() == ErrorCode::kTooLarge
-                  ? ReadLoweringErrorCode::kResourceLimit
-                  : ReadLoweringErrorCode::kInternalInvariant,
+                  ? PlanLoweringErrorCode::kResourceLimit
+                  : PlanLoweringErrorCode::kInternalInvariant,
       .program_error = error,
       .detail = std::move(detail),
   };
@@ -67,26 +75,49 @@ template <typename T>
   return CatalogNamesEqual(left, right);
 }
 
-class ReadPlanLowerer final {
+class PlanLowerer final {
  public:
-  ReadPlanLowerer(const PhysicalPlan& plan, ProgramLimits limits) noexcept
-      : plan_(plan),
-        logical_plan_(plan.logical_plan()),
-        bound_select_(logical_plan_.bound_select()),
+  PlanLowerer(const PhysicalPlan& plan, ProgramLimits limits) noexcept
+      : read_plan_(&plan),
+        logical_plan_(&plan.logical_plan()),
+        bound_select_(&logical_plan_->bound_select()),
+        expressions_(bound_select_->expressions()),
+        parameters_(bound_select_->parameters()),
+        collations_(bound_select_->collations()),
+        functions_(bound_select_->functions()),
         limits_(limits) {}
 
-  [[nodiscard]] LowerReadPlanResult Run() {
-    if (bound_select_.catalog() == nullptr) {
+  PlanLowerer(const PhysicalMutationPlan& plan, ProgramLimits limits) noexcept
+      : mutation_plan_(&plan), limits_(limits) {
+    bound_insert_ = std::get_if<BoundInsert>(&plan.logical_plan().bound_statement());
+    if (bound_insert_ != nullptr) {
+      expressions_ = bound_insert_->expressions();
+      parameters_ = bound_insert_->parameters();
+      collations_ = bound_insert_->collations();
+      functions_ = bound_insert_->functions();
+    }
+  }
+
+  [[nodiscard]] LowerPlanResult Run() {
+    if (read_plan_ != nullptr) {
+      return RunRead();
+    }
+    return RunMutation();
+  }
+
+ private:
+  [[nodiscard]] LowerPlanResult RunRead() {
+    if (bound_select_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound SELECT does not retain a catalog"));
     }
     if (auto inspected = InspectPlan(); !inspected.has_value()) {
       return std::unexpected(std::move(inspected.error()));
     }
-    if (auto layout = BuildRegisterLayout(); !layout.has_value()) {
+    if (auto layout = BuildReadRegisterLayout(); !layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
 
-    const CatalogVersion version = bound_select_.catalog()->version();
+    const CatalogVersion version = bound_select_->catalog()->version();
     auto created = ConvertProgramResult(ProgramBuilder::Create(
                                             SchemaVersionRequirement{
                                                 .schema_cookie = version.schema_cookie,
@@ -103,7 +134,7 @@ class ReadPlanLowerer final {
     }
     builder_.emplace(std::move(*created));
 
-    if (bound_select_.table_source() != nullptr) {
+    if (bound_select_->table_source() != nullptr) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
                                            "unable to require a database snapshot");
       if (!required.has_value()) {
@@ -124,8 +155,8 @@ class ReadPlanLowerer final {
     }
 
     std::vector<ResultColumnMetadata> result_columns;
-    result_columns.reserve(bound_select_.result_columns().size());
-    for (const BoundResultColumn& column : bound_select_.result_columns()) {
+    result_columns.reserve(bound_select_->result_columns().size());
+    for (const BoundResultColumn& column : bound_select_->result_columns()) {
       result_columns.push_back(ResultColumnMetadata{
           .name = column.name,
           .declared_type = column.declared_type,
@@ -142,9 +173,76 @@ class ReadPlanLowerer final {
     return std::move(*built);
   }
 
- private:
+  [[nodiscard]] LowerPlanResult RunMutation() {
+    const auto* insert = std::get_if<PhysicalInsertMutation>(&mutation_plan_->payload());
+    if (insert == nullptr) {
+      return std::unexpected(UnsupportedFailure("physical mutation plan is not implemented"));
+    }
+    if (bound_insert_ == nullptr ||
+        !std::holds_alternative<LogicalInsertMutation>(mutation_plan_->logical_plan().payload())) {
+      return std::unexpected(InternalFailure("physical INSERT plan has inconsistent ownership"));
+    }
+    if (bound_insert_->catalog() == nullptr) {
+      return std::unexpected(InternalFailure("bound INSERT does not retain a catalog"));
+    }
+    if (auto layout = BuildInsertRegisterLayout(); !layout.has_value()) {
+      return std::unexpected(std::move(layout.error()));
+    }
+
+    const CatalogVersion version = bound_insert_->required_catalog_version();
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = register_count_,
+                                                .parameters = parameter_count_,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    builder_.emplace(std::move(*created));
+
+    const ProgramRollbackMode rollback_mode = insert->atomicity == MutationAtomicity::kStatement
+                                                  ? ProgramRollbackMode::kStatement
+                                                  : ProgramRollbackMode::kTransaction;
+    auto metadata = ConvertProgramResult(
+        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kInsert,
+                                                   ProgramTransactionAccess::kWrite, rollback_mode,
+                                                   MutationResultMetadata{
+                                                       .publishes_changes = true,
+                                                       .publishes_last_insert_rowid = true,
+                                                   }),
+        "unable to set INSERT execution metadata");
+    if (!metadata.has_value()) {
+      return std::unexpected(std::move(metadata.error()));
+    }
+    if (auto constants = AddBoundConstants(); !constants.has_value()) {
+      return std::unexpected(std::move(constants.error()));
+    }
+    if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
+      return std::unexpected(std::move(symbols.error()));
+    }
+    if (auto cursor = AddInsertCursorDescriptor(); !cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    if (auto emitted = EmitInsert(); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+
+    auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
+                                      "lowered INSERT bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
   [[nodiscard]] LoweringResult<void> InspectPlan() {
-    const std::span<const PhysicalNode> nodes = plan_.nodes();
+    const std::span<const PhysicalNode> nodes = read_plan_->nodes();
     if (nodes.size() < 2U) {
       return std::unexpected(InternalFailure("physical plan has no lowering chain"));
     }
@@ -205,15 +303,19 @@ class ReadPlanLowerer final {
     return first;
   }
 
-  [[nodiscard]] LoweringResult<void> BuildRegisterLayout() {
-    const std::size_t expression_count = bound_select_.expressions().size();
+  [[nodiscard]] LoweringResult<void> BeginExpressionRegisterLayout() {
+    const std::size_t expression_count = expressions_.size();
+    if (expression_count > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kRegisterLimitExceeded},
+                         "bound expression count exceeds the bytecode identity range"));
+    }
     next_register_ = expression_count;
     call_argument_blocks_.resize(expression_count);
     literal_constants_.resize(expression_count);
 
     for (std::size_t index = 0; index < expression_count; ++index) {
-      const auto* call =
-          std::get_if<BoundScalarCallExpression>(&bound_select_.expressions()[index].payload);
+      const auto* call = std::get_if<BoundScalarCallExpression>(&expressions_[index].payload);
       if (call == nullptr) {
         continue;
       }
@@ -223,8 +325,33 @@ class ReadPlanLowerer final {
       }
       call_argument_blocks_[index] = *block;
     }
+    return {};
+  }
 
-    auto result_block = AllocateRegisters(bound_select_.result_columns().size());
+  [[nodiscard]] LoweringResult<void> FinishRegisterLayout() {
+    if (next_register_ > limits_.maximum_registers) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kRegisterLimitExceeded},
+                         "lowering register count exceeds the configured limit"));
+    }
+    if (parameters_.size() > std::numeric_limits<std::uint32_t>::max() ||
+        parameters_.size() > limits_.maximum_parameters) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kParameterLimitExceeded},
+                         "lowering parameter count exceeds the configured limit"));
+    }
+
+    register_count_ = static_cast<std::uint32_t>(next_register_);
+    parameter_count_ = static_cast<std::uint32_t>(parameters_.size());
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildReadRegisterLayout() {
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+
+    auto result_block = AllocateRegisters(bound_select_->result_columns().size());
     if (!result_block.has_value()) {
       return std::unexpected(std::move(result_block.error()));
     }
@@ -283,27 +410,35 @@ class ReadPlanLowerer final {
       }
     }
 
-    if (next_register_ > limits_.maximum_registers) {
-      return std::unexpected(
-          ProgramFailure(ProgramError{.code = ProgramErrorCode::kRegisterLimitExceeded},
-                         "lowering register count exceeds the configured limit"));
-    }
-    if (bound_select_.parameters().size() > std::numeric_limits<std::uint32_t>::max() ||
-        bound_select_.parameters().size() > limits_.maximum_parameters) {
-      return std::unexpected(
-          ProgramFailure(ProgramError{.code = ProgramErrorCode::kParameterLimitExceeded},
-                         "lowering parameter count exceeds the configured limit"));
-    }
+    return FinishRegisterLayout();
+  }
 
-    register_count_ = static_cast<std::uint32_t>(next_register_);
-    parameter_count_ = static_cast<std::uint32_t>(bound_select_.parameters().size());
-    return {};
+  [[nodiscard]] LoweringResult<void> BuildInsertRegisterLayout() {
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+    const BoundMutationTarget& target = bound_insert_->target();
+    auto values = AllocateRegisters(target.columns.size());
+    if (!values.has_value()) {
+      return std::unexpected(std::move(values.error()));
+    }
+    insert_values_first_ = *values;
+    auto rowid = AllocateRegisters(1);
+    if (!rowid.has_value()) {
+      return std::unexpected(std::move(rowid.error()));
+    }
+    insert_rowid_register_ = *rowid;
+    auto record = AllocateRegisters(1);
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    insert_record_register_ = *record;
+    return FinishRegisterLayout();
   }
 
   [[nodiscard]] LoweringResult<void> AddBoundConstants() {
-    for (std::size_t index = 0; index < bound_select_.expressions().size(); ++index) {
-      const auto* literal =
-          std::get_if<BoundLiteralExpression>(&bound_select_.expressions()[index].payload);
+    for (std::size_t index = 0; index < expressions_.size(); ++index) {
+      const auto* literal = std::get_if<BoundLiteralExpression>(&expressions_[index].payload);
       if (literal == nullptr) {
         continue;
       }
@@ -327,8 +462,8 @@ class ReadPlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> AddBoundSymbols() {
-    collation_symbols_.reserve(bound_select_.collations().size());
-    for (const BoundCollation& collation : bound_select_.collations()) {
+    collation_symbols_.reserve(collations_.size());
+    for (const BoundCollation& collation : collations_) {
       auto symbol = AddNamedSymbol(collation.name);
       if (!symbol.has_value()) {
         return std::unexpected(std::move(symbol.error()));
@@ -336,8 +471,8 @@ class ReadPlanLowerer final {
       collation_symbols_.push_back(*symbol);
     }
 
-    function_symbols_.reserve(bound_select_.functions().size());
-    for (const BoundScalarFunction& function : bound_select_.functions()) {
+    function_symbols_.reserve(functions_.size());
+    for (const BoundScalarFunction& function : functions_) {
       auto symbol = AddNamedSymbol(function.name);
       if (!symbol.has_value()) {
         return std::unexpected(std::move(symbol.error()));
@@ -405,11 +540,11 @@ class ReadPlanLowerer final {
         .fields = {},
         .index_columns = {},
     };
-    source_field_real_affinity_.assign(bound_select_.source_columns().size(), false);
+    source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
 
     if (source_kind == BoundSourceKind::kSchemaTable) {
       constexpr std::uint32_t kSchemaFieldCount = 5;
-      if (bound_select_.source_columns().size() != kSchemaFieldCount) {
+      if (bound_select_->source_columns().size() != kSchemaFieldCount) {
         return std::unexpected(InternalFailure("sqlite_schema source column count is invalid"));
       }
       descriptor.record_field_count = kSchemaFieldCount;
@@ -424,7 +559,7 @@ class ReadPlanLowerer final {
       if (!access_table.has_value()) {
         return std::unexpected(InternalFailure("catalog-table access has no table ID"));
       }
-      const CatalogSnapshot& catalog = *bound_select_.catalog();
+      const CatalogSnapshot& catalog = *bound_select_->catalog();
       const TableId table_id = AssumeValue(access_table);
       const CatalogTable& table = catalog.table(table_id);
       if (!table.without_rowid) {
@@ -432,9 +567,9 @@ class ReadPlanLowerer final {
           return std::unexpected(InternalFailure("table record field count is too large"));
         }
         descriptor.record_field_count = static_cast<std::uint32_t>(table.columns.size());
-        descriptor.fields.reserve(bound_select_.source_columns().size());
-        for (std::size_t index = 0; index < bound_select_.source_columns().size(); ++index) {
-          const BoundSourceColumn& source_column = bound_select_.source_columns()[index];
+        descriptor.fields.reserve(bound_select_->source_columns().size());
+        for (std::size_t index = 0; index < bound_select_->source_columns().size(); ++index) {
+          const BoundSourceColumn& source_column = bound_select_->source_columns()[index];
           if (!source_column.catalog_column.has_value() ||
               source_column.catalog_column->value >= table.columns.size()) {
             return std::unexpected(InternalFailure("bound source column is not a table column"));
@@ -488,9 +623,9 @@ class ReadPlanLowerer final {
                                                             : BytecodeSortOrder::kAscending,
           });
         }
-        descriptor.fields.reserve(bound_select_.source_columns().size());
-        for (std::size_t index = 0; index < bound_select_.source_columns().size(); ++index) {
-          const BoundSourceColumn& source_column = bound_select_.source_columns()[index];
+        descriptor.fields.reserve(bound_select_->source_columns().size());
+        for (std::size_t index = 0; index < bound_select_->source_columns().size(); ++index) {
+          const BoundSourceColumn& source_column = bound_select_->source_columns()[index];
           if (!source_column.catalog_column.has_value() ||
               source_column.catalog_column->value >= table.columns.size()) {
             return std::unexpected(
@@ -520,6 +655,77 @@ class ReadPlanLowerer final {
     }
     cursor_ = *cursor;
     return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddInsertCursorDescriptor() {
+    const BoundMutationTarget& target = bound_insert_->target();
+    if (target.columns.empty() ||
+        target.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(InternalFailure("bound INSERT target column count is invalid"));
+    }
+
+    WriteCursorDescriptor descriptor{
+        .root_page = RootPageNumber(target.root_page.value),
+        .columns = {},
+        .rowid_alias = std::nullopt,
+    };
+    descriptor.columns.reserve(target.columns.size());
+    insert_default_constants_.assign(target.columns.size(), std::nullopt);
+
+    for (std::size_t index = 0; index < target.columns.size(); ++index) {
+      const BoundMutationColumn& column = target.columns[index];
+      std::optional<ConstantId> default_value;
+      if (!column.rowid_alias && column.default_value != nullptr) {
+        auto constant = AddConstant(column.default_value->Clone());
+        if (!constant.has_value()) {
+          return std::unexpected(std::move(constant.error()));
+        }
+        default_value = *constant;
+        insert_default_constants_[index] = *constant;
+      }
+      if (column.rowid_alias) {
+        if (descriptor.rowid_alias.has_value()) {
+          return std::unexpected(
+              InternalFailure("bound INSERT target has duplicate rowid aliases"));
+        }
+        descriptor.rowid_alias = static_cast<std::uint32_t>(index);
+      }
+      descriptor.columns.push_back(WriteColumnDescriptor{
+          .affinity = column.affinity,
+          .not_null = column.not_null,
+          .rowid_alias = column.rowid_alias,
+          .default_value = default_value,
+      });
+    }
+
+    if (target.rowid_alias.has_value()) {
+      const std::optional<std::uint32_t> alias = TargetColumnIndex(*target.rowid_alias);
+      if (!alias.has_value() || descriptor.rowid_alias != alias) {
+        return std::unexpected(
+            InternalFailure("bound INSERT rowid alias metadata is inconsistent"));
+      }
+    } else if (descriptor.rowid_alias.has_value()) {
+      return std::unexpected(InternalFailure("bound INSERT target has an unexpected rowid alias"));
+    }
+
+    auto cursor = ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(descriptor)),
+                                       "unable to add the INSERT write cursor descriptor");
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    write_cursor_ = *cursor;
+    return {};
+  }
+
+  [[nodiscard]] std::optional<std::uint32_t> TargetColumnIndex(ColumnId column) const noexcept {
+    const std::span<const BoundMutationColumn> columns = bound_insert_->target().columns;
+    const auto found = std::ranges::find_if(
+        columns,
+        [column](const BoundMutationColumn& candidate) { return candidate.column == column; });
+    if (found == columns.end()) {
+      return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(std::distance(columns.begin(), found));
   }
 
   [[nodiscard]] LoweringResult<ConstantId> AddConstant(SqlValue value) {
@@ -617,6 +823,11 @@ class ReadPlanLowerer final {
     return RegisterId{id.value()};
   }
 
+  [[nodiscard]] const BoundExpression& Expression(BoundExpressionId id) const noexcept {
+    assert(id.value() < expressions_.size());
+    return expressions_[id.value()];
+  }
+
   [[nodiscard]] LoweringResult<SymbolId> CollationSymbol(BoundCollationId id) const {
     if (id.value() >= collation_symbols_.size()) {
       return std::unexpected(InternalFailure("bound collation ID is out of range"));
@@ -681,8 +892,8 @@ class ReadPlanLowerer final {
         binary.operation != BoundBinaryOperation::kLogicalOr) {
       return std::nullopt;
     }
-    const BoundTruthHint left = bound_select_.expression(binary.left).properties.truth_hint;
-    const BoundTruthHint right = bound_select_.expression(binary.right).properties.truth_hint;
+    const BoundTruthHint left = Expression(binary.left).properties.truth_hint;
+    const BoundTruthHint right = Expression(binary.right).properties.truth_hint;
     const bool is_and = binary.operation == BoundBinaryOperation::kLogicalAnd;
     if (left == BoundTruthHint::kAlwaysTrue || right == BoundTruthHint::kAlwaysFalse) {
       return is_and ? binary.right : binary.left;
@@ -837,10 +1048,10 @@ class ReadPlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id, RegisterId destination) {
-    if (id.value() >= bound_select_.expressions().size()) {
+    if (id.value() >= expressions_.size()) {
       return std::unexpected(InternalFailure("bound expression ID is out of range"));
     }
-    const BoundExpression& expression = bound_select_.expression(id);
+    const BoundExpression& expression = Expression(id);
 
     if (std::holds_alternative<BoundLiteralExpression>(expression.payload)) {
       const std::optional<ConstantId>& constant = literal_constants_[id.value()];
@@ -1210,10 +1421,10 @@ class ReadPlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitProjection() {
-    const LogicalNode& logical_projection = logical_plan_.node(projection_->logical_projection);
+    const LogicalNode& logical_projection = logical_plan_->node(projection_->logical_projection);
     const auto* projection = std::get_if<LogicalProjectionNode>(&logical_projection.payload);
     if (projection == nullptr ||
-        projection->expressions.size() != bound_select_.result_columns().size()) {
+        projection->expressions.size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("logical projection shape is invalid"));
     }
     for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
@@ -1470,6 +1681,98 @@ class ReadPlanLowerer final {
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitInsert() {
+    if (!write_cursor_.has_value() || !insert_values_first_.has_value() ||
+        !insert_rowid_register_.has_value() || !insert_record_register_.has_value()) {
+      return std::unexpected(InternalFailure("INSERT lowering resources are incomplete"));
+    }
+    const BoundMutationTarget& target = bound_insert_->target();
+    if (insert_default_constants_.size() != target.columns.size()) {
+      return std::unexpected(InternalFailure("INSERT default register metadata is incomplete"));
+    }
+
+    auto null_constant = EnsureNullConstant();
+    if (!null_constant.has_value()) {
+      return std::unexpected(std::move(null_constant.error()));
+    }
+    for (std::size_t index = 0; index < target.columns.size(); ++index) {
+      const ConstantId initial =
+          insert_default_constants_[index].value_or(AssumeValue(null_constant));
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = initial,
+              .output = RegisterId{AssumeValue(insert_values_first_).value() +
+                                   static_cast<std::uint32_t>(index)},
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    if (auto loaded = Append(LoadConstantInstruction{
+            .constant = AssumeValue(null_constant),
+            .output = AssumeValue(insert_rowid_register_),
+        });
+        !loaded.has_value()) {
+      return loaded;
+    }
+
+    for (const BoundInsertValue& value : bound_insert_->values()) {
+      RegisterId destination = Home(value.expression);
+      if (value.effective) {
+        if (value.target.rowid) {
+          destination = AssumeValue(insert_rowid_register_);
+        } else if (value.target.column.has_value()) {
+          const std::optional<std::uint32_t> index = TargetColumnIndex(*value.target.column);
+          if (!index.has_value()) {
+            return std::unexpected(
+                InternalFailure("effective INSERT value targets an unknown column"));
+          }
+          destination = RegisterId{AssumeValue(insert_values_first_).value() + AssumeValue(index)};
+        } else {
+          return std::unexpected(
+              InternalFailure("effective INSERT value has no column or rowid target"));
+        }
+      }
+      if (auto emitted = EmitExpression(value.expression, destination); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+
+    if (auto opened = Append(OpenWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto resolved = Append(ResolveInsertRowIdInstruction{
+            .cursor = AssumeValue(write_cursor_),
+            .input = AssumeValue(insert_rowid_register_),
+            .output = AssumeValue(insert_rowid_register_),
+        });
+        !resolved.has_value()) {
+      return resolved;
+    }
+    if (auto built = Append(BuildTableRecordInstruction{
+            .cursor = AssumeValue(write_cursor_),
+            .first_value = AssumeValue(insert_values_first_),
+            .value_count = static_cast<std::uint32_t>(target.columns.size()),
+            .output = AssumeValue(insert_record_register_),
+        });
+        !built.has_value()) {
+      return built;
+    }
+    if (auto inserted = Append(InsertTableInstruction{
+            .cursor = AssumeValue(write_cursor_),
+            .rowid = AssumeValue(insert_rowid_register_),
+            .record = AssumeValue(insert_record_register_),
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !closed.has_value()) {
+      return closed;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitPlan() {
     if (std::holds_alternative<PhysicalEmptyNode>(leaf_->payload)) {
       return EmitEmpty();
@@ -1498,9 +1801,15 @@ class ReadPlanLowerer final {
     SymbolId id;
   };
 
-  const PhysicalPlan& plan_;
-  const LogicalPlan& logical_plan_;
-  const BoundSelect& bound_select_;
+  const PhysicalPlan* read_plan_ = nullptr;
+  const LogicalPlan* logical_plan_ = nullptr;
+  const BoundSelect* bound_select_ = nullptr;
+  const PhysicalMutationPlan* mutation_plan_ = nullptr;
+  const BoundInsert* bound_insert_ = nullptr;
+  std::span<const BoundExpression> expressions_;
+  std::span<const BoundParameter> parameters_;
+  std::span<const BoundCollation> collations_;
+  std::span<const BoundScalarFunction> functions_;
   ProgramLimits limits_;
 
   const PhysicalNode* leaf_ = nullptr;
@@ -1534,42 +1843,61 @@ class ReadPlanLowerer final {
   std::optional<SymbolId> binary_symbol_;
   std::optional<CursorId> cursor_;
   std::vector<bool> source_field_real_affinity_;
+  std::optional<RegisterId> insert_values_first_;
+  std::optional<RegisterId> insert_rowid_register_;
+  std::optional<RegisterId> insert_record_register_;
+  std::vector<std::optional<ConstantId>> insert_default_constants_;
+  std::optional<WriteCursorId> write_cursor_;
 };
 
 }  // namespace
 
-ErrorCode ReadLoweringError::base_error_code() const noexcept {
+ErrorCode PlanLoweringError::base_error_code() const noexcept {
   switch (code) {
-    case ReadLoweringErrorCode::kInvalidInput:
+    case PlanLoweringErrorCode::kInvalidInput:
       return ErrorCode::kMisuse;
-    case ReadLoweringErrorCode::kResourceLimit:
+    case PlanLoweringErrorCode::kUnsupportedPlan:
+      return ErrorCode::kGeneric;
+    case PlanLoweringErrorCode::kResourceLimit:
       return ErrorCode::kTooLarge;
-    case ReadLoweringErrorCode::kInternalInvariant:
+    case PlanLoweringErrorCode::kInternalInvariant:
       return ErrorCode::kInternal;
   }
   return ErrorCode::kInternal;
 }
 
-std::string_view ReadLoweringErrorCodeName(ReadLoweringErrorCode code) noexcept {
+std::string_view PlanLoweringErrorCodeName(PlanLoweringErrorCode code) noexcept {
   switch (code) {
-    case ReadLoweringErrorCode::kInvalidInput:
+    case PlanLoweringErrorCode::kInvalidInput:
       return "invalid_input";
-    case ReadLoweringErrorCode::kResourceLimit:
+    case PlanLoweringErrorCode::kUnsupportedPlan:
+      return "unsupported_plan";
+    case PlanLoweringErrorCode::kResourceLimit:
       return "resource_limit";
-    case ReadLoweringErrorCode::kInternalInvariant:
+    case PlanLoweringErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
   return "unknown";
 }
 
-LowerReadPlanResult LowerReadPlan(const PhysicalPlan& plan, ProgramLimits limits) {
+LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
   if (!plan.valid()) {
-    return std::unexpected(ReadLoweringError{
-        .code = ReadLoweringErrorCode::kInvalidInput,
+    return std::unexpected(PlanLoweringError{
+        .code = PlanLoweringErrorCode::kInvalidInput,
         .detail = "physical plan is invalid",
     });
   }
-  return ReadPlanLowerer(plan, limits).Run();
+  return PlanLowerer(plan, limits).Run();
+}
+
+LowerPlanResult LowerPlan(const PhysicalMutationPlan& plan, ProgramLimits limits) {
+  if (!plan.valid()) {
+    return std::unexpected(PlanLoweringError{
+        .code = PlanLoweringErrorCode::kInvalidInput,
+        .detail = "physical mutation plan is invalid",
+    });
+  }
+  return PlanLowerer(plan, limits).Run();
 }
 
 }  // namespace modern_sqlite

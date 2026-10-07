@@ -348,6 +348,57 @@ Program verification requires every INSERT operand and contiguous register
 range to be in bounds and initialized, and requires the referenced write
 cursor to be open for rowid resolution, record construction, and insertion.
 
+The lowering module is generalized from `read_lowering` to canonical
+`plan_lowering` naming when the first mutation program is added. The project
+retains no compatibility aliases. Its public boundary uses:
+
+```cpp
+enum class PlanLoweringErrorCode : std::uint8_t {
+  kInvalidInput,
+  kUnsupportedPlan,
+  kResourceLimit,
+  kInternalInvariant,
+};
+
+struct PlanLoweringError;
+using LowerPlanResult = std::expected<BytecodeProgram, PlanLoweringError>;
+
+LowerPlanResult LowerPlan(const PhysicalPlan& plan,
+                          ProgramLimits limits = {});
+LowerPlanResult LowerPlan(const PhysicalMutationPlan& plan,
+                          ProgramLimits limits = {});
+```
+
+The mutation overload initially accepts `PhysicalInsertMutation`.
+Later mutation payloads return `kUnsupportedPlan` until their ordered slice
+implements them. Invalid or moved-from plans return `kInvalidInput`.
+Resource-limit failures retain the exact nested `ProgramError`; unexpected
+bound, physical, or bytecode invariants return `kInternalInvariant`.
+
+INSERT lowering reuses the complete existing scalar-expression emitter and
+preserves this order:
+
+1. allocate expression homes and scalar-call blocks;
+2. allocate one contiguous register block in stored-column order, one
+   separate resolved-rowid register, and one encoded-record register;
+3. initialize ordinary stored columns from their materialized constant
+   defaults or NULL, initialize the rowid alias field to NULL, and initialize
+   the rowid register to NULL;
+4. evaluate every bound VALUES expression from left to right, including
+   duplicate expressions marked ineffective by binding;
+5. write only effective ordinary targets into their stored-column registers
+   and only the effective hidden-rowid or INTEGER PRIMARY KEY target into the
+   rowid register;
+6. open the write cursor, resolve or generate the rowid, build the table
+   record, insert it, close the cursor, and halt.
+
+The write descriptor owns the target root, stored-column affinity and NOT
+NULL metadata, materialized ordinary-column default constants, and rowid
+alias position. A rowid-alias default is ignored, matching SQLite rowid
+generation. INSERT programs request write access, map physical atomicity to
+`ProgramRollbackMode`, publish change count and user last-insert-rowid
+metadata, and publish no result columns because RETURNING is deferred.
+
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.

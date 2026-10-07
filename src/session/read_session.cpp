@@ -15,7 +15,7 @@
 
 #include "modern_sqlite/binder/bound_select.hpp"
 #include "modern_sqlite/catalog/catalog_loader.hpp"
-#include "modern_sqlite/lowering/read_lowering.hpp"
+#include "modern_sqlite/lowering/plan_lowering.hpp"
 #include "modern_sqlite/optimizer/physical_plan.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
@@ -119,9 +119,9 @@ void CleanupReadStateAfterAllocationFailure(Pager& pager) noexcept {
   return SessionError(error.base_error_code(), std::move(message));
 }
 
-[[nodiscard]] Error LoweringFailure(const ReadLoweringError& error) {
+[[nodiscard]] Error LoweringFailure(const PlanLoweringError& error) {
   std::string message{"read lowering failed with "};
-  message.append(ReadLoweringErrorCodeName(error.code));
+  message.append(PlanLoweringErrorCodeName(error.code));
   if (!error.detail.empty()) {
     message.append(": ");
     message.append(error.detail);
@@ -265,7 +265,7 @@ struct ReadSession::State final {
     if (!physical.has_value()) {
       return std::unexpected(OptimizerFailure(physical.error()));
     }
-    auto lowered = LowerReadPlan(*physical);
+    auto lowered = LowerPlan(*physical);
     if (!lowered.has_value()) {
       return std::unexpected(LoweringFailure(lowered.error()));
     }
