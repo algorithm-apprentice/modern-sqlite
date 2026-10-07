@@ -418,6 +418,37 @@ generation. INSERT programs request write access, map physical atomicity to
 `ProgramRollbackMode`, publish change count and user last-insert-rowid
 metadata, and publish no result columns because RETURNING is deferred.
 
+DELETE lowering uses the same scalar-expression emitter and converts all
+three `PhysicalDeleteMutation` access kinds:
+
+- `kEmpty` halts without opening a cursor;
+- `kRowIdLookup` evaluates guards once, opens read and write descriptors for
+  the target, evaluates the lookup key once, snapshots the positioned row,
+  closes the read cursor, evaluates residual predicates, and point-deletes a
+  match; and
+- `kTableScan` evaluates guards once, opens read and write descriptors,
+  rewinds, and applies the reopen-and-strictly-greater loop from Section 6.
+
+DELETE register layout adds one contiguous source snapshot block in bound
+source-column order and one current-rowid register after expression homes and
+scalar-call argument blocks. While the read cursor is positioned, lowering
+copies every bound source field plus the rowid into those registers and then
+closes the cursor. Subsequent `BoundColumnExpression` and
+`BoundRowIdExpression` lowering copies from the snapshot registers rather
+than touching storage. No residual predicate, row-dependent scalar call, or
+write instruction executes while the positioned read cursor or any page pin
+remains open.
+
+Scan rejection and successful deletion converge on one advance block. It
+reopens the read cursor and emits `SeekRowIdInstruction(kGreater)` against
+the owned current rowid. A missing seek closes both cursors and halts. Exact
+lookup missing/residual-rejection paths likewise close every cursor without
+publishing a change.
+
+DELETE programs request write access, map physical atomicity to
+`ProgramRollbackMode`, publish change-count metadata, never publish a
+last-insert-rowid event, and have no result columns.
+
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.

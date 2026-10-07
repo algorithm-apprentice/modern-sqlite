@@ -338,8 +338,11 @@ struct MutationOutcome {
     const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
     std::span<const SqlValue> parameters = {}, VmEnvironment environment = VmEnvironment::Core()) {
   TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
-  TransactionStatement statement = TakeValue(
-      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  const StatementRollbackMode rollback = program.rollback_mode() == ProgramRollbackMode::kStatement
+                                             ? StatementRollbackMode::kStatement
+                                             : StatementRollbackMode::kTransaction;
+  TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite, .rollback = rollback}));
   Vm vm = TakeValue(Vm::Create(program, environment));
   for (std::size_t index = 0; index < parameters.size(); ++index) {
     RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
@@ -407,8 +410,17 @@ std::size_t callback_count = 0;
   return std::unexpected(Error::Create(ErrorCode::kGeneric, "failing function executed"));
 }
 
+[[nodiscard]] Result<SqlValue> FailAfterOne(const ScalarFunctionContext&,
+                                            std::span<const SqlValue>) {
+  ++callback_count;
+  if (callback_count > 1U) {
+    return std::unexpected(Error::Create(ErrorCode::kGeneric, "second function call failed"));
+  }
+  return SqlValue::Integer(1);
+}
+
 struct CustomEnvironment {
-  std::array<ScalarFunction, 4> functions{{
+  std::array<ScalarFunction, 5> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -419,6 +431,9 @@ struct CustomEnvironment {
                      CountCall},
       ScalarFunction{"failing", FunctionArity::Exact(0), FunctionDeterminism::kNonDeterministic,
                      FunctionCollationUse::kNone, FailCall},
+      ScalarFunction{"fail_after_one", FunctionArity::Exact(1),
+                     FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                     FailAfterOne},
   }};
   FunctionRegistry registry{functions};
   std::array<const Collation*, 3> collations{
@@ -654,6 +669,230 @@ TEST(InsertLowering, RetainsLimitsRejectsUnsupportedMutationsAndMovedFromPlans) 
   ASSERT_FALSE(invalid.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kInvalidInput, invalid.error().code);
   EXPECT_TRUE(LowerPlan(moved).has_value());
+}
+
+TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+
+  const BytecodeProgram empty = LowerMutationOrThrow("DELETE FROM Items WHERE 0", catalog);
+  EXPECT_EQ(ProgramStatementKind::kDelete, empty.statement_kind());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, empty.transaction_access());
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, empty.rollback_mode());
+  EXPECT_TRUE(empty.mutation_result().publishes_changes);
+  EXPECT_FALSE(empty.mutation_result().publishes_last_insert_rowid);
+  EXPECT_TRUE(empty.cursors().empty());
+  EXPECT_TRUE(empty.write_cursors().empty());
+  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(empty));
+
+  const BytecodeProgram exact =
+      LowerMutationOrThrow("DELETE FROM Items WHERE id=?1 AND Name=?2", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, exact.rollback_mode());
+  ASSERT_EQ(1U, exact.cursors().size());
+  ASSERT_EQ(1U, exact.write_cursors().size());
+  EXPECT_EQ(RootPageNumber{2}, exact.cursor(CursorId{0}).root_page);
+  EXPECT_EQ(RootPageNumber{2}, exact.write_cursor(WriteCursorId{0}).root_page);
+  bool exact_seek = false;
+  bool exact_delete = false;
+  std::optional<std::size_t> exact_close;
+  std::optional<std::size_t> exact_delete_index;
+  for (std::size_t index = 0; index < exact.instructions().size(); ++index) {
+    const Instruction& instruction = exact.instructions()[index];
+    if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
+      exact_seek = true;
+      EXPECT_EQ(RowIdSeekMode::kEqual, seek->mode);
+    }
+    if (!exact_close.has_value() && std::holds_alternative<CloseCursorInstruction>(instruction)) {
+      exact_close = index;
+    }
+    if (std::holds_alternative<DeleteTableInstruction>(instruction)) {
+      exact_delete = true;
+      exact_delete_index = index;
+    }
+  }
+  EXPECT_TRUE(exact_seek);
+  EXPECT_TRUE(exact_delete);
+  ASSERT_TRUE(exact_close.has_value());
+  ASSERT_TRUE(exact_delete_index.has_value());
+  EXPECT_LT(TakeOptional(exact_close, "missing exact read close"),
+            TakeOptional(exact_delete_index, "missing exact delete"));
+
+  const BytecodeProgram scan = LowerMutationOrThrow("DELETE FROM Items WHERE Score>=?1", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kStatement, scan.rollback_mode());
+  EXPECT_TRUE(std::ranges::any_of(scan.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<RewindInstruction>(instruction);
+  }));
+  bool greater_seek = false;
+  bool scan_delete = false;
+  std::optional<std::size_t> scan_close;
+  std::optional<std::size_t> scan_delete_index;
+  for (std::size_t index = 0; index < scan.instructions().size(); ++index) {
+    const Instruction& instruction = scan.instructions()[index];
+    if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
+      greater_seek = greater_seek || seek->mode == RowIdSeekMode::kGreater;
+    }
+    if (!scan_close.has_value() && std::holds_alternative<CloseCursorInstruction>(instruction)) {
+      scan_close = index;
+    }
+    if (std::holds_alternative<DeleteTableInstruction>(instruction)) {
+      scan_delete = true;
+      scan_delete_index = index;
+    }
+  }
+  EXPECT_TRUE(greater_seek);
+  EXPECT_TRUE(scan_delete);
+  ASSERT_TRUE(scan_close.has_value());
+  ASSERT_TRUE(scan_delete_index.has_value());
+  EXPECT_LT(TakeOptional(scan_close, "missing scan read close"),
+            TakeOptional(scan_delete_index, "missing scan delete"));
+
+  const PhysicalMutationPlan limited_plan =
+      OptimizeMutationOrThrow("DELETE FROM Items WHERE Score>=?1", catalog);
+  ProgramLimits limits;
+  limits.maximum_cursors = 1;
+  LowerPlanResult limited = LowerPlan(limited_plan, limits);
+  ASSERT_FALSE(limited.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
+  ASSERT_TRUE(limited.error().program_error.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded,
+            TakeOptional(limited.error().program_error, "missing DELETE cursor limit").code);
+
+  const BytecodeProgram function_scan = LowerMutationOrThrow(
+      "DELETE FROM Items WHERE fail_after_one(Score)", catalog, custom.Binder());
+  std::optional<std::size_t> function_close;
+  std::optional<std::size_t> function_call;
+  std::optional<std::size_t> function_delete;
+  for (std::size_t index = 0; index < function_scan.instructions().size(); ++index) {
+    const Instruction& instruction = function_scan.instructions()[index];
+    if (!function_close.has_value() &&
+        std::holds_alternative<CloseCursorInstruction>(instruction)) {
+      function_close = index;
+    }
+    if (!function_call.has_value() && std::holds_alternative<CallScalarInstruction>(instruction)) {
+      function_call = index;
+    }
+    if (!function_delete.has_value() &&
+        std::holds_alternative<DeleteTableInstruction>(instruction)) {
+      function_delete = index;
+    }
+  }
+  EXPECT_LT(TakeOptional(function_close, "missing function scan read close"),
+            TakeOptional(function_call, "missing function scan call"));
+  EXPECT_LT(TakeOptional(function_call, "missing function scan call"),
+            TakeOptional(function_delete, "missing function scan delete"));
+}
+
+TEST(DeleteLowering, ExecutesExactAndScanDeletesWithStatementRollback) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto insert_item = [&](std::int64_t rowid, std::string name, std::int64_t score) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(SqlValue::Text(std::move(name)));
+    parameters.push_back(SqlValue::Integer(score));
+    return TakeValue(ExecuteMutationProgram(insert, vfs, parameters));
+  };
+  static_cast<void>(insert_item(1, "alpha", 1));
+  static_cast<void>(insert_item(2, "beta", 2));
+  static_cast<void>(insert_item(3, "gamma", 3));
+  static_cast<void>(insert_item(4, "beta", 4));
+
+  const BytecodeProgram exact =
+      LowerMutationOrThrow("DELETE FROM Items WHERE id=?1 AND Name=?2", catalog);
+  std::vector<SqlValue> exact_parameters;
+  exact_parameters.push_back(SqlValue::Integer(2));
+  exact_parameters.push_back(SqlValue::Text("beta"));
+  const MutationOutcome exact_outcome =
+      TakeValue(ExecuteMutationProgram(exact, vfs, exact_parameters));
+  EXPECT_EQ(1U, exact_outcome.changes);
+  EXPECT_FALSE(exact_outcome.last_insert_rowid.has_value());
+
+  std::vector<SqlValue> rejected_parameters;
+  rejected_parameters.push_back(SqlValue::Integer(3));
+  rejected_parameters.push_back(SqlValue::Text("not-gamma"));
+  const MutationOutcome rejected =
+      TakeValue(ExecuteMutationProgram(exact, vfs, rejected_parameters));
+  EXPECT_EQ(0U, rejected.changes);
+
+  std::vector<SqlValue> invalid_key_parameters;
+  invalid_key_parameters.push_back(SqlValue::Text("not-rowid"));
+  invalid_key_parameters.push_back(SqlValue::Text("alpha"));
+  const MutationOutcome invalid_key =
+      TakeValue(ExecuteMutationProgram(exact, vfs, invalid_key_parameters));
+  EXPECT_EQ(0U, invalid_key.changes);
+
+  const BytecodeProgram scan = LowerMutationOrThrow("DELETE FROM Items WHERE Score>=?1", catalog);
+  std::vector<SqlValue> scan_parameters;
+  scan_parameters.push_back(SqlValue::Integer(3));
+  const MutationOutcome scan_outcome =
+      TakeValue(ExecuteMutationProgram(scan, vfs, scan_parameters));
+  EXPECT_EQ(2U, scan_outcome.changes);
+
+  callback_count = 0;
+  const BytecodeProgram guarded = LowerMutationOrThrow(
+      "DELETE FROM Items WHERE stable_guard(?1)=0 AND failing()", catalog, custom.Binder());
+  std::vector<SqlValue> guard_parameters;
+  guard_parameters.push_back(SqlValue::Integer(1));
+  const MutationOutcome guard_outcome =
+      TakeValue(ExecuteMutationProgram(guarded, vfs, guard_parameters, custom.Vm()));
+  EXPECT_EQ(0U, guard_outcome.changes);
+  EXPECT_EQ(0U, callback_count);
+
+  const auto remaining = ReadMutationRows(vfs);
+  ASSERT_EQ(1U, remaining.size());
+  EXPECT_EQ(1, remaining[0].first);
+  EXPECT_EQ("alpha", TextBytes(remaining[0].second[1]));
+
+  const BytecodeProgram plain_insert =
+      LowerMutationOrThrow("INSERT INTO Plain(rowid,Value) VALUES(?1,?2)", catalog);
+  const auto insert_plain = [&](std::int64_t rowid, std::string value) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(SqlValue::Text(std::move(value)));
+    return TakeValue(ExecuteMutationProgram(plain_insert, vfs, parameters));
+  };
+  static_cast<void>(insert_plain(5, "five"));
+  static_cast<void>(insert_plain(6, "six"));
+
+  const BytecodeProgram plain_exact =
+      LowerMutationOrThrow("DELETE FROM Plain WHERE rowid=?1", catalog);
+  std::vector<SqlValue> plain_key;
+  plain_key.push_back(SqlValue::Integer(5));
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(plain_exact, vfs, plain_key)).changes);
+  const BytecodeProgram plain_scan = LowerMutationOrThrow("DELETE FROM Plain", catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(plain_scan, vfs)).changes);
+  EXPECT_TRUE(ReadMutationRows(vfs, PageNumber{3}).empty());
+
+  test::WritePagerFixedVfs rollback_vfs{false};
+  InitializeMutationDatabase(rollback_vfs);
+  const auto seed_rollback = [&](std::int64_t rowid, std::string name) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(SqlValue::Text(std::move(name)));
+    parameters.push_back(SqlValue::Integer(rowid));
+    return TakeValue(ExecuteMutationProgram(insert, rollback_vfs, parameters));
+  };
+  static_cast<void>(seed_rollback(1, "first"));
+  static_cast<void>(seed_rollback(2, "second"));
+
+  callback_count = 0;
+  const BytecodeProgram failing = LowerMutationOrThrow(
+      "DELETE FROM Items WHERE fail_after_one(Score)", catalog, custom.Binder());
+  const Result<MutationOutcome> failed =
+      ExecuteMutationProgram(failing, rollback_vfs, {}, custom.Vm());
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(2U, callback_count);
+
+  const auto restored = ReadMutationRows(rollback_vfs);
+  ASSERT_EQ(2U, restored.size());
+  EXPECT_EQ(1, restored[0].first);
+  EXPECT_EQ(2, restored[1].first);
 }
 
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
