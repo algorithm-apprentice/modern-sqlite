@@ -1113,6 +1113,67 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const UpdateTableInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.table.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "update used a closed write cursor"));
+    }
+    const std::optional<std::int64_t> old_rowid = LosslessRowId(Register(operation.old_rowid));
+    const std::optional<std::int64_t> new_rowid = LosslessRowId(Register(operation.new_rowid));
+    const std::optional<ByteView> record = Register(operation.record).blob_value();
+    if (!old_rowid.has_value() || !new_rowid.has_value() || !record.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    {
+      auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      auto old_exists = cursor->Seek(*old_rowid, BtreeSeekMode::kEqual);
+      if (!old_exists.has_value()) {
+        return std::unexpected(std::move(old_exists.error()));
+      }
+      if (!*old_exists) {
+        return std::nullopt;
+      }
+      if (*new_rowid != *old_rowid) {
+        auto new_exists = cursor->Seek(*new_rowid, BtreeSeekMode::kEqual);
+        if (!new_exists.has_value()) {
+          return std::unexpected(std::move(new_exists.error()));
+        }
+        if (*new_exists) {
+          return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+        }
+      }
+    }
+
+    if (*new_rowid == *old_rowid) {
+      Status replaced = runtime.table->Insert(*new_rowid, *record, BtreeInsertMode::kReplace);
+      if (!replaced.has_value()) {
+        return std::unexpected(std::move(replaced.error()));
+      }
+    } else {
+      auto deleted = runtime.table->Delete(*old_rowid);
+      if (!deleted.has_value()) {
+        return std::unexpected(std::move(deleted.error()));
+      }
+      if (!*deleted) {
+        return std::nullopt;
+      }
+      Status inserted = runtime.table->Insert(*new_rowid, *record, BtreeInsertMode::kInsertOnly);
+      if (!inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    }
+    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    }
+    ++change_count_;
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();

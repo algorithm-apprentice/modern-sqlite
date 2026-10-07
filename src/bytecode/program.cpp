@@ -756,6 +756,17 @@ template <typename T>
               return result;
             }
             return check_register(operation.rowid, index);
+          } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (auto result = check_register(operation.old_rowid, index); !result) {
+              return result;
+            }
+            if (auto result = check_register(operation.new_rowid, index); !result) {
+              return result;
+            }
+            return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1145,6 +1156,20 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.old_rowid); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.new_rowid); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.record); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (auto result = require_initialized(operation.left); !result) {
               return result;
@@ -1286,6 +1311,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "insert_table";
     case InstructionKind::kDeleteTable:
       return "delete_table";
+    case InstructionKind::kUpdateTable:
+      return "update_table";
     case InstructionKind::kCompare:
       return "compare";
     case InstructionKind::kCallScalar:

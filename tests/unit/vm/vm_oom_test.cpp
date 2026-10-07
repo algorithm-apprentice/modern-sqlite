@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "modern_sqlite/bytecode/program.hpp"
+#include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
@@ -461,6 +462,82 @@ int main() try {
   }
   if (!delete_vm->DetachExecutionContext().has_value() ||
       !delete_statement->Rollback().has_value()) {
+    return 1;
+  }
+
+  std::vector<SqlValue> update_fields;
+  update_fields.emplace_back();
+  update_fields.push_back(SqlValue::Text("updated"));
+  auto update_record = EncodeRecord(update_fields);
+  if (!update_record.has_value()) {
+    return 1;
+  }
+  ProgramInput update_input;
+  update_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  update_input.statement_kind = ProgramStatementKind::kUpdate;
+  update_input.transaction_access = ProgramTransactionAccess::kWrite;
+  update_input.rollback_mode = ProgramRollbackMode::kStatement;
+  update_input.mutation_result.publishes_changes = true;
+  update_input.register_count = 3;
+  update_input.constants.push_back(SqlValue::Integer(1));
+  update_input.constants.push_back(SqlValue::Integer(2));
+  update_input.constants.push_back(SqlValue::Blob(std::move(*update_record)));
+  update_input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = false,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = true,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  update_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      LoadConstantInstruction{.constant = ConstantId(2), .output = RegisterId(2)},
+      OpenWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      UpdateTableInstruction{
+          .cursor = WriteCursorId(0),
+          .old_rowid = RegisterId(0),
+          .new_rowid = RegisterId(1),
+          .record = RegisterId(2),
+      },
+      HaltInstruction{},
+  };
+  auto update_program = BytecodeProgram::Create(update_input);
+  auto update_statement = delete_coordinator->BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite,
+      .rollback = StatementRollbackMode::kStatement,
+  });
+  if (!update_program.has_value() || !update_statement.has_value() ||
+      update_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto update_vm = Vm::Create(*update_program, VmEnvironment::Core());
+  if (!update_vm.has_value() ||
+      !update_vm->AttachExecutionContext(VmExecutionContext{*update_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto update_failure = update_vm->Step();
+  fail_allocations = false;
+  if (update_failure.has_value() || update_failure.error().code() != ErrorCode::kOutOfMemory ||
+      update_vm->change_count() != 0U) {
+    return 1;
+  }
+  if (!update_vm->DetachExecutionContext().has_value() ||
+      !update_statement->Rollback().has_value()) {
     return 1;
   }
   return 0;

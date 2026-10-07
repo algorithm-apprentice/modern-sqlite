@@ -307,6 +307,13 @@ struct DeleteTableInstruction {
   RegisterId rowid;
 };
 
+struct UpdateTableInstruction {
+  WriteCursorId cursor;
+  RegisterId old_rowid;
+  RegisterId new_rowid;
+  RegisterId record;
+};
+
 struct CompareInstruction {
   SqlComparison comparison;
   TypeAffinity affinity;
@@ -339,14 +346,16 @@ struct ResultRowInstruction {
   std::uint32_t count;
 };
 
-using Instruction = std::variant<
-    HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
-    UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
-    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction, OpenWriteCursorInstruction,
-    CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
-    SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
-    BuildTableRecordInstruction, InsertTableInstruction, DeleteTableInstruction, CompareInstruction,
-    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+using Instruction =
+    std::variant<HaltInstruction, LoadConstantInstruction, LoadParameterInstruction,
+                 CopyInstruction, UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction,
+                 MustBeIntegerInstruction, RealAffinityInstruction, CastInstruction,
+                 OpenReadCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
+                 CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
+                 SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
+                 ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
+                 DeleteTableInstruction, UpdateTableInstruction, CompareInstruction,
+                 CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -374,6 +383,7 @@ enum class InstructionKind : std::uint8_t {
   kBuildTableRecord,
   kInsertTable,
   kDeleteTable,
+  kUpdateTable,
   kCompare,
   kCallScalar,
   kJump,
