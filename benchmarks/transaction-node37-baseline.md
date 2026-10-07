@@ -53,6 +53,33 @@ for the fixed trace. This number is not a regression threshold and is not
 comparable to SQLite until Node 40 supplies matched schema, durability, cache,
 journal, corpus, and operation configuration.
 
+## Fixed three-write work counters
+
+A second deterministic contract compares three implicit write statements with
+three statements batched in one explicit transaction. Both workloads start
+from the same one-row, 512-byte-page image and insert three eight-byte rows.
+
+| Counter | Three implicit writes | One explicit three-write batch |
+|---|---:|---:|
+| Pager read begins | 3 | 1 |
+| Pager write begins | 3 | 1 |
+| Pager savepoint creates | 0 | 3 |
+| Pager savepoint releases | 0 | 3 |
+| Pager commits | 3 | 1 |
+| B-tree writer-session opens | 3 | 1 |
+| Database page writes | 3 | 1 |
+| Database syncs | 3 | 1 |
+| Main-journal writes | 9 | 3 |
+| Main-journal syncs | 6 | 2 |
+| Subjournal writes | 0 | 2 |
+| Journal deletions | 3 | 1 |
+
+The allocation-observable companion reports 42 allocations for the implicit
+workload and 28 for the explicit batch on the recording macOS Debug
+toolchain. CI enforces that both remain measurable and that the explicit batch
+allocates less; exact allocation counts are recorded as diagnostics because
+standard-library allocation details may differ across supported toolchains.
+
 ## Correctness evidence paired with this baseline
 
 - implicit write commit;

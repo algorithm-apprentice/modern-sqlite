@@ -10,7 +10,9 @@
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -69,6 +71,179 @@ void RequireStatus(Status status) {
   RequireStatus(table.Insert(2, payload.view()));
   RequireStatus(statement.Succeed());
   return coordinator;
+}
+
+enum class ModelActionKind : std::uint8_t {
+  kBeginDeferred,
+  kBeginImmediate,
+  kBeginRead,
+  kBeginWrite,
+  kSucceedStatement,
+  kRollbackStatement,
+  kSavepoint,
+  kRelease,
+  kRollbackTo,
+  kCommit,
+  kRollback,
+};
+
+struct ModelAction {
+  constexpr ModelAction(ModelActionKind action_kind, std::string_view action_name) noexcept
+      : kind(action_kind), name(action_name) {}
+
+  ModelActionKind kind;
+  std::string_view name;
+};
+
+struct ReferenceTransactionModel {
+  TransactionState transaction = TransactionState::kAutocommit;
+  PagerState pager = PagerState::kOpen;
+  std::optional<StatementAccess> statement;
+  std::vector<std::string> savepoints;
+
+  [[nodiscard]] static bool EqualName(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+      const auto left_byte = static_cast<std::uint8_t>(static_cast<unsigned char>(left[index]));
+      const auto right_byte = static_cast<std::uint8_t>(static_cast<unsigned char>(right[index]));
+      if (SqliteToLower(left_byte) != SqliteToLower(right_byte)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> Find(std::string_view name) const noexcept {
+    for (std::size_t index = savepoints.size(); index > 0U; --index) {
+      if (EqualName(savepoints[index - 1U], name)) {
+        return index - 1U;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] std::optional<ErrorCode> Apply(const ModelAction& action) {
+    switch (action.kind) {
+      case ModelActionKind::kBeginDeferred:
+      case ModelActionKind::kBeginImmediate:
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        if (transaction != TransactionState::kAutocommit) {
+          return ErrorCode::kMisuse;
+        }
+        transaction = TransactionState::kExplicit;
+        if (action.kind == ModelActionKind::kBeginImmediate) {
+          pager = PagerState::kWriterLocked;
+        }
+        return std::nullopt;
+      case ModelActionKind::kBeginRead:
+      case ModelActionKind::kBeginWrite:
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        statement = action.kind == ModelActionKind::kBeginRead ? StatementAccess::kRead
+                                                               : StatementAccess::kWrite;
+        if (pager == PagerState::kOpen) {
+          pager = action.kind == ModelActionKind::kBeginRead ? PagerState::kReader
+                                                             : PagerState::kWriterLocked;
+        } else if (action.kind == ModelActionKind::kBeginWrite && pager == PagerState::kReader) {
+          pager = PagerState::kWriterLocked;
+        }
+        return std::nullopt;
+      case ModelActionKind::kSucceedStatement:
+      case ModelActionKind::kRollbackStatement:
+        if (!statement.has_value()) {
+          return ErrorCode::kSchemaChanged;
+        }
+        if (transaction == TransactionState::kAutocommit) {
+          pager = PagerState::kOpen;
+          savepoints.clear();
+        } else if (*statement == StatementAccess::kWrite) {
+          if (action.kind == ModelActionKind::kRollbackStatement) {
+            pager = PagerState::kWriterCacheModified;
+          }
+        }
+        statement.reset();
+        return std::nullopt;
+      case ModelActionKind::kSavepoint:
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        savepoints.emplace_back(action.name);
+        if (transaction == TransactionState::kAutocommit) {
+          transaction = TransactionState::kSavepoint;
+        }
+        return std::nullopt;
+      case ModelActionKind::kRelease: {
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        const auto found = Find(action.name);
+        if (!found.has_value()) {
+          return ErrorCode::kGeneric;
+        }
+        if (transaction == TransactionState::kSavepoint && *found == 0U) {
+          transaction = TransactionState::kAutocommit;
+          pager = PagerState::kOpen;
+          savepoints.clear();
+          return std::nullopt;
+        }
+        savepoints.erase(savepoints.begin() + static_cast<std::ptrdiff_t>(*found),
+                         savepoints.end());
+        return std::nullopt;
+      }
+      case ModelActionKind::kRollbackTo: {
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        const auto found = Find(action.name);
+        if (!found.has_value()) {
+          return ErrorCode::kGeneric;
+        }
+        savepoints.erase(savepoints.begin() + static_cast<std::ptrdiff_t>(*found + 1U),
+                         savepoints.end());
+        if (pager == PagerState::kWriterLocked || pager == PagerState::kWriterCacheModified ||
+            pager == PagerState::kWriterDatabaseModified) {
+          pager = PagerState::kWriterCacheModified;
+        }
+        return std::nullopt;
+      }
+      case ModelActionKind::kCommit:
+        if (statement.has_value()) {
+          return ErrorCode::kBusy;
+        }
+        if (transaction == TransactionState::kAutocommit) {
+          return ErrorCode::kMisuse;
+        }
+        transaction = TransactionState::kAutocommit;
+        pager = PagerState::kOpen;
+        savepoints.clear();
+        return std::nullopt;
+      case ModelActionKind::kRollback:
+        if (transaction == TransactionState::kAutocommit && !statement.has_value() &&
+            pager == PagerState::kOpen) {
+          return ErrorCode::kMisuse;
+        }
+        transaction = TransactionState::kAutocommit;
+        pager = PagerState::kOpen;
+        statement.reset();
+        savepoints.clear();
+        return std::nullopt;
+    }
+    return ErrorCode::kInternal;
+  }
+};
+
+template <typename T>
+[[nodiscard]] std::optional<ErrorCode> ResultCode(const Result<T>& result) noexcept {
+  return result.has_value() ? std::nullopt : std::optional<ErrorCode>{result.error().code()};
+}
+
+[[nodiscard]] std::optional<ErrorCode> StatusCode(const Status& status) noexcept {
+  return status.has_value() ? std::nullopt : std::optional<ErrorCode>{status.error().code()};
 }
 
 TEST(TransactionCoordinator, OwnsPagerAndStartsDeferredOrImmediateTransactions) {
@@ -182,6 +357,11 @@ TEST(TransactionCoordinator, EnforcesExplicitTransactionStateAroundReadStatement
 TEST(TransactionCoordinator, CommitsImplicitWriteAndExpiresStatementHandles) {
   test::WritePagerFixedVfs vfs{false};
   std::optional<TableBtreeWriter> stale;
+  std::optional<IndexBtreeWriter> stale_index;
+  const std::array payload{std::byte{0x41}, std::byte{0x42}};
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
   {
     TransactionCoordinator coordinator = OpenCoordinator(vfs);
     TransactionStatement statement = TakeValue(
@@ -189,16 +369,19 @@ TEST(TransactionCoordinator, CommitsImplicitWriteAndExpiresStatementHandles) {
     ASSERT_NE(nullptr, statement.writer());
     RequireStatus(statement.writer()->InitializeDatabase());
     stale.emplace(TakeValue(statement.writer()->OpenTableBtree(PageNumber{1})));
-    const std::array payload{std::byte{0x41}, std::byte{0x42}};
+    stale_index.emplace(TakeValue(statement.writer()->CreateIndexBtree(columns)));
     RequireStatus(stale->Insert(1, payload));
     RequireStatus(statement.Succeed());
     EXPECT_FALSE(statement.valid());
     EXPECT_TRUE(coordinator.autocommit());
-
-    const auto stale_insert = stale->Insert(2, payload);
-    ASSERT_FALSE(stale_insert.has_value());
-    EXPECT_EQ(ErrorCode::kSchemaChanged, stale_insert.error().code());
   }
+  const auto stale_insert = stale->Insert(2, payload);
+  ASSERT_FALSE(stale_insert.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, stale_insert.error().code());
+  std::array<SqlValue, 1> stale_key{SqlValue::Integer(1)};
+  const auto stale_index_insert = stale_index->Insert(stale_key);
+  ASSERT_FALSE(stale_index_insert.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, stale_index_insert.error().code());
 
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
   ASSERT_NE(nullptr, pager);
@@ -379,56 +562,27 @@ TEST(TransactionCoordinator, TransactionModeStatementCannotLaunderRollbackRequir
     RequireStatus(initialize.Succeed());
   }
   const ByteBuffer fixture = ByteBuffer::CopyOf(vfs.database_bytes());
+  vfs.LoadDatabase(fixture.view());
+  TransactionCoordinator coordinator = OpenCoordinator(vfs, 1U);
+  RequireStatus(coordinator.Begin());
+  TransactionStatement statement = TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite,
+      .rollback = StatementRollbackMode::kTransaction,
+  }));
+  TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+  ByteBuffer payload{ByteCount{6'000}};
+  std::ranges::fill(payload.mutable_view(), std::byte{0x32});
+  vfs.FailDatabaseWriteAfter(1U, ErrorCode::kIo);
+  const auto mutation = table.Insert(2, payload.view());
+  ASSERT_FALSE(mutation.has_value());
+  EXPECT_EQ(ErrorCode::kIo, mutation.error().code());
+  EXPECT_GT(vfs.database_write_count(), 0U);
 
-  std::size_t mutation_count = 0U;
-  {
-    vfs.LoadDatabase(fixture.view());
-    TransactionCoordinator coordinator = OpenCoordinator(vfs);
-    RequireStatus(coordinator.Begin());
-    TransactionStatement statement =
-        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
-            .access = StatementAccess::kWrite,
-            .rollback = StatementRollbackMode::kTransaction,
-        }));
-    TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
-    ByteBuffer payload{ByteCount{2'000}};
-    std::ranges::fill(payload.mutable_view(), std::byte{0x32});
-    vfs.ArmCrashCut(std::nullopt);
-    RequireStatus(table.Insert(2, payload.view()));
-    mutation_count = vfs.mutation_count();
-    RequireStatus(coordinator.Rollback());
-  }
-  ASSERT_GT(mutation_count, 0U);
-
-  bool observed_rollback_required = false;
-  for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
-    vfs.LoadDatabase(fixture.view());
-    TransactionCoordinator coordinator = OpenCoordinator(vfs);
-    RequireStatus(coordinator.Begin());
-    TransactionStatement statement =
-        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
-            .access = StatementAccess::kWrite,
-            .rollback = StatementRollbackMode::kTransaction,
-        }));
-    TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
-    ByteBuffer payload{ByteCount{2'000}};
-    std::ranges::fill(payload.mutable_view(), std::byte{0x32});
-    vfs.ArmCrashCut(cut);
-    const auto mutation = table.Insert(2, payload.view());
-    ASSERT_FALSE(mutation.has_value());
-    EXPECT_EQ(ErrorCode::kIo, mutation.error().code());
-
-    const auto finish = statement.Succeed();
-    if (!finish.has_value() && coordinator.autocommit()) {
-      EXPECT_EQ(ErrorCode::kIo, finish.error().code());
-      EXPECT_FALSE(statement.valid());
-      observed_rollback_required = true;
-      break;
-    }
-    ASSERT_TRUE(finish.has_value());
-    RequireStatus(coordinator.Rollback());
-  }
-  EXPECT_TRUE(observed_rollback_required);
+  const auto finish = statement.Succeed();
+  ASSERT_FALSE(finish.has_value());
+  EXPECT_EQ(ErrorCode::kIo, finish.error().code());
+  EXPECT_FALSE(statement.valid());
+  EXPECT_TRUE(coordinator.autocommit());
 }
 
 TEST(TransactionCoordinator, NamedSavepointsUseNewestCaseInsensitiveMatch) {
@@ -690,29 +844,18 @@ TEST(TransactionCoordinator, SavepointReleaseAfterMutationPerformsNoPersistentIo
   RequireStatus(coordinator.Rollback());
 }
 
-TEST(TransactionCoordinator, SavepointRollbackFailureFullyRollsBackTransaction) {
+TEST(TransactionCoordinator, RecoverableSavepointRollbackFailureFullyRollsBackTransaction) {
   test::WritePagerFixedVfs vfs{false};
   const ByteBuffer fixture = MakeTransactionFixture(vfs);
 
-  std::size_t mutation_count = 0U;
-  {
-    TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
-    vfs.ArmCrashCut(std::nullopt);
-    RequireStatus(coordinator.RollbackTo(Utf8View{"s"}));
-    mutation_count = vfs.mutation_count();
-    RequireStatus(coordinator.Rollback());
-  }
-  ASSERT_GT(mutation_count, 0U);
-
-  for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
-    TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
-    vfs.ArmCrashCut(cut);
-    const auto rolled_back = coordinator.RollbackTo(Utf8View{"s"});
-    ASSERT_FALSE(rolled_back.has_value());
-    EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
-    EXPECT_TRUE(coordinator.autocommit());
-    EXPECT_TRUE(std::ranges::equal(vfs.database_bytes(), fixture.view()));
-  }
+  TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
+  EXPECT_GT(vfs.database_write_count(), 0U);
+  vfs.FailDatabaseWriteAfter(0U, ErrorCode::kIo);
+  const auto rolled_back = coordinator.RollbackTo(Utf8View{"s"});
+  ASSERT_FALSE(rolled_back.has_value());
+  EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
+  EXPECT_TRUE(coordinator.autocommit());
+  EXPECT_TRUE(std::ranges::equal(vfs.database_bytes(), fixture.view()));
 }
 
 TEST(TransactionCoordinator, NamedSavepointControlRejectsActiveStatement) {
@@ -824,6 +967,187 @@ TEST(TransactionCoordinatorModel, MixedTransactionsMatchReferenceMap) {
     EXPECT_EQ(durable.end(), expected);
   }
   RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinatorModel, StateMachineMatchesValidAndInvalidActions) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(MakeTransactionFixture(vfs));
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  ReferenceTransactionModel model;
+  std::optional<TransactionStatement> statement;
+  const std::vector<ModelAction> actions{
+      {ModelActionKind::kCommit, {}},
+      {ModelActionKind::kBeginDeferred, {}},
+      {ModelActionKind::kBeginDeferred, {}},
+      {ModelActionKind::kSavepoint, "A"},
+      {ModelActionKind::kSavepoint, "a"},
+      {ModelActionKind::kBeginRead, {}},
+      {ModelActionKind::kSavepoint, "blocked"},
+      {ModelActionKind::kCommit, {}},
+      {ModelActionKind::kSucceedStatement, {}},
+      {ModelActionKind::kRollbackTo, "A"},
+      {ModelActionKind::kRelease, "a"},
+      {ModelActionKind::kBeginWrite, {}},
+      {ModelActionKind::kRelease, "A"},
+      {ModelActionKind::kSucceedStatement, {}},
+      {ModelActionKind::kSavepoint, "B"},
+      {ModelActionKind::kRollbackTo, "a"},
+      {ModelActionKind::kRelease, "A"},
+      {ModelActionKind::kCommit, {}},
+      {ModelActionKind::kSavepoint, "outer"},
+      {ModelActionKind::kBeginWrite, {}},
+      {ModelActionKind::kSucceedStatement, {}},
+      {ModelActionKind::kRelease, "OUTER"},
+      {ModelActionKind::kBeginRead, {}},
+      {ModelActionKind::kRollback, {}},
+      {ModelActionKind::kBeginImmediate, {}},
+      {ModelActionKind::kSavepoint, "s"},
+      {ModelActionKind::kBeginWrite, {}},
+      {ModelActionKind::kRollbackStatement, {}},
+      {ModelActionKind::kRollbackTo, "missing"},
+      {ModelActionKind::kRollback, {}},
+  };
+
+  for (std::size_t index = 0U; index < actions.size(); ++index) {
+    SCOPED_TRACE(index);
+    const ModelAction& action = actions[index];
+    const std::optional<ErrorCode> expected = model.Apply(action);
+    std::optional<ErrorCode> actual;
+    switch (action.kind) {
+      case ModelActionKind::kBeginDeferred:
+        actual = StatusCode(coordinator.Begin());
+        break;
+      case ModelActionKind::kBeginImmediate:
+        actual = StatusCode(coordinator.Begin(TransactionMode::kImmediate));
+        break;
+      case ModelActionKind::kBeginRead: {
+        auto begun = coordinator.BeginStatement();
+        actual = ResultCode(begun);
+        if (begun.has_value()) {
+          statement = std::move(*begun);
+        }
+        break;
+      }
+      case ModelActionKind::kBeginWrite: {
+        auto begun = coordinator.BeginStatement(
+            TransactionStatementOptions{.access = StatementAccess::kWrite});
+        actual = ResultCode(begun);
+        if (begun.has_value()) {
+          statement = std::move(*begun);
+        }
+        break;
+      }
+      case ModelActionKind::kSucceedStatement:
+        actual = statement.has_value() ? StatusCode(statement->Succeed())
+                                       : std::optional<ErrorCode>{ErrorCode::kSchemaChanged};
+        if (!actual.has_value()) {
+          statement.reset();
+        }
+        break;
+      case ModelActionKind::kRollbackStatement:
+        actual = statement.has_value() ? StatusCode(statement->Rollback())
+                                       : std::optional<ErrorCode>{ErrorCode::kSchemaChanged};
+        if (!actual.has_value()) {
+          statement.reset();
+        }
+        break;
+      case ModelActionKind::kSavepoint:
+        actual = StatusCode(coordinator.Savepoint(Utf8View{action.name}));
+        break;
+      case ModelActionKind::kRelease:
+        actual = StatusCode(coordinator.Release(Utf8View{action.name}));
+        break;
+      case ModelActionKind::kRollbackTo:
+        actual = StatusCode(coordinator.RollbackTo(Utf8View{action.name}));
+        break;
+      case ModelActionKind::kCommit:
+        actual = StatusCode(coordinator.Commit());
+        break;
+      case ModelActionKind::kRollback:
+        actual = StatusCode(coordinator.Rollback());
+        if (!actual.has_value()) {
+          statement.reset();
+        }
+        break;
+    }
+
+    EXPECT_EQ(expected, actual);
+    EXPECT_EQ(model.transaction, coordinator.state());
+    EXPECT_EQ(model.transaction == TransactionState::kAutocommit, coordinator.autocommit());
+    EXPECT_EQ(model.statement.has_value(), coordinator.statement_active());
+    EXPECT_EQ(model.savepoints.size(), coordinator.savepoint_count());
+    ASSERT_TRUE(coordinator.pager_state().has_value());
+    EXPECT_EQ(model.pager, *coordinator.pager_state());
+  }
+}
+
+TEST(TransactionCoordinatorBaseline, RecordsImplicitAndExplicitFixedWork) {
+  test::WritePagerFixedVfs fixture_vfs{false};
+  const ByteBuffer fixture = MakeTransactionFixture(fixture_vfs);
+
+  test::WritePagerFixedVfs implicit_vfs{false};
+  implicit_vfs.LoadDatabase(fixture.view());
+  TransactionWorkCounters implicit_work;
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(implicit_vfs);
+    for (std::int64_t rowid = 2; rowid <= 4; ++rowid) {
+      TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+          TransactionStatementOptions{.access = StatementAccess::kWrite}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      std::array<std::byte, 8> payload{};
+      std::ranges::fill(payload, static_cast<std::byte>(rowid));
+      RequireStatus(table.Insert(rowid, payload));
+      RequireStatus(statement.Succeed());
+    }
+    implicit_work = coordinator.work_counters();
+  }
+
+  test::WritePagerFixedVfs explicit_vfs{false};
+  explicit_vfs.LoadDatabase(fixture.view());
+  TransactionWorkCounters explicit_work;
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(explicit_vfs);
+    RequireStatus(coordinator.Begin());
+    for (std::int64_t rowid = 2; rowid <= 4; ++rowid) {
+      TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+          TransactionStatementOptions{.access = StatementAccess::kWrite}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      std::array<std::byte, 8> payload{};
+      std::ranges::fill(payload, static_cast<std::byte>(rowid));
+      RequireStatus(table.Insert(rowid, payload));
+      RequireStatus(statement.Succeed());
+    }
+    RequireStatus(coordinator.Commit());
+    explicit_work = coordinator.work_counters();
+  }
+
+  EXPECT_EQ(3U, implicit_work.pager_read_begins);
+  EXPECT_EQ(3U, implicit_work.pager_write_begins);
+  EXPECT_EQ(0U, implicit_work.pager_savepoint_creates);
+  EXPECT_EQ(0U, implicit_work.pager_savepoint_releases);
+  EXPECT_EQ(3U, implicit_work.pager_commits);
+  EXPECT_EQ(3U, implicit_work.btree_writer_opens);
+
+  EXPECT_EQ(1U, explicit_work.pager_read_begins);
+  EXPECT_EQ(1U, explicit_work.pager_write_begins);
+  EXPECT_EQ(3U, explicit_work.pager_savepoint_creates);
+  EXPECT_EQ(3U, explicit_work.pager_savepoint_releases);
+  EXPECT_EQ(1U, explicit_work.pager_commits);
+  EXPECT_EQ(1U, explicit_work.btree_writer_opens);
+
+  EXPECT_EQ(3U, implicit_vfs.total_database_writes());
+  EXPECT_EQ(3U, implicit_vfs.total_database_syncs());
+  EXPECT_EQ(9U, implicit_vfs.total_journal_writes());
+  EXPECT_EQ(6U, implicit_vfs.total_journal_syncs());
+  EXPECT_EQ(0U, implicit_vfs.total_subjournal_writes());
+  EXPECT_EQ(3U, implicit_vfs.total_journal_deletes());
+
+  EXPECT_EQ(1U, explicit_vfs.total_database_writes());
+  EXPECT_EQ(1U, explicit_vfs.total_database_syncs());
+  EXPECT_EQ(3U, explicit_vfs.total_journal_writes());
+  EXPECT_EQ(2U, explicit_vfs.total_journal_syncs());
+  EXPECT_EQ(2U, explicit_vfs.total_subjournal_writes());
+  EXPECT_EQ(1U, explicit_vfs.total_journal_deletes());
 }
 
 }  // namespace

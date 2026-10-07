@@ -1,8 +1,10 @@
 #ifndef MODERN_SQLITE_TRANSACTION_TRANSACTION_COORDINATOR_HPP_
 #define MODERN_SQLITE_TRANSACTION_TRANSACTION_COORDINATOR_HPP_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include "modern_sqlite/base/result.hpp"
@@ -14,6 +16,7 @@
 namespace modern_sqlite {
 
 class Pager;
+enum class PagerState : std::uint8_t;
 
 namespace transaction_detail {
 class CoordinatorState;
@@ -43,6 +46,17 @@ enum class StatementRollbackMode : std::uint8_t {
 struct TransactionStatementOptions {
   StatementAccess access = StatementAccess::kRead;
   StatementRollbackMode rollback = StatementRollbackMode::kStatement;
+};
+
+struct TransactionWorkCounters {
+  std::uint64_t pager_read_begins = 0;
+  std::uint64_t pager_write_begins = 0;
+  std::uint64_t pager_savepoint_creates = 0;
+  std::uint64_t pager_savepoint_releases = 0;
+  std::uint64_t pager_savepoint_rollbacks = 0;
+  std::uint64_t pager_commits = 0;
+  std::uint64_t pager_rollbacks = 0;
+  std::uint64_t btree_writer_opens = 0;
 };
 
 class TransactionWriter final {
@@ -112,6 +126,9 @@ class TransactionCoordinator final {
   [[nodiscard]] bool autocommit() const noexcept;
   [[nodiscard]] TransactionState state() const noexcept;
   [[nodiscard]] bool statement_active() const noexcept;
+  [[nodiscard]] std::size_t savepoint_count() const noexcept;
+  [[nodiscard]] std::optional<PagerState> pager_state() const noexcept;
+  [[nodiscard]] TransactionWorkCounters work_counters() const noexcept;
 
   [[nodiscard]] Status Begin(TransactionMode mode = TransactionMode::kDeferred);
   [[nodiscard]] Status Commit();

@@ -123,6 +123,17 @@ struct TransactionStatementOptions {
   StatementRollbackMode rollback = StatementRollbackMode::kStatement;
 };
 
+struct TransactionWorkCounters {
+  std::uint64_t pager_read_begins;
+  std::uint64_t pager_write_begins;
+  std::uint64_t pager_savepoint_creates;
+  std::uint64_t pager_savepoint_releases;
+  std::uint64_t pager_savepoint_rollbacks;
+  std::uint64_t pager_commits;
+  std::uint64_t pager_rollbacks;
+  std::uint64_t btree_writer_opens;
+};
+
 class TransactionWriter;
 
 class TransactionStatement final {
@@ -182,6 +193,9 @@ class TransactionCoordinator final {
   [[nodiscard]] bool autocommit() const noexcept;
   [[nodiscard]] TransactionState state() const noexcept;
   [[nodiscard]] bool statement_active() const noexcept;
+  [[nodiscard]] std::size_t savepoint_count() const noexcept;
+  [[nodiscard]] std::optional<PagerState> pager_state() const noexcept;
+  [[nodiscard]] TransactionWorkCounters work_counters() const noexcept;
 
   [[nodiscard]] Status Begin(
       TransactionMode mode = TransactionMode::kDeferred);
@@ -400,6 +414,12 @@ storage tests and callers. A private transaction-coordinator construction
 path enables managed epochs; it does not add a second public writer mode or a
 plugin callback.
 
+Every B-tree writer core also retains a shared Pager lifetime token. Pager
+destruction clears that token before releasing its file/cache state. Escaped
+table or index handles therefore return `kSchemaChanged` without
+dereferencing the destroyed Pager, including after the coordinator and its
+owned Pager have both been destroyed.
+
 The coordinator never opens a second B-tree session merely because one
 wrapper was destroyed. It follows ADR-0044's one-claim-per-write-generation
 rule.
@@ -529,6 +549,11 @@ Potential allocations are:
 
 Savepoint lookup, transaction-state queries, statement token validation, and
 successful terminal state publication allocate nothing.
+
+The read-only diagnostic queries and `TransactionWorkCounters` add no
+allocation or I/O. They exist so model and fixed-work tests can compare the
+coordinator state machine and exact lower-layer operation counts without
+exposing mutable Pager or B-tree ownership.
 
 Every public allocation boundary catches `std::bad_alloc` and
 `std::length_error` and returns `kOutOfMemory`. Allocation is completed before

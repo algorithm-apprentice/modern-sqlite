@@ -381,9 +381,18 @@ void WriteImage(const std::filesystem::path& path, modern_sqlite::ByteView image
         return false;
       }
       auto table = statement->writer()->OpenTableBtree(root_page);
-      const modern_sqlite::ByteBuffer payload = TableRecord(2'000U, std::byte{0x02});
-      return table.has_value() && table->Insert(2, payload.view()).has_value() &&
-             vfs.database_write_count() > 0U && statement->Rollback().has_value();
+      const modern_sqlite::ByteBuffer payload = TableRecord(6'000U, std::byte{0x02});
+      if (!table.has_value()) {
+        return false;
+      }
+      vfs.FailDatabaseWriteAfter(1U, modern_sqlite::ErrorCode::kIo);
+      const auto inserted = table->Insert(2, payload.view());
+      if (inserted.has_value() || vfs.database_write_count() == 0U) {
+        return false;
+      }
+      const auto finished = statement->Succeed();
+      return !finished.has_value() && finished.error().code() == modern_sqlite::ErrorCode::kIo &&
+             coordinator.autocommit();
     }
   }
   return false;
