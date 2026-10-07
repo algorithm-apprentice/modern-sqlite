@@ -124,6 +124,7 @@ set(
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
     src/text/text.cpp
+    src/transaction/transaction_coordinator.cpp
     src/vm/read_vm.cpp
 )
 
@@ -512,6 +513,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/parser.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/transaction/transaction_coordinator.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/vm/read_vm.hpp"
   "${PROJECT_SOURCE_DIR}/src/base/bytes.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
@@ -552,6 +554,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/token_text.hpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
+  "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/read_vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
@@ -616,6 +619,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/parser_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/transaction/transaction_coordinator_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"

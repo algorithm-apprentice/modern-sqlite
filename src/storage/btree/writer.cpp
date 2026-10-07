@@ -54,6 +54,10 @@ namespace {
   return MakeError(ErrorCode::kProtocol, message);
 }
 
+[[nodiscard]] Error TooLarge(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kTooLarge, message);
+}
+
 [[nodiscard]] Result<std::vector<IndexColumnOrder>> CopyColumns(
     std::span<const IndexColumnOrder> columns) {
   if (columns.empty()) {
@@ -90,16 +94,23 @@ namespace btree_internal {
 
 class BtreeWriterCore final {
  public:
+  struct RootValidation {
+    std::uint64_t incarnation;
+    std::uint64_t statement_epoch;
+  };
+
   BtreeWriterCore(Pager& pager, std::uint64_t generation, BtreeWriteWorkspace workspace,
-                  std::optional<BtreePageGeometry> geometry,
-                  RecordCodecOptions record_options) noexcept
+                  std::optional<BtreePageGeometry> geometry, RecordCodecOptions record_options,
+                  bool managed) noexcept
       : pager_(&pager),
         generation_(generation),
         workspace_(std::move(workspace)),
         geometry_(geometry),
-        record_options_(record_options) {}
+        record_options_(record_options),
+        managed_(managed),
+        statement_active_(!managed) {}
 
-  [[nodiscard]] Status CheckActive() const {
+  [[nodiscard]] Status CheckTransaction() const {
     if (pager_ == nullptr || !pager_->in_write_transaction() ||
         pager_->write_transaction_generation() != generation_) {
       return std::unexpected(
@@ -110,6 +121,44 @@ class BtreeWriterCore final {
     }
     return {};
   }
+
+  [[nodiscard]] Status CheckActive() const {
+    auto transaction = CheckTransaction();
+    if (!transaction.has_value()) {
+      return transaction;
+    }
+    if (managed_ && !statement_active_) {
+      return std::unexpected(SchemaChanged("B-tree writer statement scope has ended"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status BeginManagedStatement() {
+    auto transaction = CheckTransaction();
+    if (!transaction.has_value()) {
+      return transaction;
+    }
+    if (!managed_) {
+      return std::unexpected(Misuse("B-tree writer session is not transaction-managed"));
+    }
+    if (statement_active_) {
+      return std::unexpected(Misuse("B-tree writer statement scope is already active"));
+    }
+    if (statement_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("B-tree writer statement generation is exhausted"));
+    }
+    ++statement_epoch_;
+    statement_active_ = true;
+    return {};
+  }
+
+  void EndManagedStatement() noexcept {
+    if (managed_) {
+      statement_active_ = false;
+    }
+  }
+
+  [[nodiscard]] std::uint64_t statement_epoch() const noexcept { return statement_epoch_; }
 
   [[nodiscard]] bool requires_rollback() const noexcept {
     return pager_ != nullptr && pager_->write_failure_code().has_value();
@@ -253,13 +302,16 @@ class BtreeWriterCore final {
     return TrackRoot(root_page, false);
   }
 
-  [[nodiscard]] Status ValidateRoot(PageNumber root_page, std::uint64_t incarnation) const {
+  [[nodiscard]] Status ValidateRoot(PageNumber root_page, RootValidation validation) const {
     auto active = CheckActive();
     if (!active.has_value()) {
       return active;
     }
+    if (managed_ && validation.statement_epoch != statement_epoch_) {
+      return std::unexpected(SchemaChanged("B-tree writer handle belongs to an ended statement"));
+    }
     const auto found = root_incarnations_.find(root_page.value());
-    if (found == root_incarnations_.end() || found->second != incarnation) {
+    if (found == root_incarnations_.end() || found->second != validation.incarnation) {
       return std::unexpected(SchemaChanged("B-tree root handle is stale"));
     }
     return {};
@@ -356,11 +408,17 @@ class BtreeWriterCore final {
   std::optional<BtreePageGeometry> geometry_;
   RecordCodecOptions record_options_;
   std::unordered_map<std::uint32_t, std::uint64_t> root_incarnations_;
+  bool managed_ = false;
+  bool statement_active_ = true;
+  std::uint64_t statement_epoch_ = 0;
 };
 
 }  // namespace btree_internal
 
-Result<BtreeWriteSession> BtreeWriteSession::Open(Pager& pager) {
+namespace {
+
+[[nodiscard]] Result<std::shared_ptr<btree_internal::BtreeWriterCore>> OpenWriterCore(
+    Pager& pager, bool managed) {
   if (!pager.in_write_transaction() || pager.state() == PagerState::kWriterFinished) {
     return std::unexpected(Misuse("B-tree write session requires an active write transaction"));
   }
@@ -412,7 +470,7 @@ Result<BtreeWriteSession> BtreeWriteSession::Open(Pager& pager) {
   try {
     core = std::make_shared<btree_internal::BtreeWriterCore>(
         pager, pager.write_transaction_generation(), std::move(*workspace), geometry,
-        record_options);
+        record_options, managed);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
@@ -420,7 +478,36 @@ Result<BtreeWriteSession> BtreeWriteSession::Open(Pager& pager) {
   if (!claimed.has_value()) {
     return std::unexpected(std::move(claimed.error()));
   }
-  return BtreeWriteSession{std::move(core)};
+  return core;
+}
+
+}  // namespace
+
+Result<BtreeWriteSession> BtreeWriteSession::Open(Pager& pager) {
+  auto core = OpenWriterCore(pager, false);
+  if (!core.has_value()) {
+    return std::unexpected(std::move(core.error()));
+  }
+  return BtreeWriteSession{std::move(*core)};
+}
+
+Result<BtreeWriteSession> BtreeWriteSession::OpenManaged(Pager& pager) {
+  auto core = OpenWriterCore(pager, true);
+  if (!core.has_value()) {
+    return std::unexpected(std::move(core.error()));
+  }
+  return BtreeWriteSession{std::move(*core)};
+}
+
+Status BtreeWriteSession::BeginManagedStatement() {
+  return core_ != nullptr ? core_->BeginManagedStatement()
+                          : Status{std::unexpected(Misuse("B-tree write session is moved from"))};
+}
+
+void BtreeWriteSession::EndManagedStatement() noexcept {
+  if (core_ != nullptr) {
+    core_->EndManagedStatement();
+  }
 }
 
 bool BtreeWriteSession::requires_rollback() const noexcept {
@@ -440,7 +527,7 @@ Result<TableBtreeWriter> BtreeWriteSession::CreateTableBtree() {
   if (!created.has_value()) {
     return std::unexpected(std::move(created.error()));
   }
-  return TableBtreeWriter{core_, created->first, created->second};
+  return TableBtreeWriter{core_, created->first, created->second, core_->statement_epoch()};
 }
 
 Result<IndexBtreeWriter> BtreeWriteSession::CreateIndexBtree(
@@ -456,7 +543,8 @@ Result<IndexBtreeWriter> BtreeWriteSession::CreateIndexBtree(
   if (!created.has_value()) {
     return std::unexpected(std::move(created.error()));
   }
-  return IndexBtreeWriter{core_, created->first, created->second, std::move(*copied)};
+  return IndexBtreeWriter{core_, created->first, created->second, core_->statement_epoch(),
+                          std::move(*copied)};
 }
 
 Result<TableBtreeWriter> BtreeWriteSession::OpenTableBtree(PageNumber root_page) {
@@ -467,7 +555,7 @@ Result<TableBtreeWriter> BtreeWriteSession::OpenTableBtree(PageNumber root_page)
   if (!incarnation.has_value()) {
     return std::unexpected(std::move(incarnation.error()));
   }
-  return TableBtreeWriter{core_, root_page, *incarnation};
+  return TableBtreeWriter{core_, root_page, *incarnation, core_->statement_epoch()};
 }
 
 Result<IndexBtreeWriter> BtreeWriteSession::OpenIndexBtree(
@@ -483,7 +571,8 @@ Result<IndexBtreeWriter> BtreeWriteSession::OpenIndexBtree(
   if (!incarnation.has_value()) {
     return std::unexpected(std::move(incarnation.error()));
   }
-  return IndexBtreeWriter{core_, root_page, *incarnation, std::move(*copied)};
+  return IndexBtreeWriter{core_, root_page, *incarnation, core_->statement_epoch(),
+                          std::move(*copied)};
 }
 
 bool TableBtreeWriter::requires_rollback() const noexcept {
@@ -494,7 +583,8 @@ Status TableBtreeWriter::Insert(std::int64_t rowid, ByteView payload, BtreeInser
   if (core_ == nullptr) {
     return std::unexpected(Misuse("table B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return valid;
   }
@@ -514,7 +604,8 @@ Result<bool> TableBtreeWriter::Delete(std::int64_t rowid) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("table B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
@@ -537,7 +628,8 @@ Result<std::uint64_t> TableBtreeWriter::Clear() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("table B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
@@ -553,7 +645,8 @@ Status TableBtreeWriter::Drop() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("table B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return valid;
   }
@@ -578,7 +671,8 @@ Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return valid;
   }
@@ -604,7 +698,8 @@ Result<bool> IndexBtreeWriter::Delete(std::span<const SqlValue> values) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
@@ -632,7 +727,8 @@ Result<std::uint64_t> IndexBtreeWriter::Clear() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
@@ -648,7 +744,8 @@ Status IndexBtreeWriter::Drop() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
   }
-  auto valid = core_->ValidateRoot(root_page_, incarnation_);
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
     return valid;
   }

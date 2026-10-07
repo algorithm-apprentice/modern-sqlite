@@ -53,6 +53,7 @@ add_executable(
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
   unit/text/text_test.cpp
+  unit/transaction/transaction_coordinator_test.cpp
   unit/vm/read_vm_test.cpp
   format/record_codec_golden_test.cpp
 )
