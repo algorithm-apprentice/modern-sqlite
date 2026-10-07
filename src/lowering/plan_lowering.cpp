@@ -1,6 +1,7 @@
 #include "modern_sqlite/lowering/plan_lowering.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -113,7 +114,9 @@ class PlanLowerer final {
       collations_ = bound_update_->collations();
       functions_ = bound_update_->functions();
       source_columns_ = bound_update_->source_columns();
+      return;
     }
+    bound_create_ = std::get_if<BoundCreateTable>(&plan.logical_plan().bound_statement());
   }
 
   [[nodiscard]] LowerPlanResult Run() {
@@ -203,6 +206,10 @@ class PlanLowerer final {
     const auto* update = std::get_if<PhysicalUpdateMutation>(&mutation_plan_->payload());
     if (update != nullptr) {
       return RunUpdate(*update);
+    }
+    const auto* create = std::get_if<PhysicalCreateTableMutation>(&mutation_plan_->payload());
+    if (create != nullptr) {
+      return RunCreateTable(*create);
     }
     return std::unexpected(UnsupportedFailure("physical mutation plan is not implemented"));
   }
@@ -411,6 +418,63 @@ class PlanLowerer final {
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
                                       "lowered UPDATE bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
+  [[nodiscard]] LowerPlanResult RunCreateTable(const PhysicalCreateTableMutation& create) {
+    if (bound_create_ == nullptr || !std::holds_alternative<LogicalCreateTableMutation>(
+                                        mutation_plan_->logical_plan().payload())) {
+      return std::unexpected(
+          InternalFailure("physical CREATE TABLE plan has inconsistent ownership"));
+    }
+    if (bound_create_->catalog() == nullptr) {
+      return std::unexpected(InternalFailure("bound CREATE TABLE does not retain a catalog"));
+    }
+
+    constexpr std::uint32_t kCreateRegisterCount = 8;
+    const std::uint32_t register_count = create.no_op ? 0U : kCreateRegisterCount;
+    const CatalogVersion version = bound_create_->required_catalog_version();
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = register_count,
+                                                .parameters = 0,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    builder_.emplace(std::move(*created));
+
+    const ProgramRollbackMode rollback_mode = create.atomicity == MutationAtomicity::kStatement
+                                                  ? ProgramRollbackMode::kStatement
+                                                  : ProgramRollbackMode::kTransaction;
+    auto metadata = ConvertProgramResult(
+        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kCreateTable,
+                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        "unable to set CREATE TABLE execution metadata");
+    if (!metadata.has_value()) {
+      return std::unexpected(std::move(metadata.error()));
+    }
+    if (create.no_op) {
+      if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+        return std::unexpected(std::move(halted.error()));
+      }
+    } else {
+      if (auto emitted = EmitCreateTable(); !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+    }
+
+    auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
+                                      "lowered CREATE TABLE bytecode failed verification");
     if (!built.has_value()) {
       return std::unexpected(std::move(built.error()));
     }
@@ -2545,6 +2609,134 @@ class PlanLowerer final {
     return std::unexpected(InternalFailure("physical UPDATE access kind is invalid"));
   }
 
+  [[nodiscard]] LoweringResult<void> EmitCreateTable() {
+    if (bound_create_->table_name().empty() || bound_create_->canonical_sql().empty()) {
+      return std::unexpected(InternalFailure("CREATE TABLE metadata is incomplete"));
+    }
+    auto type = AddConstant(SqlValue::Text("table"));
+    if (!type.has_value()) {
+      return std::unexpected(std::move(type.error()));
+    }
+    auto name = AddConstant(SqlValue::Text(std::string{bound_create_->table_name()}));
+    if (!name.has_value()) {
+      return std::unexpected(std::move(name.error()));
+    }
+    auto table_name = AddConstant(SqlValue::Text(std::string{bound_create_->table_name()}));
+    if (!table_name.has_value()) {
+      return std::unexpected(std::move(table_name.error()));
+    }
+    auto sql = AddConstant(SqlValue::Text(std::string{bound_create_->canonical_sql()}));
+    if (!sql.has_value()) {
+      return std::unexpected(std::move(sql.error()));
+    }
+    auto null_rowid = AddConstant(SqlValue{});
+    if (!null_rowid.has_value()) {
+      return std::unexpected(std::move(null_rowid.error()));
+    }
+
+    WriteCursorDescriptor descriptor{
+        .root_page = RootPageNumber(1),
+        .columns =
+            {
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                    .rowid_alias = false,
+                    .default_value = std::nullopt,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                    .rowid_alias = false,
+                    .default_value = std::nullopt,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                    .rowid_alias = false,
+                    .default_value = std::nullopt,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kInteger,
+                    .not_null = true,
+                    .rowid_alias = false,
+                    .default_value = std::nullopt,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                    .rowid_alias = false,
+                    .default_value = std::nullopt,
+                },
+            },
+        .rowid_alias = std::nullopt,
+    };
+    auto cursor = ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(descriptor)),
+                                       "unable to add the sqlite_schema write cursor");
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    const WriteCursorId schema_cursor = AssumeValue(cursor);
+
+    if (auto ensured = Append(EnsureDatabaseInitializedInstruction{}); !ensured.has_value()) {
+      return ensured;
+    }
+    if (auto root = Append(CreateTableRootInstruction{.output = RegisterId{3}});
+        !root.has_value()) {
+      return root;
+    }
+    const std::array loads{
+        LoadConstantInstruction{.constant = AssumeValue(type), .output = RegisterId{0}},
+        LoadConstantInstruction{.constant = AssumeValue(name), .output = RegisterId{1}},
+        LoadConstantInstruction{.constant = AssumeValue(table_name), .output = RegisterId{2}},
+        LoadConstantInstruction{.constant = AssumeValue(sql), .output = RegisterId{4}},
+        LoadConstantInstruction{.constant = AssumeValue(null_rowid), .output = RegisterId{5}},
+    };
+    for (const LoadConstantInstruction& load : loads) {
+      if (auto loaded = Append(load); !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    if (auto opened = Append(OpenWriteCursorInstruction{.cursor = schema_cursor});
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto rowid = Append(ResolveInsertRowIdInstruction{
+            .cursor = schema_cursor,
+            .input = RegisterId{5},
+            .output = RegisterId{5},
+        });
+        !rowid.has_value()) {
+      return rowid;
+    }
+    if (auto record = Append(BuildTableRecordInstruction{
+            .cursor = schema_cursor,
+            .first_value = RegisterId{0},
+            .value_count = 5,
+            .output = RegisterId{6},
+        });
+        !record.has_value()) {
+      return record;
+    }
+    if (auto inserted = Append(InsertTableInstruction{
+            .cursor = schema_cursor,
+            .rowid = RegisterId{5},
+            .record = RegisterId{6},
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = schema_cursor});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (auto cookie = Append(IncrementSchemaCookieInstruction{.output = RegisterId{7}});
+        !cookie.has_value()) {
+      return cookie;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitInsert() {
     if (!write_cursor_.has_value() || !insert_values_first_.has_value() ||
         !insert_rowid_register_.has_value() || !insert_record_register_.has_value()) {
@@ -2673,6 +2865,7 @@ class PlanLowerer final {
   const BoundInsert* bound_insert_ = nullptr;
   const BoundDelete* bound_delete_ = nullptr;
   const BoundUpdate* bound_update_ = nullptr;
+  const BoundCreateTable* bound_create_ = nullptr;
   std::span<const BoundExpression> expressions_;
   std::span<const BoundParameter> parameters_;
   std::span<const BoundCollation> collations_;

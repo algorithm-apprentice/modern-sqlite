@@ -207,6 +207,18 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr EmptyCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 0, .generation = 11},
+  };
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] PhysicalPlan OptimizeOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
                                            BindEnvironment environment = BindEnvironment::Core()) {
   BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog, environment);
@@ -643,7 +655,7 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   EXPECT_EQ("42", TextBytes(plain_rows[1].second[0]));
 }
 
-TEST(InsertLowering, RetainsLimitsRejectsUnsupportedMutationsAndMovedFromPlans) {
+TEST(InsertLowering, RetainsLimitsAndRejectsMovedFromPlans) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   PhysicalMutationPlan plan = OptimizeMutationOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);
 
@@ -655,12 +667,6 @@ TEST(InsertLowering, RetainsLimitsRejectsUnsupportedMutationsAndMovedFromPlans) 
   ASSERT_TRUE(limited.error().program_error.has_value());
   EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded,
             TakeOptional(limited.error().program_error, "missing nested program error").code);
-
-  const PhysicalMutationPlan create =
-      OptimizeMutationOrThrow("CREATE TABLE Other(id INTEGER PRIMARY KEY)", catalog);
-  LowerPlanResult unsupported = LowerPlan(create);
-  ASSERT_FALSE(unsupported.has_value());
-  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, unsupported.error().code);
 
   const PhysicalMutationPlan moved = std::move(plan);
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
@@ -1158,6 +1164,109 @@ TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
   ASSERT_EQ(2U, restored.size());
   EXPECT_EQ("first", TextBytes(restored[0].second[1]));
   EXPECT_EQ("second", TextBytes(restored[1].second[1]));
+}
+
+TEST(CreateTableLowering, EmitsSchemaMutationAndNoOpPrograms) {
+  const CatalogSnapshotPtr catalog = EmptyCatalog();
+  const BytecodeProgram program = LowerMutationOrThrow(
+      "CREATE TABLE main.NewItems("
+      "id INTEGER PRIMARY KEY, "
+      "Name TEXT NOT NULL DEFAULT 'seed'"
+      ")",
+      catalog);
+  EXPECT_EQ(ProgramStatementKind::kCreateTable, program.statement_kind());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, program.transaction_access());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, program.rollback_mode());
+  EXPECT_FALSE(program.mutation_result().publishes_changes);
+  EXPECT_FALSE(program.mutation_result().publishes_last_insert_rowid);
+  EXPECT_EQ(8U, program.register_count());
+  ASSERT_EQ(1U, program.write_cursors().size());
+  const WriteCursorDescriptor& schema = program.write_cursor(WriteCursorId{0});
+  EXPECT_EQ(RootPageNumber{1}, schema.root_page);
+  ASSERT_EQ(5U, schema.columns.size());
+  EXPECT_EQ(TypeAffinity::kInteger, schema.columns[3].affinity);
+  EXPECT_FALSE(schema.rowid_alias.has_value());
+  EXPECT_EQ((std::vector{
+                InstructionKind::kEnsureDatabaseInitialized,
+                InstructionKind::kCreateTableRoot,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kOpenWrite,
+                InstructionKind::kResolveInsertRowId,
+                InstructionKind::kBuildTableRecord,
+                InstructionKind::kInsertTable,
+                InstructionKind::kCloseWrite,
+                InstructionKind::kIncrementSchemaCookie,
+                InstructionKind::kHalt,
+            }),
+            InstructionKinds(program));
+
+  const CatalogSnapshotPtr existing = MutationCatalog();
+  const BytecodeProgram no_op =
+      LowerMutationOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", existing);
+  EXPECT_EQ(ProgramStatementKind::kCreateTable, no_op.statement_kind());
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, no_op.rollback_mode());
+  EXPECT_EQ(0U, no_op.register_count());
+  EXPECT_TRUE(no_op.constants().empty());
+  EXPECT_TRUE(no_op.write_cursors().empty());
+  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(no_op));
+}
+
+TEST(CreateTableLowering, WritesLoadableCanonicalSchema) {
+  const CatalogSnapshotPtr catalog = EmptyCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  const BytecodeProgram program = LowerMutationOrThrow(
+      "CREATE TABLE main.NewItems("
+      "id INTEGER PRIMARY KEY, "
+      "Name TEXT NOT NULL DEFAULT 'seed'"
+      ")",
+      catalog);
+  CatalogSnapshotPtr candidate;
+  {
+    std::unique_ptr<Pager> active_pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, active_pager);
+    Pager* const pager_identity = active_pager.get();
+    TransactionCoordinator coordinator =
+        TakeValue(TransactionCoordinator::Open(std::move(active_pager)));
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 11}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(0U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    candidate = TakeValue(LoadCatalog(*pager_identity, CatalogLoadOptions{.generation = 12}));
+    RequireStatus(statement.Succeed());
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr durable =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 12}));
+  const auto expect_catalog = [&](const CatalogSnapshotPtr& loaded) {
+    EXPECT_EQ((CatalogVersion{.schema_cookie = 1, .generation = 12}), loaded->version());
+    const std::optional<TableId> table_id = loaded->FindTable("newitems");
+    ASSERT_TRUE(table_id.has_value());
+    const CatalogTable& table = loaded->table(TakeOptional(table_id, "missing created table"));
+    EXPECT_EQ(RootPageId{2}, table.root_page);
+    ASSERT_EQ(2U, table.columns.size());
+    EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, table.rowid_alias);
+    ASSERT_NE(nullptr, table.columns[1].missing_record_value);
+    EXPECT_EQ("seed", TextBytes(*table.columns[1].missing_record_value));
+    EXPECT_EQ("CREATE TABLE NewItems(id INTEGER PRIMARY KEY, Name TEXT NOT NULL DEFAULT 'seed')",
+              loaded->definition(table.definition).source().bytes());
+  };
+  expect_catalog(candidate);
+  expect_catalog(durable);
+  RequireStatus(pager->EndRead());
 }
 
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {

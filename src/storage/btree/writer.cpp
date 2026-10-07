@@ -251,7 +251,12 @@ class BtreeWriterCore final {
         static_cast<std::uint16_t>(next_geometry->usable_size().value() == 65536U
                                        ? 0U
                                        : next_geometry->usable_size().value()));
+    auto header = ParseDatabaseHeader(bytes);
+    if (!header.has_value()) {
+      return std::unexpected(std::move(header.error()));
+    }
 
+    pager_->current_header_ = *header;
     geometry_ = *next_geometry;
     record_options_.schema_format = static_cast<RecordSchemaFormat>(options.schema_format);
     return {};

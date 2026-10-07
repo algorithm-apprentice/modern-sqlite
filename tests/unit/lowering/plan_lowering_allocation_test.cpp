@@ -165,6 +165,26 @@ bool fail_allocations = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan CreateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound = BindStatement(
+      ParseTree("CREATE TABLE NewTable(id INTEGER PRIMARY KEY, Name TEXT DEFAULT 'seed')"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind CREATE TABLE lowering allocation fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan CREATE TABLE lowering allocation fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize CREATE TABLE lowering allocation fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -258,6 +278,22 @@ int main() try {
     }
     const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
     if (allocations != kExpectedUpdateAllocations) {
+      return 1;
+    }
+  }
+
+  const PhysicalMutationPlan create = CreateFixture(catalog);
+  constexpr std::size_t kExpectedCreateAllocations = 23U;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    const LowerPlanResult lowered = LowerPlan(create);
+    count_allocations = false;
+    if (!lowered.has_value()) {
+      return 1;
+    }
+    const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+    if (allocations != kExpectedCreateAllocations) {
       return 1;
     }
   }
