@@ -484,6 +484,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/coding.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/base/result.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/binder/bound_select.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/binder/bound_statement.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/bytecode/program.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/catalog/catalog_loader.hpp"

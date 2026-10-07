@@ -179,6 +179,11 @@ Add bound statement variants:
 - `BoundCreateTable`; and
 - typed transaction-control statements.
 
+The public contracts live in
+`include/modern_sqlite/binder/bound_statement.hpp`. `BindStatement()`
+returns one move-only `BoundStatement` variant while the existing
+`BindSelectStatement()` API remains available to the read-only pipeline.
+
 Binding resolves:
 
 - the target main-database table;
@@ -189,6 +194,18 @@ Binding resolves:
 - column affinity, declared type, nullability, and constant default;
 - the physical table root page; and
 - the schema cookie and catalog generation required at execution.
+
+Duplicate targets follow pinned SQLite rather than a newly invented
+rejection rule:
+
+- INSERT keeps the first value for a repeated ordinary stored column;
+- INSERT keeps the last value for repeated hidden-rowid or INTEGER PRIMARY
+  KEY aliases; and
+- UPDATE keeps the last assignment to any repeated target.
+
+All duplicate-source expressions still bind and retain their parameter slots.
+An explicit INSERT column list combined with `DEFAULT VALUES` therefore
+reports the same zero-values/column-count error as SQLite.
 
 Node 38 accepts only ordinary rowid tables with no stored secondary or
 automatic indexes. Mutation of a table with any index is rejected with

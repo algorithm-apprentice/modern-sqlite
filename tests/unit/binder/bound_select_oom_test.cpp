@@ -8,7 +8,7 @@
 #include <string_view>
 #include <utility>
 
-#include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 
@@ -106,55 +106,66 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main() try {
   using namespace modern_sqlite;
 
-  constexpr std::string_view kSql =
-      "SELECT Name COLLATE NOCASE, abs(?), coalesce(NULL,Name), "
-      "x'00112233445566778899AABBCCDDEEFF' AS payload "
-      "FROM Items WHERE Name=? AND id>0 LIMIT ?";
+  constexpr std::array kSql{
+      std::string_view{"SELECT Name COLLATE NOCASE, abs(?), coalesce(NULL,Name), "
+                       "x'00112233445566778899AABBCCDDEEFF' AS payload "
+                       "FROM Items WHERE Name=? AND id>0 LIMIT ?"},
+      std::string_view{"INSERT INTO Items(Name,id) VALUES(abs(?1),?2)"},
+      std::string_view{"UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Name=?2"},
+      std::string_view{"DELETE FROM Items WHERE id=?1"},
+      std::string_view{"CREATE TABLE NewItems(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x')"},
+  };
   const CatalogSnapshotPtr catalog = TestCatalog();
 
-  SyntaxTree baseline_tree = ParseTree(kSql);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const BindSelectResult baseline = BindSelectStatement(std::move(baseline_tree), catalog);
-  if (!baseline.has_value()) {
-    return 1;
-  }
-  const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
-  if (allocation_count == 0 || allocation_count > 512U) {
-    return 1;
-  }
-
-  const std::array<std::size_t, 5> failures{
-      0,
-      allocation_count / 4U,
-      allocation_count / 2U,
-      (allocation_count * 3U) / 4U,
-      allocation_count - 1U,
-  };
-  std::optional<std::size_t> previous_failure;
-  for (const std::size_t failure : failures) {
-    if (previous_failure == failure) {
-      continue;
-    }
-    previous_failure = failure;
-    SyntaxTree tree = ParseTree(kSql);
+  for (const std::string_view sql : kSql) {
+    SyntaxTree baseline_tree = ParseTree(sql);
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const BindSelectResult unexpected =
-          BindSelectStatement(std::move(tree), catalog);
-    } catch (const std::bad_alloc&) {
-      threw = true;
+    const BindStatementResult baseline = BindStatement(std::move(baseline_tree), catalog);
+    if (!baseline.has_value()) {
+      return 1;
     }
-    inject_failure = false;
-    if (!threw) {
+    const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
+    if (allocation_count == 0 || allocation_count > 1024U) {
+      return 1;
+    }
+
+    const std::array<std::size_t, 5> failures{
+        0,
+        allocation_count / 4U,
+        allocation_count / 2U,
+        (allocation_count * 3U) / 4U,
+        allocation_count - 1U,
+    };
+    std::optional<std::size_t> previous_failure;
+    for (const std::size_t failure : failures) {
+      if (previous_failure == failure) {
+        continue;
+      }
+      previous_failure = failure;
+      SyntaxTree tree = ParseTree(sql);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const BindStatementResult unexpected =
+            BindStatement(std::move(tree), catalog);
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return 1;
+      }
+    }
+
+    const BindStatementResult recovered = BindStatement(ParseTree(sql), catalog);
+    if (!recovered.has_value()) {
       return 1;
     }
   }
 
-  const BindSelectResult recovered = BindSelectStatement(ParseTree(kSql), catalog);
-  return recovered.has_value() ? 0 : 1;
+  return 0;
 } catch (...) {
   inject_failure = false;
   return 1;

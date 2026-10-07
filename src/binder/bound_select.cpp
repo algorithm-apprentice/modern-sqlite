@@ -1,5 +1,3 @@
-#include "modern_sqlite/binder/bound_select.hpp"
-
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -21,6 +19,7 @@
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/token_text.hpp"
 #include "modern_sqlite/base/bytes.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
@@ -130,6 +129,16 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
   const Token second = lexer.Next();
   return first.kind == expected && first.span.begin().value() == 0U &&
          first.span.length().value() == token.size() && second.kind == TokenKind::kEndOfInput;
+}
+
+[[nodiscard]] bool IsBareDefaultNameToken(std::string_view token) noexcept {
+  Lexer lexer{Utf8View{token}};
+  const Token first = lexer.Next();
+  const Token second = lexer.Next();
+  return (first.kind == TokenKind::kIdentifier || first.kind == TokenKind::kIndexed ||
+          first.kind == TokenKind::kJoinKeyword || IsKeyword(first.kind)) &&
+         first.span.begin().value() == 0U && first.span.length().value() == token.size() &&
+         second.kind == TokenKind::kEndOfInput;
 }
 
 [[nodiscard]] bool IsHexadecimalLiteral(std::string_view token) noexcept {
@@ -341,7 +350,7 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
 
 }  // namespace
 
-struct BoundSelect::Impl {
+struct BoundExpressionState {
   std::string source;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
@@ -351,41 +360,57 @@ struct BoundSelect::Impl {
   std::vector<BoundScalarFunction> functions;
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
+};
+
+struct BoundSelect::Impl final : BoundExpressionState {
   std::vector<BoundResultColumn> result_columns;
   std::optional<BoundExpressionId> where;
   std::optional<BoundLimit> limit;
 };
 
+struct BoundInsert::Impl final : BoundExpressionState {
+  BoundMutationTarget target;
+  std::vector<BoundInsertValue> values;
+  bool default_values = false;
+  bool explicit_columns = false;
+};
+
+struct BoundUpdate::Impl final : BoundExpressionState {
+  BoundMutationTarget target;
+  std::vector<BoundUpdateAssignment> assignments;
+  std::optional<BoundExpressionId> where;
+  bool changes_rowid = false;
+};
+
+struct BoundDelete::Impl final : BoundExpressionState {
+  BoundMutationTarget target;
+  std::optional<BoundExpressionId> where;
+};
+
+struct BoundCreateTable::Impl final {
+  std::string source;
+  CatalogSnapshotPtr catalog;
+  std::string table_name;
+  bool if_not_exists = false;
+  bool no_op = false;
+  std::string canonical_sql;
+  std::vector<BoundCreateColumn> columns;
+  std::optional<ColumnId> rowid_alias;
+};
+
 namespace binder_detail {
 
-class SelectBinder final {
+class StatementBinder final {
  public:
-  SelectBinder(SyntaxTree tree, CatalogSnapshotPtr catalog, BindEnvironment environment,
-               BindOptions options)
+  StatementBinder(SyntaxTree tree, CatalogSnapshotPtr catalog, BindEnvironment environment,
+                  BindOptions options)
       : tree_(std::move(tree)),
         catalog_(std::move(catalog)),
         environment_(environment),
         options_(options),
         impl_(std::make_unique<BoundSelect::Impl>()) {}
 
-  [[nodiscard]] BindSelectResult Run() {
-    if (catalog_ == nullptr) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInvalidInput, {}, "catalog snapshot is null"));
-    }
-    if (!LimitsAreRepresentable()) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInvalidInput, {}, "binder limit exceeds bound ID range"));
-    }
-    if (FindRegisteredCollation("BINARY") == nullptr) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInvalidInput, {}, "BINARY collation is not registered"));
-    }
-    if (std::ranges::any_of(environment_.collations(),
-                            [](const Collation* collation) { return collation == nullptr; })) {
-      return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
-                                         "collation registry contains a null descriptor"));
-    }
+  [[nodiscard]] BindSelectResult RunSelect() {
     if (!std::holds_alternative<SelectStatement>(tree_.statement())) {
       return std::unexpected(
           BinderError(BindErrorCode::kInvalidInput, {}, "syntax tree is not a SELECT statement"));
@@ -400,14 +425,9 @@ class SelectBinder final {
                                          "SELECT DISTINCT is not supported"));
     }
 
-    impl_->source.assign(tree_.source().bytes());
-    impl_->catalog = catalog_;
-    impl_->registration_generation = environment_.registration_generation();
-    parameter_bindings_.resize(tree_.expressions().size());
-
-    BindExpected<void> parameters = AssignParameters();
-    if (!parameters.has_value()) {
-      return std::unexpected(std::move(parameters.error()));
+    BindExpected<void> initialized = InitializeCommon();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
     }
     BindExpected<void> source = BindSource(select);
     if (!source.has_value()) {
@@ -445,7 +465,697 @@ class SelectBinder final {
     return BoundSelect(std::move(impl_));
   }
 
+  [[nodiscard]] BindStatementResult RunStatement() {
+    if (std::holds_alternative<SelectStatement>(tree_.statement())) {
+      BindSelectResult select = RunSelect();
+      if (!select.has_value()) {
+        return std::unexpected(std::move(select.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundSelect>, std::move(*select)};
+    }
+    if (std::holds_alternative<InsertStatement>(tree_.statement())) {
+      BindExpected<BoundInsert> insert = RunInsert();
+      if (!insert.has_value()) {
+        return std::unexpected(std::move(insert.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundInsert>, std::move(*insert)};
+    }
+    if (std::holds_alternative<UpdateStatement>(tree_.statement())) {
+      BindExpected<BoundUpdate> update = RunUpdate();
+      if (!update.has_value()) {
+        return std::unexpected(std::move(update.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundUpdate>, std::move(*update)};
+    }
+    if (std::holds_alternative<DeleteStatement>(tree_.statement())) {
+      BindExpected<BoundDelete> delete_statement = RunDelete();
+      if (!delete_statement.has_value()) {
+        return std::unexpected(std::move(delete_statement.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundDelete>, std::move(*delete_statement)};
+    }
+    if (std::holds_alternative<CreateTableStatement>(tree_.statement())) {
+      BindExpected<BoundCreateTable> create = RunCreateTable();
+      if (!create.has_value()) {
+        return std::unexpected(std::move(create.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundCreateTable>, std::move(*create)};
+    }
+    BindExpected<void> environment = ValidateEnvironment();
+    if (!environment.has_value()) {
+      return std::unexpected(std::move(environment.error()));
+    }
+    if (const auto* begin = std::get_if<BeginTransactionStatement>(&tree_.statement());
+        begin != nullptr) {
+      return BoundStatement{BoundBeginTransaction{.mode = begin->mode}};
+    }
+    if (const auto* commit = std::get_if<CommitTransactionStatement>(&tree_.statement());
+        commit != nullptr) {
+      return BoundStatement{BoundCommitTransaction{.syntax = commit->syntax}};
+    }
+    if (std::holds_alternative<RollbackTransactionStatement>(tree_.statement())) {
+      return BoundStatement{BoundRollbackTransaction{}};
+    }
+    if (const auto* savepoint = std::get_if<SavepointStatement>(&tree_.statement());
+        savepoint != nullptr) {
+      BindExpected<std::string> name = Dequote(savepoint->name);
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      return BoundStatement{BoundSavepoint{.name = std::move(*name)}};
+    }
+    if (const auto* release = std::get_if<ReleaseSavepointStatement>(&tree_.statement());
+        release != nullptr) {
+      BindExpected<std::string> name = Dequote(release->name);
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      return BoundStatement{BoundReleaseSavepoint{.name = std::move(*name)}};
+    }
+    if (const auto* rollback = std::get_if<RollbackToSavepointStatement>(&tree_.statement());
+        rollback != nullptr) {
+      BindExpected<std::string> name = Dequote(rollback->name);
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      return BoundStatement{BoundRollbackToSavepoint{.name = std::move(*name)}};
+    }
+    const SourceSpan span =
+        std::visit([](const auto& statement) { return statement.span; }, tree_.statement());
+    return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                       "statement execution is not supported"));
+  }
+
+  [[nodiscard]] BindExpected<BoundInsert> RunInsert() {
+    const auto& insert = std::get<InsertStatement>(tree_.statement());
+    BindExpected<void> initialized = InitializeCommon();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(insert.table);
+    if (!target.has_value()) {
+      return std::unexpected(std::move(target.error()));
+    }
+
+    auto output = std::make_unique<BoundInsert::Impl>();
+    output->target = std::move(*target);
+    output->explicit_columns = !insert.columns.empty();
+    if (std::holds_alternative<InsertDefaultValuesSource>(insert.source)) {
+      if (!insert.columns.empty()) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kColumnCountMismatch, insert.span,
+                        "0 values for " + std::to_string(insert.columns.size()) + " columns"));
+      }
+      output->default_values = true;
+      MoveCommon(*output);
+      return BoundInsert(std::move(output));
+    }
+
+    const auto& values = std::get<InsertValuesSource>(insert.source).values;
+    const std::size_t target_count =
+        insert.columns.empty() ? output->target.columns.size() : insert.columns.size();
+    if (values.size() != target_count) {
+      return std::unexpected(BinderError(BindErrorCode::kColumnCountMismatch, insert.span,
+                                         std::to_string(values.size()) + " values for " +
+                                             std::to_string(target_count) + " columns"));
+    }
+
+    output->values.reserve(values.size());
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      BindExpected<BoundMutationField> field =
+          insert.columns.empty() ? BindExpected<BoundMutationField>{BoundMutationField{
+                                       .column = ColumnId{index},
+                                       .rowid = output->target.rowid_alias == ColumnId{index},
+                                   }}
+                                 : ResolveMutationField(output->target, insert.columns[index]);
+      if (!field.has_value()) {
+        return std::unexpected(std::move(field.error()));
+      }
+      BindExpected<BoundExpressionId> expression = BindExpression(
+          values[index], BindScope{.source_columns = false, .result_aliases = false});
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      output->values.push_back(BoundInsertValue{
+          .target = *field,
+          .expression = *expression,
+      });
+    }
+    MarkInsertEffectiveness(output->values);
+    MoveCommon(*output);
+    return BoundInsert(std::move(output));
+  }
+
+  [[nodiscard]] BindExpected<BoundUpdate> RunUpdate() {
+    const auto& update = std::get<UpdateStatement>(tree_.statement());
+    BindExpected<void> initialized = InitializeCommon();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(update.table);
+    if (!target.has_value()) {
+      return std::unexpected(std::move(target.error()));
+    }
+    PublishMutationSource(*target);
+
+    auto output = std::make_unique<BoundUpdate::Impl>();
+    output->target = std::move(*target);
+    output->assignments.reserve(update.assignments.size());
+    for (const UpdateAssignment& assignment : update.assignments) {
+      BindExpected<BoundMutationField> field =
+          ResolveMutationField(output->target, assignment.column);
+      if (!field.has_value()) {
+        return std::unexpected(std::move(field.error()));
+      }
+      BindExpected<BoundExpressionId> expression = BindExpression(
+          assignment.expression, BindScope{.source_columns = true, .result_aliases = false});
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      output->assignments.push_back(BoundUpdateAssignment{
+          .target = *field,
+          .expression = *expression,
+      });
+    }
+    MarkUpdateEffectiveness(output->assignments);
+    output->changes_rowid =
+        std::ranges::any_of(output->assignments, [](const BoundUpdateAssignment& assignment) {
+          return assignment.effective && assignment.target.rowid;
+        });
+    if (update.where.has_value()) {
+      BindExpected<BoundExpressionId> where =
+          BindExpression(*update.where, BindScope{.source_columns = true, .result_aliases = false});
+      if (!where.has_value()) {
+        return std::unexpected(std::move(where.error()));
+      }
+      output->where = *where;
+    }
+    MoveCommon(*output);
+    return BoundUpdate(std::move(output));
+  }
+
+  [[nodiscard]] BindExpected<BoundDelete> RunDelete() {
+    const auto& delete_statement = std::get<DeleteStatement>(tree_.statement());
+    BindExpected<void> initialized = InitializeCommon();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(delete_statement.table);
+    if (!target.has_value()) {
+      return std::unexpected(std::move(target.error()));
+    }
+    PublishMutationSource(*target);
+
+    auto output = std::make_unique<BoundDelete::Impl>();
+    output->target = std::move(*target);
+    if (delete_statement.where.has_value()) {
+      BindExpected<BoundExpressionId> where = BindExpression(
+          *delete_statement.where, BindScope{.source_columns = true, .result_aliases = false});
+      if (!where.has_value()) {
+        return std::unexpected(std::move(where.error()));
+      }
+      output->where = *where;
+    }
+    MoveCommon(*output);
+    return BoundDelete(std::move(output));
+  }
+
+  [[nodiscard]] BindExpected<BoundCreateTable> RunCreateTable() {
+    const auto& table = std::get<CreateTableStatement>(tree_.statement());
+    BindExpected<void> initialized = InitializeCommon();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    BindExpected<DecodedNameParts> parts = NameParts(table.name);
+    if (!parts.has_value()) {
+      return std::unexpected(std::move(parts.error()));
+    }
+    if (parts->empty() || parts->size() > 2U ||
+        (parts->size() == 2U && !NamesEqual(parts->front(), catalog_->schema_name()))) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, table.name.span,
+                                         "only the main schema is writable"));
+    }
+    const std::string_view table_name = parts->back();
+    if (HasSqlitePrefix(table_name)) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kObjectNameReserved, table.name.span,
+                      "object name reserved for internal use: " + std::string{table_name}));
+    }
+    if (catalog_->FindIndex(table_name).has_value()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kTableAlreadyExists, table.name.span,
+                      "there is already an index named " + std::string{table_name}));
+    }
+
+    auto output = std::make_unique<BoundCreateTable::Impl>();
+    output->source.assign(tree_.source().bytes());
+    output->catalog = catalog_;
+    output->table_name = std::string{table_name};
+    output->if_not_exists = table.if_not_exists;
+    if (catalog_->FindTable(table_name).has_value()) {
+      if (!table.if_not_exists) {
+        return std::unexpected(BinderError(BindErrorCode::kTableAlreadyExists, table.name.span,
+                                           "table " + std::string{table_name} + " already exists"));
+      }
+      output->no_op = true;
+      return BoundCreateTable(std::move(output));
+    }
+
+    if (table.temporary || table.without_rowid || table.strict || !table.constraints.empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, table.span,
+                                         "CREATE TABLE shape is not supported"));
+    }
+
+    const std::size_t retained_begin = table.name.parts.back().begin().value();
+    const std::size_t retained_end = table.span.end().value();
+    output->canonical_sql = "CREATE TABLE ";
+    output->canonical_sql.append(
+        tree_.source().bytes().substr(retained_begin, retained_end - retained_begin));
+    output->columns.reserve(table.columns.size());
+
+    std::vector<std::string> column_names;
+    column_names.reserve(table.columns.size());
+    std::optional<ColumnId> rowid_alias;
+    for (std::size_t index = 0; index < table.columns.size(); ++index) {
+      const ColumnDefinition& column = table.columns[index];
+      BindExpected<std::string> column_name = Dequote(column.name);
+      if (!column_name.has_value()) {
+        return std::unexpected(std::move(column_name.error()));
+      }
+      if (std::ranges::any_of(column_names, [&column_name](const std::string& existing) {
+            return NamesEqual(existing, *column_name);
+          })) {
+        return std::unexpected(BinderError(BindErrorCode::kDuplicateColumn, column.name,
+                                           "duplicate column name: " + *column_name));
+      }
+      column_names.push_back(*column_name);
+
+      std::optional<std::string> declared_type;
+      if (column.type_name.has_value()) {
+        BindExpected<std::string> decoded_type = Dequote(*column.type_name);
+        if (!decoded_type.has_value()) {
+          return std::unexpected(std::move(decoded_type.error()));
+        }
+        declared_type = std::move(*decoded_type);
+      }
+      const TypeAffinity affinity = DetermineTypeAffinity(
+          declared_type.has_value() ? std::optional<std::string_view>{*declared_type}
+                                    : std::nullopt);
+      bool not_null = false;
+      bool primary_key = false;
+      std::shared_ptr<const SqlValue> default_value;
+      for (const ColumnConstraint& constraint : column.constraints) {
+        if (constraint.name.has_value()) {
+          return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
+                                             "named constraints are not supported"));
+        }
+        if (const auto* null_value = std::get_if<NullColumnConstraint>(&constraint.payload);
+            null_value != nullptr) {
+          if (!IsDefaultAbort(null_value->conflict)) {
+            return std::unexpected(UnsupportedConflict(constraint.span));
+          }
+          continue;
+        }
+        if (const auto* not_null_constraint =
+                std::get_if<NotNullColumnConstraint>(&constraint.payload);
+            not_null_constraint != nullptr) {
+          if (!IsDefaultAbort(not_null_constraint->conflict)) {
+            return std::unexpected(UnsupportedConflict(constraint.span));
+          }
+          not_null = true;
+          continue;
+        }
+        if (const auto* key = std::get_if<PrimaryKeyColumnConstraint>(&constraint.payload);
+            key != nullptr) {
+          if (primary_key || rowid_alias.has_value() || key->order == SortOrder::kDescending ||
+              !IsDefaultAbort(key->conflict) || key->autoincrement || !declared_type.has_value() ||
+              !NamesEqual(*declared_type, "INTEGER")) {
+            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
+                                               "only one INTEGER PRIMARY KEY column is supported"));
+          }
+          primary_key = true;
+          rowid_alias = ColumnId{index};
+          continue;
+        }
+        if (const auto* default_constraint =
+                std::get_if<DefaultColumnConstraint>(&constraint.payload);
+            default_constraint != nullptr) {
+          if (default_value != nullptr) {
+            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
+                                               "multiple DEFAULT clauses are not supported"));
+          }
+          BindExpected<std::shared_ptr<const SqlValue>> materialized =
+              MaterializeConstantDefault(default_constraint->expression, affinity);
+          if (!materialized.has_value()) {
+            return std::unexpected(std::move(materialized.error()));
+          }
+          default_value = std::move(*materialized);
+          continue;
+        }
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
+                                           "column constraint is not supported"));
+      }
+
+      output->columns.push_back(BoundCreateColumn{
+          .column = ColumnId{index},
+          .name = std::move(*column_name),
+          .declared_type = std::move(declared_type),
+          .affinity = affinity,
+          .not_null = not_null,
+          .default_value = std::move(default_value),
+          .rowid_alias = primary_key,
+      });
+    }
+    output->rowid_alias = rowid_alias;
+    return BoundCreateTable(std::move(output));
+  }
+
  private:
+  [[nodiscard]] BindExpected<void> ValidateEnvironment() const {
+    if (catalog_ == nullptr) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInvalidInput, {}, "catalog snapshot is null"));
+    }
+    if (!LimitsAreRepresentable()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInvalidInput, {}, "binder limit exceeds bound ID range"));
+    }
+    if (FindRegisteredCollation("BINARY") == nullptr) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInvalidInput, {}, "BINARY collation is not registered"));
+    }
+    if (std::ranges::any_of(environment_.collations(),
+                            [](const Collation* collation) { return collation == nullptr; })) {
+      return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
+                                         "collation registry contains a null descriptor"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> InitializeCommon() {
+    BindExpected<void> environment = ValidateEnvironment();
+    if (!environment.has_value()) {
+      return environment;
+    }
+    impl_->source.assign(tree_.source().bytes());
+    impl_->catalog = catalog_;
+    impl_->registration_generation = environment_.registration_generation();
+    parameter_bindings_.resize(tree_.expressions().size());
+    return AssignParameters();
+  }
+
+  template <typename Output>
+  void MoveCommon(Output& output) {
+    static_cast<BoundExpressionState&>(output) =
+        std::move(static_cast<BoundExpressionState&>(*impl_));
+  }
+
+  [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name) {
+    BindExpected<DecodedNameParts> parts = NameParts(name);
+    if (!parts.has_value()) {
+      return std::unexpected(std::move(parts.error()));
+    }
+    if (parts->empty() || parts->size() > 2U ||
+        (parts->size() == 2U && !NamesEqual(parts->front(), catalog_->schema_name()))) {
+      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, name.span,
+                                         "no such table: " + std::string{SpanText(name.span)}));
+    }
+    const std::string_view requested_name = parts->back();
+    if (IsSchemaTableName(requested_name)) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
+                                         "sqlite_schema mutation is not supported"));
+    }
+    const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
+    if (!table_id.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, name.span,
+                                         "no such table: " + std::string{requested_name}));
+    }
+    const CatalogTable& table = catalog_->table(*table_id);
+    if (!catalog_->table_indexes(*table_id).empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
+                                         "table mutation with indexes is not supported"));
+    }
+    if (table.without_rowid || table.strict || table.autoincrement ||
+        !table.check_constraints.empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
+                                         "table shape is not supported for mutation"));
+    }
+    if (table.rowid_primary_key_conflict != ConflictAction::kDefault &&
+        table.rowid_primary_key_conflict != ConflictAction::kAbort) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
+                                         "rowid conflict action is not supported"));
+    }
+
+    BoundMutationTarget target{
+        .table = *table_id,
+        .root_page = table.root_page,
+        .span = name.span,
+        .rowid_alias = table.rowid_alias,
+    };
+    target.columns.reserve(table.columns.size());
+    for (std::size_t index = 0; index < table.columns.size(); ++index) {
+      const CatalogColumn& column = table.columns[index];
+      if (column.effective_not_null_conflict.has_value() &&
+          *column.effective_not_null_conflict != ConflictAction::kDefault &&
+          *column.effective_not_null_conflict != ConflictAction::kAbort) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
+                                           "NOT NULL conflict action is not supported"));
+      }
+      if (column.default_expression.has_value() && column.missing_record_value == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
+                                           "non-constant column defaults are not supported"));
+      }
+      target.columns.push_back(BoundMutationColumn{
+          .column = ColumnId{index},
+          .name = column.name,
+          .declared_type = column.declared_type.has_value()
+                               ? std::optional<std::string_view>{*column.declared_type}
+                               : std::nullopt,
+          .affinity = column.affinity,
+          .not_null = column.effective_not_null_conflict.has_value(),
+          .default_value = column.missing_record_value,
+          .rowid_alias = table.rowid_alias == ColumnId{index},
+      });
+    }
+    return target;
+  }
+
+  void PublishMutationSource(const BoundMutationTarget& target) {
+    const CatalogTable& table = catalog_->table(target.table);
+    source_state_ = SourceState{
+        .name = table.name,
+        .alias = std::nullopt,
+        .table = target.table,
+        .schema_table = false,
+    };
+    impl_->table_source = BoundTableSource{
+        .kind = BoundSourceKind::kCatalogTable,
+        .table = target.table,
+        .span = target.span,
+    };
+    impl_->source_columns.reserve(target.columns.size());
+    for (const BoundMutationColumn& column : target.columns) {
+      impl_->source_columns.push_back(BoundSourceColumn{
+          .name = column.name,
+          .declared_type = column.declared_type,
+          .affinity = column.affinity,
+          .collation_name = catalog_->column(target.table, column.column).collation_name,
+          .catalog_column = column.column,
+      });
+    }
+  }
+
+  [[nodiscard]] BindExpected<BoundMutationField> ResolveMutationField(
+      const BoundMutationTarget& target, SourceSpan name_span) {
+    BindExpected<std::string> name = Dequote(name_span);
+    if (!name.has_value()) {
+      return std::unexpected(std::move(name.error()));
+    }
+    const std::optional<ColumnId> column = catalog_->FindColumn(target.table, *name);
+    if (column.has_value()) {
+      return BoundMutationField{
+          .column = *column,
+          .rowid = target.rowid_alias == *column,
+      };
+    }
+    if (IsRowIdName(*name)) {
+      return BoundMutationField{
+          .column = target.rowid_alias,
+          .rowid = true,
+      };
+    }
+    return std::unexpected(
+        BinderError(BindErrorCode::kNoSuchColumn, name_span, "no such column: " + *name));
+  }
+
+  [[nodiscard]] static bool SameMutationField(const BoundMutationField& left,
+                                              const BoundMutationField& right) noexcept {
+    if (left.rowid || right.rowid) {
+      return left.rowid && right.rowid;
+    }
+    return left.column == right.column;
+  }
+
+  static void MarkInsertEffectiveness(std::span<BoundInsertValue> values) noexcept {
+    for (std::size_t current = 0; current < values.size(); ++current) {
+      if (values[current].target.rowid) {
+        for (std::size_t prior = 0; prior < current; ++prior) {
+          if (SameMutationField(values[prior].target, values[current].target)) {
+            values[prior].effective = false;
+          }
+        }
+        continue;
+      }
+      for (std::size_t prior = 0; prior < current; ++prior) {
+        if (SameMutationField(values[prior].target, values[current].target)) {
+          values[current].effective = false;
+          break;
+        }
+      }
+    }
+  }
+
+  static void MarkUpdateEffectiveness(std::span<BoundUpdateAssignment> assignments) noexcept {
+    for (std::size_t current = 0; current < assignments.size(); ++current) {
+      for (std::size_t prior = 0; prior < current; ++prior) {
+        if (SameMutationField(assignments[prior].target, assignments[current].target)) {
+          assignments[prior].effective = false;
+        }
+      }
+    }
+  }
+
+  [[nodiscard]] static bool HasSqlitePrefix(std::string_view name) noexcept {
+    constexpr std::string_view prefix = "sqlite_";
+    if (name.size() < prefix.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+      const auto byte = static_cast<std::uint8_t>(static_cast<unsigned char>(name[index]));
+      if (SqliteToLower(byte) != static_cast<std::uint8_t>(prefix[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] static bool IsDefaultAbort(ConflictAction conflict) noexcept {
+    return conflict == ConflictAction::kDefault || conflict == ConflictAction::kAbort;
+  }
+
+  [[nodiscard]] static BindError UnsupportedConflict(SourceSpan span) {
+    return BinderError(BindErrorCode::kUnsupportedFeature, span,
+                       "non-default conflict actions are not supported");
+  }
+
+  [[nodiscard]] BindExpected<SqlValue> MaterializeSyntaxConstant(ExpressionId id) {
+    const Expression& expression = tree_.expression(id);
+    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+        parenthesized != nullptr) {
+      return MaterializeSyntaxConstant(parenthesized->inner);
+    }
+    if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+        literal != nullptr) {
+      const std::string_view token = SpanText(literal->token);
+      if (literal->kind == LiteralKind::kString && !IsQuotedToken(token)) {
+        if (!IsBareDefaultNameToken(token)) {
+          return std::unexpected(
+              BinderError(BindErrorCode::kInternalInvariant, literal->token,
+                          "literal token does not match its AST kind: " + std::string{token}));
+        }
+      } else {
+        BindExpected<void> validated = ValidateLiteralToken(*literal);
+        if (!validated.has_value()) {
+          return std::unexpected(std::move(validated.error()));
+        }
+      }
+      switch (literal->kind) {
+        case LiteralKind::kNull:
+          return SqlValue{};
+        case LiteralKind::kInteger:
+          return ParseIntegerLiteral(literal->token);
+        case LiteralKind::kReal:
+          return SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)));
+        case LiteralKind::kString: {
+          BindExpected<std::string> value = Dequote(literal->token);
+          if (!value.has_value()) {
+            return std::unexpected(std::move(value.error()));
+          }
+          return SqlValue::Text(std::move(*value));
+        }
+        case LiteralKind::kBlob: {
+          BindExpected<ByteBuffer> value = ParseBlobLiteral(literal->token);
+          if (!value.has_value()) {
+            return std::unexpected(std::move(value.error()));
+          }
+          return SqlValue::Blob(std::move(*value));
+        }
+        case LiteralKind::kTrue:
+          return SqlValue::Integer(1);
+        case LiteralKind::kFalse:
+          return SqlValue::Integer(0);
+        case LiteralKind::kCurrentDate:
+        case LiteralKind::kCurrentTime:
+        case LiteralKind::kCurrentTimestamp:
+          return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
+                                             "current-time defaults are not supported"));
+      }
+    }
+    if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
+        identifier != nullptr && identifier->name.parts.size() == 1U) {
+      BindExpected<std::string> name = Dequote(identifier->name.parts.front());
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      if (NamesEqual(*name, "true")) {
+        return SqlValue::Integer(1);
+      }
+      if (NamesEqual(*name, "false")) {
+        return SqlValue::Integer(0);
+      }
+    }
+    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+        unary != nullptr &&
+        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+      if (unary->op == UnaryOperator::kNegative) {
+        const Expression& operand_expression = tree_.expression(unary->operand);
+        const auto* integer = std::get_if<LiteralExpression>(&operand_expression.payload);
+        if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
+            IsSignedMinimumMagnitude(SpanText(integer->token))) {
+          return SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+        }
+      }
+      BindExpected<SqlValue> operand = MaterializeSyntaxConstant(unary->operand);
+      if (!operand.has_value()) {
+        return std::unexpected(std::move(operand.error()));
+      }
+      if (unary->op == UnaryOperator::kPositive) {
+        return std::move(*operand);
+      }
+      if (operand->type() == SqlValueType::kInteger) {
+        const std::int64_t value = operand->integer_value().value_or(0);
+        if (value == std::numeric_limits<std::int64_t>::min()) {
+          return SqlValue::Real(-static_cast<double>(value));
+        }
+        return SqlValue::Integer(-value);
+      }
+      if (operand->type() == SqlValueType::kReal) {
+        return SqlValue::Real(-operand->real_value().value_or(0.0));
+      }
+    }
+    return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
+                                       "default value must be a constant literal"));
+  }
+
+  [[nodiscard]] BindExpected<std::shared_ptr<const SqlValue>> MaterializeConstantDefault(
+      ExpressionId id, TypeAffinity affinity) {
+    BindExpected<SqlValue> value = MaterializeSyntaxConstant(id);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    return std::make_shared<const SqlValue>(ApplyAffinity(std::move(*value), affinity));
+  }
+
   [[nodiscard]] bool LimitsAreRepresentable() const noexcept {
     constexpr std::size_t maximum = std::numeric_limits<std::uint32_t>::max();
     return options_.maximum_parameters <= maximum && options_.maximum_result_columns <= maximum &&
@@ -1939,6 +2649,16 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "function_argument_limit_exceeded";
     case BindErrorCode::kResultColumnLimitExceeded:
       return "result_column_limit_exceeded";
+    case BindErrorCode::kColumnCountMismatch:
+      return "column_count_mismatch";
+    case BindErrorCode::kDuplicateColumn:
+      return "duplicate_column";
+    case BindErrorCode::kTableAlreadyExists:
+      return "table_already_exists";
+    case BindErrorCode::kObjectNameReserved:
+      return "object_name_reserved";
+    case BindErrorCode::kIndexedTableUnsupported:
+      return "indexed_table_unsupported";
     case BindErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
@@ -1953,6 +2673,8 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kFunctionArgumentLimitExceeded:
     case BindErrorCode::kResultColumnLimitExceeded:
       return ErrorCode::kTooLarge;
+    case BindErrorCode::kIndexedTableUnsupported:
+      return ErrorCode::kProtocol;
     case BindErrorCode::kInternalInvariant:
       return ErrorCode::kInternal;
     case BindErrorCode::kUnsupportedFeature:
@@ -1965,6 +2687,10 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kNoSuchCollation:
     case BindErrorCode::kInvalidLiteral:
     case BindErrorCode::kInvalidVariableNumber:
+    case BindErrorCode::kColumnCountMismatch:
+    case BindErrorCode::kDuplicateColumn:
+    case BindErrorCode::kTableAlreadyExists:
+    case BindErrorCode::kObjectNameReserved:
       return ErrorCode::kGeneric;
   }
   return ErrorCode::kInternal;
@@ -2049,8 +2775,259 @@ const BoundLimit* BoundSelect::limit() const noexcept {
 
 BindSelectResult BindSelectStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,
                                      BindEnvironment environment, BindOptions options) {
-  return binder_detail::SelectBinder(std::move(tree), std::move(catalog), environment, options)
-      .Run();
+  return binder_detail::StatementBinder(std::move(tree), std::move(catalog), environment, options)
+      .RunSelect();
+}
+
+BoundInsert::BoundInsert(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundInsert::BoundInsert(BoundInsert&&) noexcept = default;
+
+BoundInsert& BoundInsert::operator=(BoundInsert&&) noexcept = default;
+
+BoundInsert::~BoundInsert() = default;
+
+bool BoundInsert::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundInsert::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundInsert::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundInsert::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+std::uint64_t BoundInsert::registration_generation() const noexcept {
+  return impl_ != nullptr ? impl_->registration_generation : 0;
+}
+
+const BoundMutationTarget& BoundInsert::target() const noexcept { return impl_->target; }
+
+std::span<const BoundParameter> BoundInsert::parameters() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+                          : std::span<const BoundParameter>{};
+}
+
+std::span<const BoundCollation> BoundInsert::collations() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+                          : std::span<const BoundCollation>{};
+}
+
+std::span<const BoundScalarFunction> BoundInsert::functions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+                          : std::span<const BoundScalarFunction>{};
+}
+
+std::span<const BoundExpression> BoundInsert::expressions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+                          : std::span<const BoundExpression>{};
+}
+
+const BoundExpression& BoundInsert::expression(BoundExpressionId id) const noexcept {
+  return impl_->expressions[id.value()];
+}
+
+std::span<const BoundInsertValue> BoundInsert::values() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundInsertValue>{impl_->values}
+                          : std::span<const BoundInsertValue>{};
+}
+
+bool BoundInsert::default_values() const noexcept {
+  return impl_ != nullptr && impl_->default_values;
+}
+
+bool BoundInsert::explicit_columns() const noexcept {
+  return impl_ != nullptr && impl_->explicit_columns;
+}
+
+BoundUpdate::BoundUpdate(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundUpdate::BoundUpdate(BoundUpdate&&) noexcept = default;
+
+BoundUpdate& BoundUpdate::operator=(BoundUpdate&&) noexcept = default;
+
+BoundUpdate::~BoundUpdate() = default;
+
+bool BoundUpdate::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundUpdate::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundUpdate::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundUpdate::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+std::uint64_t BoundUpdate::registration_generation() const noexcept {
+  return impl_ != nullptr ? impl_->registration_generation : 0;
+}
+
+const BoundMutationTarget& BoundUpdate::target() const noexcept { return impl_->target; }
+
+std::span<const BoundSourceColumn> BoundUpdate::source_columns() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundSourceColumn>{impl_->source_columns}
+                          : std::span<const BoundSourceColumn>{};
+}
+
+std::span<const BoundParameter> BoundUpdate::parameters() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+                          : std::span<const BoundParameter>{};
+}
+
+std::span<const BoundCollation> BoundUpdate::collations() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+                          : std::span<const BoundCollation>{};
+}
+
+std::span<const BoundScalarFunction> BoundUpdate::functions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+                          : std::span<const BoundScalarFunction>{};
+}
+
+std::span<const BoundExpression> BoundUpdate::expressions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+                          : std::span<const BoundExpression>{};
+}
+
+const BoundExpression& BoundUpdate::expression(BoundExpressionId id) const noexcept {
+  return impl_->expressions[id.value()];
+}
+
+std::span<const BoundUpdateAssignment> BoundUpdate::assignments() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundUpdateAssignment>{impl_->assignments}
+                          : std::span<const BoundUpdateAssignment>{};
+}
+
+std::optional<BoundExpressionId> BoundUpdate::where_expression() const noexcept {
+  return impl_ != nullptr ? impl_->where : std::nullopt;
+}
+
+bool BoundUpdate::changes_rowid() const noexcept {
+  return impl_ != nullptr && impl_->changes_rowid;
+}
+
+BoundDelete::BoundDelete(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundDelete::BoundDelete(BoundDelete&&) noexcept = default;
+
+BoundDelete& BoundDelete::operator=(BoundDelete&&) noexcept = default;
+
+BoundDelete::~BoundDelete() = default;
+
+bool BoundDelete::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundDelete::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundDelete::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundDelete::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+std::uint64_t BoundDelete::registration_generation() const noexcept {
+  return impl_ != nullptr ? impl_->registration_generation : 0;
+}
+
+const BoundMutationTarget& BoundDelete::target() const noexcept { return impl_->target; }
+
+std::span<const BoundSourceColumn> BoundDelete::source_columns() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundSourceColumn>{impl_->source_columns}
+                          : std::span<const BoundSourceColumn>{};
+}
+
+std::span<const BoundParameter> BoundDelete::parameters() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+                          : std::span<const BoundParameter>{};
+}
+
+std::span<const BoundCollation> BoundDelete::collations() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+                          : std::span<const BoundCollation>{};
+}
+
+std::span<const BoundScalarFunction> BoundDelete::functions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+                          : std::span<const BoundScalarFunction>{};
+}
+
+std::span<const BoundExpression> BoundDelete::expressions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+                          : std::span<const BoundExpression>{};
+}
+
+const BoundExpression& BoundDelete::expression(BoundExpressionId id) const noexcept {
+  return impl_->expressions[id.value()];
+}
+
+std::optional<BoundExpressionId> BoundDelete::where_expression() const noexcept {
+  return impl_ != nullptr ? impl_->where : std::nullopt;
+}
+
+BoundCreateTable::BoundCreateTable(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundCreateTable::BoundCreateTable(BoundCreateTable&&) noexcept = default;
+
+BoundCreateTable& BoundCreateTable::operator=(BoundCreateTable&&) noexcept = default;
+
+BoundCreateTable::~BoundCreateTable() = default;
+
+bool BoundCreateTable::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundCreateTable::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundCreateTable::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundCreateTable::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+std::string_view BoundCreateTable::table_name() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->table_name} : std::string_view{};
+}
+
+bool BoundCreateTable::if_not_exists() const noexcept {
+  return impl_ != nullptr && impl_->if_not_exists;
+}
+
+bool BoundCreateTable::no_op() const noexcept { return impl_ != nullptr && impl_->no_op; }
+
+std::string_view BoundCreateTable::canonical_sql() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->canonical_sql} : std::string_view{};
+}
+
+std::span<const BoundCreateColumn> BoundCreateTable::columns() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundCreateColumn>{impl_->columns}
+                          : std::span<const BoundCreateColumn>{};
+}
+
+std::optional<ColumnId> BoundCreateTable::rowid_alias() const noexcept {
+  return impl_ != nullptr ? impl_->rowid_alias : std::nullopt;
+}
+
+BindStatementResult BindStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,
+                                  BindEnvironment environment, BindOptions options) {
+  return binder_detail::StatementBinder(std::move(tree), std::move(catalog), environment, options)
+      .RunStatement();
 }
 
 }  // namespace modern_sqlite
