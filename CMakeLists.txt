@@ -646,6 +646,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/model/read_session_model_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/model/write_session_model_test.cpp"
   "${PROJECT_SOURCE_DIR}/tools/modern_sqlite_inspect.cpp"
   "${PROJECT_SOURCE_DIR}/tools/modern_sqlite_read_trace.cpp"
 )

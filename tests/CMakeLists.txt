@@ -161,6 +161,26 @@ gtest_discover_tests(
 )
 
 add_executable(
+  modern_sqlite_write_session_model_test
+  model/write_session_model_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_write_session_model_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_write_session_model_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_session_model_test)
+gtest_discover_tests(
+  modern_sqlite_write_session_model_test
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS model
+    TIMEOUT 20
+)
+
+add_executable(
   modern_sqlite_read_fuzz_smoke_test
   fuzz/database_image_fuzz.cpp
   fuzz/read_fuzz_smoke_test.cpp
