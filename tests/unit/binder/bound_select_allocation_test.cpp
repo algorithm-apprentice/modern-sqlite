@@ -10,7 +10,7 @@
 #include <utility>
 #include <variant>
 
-#include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 
@@ -108,6 +108,20 @@ bool fail_allocations = false;
   return allocation_count.load(std::memory_order_relaxed);
 }
 
+[[nodiscard]] std::size_t BindStatementAllocationCount(
+    std::string_view sql, const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::SyntaxTree tree = ParseTree(sql);
+  allocation_count.store(0, std::memory_order_relaxed);
+  count_allocations = true;
+  const modern_sqlite::BindStatementResult bound =
+      modern_sqlite::BindStatement(std::move(tree), catalog);
+  count_allocations = false;
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind statement allocation fixture"};
+  }
+  return allocation_count.load(std::memory_order_relaxed);
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -147,6 +161,14 @@ int main() try {
   if (repeated_name_allocations > one_name_allocations + 16U) {
     return 1;
   }
+  const std::size_t update_allocations = BindStatementAllocationCount(
+      "UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Score>?2", catalog);
+  const std::size_t create_allocations = BindStatementAllocationCount(
+      "CREATE TABLE NewItems(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x')", catalog);
+  if (update_allocations == 0 || update_allocations > 256U || create_allocations == 0 ||
+      create_allocations > 256U) {
+    return 1;
+  }
 
   std::optional<std::size_t> expected_allocations;
   std::unique_ptr<BoundSelect> published;
@@ -176,6 +198,13 @@ int main() try {
     return 1;
   }
   const BoundSelect& select = *published;
+  BindStatementResult update_result =
+      BindStatement(ParseTree("UPDATE Items SET Name=?1, id=id+1 WHERE Score>?2"), catalog);
+  if (!update_result.has_value() || !std::holds_alternative<BoundUpdate>(*update_result)) {
+    return 1;
+  }
+  BoundStatement update_statement = std::move(*update_result);
+  const BoundUpdate& update = std::get<BoundUpdate>(update_statement);
 
   std::uint64_t checksum = 0;
   fail_allocations = true;
@@ -190,6 +219,12 @@ int main() try {
     checksum += BoundExpressionKindName(BoundExpressionKindOf(expression)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, expression.payload);
   }
+  checksum += update.source().size_bytes();
+  checksum += update.target().columns.size();
+  checksum += update.assignments().size();
+  checksum += update.parameters().size();
+  checksum += update.expressions().size();
+  checksum += update.where_expression().has_value() ? 1U : 0U;
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

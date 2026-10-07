@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
@@ -29,6 +30,16 @@ static_assert(!std::is_copy_constructible_v<BoundSelect>);
 static_assert(!std::is_copy_assignable_v<BoundSelect>);
 static_assert(std::is_nothrow_move_constructible_v<BoundSelect>);
 static_assert(std::is_nothrow_move_assignable_v<BoundSelect>);
+static_assert(!std::is_copy_constructible_v<BoundInsert>);
+static_assert(!std::is_copy_assignable_v<BoundInsert>);
+static_assert(std::is_nothrow_move_constructible_v<BoundInsert>);
+static_assert(std::is_nothrow_move_assignable_v<BoundInsert>);
+static_assert(!std::is_copy_constructible_v<BoundUpdate>);
+static_assert(!std::is_copy_constructible_v<BoundDelete>);
+static_assert(!std::is_copy_constructible_v<BoundCreateTable>);
+static_assert(!std::is_copy_constructible_v<BoundStatement>);
+static_assert(std::is_nothrow_move_constructible_v<BoundStatement>);
+static_assert(std::is_nothrow_move_assignable_v<BoundStatement>);
 
 const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core();
 
@@ -154,6 +165,175 @@ const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core()
   return *std::move(created);
 }
 
+[[nodiscard]] ExpressionId ColumnDefaultExpression(const SyntaxTree& tree,
+                                                   std::size_t column_index) {
+  const auto& table = std::get<CreateTableStatement>(tree.statement());
+  for (const ColumnConstraint& constraint : table.columns.at(column_index).constraints) {
+    if (const auto* default_value = std::get_if<DefaultColumnConstraint>(&constraint.payload);
+        default_value != nullptr) {
+      return default_value->expression;
+    }
+  }
+  throw std::runtime_error{"test column has no default expression"};
+}
+
+[[nodiscard]] CatalogSnapshotPtr MutationCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 23, .generation = 11},
+  };
+
+  SyntaxTree items = ParseTree(
+      "CREATE TABLE Items("
+      "id INTEGER PRIMARY KEY, "
+      "Name TEXT NOT NULL DEFAULT 'seed', "
+      "Score REAL"
+      ")");
+  const ExpressionId name_default = ColumnDefaultExpression(items, 1);
+  input.definitions.push_back(std::move(items));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE IndexedItems(id INTEGER PRIMARY KEY, Value TEXT)"));
+  input.definitions.push_back(ParseTree("CREATE TABLE wr(key TEXT PRIMARY KEY) WITHOUT ROWID"));
+  input.definitions.push_back(ParseTree("CREATE INDEX idx_items_value ON IndexedItems(Value)"));
+  input.definitions.push_back(ParseTree("CREATE TABLE Shadowed(rowid TEXT, Value TEXT)"));
+  SyntaxTree dynamic_default =
+      ParseTree("CREATE TABLE DynamicDefault(Value TEXT DEFAULT CURRENT_DATE)");
+  const ExpressionId dynamic_default_expression = ColumnDefaultExpression(dynamic_default, 0);
+  input.definitions.push_back(std::move(dynamic_default));
+
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Name",
+                  .declared_type = "TEXT",
+                  .not_null_conflict = ConflictAction::kDefault,
+                  .default_expression =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{0},
+                          .expression = name_default,
+                      },
+                  .missing_record_value = std::make_shared<const SqlValue>(SqlValue::Text("seed")),
+              },
+              CatalogColumnInput{
+                  .name = "Score",
+                  .declared_type = "REAL",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "IndexedItems",
+      .root_page = RootPageId{3},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "TEXT",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{2},
+      .name = "wr",
+      .root_page = RootPageId{4},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "key",
+                  .declared_type = "TEXT",
+                  .primary_key = true,
+              },
+          },
+      .without_rowid = true,
+  });
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{4},
+      .name = "Shadowed",
+      .root_page = RootPageId{6},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "rowid",
+                  .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "TEXT",
+              },
+          },
+  });
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{5},
+      .name = "DynamicDefault",
+      .root_page = RootPageId{7},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "TEXT",
+                  .default_expression =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{5},
+                          .expression = dynamic_default_expression,
+                      },
+              },
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{3},
+      .name = "idx_items_value",
+      .table = TableId{1},
+      .root_page = RootPageId{5},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(1),
+              CatalogIndexTerm{
+                  .target = RowIdIndexTerm{},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{2},
+      .name = "sqlite_autoindex_wr_1",
+      .table = TableId{2},
+      .root_page = RootPageId{4},
+      .origin = IndexOrigin::kPrimaryKey,
+      .unique = true,
+      .conflict_action = ConflictAction::kDefault,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(0),
+          },
+  });
+
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] BoundSelect BindOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
                                       BindEnvironment environment = BindEnvironment::Core(),
                                       BindOptions options = {}) {
@@ -162,6 +342,26 @@ const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core()
     throw std::runtime_error{bound.error().detail};
   }
   return std::move(*bound);
+}
+
+[[nodiscard]] BoundStatement BindStatementOrThrow(
+    std::string_view sql, const CatalogSnapshotPtr& catalog,
+    BindEnvironment environment = BindEnvironment::Core(), BindOptions options = {}) {
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment, options);
+  if (!bound.has_value()) {
+    throw std::runtime_error{bound.error().detail};
+  }
+  return std::move(*bound);
+}
+
+void ExpectStatementBindError(std::string_view sql, const CatalogSnapshotPtr& catalog,
+                              BindErrorCode code, ErrorCode base_code,
+                              std::string_view detail_fragment) {
+  const BindStatementResult bound = BindStatement(ParseTree(sql), catalog);
+  ASSERT_FALSE(bound.has_value()) << sql;
+  EXPECT_EQ(code, bound.error().code) << sql;
+  EXPECT_EQ(base_code, bound.error().base_error_code()) << sql;
+  EXPECT_NE(std::string_view::npos, bound.error().detail.find(detail_fragment)) << sql;
 }
 
 void ExpectBindError(std::string_view sql, const CatalogSnapshotPtr& catalog, BindErrorCode code,
@@ -206,11 +406,15 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
 
   EXPECT_EQ("no_such_table", BindErrorCodeName(BindErrorCode::kNoSuchTable));
   EXPECT_EQ("invalid_variable_number", BindErrorCodeName(BindErrorCode::kInvalidVariableNumber));
+  EXPECT_EQ("indexed_table_unsupported",
+            BindErrorCodeName(BindErrorCode::kIndexedTableUnsupported));
   EXPECT_EQ("unknown", BindErrorCodeName(static_cast<BindErrorCode>(255)));  // NOLINT
 
   EXPECT_EQ(ErrorCode::kGeneric, BindError{.code = BindErrorCode::kNoSuchColumn}.base_error_code());
   EXPECT_EQ(ErrorCode::kTooLarge,
             BindError{.code = BindErrorCode::kResultColumnLimitExceeded}.base_error_code());
+  EXPECT_EQ(ErrorCode::kProtocol,
+            BindError{.code = BindErrorCode::kIndexedTableUnsupported}.base_error_code());
   EXPECT_EQ(ErrorCode::kMisuse, BindError{.code = BindErrorCode::kInvalidInput}.base_error_code());
   EXPECT_EQ(0U, BindEnvironment::Core().registration_generation());
 }
@@ -306,6 +510,247 @@ TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
 
   ExpectBindError("SELECT sqlite_schema.* FROM sqlite_schema", catalog, BindErrorCode::kNoSuchTable,
                   "no such table: sqlite_schema");
+}
+
+TEST(StatementBinder, BindsInsertUpdateAndDeleteAgainstOneCatalogSnapshot) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  BoundStatement insert_statement =
+      BindStatementOrThrow("INSERT INTO main.Items(Name, id, name) VALUES(?1, ?2, ?3)", catalog);
+  const auto& insert = std::get<BoundInsert>(insert_statement);
+  EXPECT_EQ(catalog.get(), insert.catalog());
+  EXPECT_EQ((CatalogVersion{.schema_cookie = 23, .generation = 11}),
+            insert.required_catalog_version());
+  EXPECT_EQ(TableId{0}, insert.target().table);
+  EXPECT_EQ(RootPageId{2}, insert.target().root_page);
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, insert.target().rowid_alias);
+  ASSERT_EQ(3U, insert.target().columns.size());
+  EXPECT_EQ("Name", insert.target().columns[1].name);
+  ASSERT_NE(nullptr, insert.target().columns[1].default_value);
+  EXPECT_EQ("seed",
+            RequiredOptional(insert.target().columns[1].default_value->text_value()).bytes());
+  ASSERT_EQ(3U, insert.values().size());
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{1}}, insert.values()[0].target.column);
+  EXPECT_FALSE(insert.values()[0].target.rowid);
+  EXPECT_TRUE(insert.values()[0].effective);
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, insert.values()[1].target.column);
+  EXPECT_TRUE(insert.values()[1].target.rowid);
+  EXPECT_TRUE(insert.values()[1].effective);
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{1}}, insert.values()[2].target.column);
+  EXPECT_FALSE(insert.values()[2].effective);
+  EXPECT_EQ(3U, insert.parameters().size());
+  EXPECT_FALSE(insert.default_values());
+  EXPECT_TRUE(insert.explicit_columns());
+
+  BoundStatement update_statement =
+      BindStatementOrThrow("UPDATE Items SET Name=?1, name=?2, rowid=id+1 WHERE Score>?3", catalog);
+  const auto& update = std::get<BoundUpdate>(update_statement);
+  ASSERT_EQ(3U, update.assignments().size());
+  EXPECT_FALSE(update.assignments()[0].effective);
+  EXPECT_TRUE(update.assignments()[1].effective);
+  EXPECT_TRUE(update.assignments()[2].effective);
+  EXPECT_TRUE(update.assignments()[2].target.rowid);
+  EXPECT_TRUE(update.changes_rowid());
+  EXPECT_TRUE(update.where_expression().has_value());
+  EXPECT_EQ(3U, update.parameters().size());
+
+  BoundStatement delete_statement = BindStatementOrThrow("DELETE FROM Items WHERE id=?1", catalog);
+  const auto& delete_bound = std::get<BoundDelete>(delete_statement);
+  EXPECT_EQ(TableId{0}, delete_bound.target().table);
+  EXPECT_TRUE(delete_bound.where_expression().has_value());
+  EXPECT_EQ(1U, delete_bound.parameters().size());
+}
+
+TEST(StatementBinder, RejectsInvalidOrUnsafeMutationTargetsBeforePlanning) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  ExpectStatementBindError("INSERT INTO missing VALUES(1)", catalog, BindErrorCode::kNoSuchTable,
+                           ErrorCode::kGeneric, "no such table");
+  ExpectStatementBindError("INSERT INTO Items(missing) VALUES(1)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "no such column");
+  ExpectStatementBindError("INSERT INTO Items VALUES(1, 2)", catalog,
+                           BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric, "values for");
+  ExpectStatementBindError("INSERT INTO Items(Name) DEFAULT VALUES", catalog,
+                           BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric,
+                           "0 values for 1 columns");
+  ExpectStatementBindError("INSERT INTO Items(Name) VALUES(Name)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "no such column");
+  ExpectStatementBindError("UPDATE IndexedItems SET Value=no_such_function()", catalog,
+                           BindErrorCode::kIndexedTableUnsupported, ErrorCode::kProtocol,
+                           "indexes");
+  ExpectStatementBindError("DELETE FROM wr", catalog, BindErrorCode::kIndexedTableUnsupported,
+                           ErrorCode::kProtocol, "indexes");
+  ExpectStatementBindError("INSERT INTO DynamicDefault DEFAULT VALUES", catalog,
+                           BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
+                           "non-constant column defaults");
+}
+
+TEST(StatementBinder, PreservesPinnedDuplicateTargetAndDefaultValuesRules) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  BoundStatement insert_statement = BindStatementOrThrow(
+      "INSERT INTO Items(Name, name, rowid, id) VALUES(?1, ?2, ?3, ?4)", catalog);
+  const auto& insert = std::get<BoundInsert>(insert_statement);
+  ASSERT_EQ(4U, insert.values().size());
+  EXPECT_TRUE(insert.values()[0].effective);
+  EXPECT_FALSE(insert.values()[1].effective);
+  EXPECT_FALSE(insert.values()[2].effective);
+  EXPECT_TRUE(insert.values()[3].effective);
+  EXPECT_TRUE(insert.values()[2].target.rowid);
+  EXPECT_TRUE(insert.values()[3].target.rowid);
+  EXPECT_EQ(4U, insert.parameters().size());
+
+  BoundStatement update_statement =
+      BindStatementOrThrow("UPDATE Items SET Name=?1, name=?2, rowid=?3, id=?4", catalog);
+  const auto& update = std::get<BoundUpdate>(update_statement);
+  ASSERT_EQ(4U, update.assignments().size());
+  EXPECT_FALSE(update.assignments()[0].effective);
+  EXPECT_TRUE(update.assignments()[1].effective);
+  EXPECT_FALSE(update.assignments()[2].effective);
+  EXPECT_TRUE(update.assignments()[3].effective);
+  EXPECT_TRUE(update.changes_rowid());
+
+  BoundStatement defaults_statement =
+      BindStatementOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);
+  const auto& defaults = std::get<BoundInsert>(defaults_statement);
+  EXPECT_TRUE(defaults.default_values());
+  EXPECT_FALSE(defaults.explicit_columns());
+  EXPECT_TRUE(defaults.values().empty());
+
+  BoundStatement positional_statement =
+      BindStatementOrThrow("INSERT INTO Items VALUES(?1, ?2, ?3)", catalog);
+  const auto& positional = std::get<BoundInsert>(positional_statement);
+  ASSERT_EQ(3U, positional.values().size());
+  EXPECT_FALSE(positional.explicit_columns());
+  EXPECT_TRUE(positional.values()[0].target.rowid);
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{2}}, positional.values()[2].target.column);
+
+  BoundStatement shadowed_statement =
+      BindStatementOrThrow("UPDATE Shadowed SET rowid=?1, _rowid_=?2", catalog);
+  const auto& shadowed = std::get<BoundUpdate>(shadowed_statement);
+  ASSERT_EQ(2U, shadowed.assignments().size());
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, shadowed.assignments()[0].target.column);
+  EXPECT_FALSE(shadowed.assignments()[0].target.rowid);
+  EXPECT_FALSE(shadowed.assignments()[1].target.column.has_value());
+  EXPECT_TRUE(shadowed.assignments()[1].target.rowid);
+  EXPECT_TRUE(shadowed.assignments()[0].effective);
+  EXPECT_TRUE(shadowed.assignments()[1].effective);
+}
+
+TEST(StatementBinder, BindsCreateTableAndTransactionControlMetadata) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  BoundStatement create_statement = BindStatementOrThrow(
+      "CREATE TABLE IF NOT EXISTS main.\"New Table\" ("
+      "id INTEGER PRIMARY KEY, "
+      "name TEXT NOT NULL DEFAULT 'x', "
+      "score REAL"
+      ")",
+      catalog);
+  const auto& create = std::get<BoundCreateTable>(create_statement);
+  EXPECT_EQ("New Table", create.table_name());
+  EXPECT_TRUE(create.if_not_exists());
+  EXPECT_FALSE(create.no_op());
+  EXPECT_EQ(
+      "CREATE TABLE \"New Table\" (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'x', "
+      "score REAL)",
+      create.canonical_sql());
+  ASSERT_EQ(3U, create.columns().size());
+  EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, create.rowid_alias());
+  EXPECT_TRUE(create.columns()[1].not_null);
+  ASSERT_NE(nullptr, create.columns()[1].default_value);
+  EXPECT_EQ("x", RequiredOptional(create.columns()[1].default_value->text_value()).bytes());
+
+  BoundStatement no_op_statement =
+      BindStatementOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", catalog);
+  const auto& no_op = std::get<BoundCreateTable>(no_op_statement);
+  EXPECT_TRUE(no_op.no_op());
+
+  BoundStatement begin_statement = BindStatementOrThrow("BEGIN IMMEDIATE", catalog);
+  const auto& begin = std::get<BoundBeginTransaction>(begin_statement);
+  EXPECT_EQ(BeginTransactionMode::kImmediate, begin.mode);
+  BoundStatement savepoint_statement = BindStatementOrThrow("SAVEPOINT \"CaseName\"", catalog);
+  const auto& savepoint = std::get<BoundSavepoint>(savepoint_statement);
+  EXPECT_EQ("CaseName", savepoint.name);
+  EXPECT_TRUE(std::holds_alternative<BoundCommitTransaction>(
+      BindStatementOrThrow("END TRANSACTION", catalog)));
+  EXPECT_TRUE(std::holds_alternative<BoundRollbackToSavepoint>(
+      BindStatementOrThrow("ROLLBACK TO SAVEPOINT CaseName", catalog)));
+}
+
+TEST(StatementBinder, MaterializesSupportedCreateDefaultsWithColumnAffinity) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  BoundStatement statement = BindStatementOrThrow(
+      "CREATE TABLE Defaults("
+      "a TEXT DEFAULT word, "
+      "b INTEGER DEFAULT -2, "
+      "c BLOB DEFAULT X'0A', "
+      "d TEXT DEFAULT NULL, "
+      "e NUMERIC DEFAULT true"
+      ")",
+      catalog);
+  const auto& create = std::get<BoundCreateTable>(statement);
+  ASSERT_EQ(5U, create.columns().size());
+
+  ASSERT_NE(nullptr, create.columns()[0].default_value);
+  EXPECT_EQ("word", RequiredOptional(create.columns()[0].default_value->text_value()).bytes());
+  ASSERT_NE(nullptr, create.columns()[1].default_value);
+  EXPECT_EQ(-2, RequiredOptional(create.columns()[1].default_value->integer_value()));
+  ASSERT_NE(nullptr, create.columns()[2].default_value);
+  EXPECT_EQ(1U, RequiredOptional(create.columns()[2].default_value->blob_value()).size_bytes());
+  ASSERT_NE(nullptr, create.columns()[3].default_value);
+  EXPECT_EQ(SqlValueType::kNull, create.columns()[3].default_value->type());
+  ASSERT_NE(nullptr, create.columns()[4].default_value);
+  EXPECT_EQ(1, RequiredOptional(create.columns()[4].default_value->integer_value()));
+}
+
+TEST(StatementBinder, DispatchesSelectAndValidatesTransactionBindingInputs) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  EXPECT_TRUE(
+      std::holds_alternative<BoundSelect>(BindStatementOrThrow("SELECT Name FROM Items", catalog)));
+  EXPECT_TRUE(std::holds_alternative<BoundReleaseSavepoint>(
+      BindStatementOrThrow("RELEASE SAVEPOINT name", catalog)));
+
+  const BindStatementResult null_catalog = BindStatement(ParseTree("BEGIN"), CatalogSnapshotPtr{});
+  ASSERT_FALSE(null_catalog.has_value());
+  EXPECT_EQ(BindErrorCode::kInvalidInput, null_catalog.error().code);
+
+  const BindStatementResult create_index =
+      BindStatement(ParseTree("CREATE INDEX new_index ON Items(Name)"), catalog);
+  ASSERT_FALSE(create_index.has_value());
+  EXPECT_EQ(BindErrorCode::kUnsupportedFeature, create_index.error().code);
+}
+
+TEST(StatementBinder, RejectsUnsupportedCreateTableShapes) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  ExpectStatementBindError("CREATE TABLE sqlite_private(id)", catalog,
+                           BindErrorCode::kObjectNameReserved, ErrorCode::kGeneric,
+                           "reserved for internal use");
+  ExpectStatementBindError("CREATE TABLE idx_items_value(id)", catalog,
+                           BindErrorCode::kTableAlreadyExists, ErrorCode::kGeneric,
+                           "already an index");
+  ExpectStatementBindError("CREATE TABLE bad(A, a)", catalog, BindErrorCode::kDuplicateColumn,
+                           ErrorCode::kGeneric, "duplicate column");
+
+  for (const std::string_view sql : {
+           "CREATE TEMP TABLE temp_items(id)",
+           "CREATE TABLE bad(id TEXT PRIMARY KEY)",
+           "CREATE TABLE bad(id INTEGER PRIMARY KEY AUTOINCREMENT)",
+           "CREATE TABLE bad(value TEXT UNIQUE)",
+           "CREATE TABLE bad(value TEXT COLLATE NOCASE)",
+           "CREATE TABLE bad(value TEXT CHECK(value <> ''))",
+           "CREATE TABLE bad(value TEXT NOT NULL ON CONFLICT FAIL)",
+           "CREATE TABLE bad(value TEXT DEFAULT (1 + 2))",
+           "CREATE TABLE bad(a, UNIQUE(a))",
+           "CREATE TABLE bad(value TEXT) WITHOUT ROWID",
+           "CREATE TABLE bad(value TEXT) STRICT",
+       }) {
+    const BindStatementResult bound = BindStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(bound.has_value()) << sql;
+    EXPECT_EQ(BindErrorCode::kUnsupportedFeature, bound.error().code) << sql;
+  }
 }
 
 TEST(Binder, AppliesAliasPrecedenceAndPreservesPerReferenceEvaluation) {

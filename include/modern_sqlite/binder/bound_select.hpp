@@ -24,7 +24,7 @@ namespace modern_sqlite {
 class Collation;
 class FunctionRegistry;
 namespace binder_detail {
-class SelectBinder;
+class StatementBinder;
 }  // namespace binder_detail
 
 template <typename Tag>
@@ -253,6 +253,11 @@ enum class BindErrorCode : std::uint8_t {
   kParameterLimitExceeded,
   kFunctionArgumentLimitExceeded,
   kResultColumnLimitExceeded,
+  kColumnCountMismatch,
+  kDuplicateColumn,
+  kTableAlreadyExists,
+  kObjectNameReserved,
+  kIndexedTableUnsupported,
   kInternalInvariant,
 };
 
@@ -320,7 +325,7 @@ class BoundSelect final {
   [[nodiscard]] const BoundLimit* limit() const noexcept;
 
  private:
-  friend class binder_detail::SelectBinder;
+  friend class binder_detail::StatementBinder;
 
   struct Impl;
 
