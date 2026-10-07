@@ -56,6 +56,10 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
   return MakeError(ErrorCode::kNotFound, message);
 }
 
+[[nodiscard]] Error Busy(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kBusy, message);
+}
+
 [[nodiscard]] Error Internal(std::string_view message) noexcept {
   return MakeError(ErrorCode::kInternal, message);
 }
@@ -368,6 +372,28 @@ Status MutationPageOwner::Promote(std::size_t slot) {
   page.pin.emplace<WritePagePin>(std::move(*promoted));
   ++size_;
   return {};
+}
+
+Status MutationPageOwner::RequireSolePin(std::size_t slot) const {
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  if (slot >= pages_.size()) {
+    return std::unexpected(Misuse("mutation page slot is out of range"));
+  }
+  const OwnedPage& page = pages_[slot];
+  if (const auto* read = std::get_if<ReadPagePin>(&page.pin); read != nullptr) {
+    return read->sole()
+               ? Status{}
+               : Status{std::unexpected(Busy("B-tree mutation requires the sole page pin"))};
+  }
+  if (const auto* write = std::get_if<WritePagePin>(&page.pin); write != nullptr) {
+    return write->sole()
+               ? Status{}
+               : Status{std::unexpected(Busy("B-tree mutation requires the sole page pin"))};
+  }
+  return std::unexpected(Misuse("mutation page slot is empty"));
 }
 
 Status MutationPageOwner::PermutePageNumbers(std::span<const MutationPageRekey> pages) {
@@ -704,6 +730,27 @@ Status FreeBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry, PageN
   return {};
 }
 
+Result<PageNumber> CreateBtreeRoot(MutationPageOwner& owner, BtreePageGeometry geometry,
+                                   bool table) {
+  const std::uint64_t checkpoint = owner.operation_checkpoint();
+  const auto fail = [&owner, checkpoint](Error error) -> Result<PageNumber> {
+    owner.MarkRollbackRequiredAfter(error.code(), checkpoint);
+    return std::unexpected(std::move(error));
+  };
+  auto allocated = AllocateBtreePage(owner, geometry);
+  if (!allocated.has_value()) {
+    return fail(std::move(allocated.error()));
+  }
+  auto root =
+      MutableBtreePage::Initialize(owner, allocated->owner_slot, geometry,
+                                   table ? BtreePageType::kLeafTable : BtreePageType::kLeafIndex);
+  if (!root.has_value()) {
+    owner.Release(allocated->owner_slot);
+    return fail(std::move(root.error()));
+  }
+  return allocated->page_number;
+}
+
 Result<FormattedCell> FillTableLeafCell(MutationPageOwner& owner, BtreePageGeometry geometry,
                                         BtreeWriteWorkspace& workspace, std::int64_t rowid,
                                         ByteView payload) {
@@ -845,17 +892,22 @@ Status ClearCellOverflow(MutationPageOwner& owner, BtreePageGeometry geometry,
     if (owner.Find(current).has_value()) {
       return fail(Corruption("overflow page aliases another mutation page"));
     }
+    auto slot = owner.AcquireRead(current);
+    if (!slot.has_value()) {
+      return fail(std::move(slot.error()));
+    }
+    auto sole = owner.RequireSolePin(*slot);
+    if (!sole.has_value()) {
+      owner.Release(*slot);
+      return fail(std::move(sole.error()));
+    }
+    auto frame = owner.Frame(*slot);
+    if (!frame.has_value()) {
+      owner.Release(*slot);
+      return fail(std::move(frame.error()));
+    }
     std::optional<PageNumber> next;
     if (index + 1U < expected_pages) {
-      auto slot = owner.AcquireRead(current);
-      if (!slot.has_value()) {
-        return fail(std::move(slot.error()));
-      }
-      auto frame = owner.Frame(*slot);
-      if (!frame.has_value()) {
-        owner.Release(*slot);
-        return fail(std::move(frame.error()));
-      }
       auto overflow = OverflowPageView::Parse(frame->get().bytes(), geometry);
       if (!overflow.has_value()) {
         owner.Release(*slot);
@@ -870,17 +922,133 @@ Status ClearCellOverflow(MutationPageOwner& owner, BtreePageGeometry geometry,
 
     auto freed = FreeBtreePage(owner, geometry, current);
     if (!freed.has_value()) {
-      if (const auto slot = owner.Find(current); slot.has_value()) {
-        owner.Release(*slot);
-      }
+      owner.Release(*slot);
       return fail(std::move(freed.error()));
     }
-    if (const auto slot = owner.Find(current); slot.has_value()) {
-      owner.Release(*slot);
-    }
+    owner.Release(*slot);
     if (next.has_value()) {
       current = *next;
     }
+  }
+  return {};
+}
+
+namespace {
+
+[[nodiscard]] Result<std::uint64_t> ClearBtreePage(MutationPageOwner& owner,
+                                                   BtreePageGeometry geometry,
+                                                   PageNumber page_number, std::size_t depth,
+                                                   bool free_page) {
+  if (depth >= kMaximumBtreeDepth || page_number.value() == 0U ||
+      page_number.value() > owner.pager().page_count() || page_number == geometry.locking_page() ||
+      (free_page && page_number == PageNumber{1})) {
+    return std::unexpected(Corruption("cleared B-tree page or depth is invalid"));
+  }
+  const bool already_owned = owner.Find(page_number).has_value();
+  if (depth != 0U && already_owned) {
+    return std::unexpected(Corruption("cleared B-tree child aliases its ancestor path"));
+  }
+  auto slot = already_owned ? owner.Borrow(page_number) : owner.AcquireRead(page_number);
+  if (!slot.has_value()) {
+    return std::unexpected(std::move(slot.error()));
+  }
+  const TemporaryOwnedPage lease{owner, page_number, !already_owned};
+  auto sole = owner.RequireSolePin(*slot);
+  if (!sole.has_value()) {
+    return std::unexpected(std::move(sole.error()));
+  }
+  auto frame = owner.Frame(*slot);
+  if (!frame.has_value()) {
+    return std::unexpected(std::move(frame.error()));
+  }
+  auto page = BtreePageView::Parse(frame->get().bytes(), page_number, geometry);
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+
+  std::uint64_t cleared =
+      page->is_table() && !page->is_leaf() ? 0U : static_cast<std::uint64_t>(page->cell_count());
+  for (std::size_t index = 0U; index < page->cell_count(); ++index) {
+    auto cell = page->cell(index);
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    if (!page->is_leaf()) {
+      if (!cell->left_child().has_value()) {
+        return std::unexpected(Corruption("cleared interior B-tree cell has no child"));
+      }
+      auto child = ClearBtreePage(owner, geometry, *cell->left_child(), depth + 1U, true);
+      if (!child.has_value()) {
+        return std::unexpected(std::move(child.error()));
+      }
+      if (*child > (std::numeric_limits<std::uint64_t>::max)() - cleared) {
+        return std::unexpected(Corruption("cleared B-tree entry count overflows"));
+      }
+      cleared += *child;
+    }
+    auto overflow = ClearCellOverflow(owner, geometry, *cell);
+    if (!overflow.has_value()) {
+      return std::unexpected(std::move(overflow.error()));
+    }
+  }
+  if (!page->is_leaf()) {
+    if (!page->rightmost_child().has_value()) {
+      return std::unexpected(Corruption("cleared interior B-tree page has no rightmost child"));
+    }
+    auto child = ClearBtreePage(owner, geometry, *page->rightmost_child(), depth + 1U, true);
+    if (!child.has_value()) {
+      return std::unexpected(std::move(child.error()));
+    }
+    if (*child > (std::numeric_limits<std::uint64_t>::max)() - cleared) {
+      return std::unexpected(Corruption("cleared B-tree entry count overflows"));
+    }
+    cleared += *child;
+  }
+
+  if (free_page) {
+    auto freed = FreeBtreePage(owner, geometry, page_number);
+    if (!freed.has_value()) {
+      return std::unexpected(std::move(freed.error()));
+    }
+  } else {
+    auto promoted = owner.Promote(*slot);
+    if (!promoted.has_value()) {
+      return std::unexpected(std::move(promoted.error()));
+    }
+    auto root = MutableBtreePage::Open(owner, *slot, geometry);
+    if (!root.has_value()) {
+      return std::unexpected(std::move(root.error()));
+    }
+    auto zeroed =
+        root->Zero(page->is_table() ? BtreePageType::kLeafTable : BtreePageType::kLeafIndex);
+    if (!zeroed.has_value()) {
+      return std::unexpected(std::move(zeroed.error()));
+    }
+  }
+  return cleared;
+}
+
+}  // namespace
+
+Result<std::uint64_t> ClearBtree(MutationPageOwner& owner, BtreePageGeometry geometry,
+                                 PageNumber root_page) {
+  const std::uint64_t checkpoint = owner.operation_checkpoint();
+  auto cleared = ClearBtreePage(owner, geometry, root_page, 0U, false);
+  if (!cleared.has_value()) {
+    owner.MarkRollbackRequiredAfter(cleared.error().code(), checkpoint);
+  }
+  return cleared;
+}
+
+Status DropBtree(MutationPageOwner& owner, BtreePageGeometry geometry, PageNumber root_page) {
+  if (root_page.value() < 2U) {
+    return std::unexpected(Misuse("page one B-tree root cannot be dropped"));
+  }
+  const std::uint64_t checkpoint = owner.operation_checkpoint();
+  auto cleared = ClearBtreePage(owner, geometry, root_page, 0U, true);
+  if (!cleared.has_value()) {
+    owner.MarkRollbackRequiredAfter(cleared.error().code(), checkpoint);
+    return std::unexpected(std::move(cleared.error()));
   }
   return {};
 }

@@ -52,6 +52,7 @@ class MutationPageOwner final {
   [[nodiscard]] Result<std::size_t> AllocatePage();
   [[nodiscard]] Result<std::size_t> Borrow(PageNumber page_number) const;
   [[nodiscard]] Status Promote(std::size_t slot);
+  [[nodiscard]] Status RequireSolePin(std::size_t slot) const;
   [[nodiscard]] Status PermutePageNumbers(std::span<const MutationPageRekey> pages);
   void Release(std::size_t slot) noexcept;
 
@@ -100,6 +101,12 @@ class BtreeWriteWorkspace;
                                                            BtreePageGeometry geometry);
 [[nodiscard]] Status FreeBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry,
                                    PageNumber page_number);
+[[nodiscard]] Result<PageNumber> CreateBtreeRoot(MutationPageOwner& owner,
+                                                 BtreePageGeometry geometry, bool table);
+[[nodiscard]] Result<std::uint64_t> ClearBtree(MutationPageOwner& owner, BtreePageGeometry geometry,
+                                               PageNumber root_page);
+[[nodiscard]] Status DropBtree(MutationPageOwner& owner, BtreePageGeometry geometry,
+                               PageNumber root_page);
 
 struct FormattedCell {
   ByteView bytes;
