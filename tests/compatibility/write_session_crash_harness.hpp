@@ -4,6 +4,7 @@
 namespace modern_sqlite::test {
 
 void RunWriteSessionCrashHarness();
+void RunWriteSessionTransactionCrashHarness();
 
 }  // namespace modern_sqlite::test
 

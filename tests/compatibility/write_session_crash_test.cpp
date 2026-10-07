@@ -9,5 +9,9 @@ TEST(WriteSessionCrash, RecoversEveryImplicitInsertCut) {
   EXPECT_NO_THROW(RunWriteSessionCrashHarness());
 }
 
+TEST(WriteSessionCrash, RecoversTransactionAndSchemaCuts) {
+  EXPECT_NO_THROW(RunWriteSessionTransactionCrashHarness());
+}
+
 }  // namespace
 }  // namespace modern_sqlite::test
