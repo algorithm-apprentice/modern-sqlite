@@ -808,6 +808,34 @@ if(TARGET modern_sqlite_benchmark_sqlite)
   )
 
   add_executable(
+    modern_sqlite_btree_writer_sqlite_compatibility
+    compatibility/btree_writer_sqlite_compatibility.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_btree_writer_sqlite_compatibility
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(
+    modern_sqlite_btree_writer_sqlite_compatibility
+    PRIVATE
+  )
+  modern_sqlite_enable_clang_tidy(
+    modern_sqlite_btree_writer_sqlite_compatibility
+  )
+  add_test(
+    NAME compatibility.btree_writer_sqlite
+    COMMAND modern_sqlite_btree_writer_sqlite_compatibility
+  )
+  set_tests_properties(
+    compatibility.btree_writer_sqlite
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
+
+  add_executable(
     modern_sqlite_rollback_journal_fixture
     compatibility/rollback_journal_fixture.cpp
   )
