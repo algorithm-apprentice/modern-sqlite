@@ -120,6 +120,26 @@ add_test(
 set_tests_properties(btree.writer_internal_oom PROPERTIES LABELS unit TIMEOUT 20)
 
 add_executable(
+  modern_sqlite_transaction_coordinator_oom_test
+  unit/transaction/transaction_coordinator_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_transaction_coordinator_oom_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+target_include_directories(
+  modern_sqlite_transaction_coordinator_oom_test
+  PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src"
+)
+modern_sqlite_set_project_warnings(modern_sqlite_transaction_coordinator_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_transaction_coordinator_oom_test)
+add_test(
+  NAME transaction.coordinator_oom
+  COMMAND modern_sqlite_transaction_coordinator_oom_test
+)
+set_tests_properties(transaction.coordinator_oom PROPERTIES LABELS unit TIMEOUT 20)
+
+add_executable(
   modern_sqlite_read_session_model_test
   model/read_session_model_test.cpp
 )

@@ -33,12 +33,41 @@ void RequireStatus(Status status) {
   }
 }
 
-[[nodiscard]] TransactionCoordinator OpenCoordinator(test::WritePagerFixedVfs& vfs) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+[[nodiscard]] TransactionCoordinator OpenCoordinator(test::WritePagerFixedVfs& vfs,
+                                                     std::size_t cache_pages = 64U) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, cache_pages);
   if (pager == nullptr) {
     throw std::runtime_error("failed to open transaction test pager");
   }
   return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+}
+
+[[nodiscard]] ByteBuffer MakeTransactionFixture(test::WritePagerFixedVfs& vfs) {
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(statement.writer()->InitializeDatabase());
+  TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+  const std::array payload{std::byte{0x01}};
+  RequireStatus(table.Insert(1, payload));
+  RequireStatus(statement.Succeed());
+  return ByteBuffer::CopyOf(vfs.database_bytes());
+}
+
+[[nodiscard]] TransactionCoordinator PrepareNamedMutation(test::WritePagerFixedVfs& vfs,
+                                                          ByteView fixture) {
+  vfs.LoadDatabase(fixture);
+  TransactionCoordinator coordinator = OpenCoordinator(vfs, 1U);
+  RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+  RequireStatus(coordinator.Savepoint(Utf8View{"s"}));
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+  ByteBuffer payload{ByteCount{2'000}};
+  std::ranges::fill(payload.mutable_view(), std::byte{0x02});
+  RequireStatus(table.Insert(2, payload.view()));
+  RequireStatus(statement.Succeed());
+  return coordinator;
 }
 
 TEST(TransactionCoordinator, OwnsPagerAndStartsDeferredOrImmediateTransactions) {
@@ -618,6 +647,71 @@ TEST(TransactionCoordinator, RejectsMalformedSavepointNameBeforeStateChange) {
   RequireStatus(coordinator.Savepoint(Utf8View{""}));
   RequireStatus(coordinator.Release(Utf8View{""}));
   EXPECT_TRUE(coordinator.autocommit());
+}
+
+TEST(TransactionCoordinator, SavepointPublicationFailureFullyRollsBackTransaction) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = MakeTransactionFixture(vfs);
+
+  std::size_t mutation_count = 0U;
+  {
+    vfs.LoadDatabase(fixture.view());
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    vfs.ArmCrashCut(std::nullopt);
+    RequireStatus(coordinator.Savepoint(Utf8View{"s"}));
+    mutation_count = vfs.mutation_count();
+    RequireStatus(coordinator.Rollback());
+  }
+  ASSERT_GT(mutation_count, 0U);
+
+  for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
+    vfs.LoadDatabase(fixture.view());
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    vfs.ArmCrashCut(cut);
+    const auto saved = coordinator.Savepoint(Utf8View{"s"});
+    ASSERT_FALSE(saved.has_value());
+    EXPECT_EQ(ErrorCode::kIo, saved.error().code());
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_TRUE(std::ranges::equal(vfs.database_bytes(), fixture.view()));
+  }
+}
+
+TEST(TransactionCoordinator, SavepointReleaseAfterMutationPerformsNoPersistentIo) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = MakeTransactionFixture(vfs);
+
+  TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
+  vfs.ArmCrashCut(std::nullopt);
+  RequireStatus(coordinator.Release(Utf8View{"s"}));
+  EXPECT_EQ(0U, vfs.mutation_count());
+  RequireStatus(coordinator.Rollback());
+}
+
+TEST(TransactionCoordinator, SavepointRollbackFailureFullyRollsBackTransaction) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = MakeTransactionFixture(vfs);
+
+  std::size_t mutation_count = 0U;
+  {
+    TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
+    vfs.ArmCrashCut(std::nullopt);
+    RequireStatus(coordinator.RollbackTo(Utf8View{"s"}));
+    mutation_count = vfs.mutation_count();
+    RequireStatus(coordinator.Rollback());
+  }
+  ASSERT_GT(mutation_count, 0U);
+
+  for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
+    TransactionCoordinator coordinator = PrepareNamedMutation(vfs, fixture.view());
+    vfs.ArmCrashCut(cut);
+    const auto rolled_back = coordinator.RollbackTo(Utf8View{"s"});
+    ASSERT_FALSE(rolled_back.has_value());
+    EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_TRUE(std::ranges::equal(vfs.database_bytes(), fixture.view()));
+  }
 }
 
 TEST(TransactionCoordinator, NamedSavepointControlRejectsActiveStatement) {
