@@ -809,7 +809,13 @@ if(TARGET modern_sqlite_benchmark_sqlite)
 
   add_executable(
     modern_sqlite_btree_writer_sqlite_compatibility
+    compatibility/btree_writer_crash_compatibility.cpp
     compatibility/btree_writer_sqlite_compatibility.cpp
+  )
+  target_include_directories(
+    modern_sqlite_btree_writer_sqlite_compatibility
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}"
   )
   target_link_libraries(
     modern_sqlite_btree_writer_sqlite_compatibility
