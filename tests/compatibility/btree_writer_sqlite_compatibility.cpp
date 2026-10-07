@@ -23,6 +23,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
+#include "tests/compatibility/btree_writer_crash_compatibility.hpp"
 
 namespace {
 
@@ -550,6 +551,7 @@ int main() try {
       }
     }
   }
+  modern_sqlite::test::RunBtreeWriterCrashCompatibility();
   return 0;
 } catch (const std::exception& error) {
   static_cast<void>(std::fprintf(stderr, "%s\n", error.what()));
