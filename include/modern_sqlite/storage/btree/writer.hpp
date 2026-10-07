@@ -19,6 +19,10 @@ class Pager;
 class TableBtreeWriter;
 class IndexBtreeWriter;
 
+namespace transaction_detail {
+class CoordinatorState;
+}
+
 namespace btree_internal {
 class BtreeWriterCore;
 }
@@ -55,6 +59,12 @@ class BtreeWriteSession final {
                                                         std::span<const IndexColumnOrder> columns);
 
  private:
+  friend class transaction_detail::CoordinatorState;
+
+  [[nodiscard]] static Result<BtreeWriteSession> OpenManaged(Pager& pager);
+  [[nodiscard]] Status BeginManagedStatement();
+  void EndManagedStatement() noexcept;
+
   explicit BtreeWriteSession(std::shared_ptr<btree_internal::BtreeWriterCore> core) noexcept
       : core_(std::move(core)) {}
 
@@ -82,12 +92,16 @@ class TableBtreeWriter final {
   friend class BtreeWriteSession;
 
   TableBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
-                   std::uint64_t incarnation) noexcept
-      : core_(std::move(core)), root_page_(root_page), incarnation_(incarnation) {}
+                   std::uint64_t incarnation, std::uint64_t statement_epoch) noexcept
+      : core_(std::move(core)),
+        root_page_(root_page),
+        incarnation_(incarnation),
+        statement_epoch_(statement_epoch) {}
 
   std::shared_ptr<btree_internal::BtreeWriterCore> core_;
   PageNumber root_page_;
   std::uint64_t incarnation_ = 0;
+  std::uint64_t statement_epoch_ = 0;
 };
 
 class IndexBtreeWriter final {
@@ -110,15 +124,18 @@ class IndexBtreeWriter final {
   friend class BtreeWriteSession;
 
   IndexBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
-                   std::uint64_t incarnation, std::vector<IndexColumnOrder> columns) noexcept
+                   std::uint64_t incarnation, std::uint64_t statement_epoch,
+                   std::vector<IndexColumnOrder> columns) noexcept
       : core_(std::move(core)),
         root_page_(root_page),
         incarnation_(incarnation),
+        statement_epoch_(statement_epoch),
         columns_(std::move(columns)) {}
 
   std::shared_ptr<btree_internal::BtreeWriterCore> core_;
   PageNumber root_page_;
   std::uint64_t incarnation_ = 0;
+  std::uint64_t statement_epoch_ = 0;
   std::vector<IndexColumnOrder> columns_;
 };
 
