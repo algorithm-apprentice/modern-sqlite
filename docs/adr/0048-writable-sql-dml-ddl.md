@@ -497,9 +497,24 @@ assignment targets the same column. Exact rowid-changing UPDATE uses
 statement rollback as selected by the physical plan. Stable-rowid scans use
 the same reopen-and-strictly-greater loop as DELETE.
 
-Scan UPDATE with `collect_original_rowids=true` remains `kUnsupportedPlan` in
-this slice. Its following slice adds the bounded stable original-rowid
-collection required to prevent a moved row from being revisited.
+Scan UPDATE with `collect_original_rowids=true` uses two phases:
+
+1. clear the VM rowid list;
+2. run the cursor-safe table scan, evaluate guards and residual predicates
+   against owned source snapshots, and append every qualifying original rowid
+   in ascending scan order;
+3. close the scan cursor before the first mutation;
+4. rewind the fixed rowid list;
+5. for each collected key, point-seek the current row, snapshot and close the
+   read cursor, evaluate assignments against that row's immutable snapshot,
+   and emit `UpdateTableInstruction`; and
+6. advance only through the rowid list, never through the mutated table.
+
+Allocation or expression failure during collection occurs before any row
+mutation. A row moved to a greater key is not appended again, and a row moved
+onto another collected original key encounters the normal duplicate-rowid
+constraint and rolls back the statement. Missing collected keys are skipped
+without changing the list order.
 
 UPDATE programs publish change-count metadata, never publish a
 last-insert-rowid event, and have no result columns.

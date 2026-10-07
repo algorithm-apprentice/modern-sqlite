@@ -150,7 +150,7 @@ bool fail_allocations = false;
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   using namespace modern_sqlite;
   BindStatementResult bound =
-      BindStatement(ParseTree("UPDATE Items SET Name=?1 WHERE Name=?2"), catalog);
+      BindStatement(ParseTree("UPDATE Items SET id=id+10 WHERE Name=?1"), catalog);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind UPDATE lowering allocation fixture"};
   }
@@ -247,7 +247,7 @@ int main() try {
   }
 
   const PhysicalMutationPlan update = UpdateFixture(catalog);
-  constexpr std::size_t kExpectedUpdateAllocations = 32U;
+  constexpr std::size_t kExpectedUpdateAllocations = 36U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
     allocation_count.store(0, std::memory_order_relaxed);
     count_allocations = true;
