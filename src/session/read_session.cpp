@@ -21,7 +21,7 @@
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 #include "read_session_internal.hpp"
 
 namespace modern_sqlite {
@@ -146,11 +146,11 @@ void CleanupReadStateAfterAllocationFailure(Pager& pager) noexcept {
 }
 
 struct StatementExecution {
-  StatementExecution(std::unique_ptr<BytecodeProgram> owned_program, ReadVm owned_vm) noexcept
+  StatementExecution(std::unique_ptr<BytecodeProgram> owned_program, Vm owned_vm) noexcept
       : program(std::move(owned_program)), vm(std::move(owned_vm)) {}
 
   std::unique_ptr<BytecodeProgram> program;
-  ReadVm vm;
+  Vm vm;
 };
 
 struct CompiledStatement {
@@ -271,7 +271,7 @@ struct ReadSession::State final {
     }
 
     auto program = std::make_unique<BytecodeProgram>(std::move(*lowered));
-    auto vm = ReadVm::Create(*program, ReadVmEnvironment::Core(*pager, catalog_generation));
+    auto vm = Vm::Create(*program, VmEnvironment::Core());
     if (!vm.has_value()) {
       return std::unexpected(std::move(vm.error()));
     }
@@ -353,6 +353,12 @@ struct ReadStatement::Impl final {
   }
 
   [[nodiscard]] Result<ReadStep> FailAndRelease(Error error) {
+    if (execution != nullptr && execution->vm.has_execution_context()) {
+      auto detached = execution->vm.DetachExecutionContext();
+      if (!detached.has_value()) {
+        error = CombineErrors(error, detached.error(), "VM execution-context cleanup");
+      }
+    }
     if (holds_read_reference) {
       auto released = state->ReleaseReadReference();
       holds_read_reference = false;
@@ -384,7 +390,7 @@ struct ReadStatement::Impl final {
     }
 
     if (lifecycle == StatementState::kReady) {
-      if (execution->program->requires_read_transaction()) {
+      if (execution->program->requires_database_snapshot()) {
         auto acquired = state->AcquireReadReference();
         if (!acquired.has_value()) {
           return Fail(std::move(acquired.error()));
@@ -395,17 +401,26 @@ struct ReadStatement::Impl final {
       if (!current.has_value()) {
         return FailAndRelease(std::move(current.error()));
       }
+      auto attached = execution->vm.AttachExecutionContext(
+          VmExecutionContext{*state->pager, state->catalog_generation});
+      if (!attached.has_value()) {
+        return FailAndRelease(std::move(attached.error()));
+      }
     }
 
     auto stepped = execution->vm.Step();
     if (!stepped.has_value()) {
       return FailAndRelease(std::move(stepped.error()));
     }
-    if (*stepped == ReadVmStep::kRow) {
+    if (*stepped == VmStep::kRow) {
       lifecycle = StatementState::kRow;
       return ReadStep::kRow;
     }
 
+    auto detached = execution->vm.DetachExecutionContext();
+    if (!detached.has_value()) {
+      return FailAndRelease(std::move(detached.error()));
+    }
     if (holds_read_reference) {
       auto released = state->ReleaseReadReference();
       holds_read_reference = false;

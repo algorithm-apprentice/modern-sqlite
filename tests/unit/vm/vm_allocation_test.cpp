@@ -8,7 +8,7 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 
 namespace {
 
@@ -102,22 +102,25 @@ int main() try {
   if (!program.has_value()) {
     return 1;
   }
-  auto created = ReadVm::Create(*program, ReadVmEnvironment::Core(**opened, 17));
+  auto created = Vm::Create(*program, VmEnvironment::Core());
   if (!created.has_value()) {
     return 1;
   }
-  ReadVm& vm = *created;
+  Vm& vm = *created;
 
   const std::size_t before = allocation_count.load(std::memory_order_relaxed);
   std::uint64_t checksum = 0;
   for (std::size_t iteration = 0; iteration < 10; ++iteration) {
+    if (!vm.AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+      return 1;
+    }
     const auto row = vm.Step();
-    if (!row.has_value() || *row != ReadVmStep::kRow || vm.row().size() != 1U) {
+    if (!row.has_value() || *row != VmStep::kRow || vm.row().size() != 1U) {
       return 1;
     }
     checksum += static_cast<std::uint64_t>(vm.row().front().integer_value().value_or(-1));
     const auto done = vm.Step();
-    if (!done.has_value() || *done != ReadVmStep::kDone || !vm.Reset().has_value()) {
+    if (!done.has_value() || *done != VmStep::kDone || !vm.Reset().has_value()) {
       return 1;
     }
   }

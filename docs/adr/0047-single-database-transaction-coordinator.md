@@ -25,7 +25,7 @@ The lower layers intentionally do not own connection policy:
   names or transaction-savepoint semantics.
 - `BtreeWriteSession` owns one write-generation mutation authority but not
   statement boundaries.
-- `ReadVm` deliberately does not begin or end transactions.
+- `Vm` deliberately does not begin or end transactions.
 - `ReadSession` is read-only and ends an implicit read transaction when its
   final active read statement finishes.
 

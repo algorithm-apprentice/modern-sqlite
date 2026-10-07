@@ -18,6 +18,9 @@ namespace {
 
 [[nodiscard]] constexpr RegisterId Reg(std::uint32_t value) { return RegisterId(value); }
 [[nodiscard]] constexpr CursorId Cursor(std::uint32_t value) { return CursorId(value); }
+[[nodiscard]] constexpr WriteCursorId WriteCursor(std::uint32_t value) {
+  return WriteCursorId(value);
+}
 [[nodiscard]] constexpr ParameterId Parameter(std::uint32_t value) { return ParameterId(value); }
 [[nodiscard]] constexpr ConstantId Constant(std::uint32_t value) { return ConstantId(value); }
 [[nodiscard]] constexpr SymbolId Symbol(std::uint32_t value) { return SymbolId(value); }
@@ -200,7 +203,7 @@ TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   EXPECT_EQ(program.schema_version().generation, 11U);
   EXPECT_EQ(program.register_count(), 1U);
   EXPECT_EQ(program.parameter_count(), 0U);
-  EXPECT_FALSE(program.requires_read_transaction());
+  EXPECT_FALSE(program.requires_database_snapshot());
   EXPECT_EQ(program.constants().size(), 1U);
   EXPECT_EQ(program.instructions().size(), 3U);
   EXPECT_EQ(program.result_columns().front().name, "value");
@@ -209,6 +212,62 @@ TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   EXPECT_EQ(InstructionKindOf(program.instruction(Address(1))), InstructionKind::kResultRow);
   EXPECT_GT(program.verification_metrics().owned_bytes, 0U);
   static_assert(std::is_same_v<decltype(program.instructions()), std::span<const Instruction>>);
+}
+
+TEST(BytecodeProgramTest, PublishesExecutionAndWriteMetadata) {
+  static_assert(!std::is_convertible_v<CursorId, WriteCursorId>);
+
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = false,
+  };
+  input.constants.push_back(SqlValue::Text("default"));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = true,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = false,
+                  .rowid_alias = false,
+                  .default_value = Constant(0),
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.instructions = {HaltInstruction{}};
+
+  auto created = BytecodeProgram::Create(input);
+  ASSERT_TRUE(created.has_value());
+  const BytecodeProgram& program = *created;
+  EXPECT_EQ(ProgramStatementKind::kUpdate, program.statement_kind());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, program.transaction_access());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, program.rollback_mode());
+  EXPECT_TRUE(program.requires_database_snapshot());
+  EXPECT_TRUE(program.mutation_result().publishes_changes);
+  ASSERT_EQ(1U, program.write_cursors().size());
+  EXPECT_EQ(RootPageNumber(2), program.write_cursor(WriteCursor(0)).root_page);
+
+  input.statement_kind = ProgramStatementKind::kSelect;
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.write_cursors.front().columns[1].default_value = Constant(1);
+  EXPECT_EQ(ProgramErrorCode::kInvalidCursorDescriptor, VerifyError(input));
+
+  input.write_cursors.front().columns[1].default_value = Constant(0);
+  input.transaction_access = static_cast<ProgramTransactionAccess>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
 }
 
 TEST(BytecodeProgramTest, CanonicalizesCallerStorageBeforePublication) {
@@ -222,7 +281,7 @@ TEST(BytecodeProgramTest, CanonicalizesCallerStorageBeforePublication) {
   auto created = BytecodeProgram::Create(input);
   ASSERT_TRUE(created.has_value());
   ASSERT_EQ(created->cursors().size(), 1U);
-  EXPECT_TRUE(created->requires_read_transaction());
+  EXPECT_TRUE(created->requires_database_snapshot());
   EXPECT_NE(created->instructions().data(), source_instructions);
   EXPECT_NE(created->cursors().front().fields.data(), source_fields);
 
@@ -277,17 +336,57 @@ TEST(BytecodeProgramTest, BuilderResolvesOwnedForwardAndBackwardLabels) {
   EXPECT_EQ(std::get<JumpInstruction>(program->instructions()[2]).target, Address(0));
 }
 
-TEST(BytecodeProgramTest, BuilderPublishesExplicitReadTransactionRequirement) {
+TEST(BytecodeProgramTest, BuilderPublishesExplicitDatabaseSnapshotRequirement) {
   auto created = ProgramBuilder::Create({}, Resources(0));
   ASSERT_TRUE(created.has_value());
   ProgramBuilder builder = std::move(*created);
-  ASSERT_TRUE(builder.RequireReadTransaction().has_value());
+  ASSERT_TRUE(builder.RequireDatabaseSnapshot().has_value());
   ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());
 
   auto program = std::move(builder).Build({});
 
   ASSERT_TRUE(program.has_value());
-  EXPECT_TRUE(program->requires_read_transaction());
+  EXPECT_TRUE(program->requires_database_snapshot());
+}
+
+TEST(BytecodeProgramTest, BuilderPublishesWriteExecutionMetadata) {
+  auto created = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  auto default_value = builder.AddConstant(SqlValue::Text("default"));
+  ASSERT_TRUE(default_value.has_value());
+  ASSERT_TRUE(builder
+                  .SetExecutionMetadata(ProgramStatementKind::kInsert,
+                                        ProgramTransactionAccess::kWrite,
+                                        ProgramRollbackMode::kTransaction,
+                                        MutationResultMetadata{
+                                            .publishes_changes = true,
+                                            .publishes_last_insert_rowid = true,
+                                        })
+                  .has_value());
+  auto cursor = builder.AddWriteCursor(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = false,
+                  .rowid_alias = false,
+                  .default_value = *default_value,
+              },
+          },
+      .rowid_alias = std::nullopt,
+  });
+  ASSERT_TRUE(cursor.has_value());
+  ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());
+
+  auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(WriteCursorId(0), *cursor);
+  EXPECT_EQ(ProgramStatementKind::kInsert, program->statement_kind());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, program->transaction_access());
+  EXPECT_TRUE(program->requires_database_snapshot());
+  EXPECT_EQ(1U, program->write_cursors().size());
 }
 
 TEST(BytecodeProgramTest, BuilderRejectsDirectNumericBranchesAndForeignLabels) {
@@ -618,6 +717,8 @@ TEST(BytecodeProgramTest, MapsResourceAndValidationFailuresToBaseErrors) {
   EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded}.base_error_code(),
             ErrorCode::kTooLarge);
   EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kUninitializedRegister}.base_error_code(),
+            ErrorCode::kMisuse);
+  EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kInvalidExecutionMetadata}.base_error_code(),
             ErrorCode::kMisuse);
 }
 

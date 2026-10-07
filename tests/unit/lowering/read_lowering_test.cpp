@@ -25,7 +25,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -156,13 +156,15 @@ void RequireStatus(Status status) {
          "lowering" / "sqlite-3.54.0-alter-defaults.db";
 }
 
-[[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(const BytecodeProgram& program,
-                                                             ReadVmEnvironment environment) {
-  ReadVm vm = TakeValue(ReadVm::Create(program, environment));
+[[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(
+    const BytecodeProgram& program, Pager& pager, std::uint64_t catalog_generation,
+    VmEnvironment environment = VmEnvironment::Core()) {
+  Vm vm = TakeValue(Vm::Create(program, environment));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
   std::vector<std::vector<SqlValue>> rows;
   while (true) {
-    const ReadVmStep step = TakeValue(vm.Step());
-    if (step == ReadVmStep::kDone) {
+    const VmStep step = TakeValue(vm.Step());
+    if (step == VmStep::kDone) {
       return rows;
     }
     std::vector<SqlValue> row;
@@ -218,10 +220,7 @@ struct CustomEnvironment {
     return BindEnvironment{registry, collations, 29};
   }
 
-  [[nodiscard]] ReadVmEnvironment Vm(Pager& pager,
-                                     std::uint64_t catalog_generation) const noexcept {
-    return ReadVmEnvironment{pager, catalog_generation, registry, collations};
-  }
+  [[nodiscard]] VmEnvironment Vm() const noexcept { return VmEnvironment{registry, collations}; }
 };
 
 TEST(ReadLoweringApi, ExposesStableErrorsAndBaseMappings) {
@@ -374,7 +373,7 @@ TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
 
   const BytecodeProgram table = LowerOrThrow("SELECT id, name, score FROM items", catalog);
-  EXPECT_TRUE(table.requires_read_transaction());
+  EXPECT_TRUE(table.requires_database_snapshot());
   ASSERT_EQ(1U, table.cursors().size());
   EXPECT_EQ(CursorStorageKind::kRowIdTable, table.cursors()[0].storage);
   ASSERT_EQ(4U, table.cursors()[0].fields.size());
@@ -426,14 +425,14 @@ TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   EXPECT_LT(*key_call, *seek);
 }
 
-TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsTransactional) {
+TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsSnapshotRequired) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const BytecodeProgram constant = LowerOrThrow("SELECT 1", catalog);
   const BytecodeProgram empty = LowerOrThrow("SELECT name FROM items WHERE 0", catalog);
 
-  EXPECT_FALSE(constant.requires_read_transaction());
-  EXPECT_TRUE(empty.requires_read_transaction());
+  EXPECT_FALSE(constant.requires_database_snapshot());
+  EXPECT_TRUE(empty.requires_database_snapshot());
   EXPECT_TRUE(empty.cursors().empty());
 }
 
@@ -445,8 +444,7 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
       TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 73}));
 
   const BytecodeProgram scan = LowerOrThrow("SELECT id, name, score FROM items", catalog);
-  const auto rows =
-      ExecuteRows(scan, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto rows = ExecuteRows(scan, *pager, catalog->version().generation);
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ("alpha", TextBytes(rows[0][1]));
@@ -456,32 +454,30 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   EXPECT_EQ(SqlValueType::kNull, rows[2][2].type());
 
   const BytecodeProgram lookup = LowerOrThrow("SELECT name FROM items WHERE rowid=2", catalog);
-  const auto lookup_rows =
-      ExecuteRows(lookup, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation);
   ASSERT_EQ(1U, lookup_rows.size());
   EXPECT_EQ("beta", TextBytes(lookup_rows[0][0]));
 
   const BytecodeProgram limited =
       LowerOrThrow("SELECT name FROM items LIMIT ?1 OFFSET ?2", catalog);
-  ReadVm limited_vm = TakeValue(
-      ReadVm::Create(limited, ReadVmEnvironment::Core(*pager, catalog->version().generation)));
+  Vm limited_vm = TakeValue(Vm::Create(limited, VmEnvironment::Core()));
+  RequireStatus(
+      limited_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
   const SqlValue one = SqlValue::Integer(1);
   RequireStatus(limited_vm.Bind(ParameterId{0}, one));
   RequireStatus(limited_vm.Bind(ParameterId{1}, one));
-  ASSERT_EQ(ReadVmStep::kRow, TakeValue(limited_vm.Step()));
+  ASSERT_EQ(VmStep::kRow, TakeValue(limited_vm.Step()));
   EXPECT_EQ("beta", TextBytes(limited_vm.row()[0]));
-  EXPECT_EQ(ReadVmStep::kDone, TakeValue(limited_vm.Step()));
+  EXPECT_EQ(VmStep::kDone, TakeValue(limited_vm.Step()));
 
   const BytecodeProgram negative =
       LowerOrThrow("SELECT name FROM items LIMIT -1 OFFSET -2", catalog);
-  const auto negative_rows =
-      ExecuteRows(negative, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto negative_rows = ExecuteRows(negative, *pager, catalog->version().generation);
   ASSERT_EQ(3U, negative_rows.size());
   EXPECT_EQ("alpha", TextBytes(negative_rows[0][0]));
 
   const BytecodeProgram without_rowid = LowerOrThrow("SELECT a, b, c, payload FROM wr", catalog);
-  const auto wr_rows =
-      ExecuteRows(without_rowid, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto wr_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
   ASSERT_EQ(2U, wr_rows.size());
   EXPECT_EQ("right", TextBytes(wr_rows[0][0]));
   EXPECT_EQ(2, wr_rows[0][1].integer_value());
@@ -500,7 +496,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   callback_count = 0;
   const BytecodeProgram guarded =
       LowerOrThrow("SELECT 1 WHERE volatile_counter() AND 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(guarded, custom.Vm(*pager, catalog->version().generation)).empty());
+  EXPECT_TRUE(ExecuteRows(guarded, *pager, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(1U, callback_count);
 
   callback_count = 0;
@@ -508,7 +504,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
       "SELECT 0 AND failing(), coalesce('ok', failing()), "
       "iif(0, failing(), 'chosen')",
       catalog, custom.Binder());
-  const auto rows = ExecuteRows(lazy, custom.Vm(*pager, catalog->version().generation));
+  const auto rows = ExecuteRows(lazy, *pager, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(0, rows[0][0].integer_value());
   EXPECT_EQ("ok", TextBytes(rows[0][1]));
@@ -518,12 +514,13 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   callback_count = 0;
   const BytecodeProgram zero_limit =
       LowerOrThrow("SELECT 1 LIMIT 0 OFFSET failing()", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero_limit, custom.Vm(*pager, catalog->version().generation)).empty());
+  EXPECT_TRUE(ExecuteRows(zero_limit, *pager, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   const BytecodeProgram barrier = LowerOrThrow("SELECT +0 AND failing()", catalog, custom.Binder());
-  ReadVm barrier_vm =
-      TakeValue(ReadVm::Create(barrier, custom.Vm(*pager, catalog->version().generation)));
+  Vm barrier_vm = TakeValue(Vm::Create(barrier, custom.Vm()));
+  RequireStatus(
+      barrier_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
   const auto failed = barrier_vm.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
@@ -532,8 +529,9 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   callback_count = 0;
   const BytecodeProgram high_bit_hex =
       LowerOrThrow("SELECT 0xffffffffffffffff OR failing()", catalog, custom.Binder());
-  ReadVm high_bit_hex_vm =
-      TakeValue(ReadVm::Create(high_bit_hex, custom.Vm(*pager, catalog->version().generation)));
+  Vm high_bit_hex_vm = TakeValue(Vm::Create(high_bit_hex, custom.Vm()));
+  RequireStatus(high_bit_hex_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation}));
   const auto high_bit_hex_failed = high_bit_hex_vm.Step();
   ASSERT_FALSE(high_bit_hex_failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, high_bit_hex_failed.error().code());
@@ -549,8 +547,9 @@ TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
 
   const BytecodeProgram program =
       LowerOrThrow("SELECT name FROM items LIMIT 'not-an-integer'", catalog);
-  ReadVm vm = TakeValue(
-      ReadVm::Create(program, ReadVmEnvironment::Core(*pager, catalog->version().generation)));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
   const auto stepped = vm.Step();
   ASSERT_FALSE(stepped.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, stepped.error().code());
@@ -577,8 +576,7 @@ TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
   EXPECT_EQ(MissingFieldValueKind::kConstant, descriptor.fields[5].missing_value_kind);
   EXPECT_EQ(MissingFieldValueKind::kConstant, descriptor.fields[6].missing_value_kind);
 
-  const auto rows =
-      ExecuteRows(program, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
   ASSERT_EQ(2U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ("old", TextBytes(rows[0][1]));
@@ -598,8 +596,7 @@ TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
 
   const BytecodeProgram without_rowid =
       LowerOrThrow("SELECT key, existing, added FROM wr", catalog);
-  const auto wr_rows =
-      ExecuteRows(without_rowid, ReadVmEnvironment::Core(*pager, catalog->version().generation));
+  const auto wr_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
   ASSERT_EQ(2U, wr_rows.size());
   EXPECT_EQ("new", TextBytes(wr_rows[0][0]));
   EXPECT_EQ(SqlValueType::kNull, wr_rows[0][2].type());

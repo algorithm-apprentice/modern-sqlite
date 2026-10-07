@@ -451,7 +451,7 @@ TEST(ReadSession, RepreparesAfterSchemaChangeAndPreservesBindingsAndMetadataView
   EXPECT_EQ(1, IntegerValue(statement.row()[0]));
 }
 
-TEST(ReadSession, TransactionFreeStepDrainsAFailedEndReadCleanup) {
+TEST(ReadSession, SnapshotFreeStepDrainsAFailedEndReadCleanup) {
   const auto failure = std::make_shared<UnlockFailureState>();
   ReadSession session = TakeValue(
       ReadSession::Open(std::make_unique<UnlockFailingVfs>(failure), FixturePath().string()));
@@ -473,7 +473,7 @@ TEST(ReadSession, TransactionFreeStepDrainsAFailedEndReadCleanup) {
   EXPECT_EQ(ErrorCode::kIo, reset.error().code());
 }
 
-TEST(ReadSession, SuspendedTransactionFreeStepHonorsTheCleanupBarrier) {
+TEST(ReadSession, SuspendedSnapshotFreeStepHonorsTheCleanupBarrier) {
   const auto failure = std::make_shared<UnlockFailureState>();
   ReadSession session = TakeValue(
       ReadSession::Open(std::make_unique<UnlockFailingVfs>(failure), FixturePath().string()));

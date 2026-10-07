@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <new>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -33,19 +34,28 @@ int main() try {
 
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{.schema_cookie = 1, .generation = 2};
-  input.register_count = 1;
+  input.statement_kind = ProgramStatementKind::kInsert;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
   input.constants.push_back(SqlValue::Text("payload"));
   input.symbols.emplace_back("BINARY");
-  input.result_columns.push_back(ResultColumnMetadata{
-      .name = "value",
-      .declared_type = "TEXT",
-      .affinity = TypeAffinity::kText,
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = false,
+                  .rowid_alias = false,
+                  .default_value = ConstantId(0),
+              },
+          },
+      .rowid_alias = std::nullopt,
   });
-  input.instructions = {
-      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
-      ResultRowInstruction{.first = RegisterId(0), .count = 1},
-      HaltInstruction{},
-  };
+  input.instructions = {HaltInstruction{}};
 
   auto created = BytecodeProgram::Create(input);
   if (!created.has_value()) {
@@ -66,12 +76,14 @@ int main() try {
   for (const auto& symbol : program.symbols()) {
     checksum += symbol.size();
   }
-  for (const auto& column : program.result_columns()) {
-    checksum += column.name.size();
-    checksum +=
-        column.declared_type.transform([](const std::string& value) { return value.size(); })
-            .value_or(0);
+  for (const WriteCursorDescriptor& cursor : program.write_cursors()) {
+    checksum += cursor.root_page.value();
+    checksum += cursor.columns.size();
   }
+  checksum += static_cast<std::size_t>(program.statement_kind());
+  checksum += static_cast<std::size_t>(program.transaction_access());
+  checksum += static_cast<std::size_t>(program.rollback_mode());
+  checksum += program.mutation_result().publishes_changes ? 1U : 0U;
   checksum += program.constant(ConstantId(0)).text_value().value_or(Utf8View{}).size_bytes();
   fail_allocations = false;
 

@@ -21,9 +21,12 @@ The lower layers intentionally do not own connection lifecycle:
 - binding consumes one immutable catalog snapshot;
 - lowering produces a program that owns result metadata but not parameter
   names;
-- `ReadVm` borrows both its program and pager;
-- `ReadVm::Step()` currently requires a read transaction for every program;
-- `ReadVm::Reset()` closes cursors and preserves bindings; and
+- `Vm` permanently borrows its program and borrows the pager only through an
+  attached execution context;
+- `Vm::Step()` requires an attached context, while only snapshot-dependent
+  programs require an active pager transaction;
+- `Vm::Reset()` closes cursors, detaches the context, and preserves bindings;
+  and
 - VM row spans remain valid only while execution is suspended on a row.
 
 The session layer must therefore own and coordinate:
@@ -218,7 +221,7 @@ Each statement implementation owns:
 - the exact consumed SQL bytes needed for reprepare;
 - parameter-name metadata;
 - a heap-stable `BytecodeProgram`;
-- a `ReadVm` borrowing that program;
+- a `Vm` borrowing that program;
 - its public lifecycle state;
 - any retained terminal error; and
 - whether it currently contributes to the shared read-transaction count.
@@ -274,7 +277,7 @@ SyntaxTree
   -> BuildLogicalPlan
   -> OptimizeLogicalPlan
   -> LowerReadPlan
-  -> ReadVm::Create
+  -> Vm::Create
 ```
 
 The statement stores source bytes from offset zero through
@@ -289,6 +292,11 @@ the shared transaction count.
 Prepare publishes no partially compiled statement. Failure destroys all
 temporary syntax, plans, programs, and VMs before returning the mapped
 `Error`.
+
+`Vm::Create()` resolves runtime functions and collations while prepare still
+has its temporary catalog snapshot, but it does not retain the Pager or that
+transaction. Execution attaches the then-current Pager and catalog generation
+immediately before the first step.
 
 ### Catalog snapshots and generations
 
@@ -351,7 +359,7 @@ The bookkeeping count is decremented even if `EndRead()` fails. The pager
 then remains active with no logical owner, which is a pending cleanup state.
 Whenever the logical count is zero, the state calls `CleanupReadState()` as
 an execution barrier before every substantive `Prepare()` and every
-`Step()`, including transaction-free statements. This also drains a shared
+`Step()`, including snapshot-free statements. This also drains a shared
 lock retained by failed begin cleanup. No operation may execute past a failed
 cleanup barrier.
 
@@ -374,42 +382,44 @@ must still observe schema changes.
 Extend `ProgramInput` and `BytecodeProgram` with:
 
 ```cpp
-bool requires_read_transaction = false;
+bool requires_database_snapshot = false;
 ```
 
 Add:
 
 ```cpp
-[[nodiscard]] bool requires_read_transaction() const noexcept;
+[[nodiscard]] bool requires_database_snapshot() const noexcept;
 ```
 
 `ProgramBuilder::AddCursor()` sets the requirement automatically.
-`ProgramBuilder::RequireReadTransaction()` sets it explicitly without
-allocation. Lowering calls `RequireReadTransaction()` whenever the bound
+`ProgramBuilder::RequireDatabaseSnapshot()` sets it explicitly without
+allocation. Lowering calls `RequireDatabaseSnapshot()` whenever the bound
 SELECT has a table source, including an Empty access path.
 
 `BytecodeProgram::Create()` canonicalizes its owned input before verification
 and publication:
 
 ```cpp
-canonical.requires_read_transaction =
-    input.requires_read_transaction || !input.cursors.empty();
+canonical.requires_database_snapshot =
+    input.requires_database_snapshot ||
+    input.transaction_access == ProgramTransactionAccess::kWrite ||
+    !input.cursors.empty() ||
+    !input.write_cursors.empty();
 ```
 
 The builder applies the same effective rule. The verifier validates the
-canonical input, and `requires_read_transaction()` returns the canonical
+canonical input, and `requires_database_snapshot()` returns the canonical
 value. A directly constructed cursor program therefore cannot publish a
 false requirement.
 
-`ReadVm` continues to validate the complete schema cookie, catalog
-generation, database encoding, and schema format when a transaction is
-active. When no transaction is active, it may execute only a program that
-does not require one; in that case it validates the retained catalog
-generation and uses the record options established when the VM was created
-during prepare.
+`Vm::AttachExecutionContext()` and the first step validate the complete schema
+cookie, catalog generation, database encoding, and schema format when a
+transaction is active. When no transaction is active, attachment may execute
+only a program that does not require one; in that case it validates the
+retained catalog generation.
 
-Suspending and resuming a transaction-free program does not inspect pager
-transaction state or data version. A transaction-requiring program retains
+Suspending and resuming a snapshot-free program does not inspect pager
+transaction state or data version. A snapshot-requiring program retains
 the existing strict snapshot and data-version checks.
 
 ### Automatic reprepare
@@ -422,7 +432,11 @@ Before starting an execution that requires a read transaction, the statement:
    catalog; and
 4. recompiles from retained SQL if either value differs.
 
-A transaction-free statement also recompiles if another operation has
+The statement then attaches `VmExecutionContext`. DONE and ERROR detach before
+releasing the shared read reference. Reset and finalization use the VM reset
+path to close cursors and detach before ending the reference.
+
+A snapshot-free statement also recompiles if another operation has
 already published a newer catalog generation. It does not open a transaction
 solely to discover an otherwise unobservable external schema change.
 
@@ -503,7 +517,7 @@ The public parameter index is one-based. Index zero or an index greater than
 `parameter_count()` returns `ErrorCode::kOutOfRange`.
 
 `Bind()` is valid only in READY. It delegates value-size enforcement and
-cloning to `ReadVm::Bind()`. Binding while ROW, DONE, or ERROR returns
+cloning to `Vm::Bind()`. Binding while ROW, DONE, or ERROR returns
 `ErrorCode::kMisuse`.
 
 Every parameter is initially NULL. Reset and automatic reprepare preserve
@@ -651,7 +665,7 @@ missing session symbols. The test matrix covers:
 - every session-owned allocation boundary;
 - no session dependency from parser, catalog, bytecode, VM, or lower layers;
   and
-- the relaxed VM rule for transaction-free versus transaction-requiring
+- the relaxed VM rule for snapshot-free versus snapshot-requiring
   programs.
 
 Pinned SQLite comparison uses SQLite 3.54.0 and an immutable 1,000-row fixture
@@ -763,7 +777,7 @@ complexity without improving schema-stable execution.
 - Reset and finalize expose execution errors instead of losing them in RAII
   cleanup.
 - The bytecode gains one explicit execution requirement, and the VM gains
-  one read-only bindings accessor plus a narrow transaction-free path.
+  one read-only bindings accessor plus a narrow snapshot-free path.
 - Clear-bindings, custom registries, connection options, statement caching,
   and concurrency remain future decisions rather than hidden scope in this
   node.

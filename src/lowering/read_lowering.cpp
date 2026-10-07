@@ -104,8 +104,8 @@ class ReadPlanLowerer final {
     builder_.emplace(std::move(*created));
 
     if (bound_select_.table_source() != nullptr) {
-      auto required = ConvertProgramResult(AssumeValue(builder_).RequireReadTransaction(),
-                                           "unable to require a read transaction");
+      auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
+                                           "unable to require a database snapshot");
       if (!required.has_value()) {
         return std::unexpected(std::move(required.error()));
       }

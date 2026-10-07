@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -132,6 +133,14 @@ class CoordinatorState final {
   [[nodiscard]] std::size_t savepoint_count() const noexcept { return savepoints_.size(); }
 
   [[nodiscard]] PagerState pager_state() const noexcept { return pager_->state(); }
+
+  [[nodiscard]] Pager& WriterPager(std::uint64_t token) noexcept {
+    if (!active_.has_value() || active_->token != token ||
+        active_->access != StatementAccess::kWrite) {
+      std::terminate();
+    }
+    return *pager_;
+  }
 
   [[nodiscard]] TransactionWorkCounters work_counters() const noexcept { return counters_; }
 
@@ -869,6 +878,8 @@ Result<IndexBtreeWriter> TransactionWriter::OpenIndexBtree(
     PageNumber root_page, std::span<const IndexColumnOrder> columns) {
   return state_->OpenIndexBtree(token_, root_page, columns);
 }
+
+Pager& TransactionWriter::pager() noexcept { return state_->WriterPager(token_); }
 
 Result<TransactionCoordinator> TransactionCoordinator::Open(std::unique_ptr<Pager> pager) {
   if (pager == nullptr) {

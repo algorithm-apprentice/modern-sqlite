@@ -116,6 +116,36 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(ProgramStatementKind kind) noexcept {
+  switch (kind) {
+    case ProgramStatementKind::kSelect:
+    case ProgramStatementKind::kInsert:
+    case ProgramStatementKind::kUpdate:
+    case ProgramStatementKind::kDelete:
+    case ProgramStatementKind::kCreateTable:
+      return true;
+  }
+  return false;
+}
+
+[[nodiscard]] bool IsValid(ProgramTransactionAccess access) noexcept {
+  switch (access) {
+    case ProgramTransactionAccess::kRead:
+    case ProgramTransactionAccess::kWrite:
+      return true;
+  }
+  return false;
+}
+
+[[nodiscard]] bool IsValid(ProgramRollbackMode mode) noexcept {
+  switch (mode) {
+    case ProgramRollbackMode::kTransaction:
+    case ProgramRollbackMode::kStatement:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(CursorFieldSourceKind kind) noexcept {
   switch (kind) {
     case CursorFieldSourceKind::kRecordField:
@@ -260,6 +290,17 @@ template <typename T>
     }
   }
 
+  if (!AddArrayBytes<WriteCursorDescriptor>(ElementCount(input.write_cursors, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  for (const auto& cursor : input.write_cursors) {
+    if (!AddArrayBytes<WriteColumnDescriptor>(ElementCount(cursor.columns, measure), &total) ||
+        total > limits.maximum_owned_bytes) {
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+    }
+  }
+
   if (!AddArrayBytes<ResultColumnMetadata>(ElementCount(input.result_columns, measure), &total) ||
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
@@ -284,9 +325,15 @@ template <typename T>
 [[nodiscard]] ProgramInput CloneProgramInput(const ProgramInput& input) {
   ProgramInput clone;
   clone.schema_version = input.schema_version;
+  clone.statement_kind = input.statement_kind;
+  clone.transaction_access = input.transaction_access;
+  clone.rollback_mode = input.rollback_mode;
+  clone.mutation_result = input.mutation_result;
   clone.register_count = input.register_count;
   clone.parameter_count = input.parameter_count;
-  clone.requires_read_transaction = input.requires_read_transaction || !input.cursors.empty();
+  clone.requires_database_snapshot = input.requires_database_snapshot ||
+                                     input.transaction_access == ProgramTransactionAccess::kWrite ||
+                                     !input.cursors.empty() || !input.write_cursors.empty();
 
   clone.constants.reserve(input.constants.size());
   for (const auto& value : input.constants) {
@@ -307,6 +354,15 @@ template <typename T>
         .fields = std::vector<CursorFieldSource>(cursor.fields.begin(), cursor.fields.end()),
         .index_columns = std::vector<IndexColumnMetadata>(cursor.index_columns.begin(),
                                                           cursor.index_columns.end()),
+    });
+  }
+
+  clone.write_cursors.reserve(input.write_cursors.size());
+  for (const auto& cursor : input.write_cursors) {
+    clone.write_cursors.push_back(WriteCursorDescriptor{
+        .root_page = cursor.root_page,
+        .columns = std::vector<WriteColumnDescriptor>(cursor.columns.begin(), cursor.columns.end()),
+        .rowid_alias = cursor.rowid_alias,
     });
   }
 
@@ -337,7 +393,9 @@ template <typename T>
     return std::unexpected(MakeProgramError(ProgramErrorCode::kRegisterLimitExceeded));
   }
   if (input.cursors.size() > limits.maximum_cursors ||
-      input.cursors.size() > std::numeric_limits<std::uint32_t>::max()) {
+      input.write_cursors.size() > limits.maximum_cursors - input.cursors.size() ||
+      input.cursors.size() > std::numeric_limits<std::uint32_t>::max() ||
+      input.write_cursors.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kCursorLimitExceeded));
   }
   if (static_cast<std::size_t>(input.parameter_count) > limits.maximum_parameters) {
@@ -354,6 +412,29 @@ template <typename T>
   if (input.result_columns.size() > limits.maximum_result_columns ||
       input.result_columns.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kResultColumnLimitExceeded));
+  }
+  return {};
+}
+
+[[nodiscard]] ProgramResult<void> CheckExecutionMetadata(const ProgramInput& input) {
+  if (!IsValid(input.statement_kind) || !IsValid(input.transaction_access) ||
+      !IsValid(input.rollback_mode)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidEnumValue));
+  }
+  const bool is_select = input.statement_kind == ProgramStatementKind::kSelect;
+  if ((is_select && input.transaction_access != ProgramTransactionAccess::kRead) ||
+      (!is_select && input.transaction_access != ProgramTransactionAccess::kWrite) ||
+      (is_select && input.rollback_mode != ProgramRollbackMode::kTransaction) ||
+      (is_select && (!input.write_cursors.empty() || input.mutation_result.publishes_changes ||
+                     input.mutation_result.publishes_last_insert_rowid)) ||
+      (!is_select && !input.result_columns.empty()) ||
+      (input.mutation_result.publishes_last_insert_rowid &&
+       input.statement_kind != ProgramStatementKind::kInsert) ||
+      (input.mutation_result.publishes_changes &&
+       input.statement_kind != ProgramStatementKind::kInsert &&
+       input.statement_kind != ProgramStatementKind::kUpdate &&
+       input.statement_kind != ProgramStatementKind::kDelete)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidExecutionMetadata));
   }
   return {};
 }
@@ -413,6 +494,39 @@ template <typename T>
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                        ProgramError::kNoInstruction, cursor_index));
       }
+    }
+  }
+  for (std::size_t cursor_index = 0; cursor_index < input.write_cursors.size(); ++cursor_index) {
+    const WriteCursorDescriptor& cursor = input.write_cursors[cursor_index];
+    if (cursor.root_page.value() == 0) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidRootPage, ProgramError::kNoInstruction, cursor_index));
+    }
+    if (cursor.columns.empty() ||
+        cursor.columns.size() > std::numeric_limits<std::uint32_t>::max() ||
+        (cursor.rowid_alias.has_value() && *cursor.rowid_alias >= cursor.columns.size())) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                     ProgramError::kNoInstruction, cursor_index));
+    }
+    std::optional<std::uint32_t> rowid_alias;
+    for (std::size_t column_index = 0; column_index < cursor.columns.size(); ++column_index) {
+      const WriteColumnDescriptor& column = cursor.columns[column_index];
+      if (!IsValid(column.affinity) || (column.default_value.has_value() &&
+                                        column.default_value->value() >= input.constants.size())) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                       ProgramError::kNoInstruction, cursor_index));
+      }
+      if (column.rowid_alias) {
+        if (rowid_alias.has_value()) {
+          return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                         ProgramError::kNoInstruction, cursor_index));
+        }
+        rowid_alias = static_cast<std::uint32_t>(column_index);
+      }
+    }
+    if (cursor.rowid_alias != rowid_alias) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                     ProgramError::kNoInstruction, cursor_index));
     }
   }
   return {};
@@ -965,6 +1079,16 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   return result;
 }
 
+[[nodiscard]] std::size_t CursorOwnedBytes(const WriteCursorDescriptor& cursor) noexcept {
+  std::size_t result = sizeof(WriteCursorDescriptor);
+  std::size_t columns = 0;
+  if (!CheckedMultiply(cursor.columns.size(), sizeof(WriteColumnDescriptor), &columns) ||
+      !CheckedAdd(columns, &result)) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return result;
+}
+
 [[nodiscard]] std::size_t ColumnOwnedBytes(const ResultColumnMetadata& column) {
   std::size_t result = sizeof(ResultColumnMetadata);
   const std::size_t declared_type_size =
@@ -1049,6 +1173,7 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kEmptyProgram:
     case ProgramErrorCode::kInvalidRootPage:
     case ProgramErrorCode::kInvalidCursorDescriptor:
+    case ProgramErrorCode::kInvalidExecutionMetadata:
     case ProgramErrorCode::kInvalidRegister:
     case ProgramErrorCode::kInvalidRegisterRange:
     case ProgramErrorCode::kInvalidParameter:
@@ -1086,6 +1211,9 @@ ProgramResult<ProgramVerificationMetrics> VerifyProgram(const ProgramInput& inpu
   if (auto checked = CheckCounts(input, limits); !checked) {
     return std::unexpected(checked.error());
   }
+  if (auto checked = CheckExecutionMetadata(input); !checked) {
+    return std::unexpected(checked.error());
+  }
   auto owned_bytes = ComputeOwnedBytes(input, limits, OwnedByteMeasure::kRetainedCapacity);
   if (!owned_bytes) {
     return std::unexpected(owned_bytes.error());
@@ -1105,6 +1233,9 @@ ProgramResult<ProgramVerificationMetrics> VerifyProgram(const ProgramInput& inpu
 ProgramResult<BytecodeProgram> BytecodeProgram::Create(const ProgramInput& input,
                                                        ProgramLimits limits) {
   if (auto checked = CheckCounts(input, limits); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (auto checked = CheckExecutionMetadata(input); !checked) {
     return std::unexpected(checked.error());
   }
   if (auto owned_bytes = ComputeOwnedBytes(input, limits, OwnedByteMeasure::kLogicalSize);
@@ -1139,6 +1270,10 @@ std::string_view BytecodeProgram::symbol(SymbolId id) const noexcept {
 
 const ReadCursorDescriptor& BytecodeProgram::cursor(CursorId id) const noexcept {
   return input_.cursors[id.value()];
+}
+
+const WriteCursorDescriptor& BytecodeProgram::write_cursor(WriteCursorId id) const noexcept {
+  return input_.write_cursors[id.value()];
 }
 
 const Instruction& BytecodeProgram::instruction(InstructionAddress address) const noexcept {
@@ -1269,7 +1404,7 @@ ProgramResult<CursorId> ProgramBuilder::AddCursor(ReadCursorDescriptor cursor) {
   }
   try {
     input_.cursors.push_back(std::move(cursor));
-    input_.requires_read_transaction = true;
+    input_.requires_database_snapshot = true;
   } catch (...) {
     owned_bytes_ -= bytes;
     throw;
@@ -1277,11 +1412,53 @@ ProgramResult<CursorId> ProgramBuilder::AddCursor(ReadCursorDescriptor cursor) {
   return CursorId(static_cast<std::uint32_t>(input_.cursors.size() - 1));
 }
 
-ProgramResult<void> ProgramBuilder::RequireReadTransaction() {
+ProgramResult<WriteCursorId> ProgramBuilder::AddWriteCursor(WriteCursorDescriptor cursor) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.cursors.size() >= limits_.maximum_cursors ||
+      input_.write_cursors.size() >= limits_.maximum_cursors - input_.cursors.size() ||
+      input_.write_cursors.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kCursorLimitExceeded));
+  }
+  const std::size_t bytes = CursorOwnedBytes(cursor);
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(bytes); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.write_cursors.push_back(std::move(cursor));
+    input_.requires_database_snapshot = true;
+  } catch (...) {
+    owned_bytes_ -= bytes;
+    throw;
+  }
+  return WriteCursorId(static_cast<std::uint32_t>(input_.write_cursors.size() - 1));
+}
+
+ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
+    ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
+    ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result) {
   if (auto usable = CheckUsable(); !usable) {
     return usable;
   }
-  input_.requires_read_transaction = true;
+  input_.statement_kind = statement_kind;
+  input_.transaction_access = transaction_access;
+  input_.rollback_mode = rollback_mode;
+  input_.mutation_result = mutation_result;
+  if (transaction_access == ProgramTransactionAccess::kWrite) {
+    input_.requires_database_snapshot = true;
+  }
+  return {};
+}
+
+ProgramResult<void> ProgramBuilder::RequireDatabaseSnapshot() {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  input_.requires_database_snapshot = true;
   return {};
 }
 
