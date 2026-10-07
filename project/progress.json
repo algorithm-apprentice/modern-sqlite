@@ -35,8 +35,9 @@
     "build-read-performance-baseline",
     "implement-journal-contracts",
     "implement-rollback-journal",
-    "implement-write-pager"
+    "implement-write-pager",
+    "implement-btree-write"
   ],
-  "activeNode": "implement-btree-write",
-  "activeNodeState": "in_progress"
+  "activeNode": "implement-transaction-coordinator",
+  "activeNodeState": "review_pending"
 }
