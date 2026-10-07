@@ -422,6 +422,31 @@ TEST(BytecodeProgramTest, VerifiesRowidListLifecycleAndBranches) {
   EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, VerifyError(conflict));
 }
 
+TEST(BytecodeProgramTest, VerifiesCreateTableStorageInstructions) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kCreateTable;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.register_count = 2;
+  input.instructions = {
+      EnsureDatabaseInitializedInstruction{},
+      CreateTableRootInstruction{.output = Reg(0)},
+      IncrementSchemaCookieInstruction{.output = Reg(1)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("ensure_database_initialized",
+            InstructionKindName(InstructionKindOf(input.instructions[0])));
+  EXPECT_EQ("create_table_root", InstructionKindName(InstructionKindOf(input.instructions[1])));
+  EXPECT_EQ("increment_schema_cookie",
+            InstructionKindName(InstructionKindOf(input.instructions[2])));
+
+  input.statement_kind = ProgramStatementKind::kSelect;
+  input.transaction_access = ProgramTransactionAccess::kRead;
+  input.rollback_mode = ProgramRollbackMode::kTransaction;
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());

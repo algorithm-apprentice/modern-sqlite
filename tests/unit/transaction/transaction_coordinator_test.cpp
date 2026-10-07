@@ -492,6 +492,40 @@ TEST(TransactionCoordinator, RollsBackImplicitWrite) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(TransactionCoordinator, CommitsAndRollsBackSchemaCookieIncrements) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    TransactionStatement initialize = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(initialize.writer()->InitializeDatabase());
+    RequireStatus(initialize.Succeed());
+
+    TransactionStatement rolled_back =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    EXPECT_EQ(1U, TakeValue(rolled_back.writer()->IncrementSchemaCookie()));
+    RequireStatus(rolled_back.Rollback());
+
+    TransactionStatement committed =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    EXPECT_EQ(1U, TakeValue(committed.writer()->IncrementSchemaCookie()));
+    RequireStatus(committed.Succeed());
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  ASSERT_NE(nullptr, pager->header());
+  EXPECT_EQ(1U, pager->header()->schema_cookie());
+  RequireStatus(pager->EndRead());
+}
+
 TEST(TransactionCoordinator, RollsBackOneStatementInsideExplicitTransaction) {
   test::WritePagerFixedVfs vfs{false};
   {

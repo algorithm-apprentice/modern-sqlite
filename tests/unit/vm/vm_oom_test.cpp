@@ -573,6 +573,54 @@ int main() try {
       !update_statement->Rollback().has_value()) {
     return 1;
   }
+
+  test::WritePagerFixedVfs create_vfs{false};
+  std::unique_ptr<Pager> create_pager = test::OpenWritePager(create_vfs, 64U);
+  if (create_pager == nullptr) {
+    return 1;
+  }
+  auto create_coordinator = TransactionCoordinator::Open(std::move(create_pager));
+  if (!create_coordinator.has_value()) {
+    return 1;
+  }
+  ProgramInput create_input;
+  create_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  create_input.statement_kind = ProgramStatementKind::kCreateTable;
+  create_input.transaction_access = ProgramTransactionAccess::kWrite;
+  create_input.rollback_mode = ProgramRollbackMode::kStatement;
+  create_input.register_count = 2;
+  create_input.instructions = {
+      EnsureDatabaseInitializedInstruction{},
+      CreateTableRootInstruction{.output = RegisterId(0)},
+      IncrementSchemaCookieInstruction{.output = RegisterId(1)},
+      HaltInstruction{},
+  };
+  auto create_program = BytecodeProgram::Create(create_input);
+  auto create_statement = create_coordinator->BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite,
+      .rollback = StatementRollbackMode::kStatement,
+  });
+  if (!create_program.has_value() || !create_statement.has_value() ||
+      create_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto create_vm = Vm::Create(*create_program, VmEnvironment::Core());
+  if (!create_vm.has_value() ||
+      !create_vm->AttachExecutionContext(VmExecutionContext{*create_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto create_step_failure = create_vm->Step();
+  fail_allocations = false;
+  if (create_step_failure.has_value() ||
+      create_step_failure.error().code() != ErrorCode::kOutOfMemory) {
+    return 1;
+  }
+  if (!create_vm->DetachExecutionContext().has_value() ||
+      !create_statement->Rollback().has_value() || !create_vfs.database_bytes().empty()) {
+    return 1;
+  }
   return 0;
 } catch (...) {
   fail_allocations = false;

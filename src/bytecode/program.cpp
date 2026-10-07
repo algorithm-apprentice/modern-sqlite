@@ -781,6 +781,19 @@ template <typename T>
               return result;
             }
             return check_register(operation.record, index);
+          } else if constexpr (std::is_same_v<Operation, EnsureDatabaseInitializedInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kCreateTable ||
+                input.transaction_access != ProgramTransactionAccess::kWrite) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            return ProgramResult<void>{};
+          } else if constexpr (std::is_same_v<Operation, CreateTableRootInstruction> ||
+                               std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kCreateTable ||
+                input.transaction_access != ProgramTransactionAccess::kWrite) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1071,7 +1084,9 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
           if constexpr (std::is_same_v<Operation, HaltInstruction>) {
             return {};
           } else if constexpr (std::is_same_v<Operation, LoadConstantInstruction> ||
-                               std::is_same_v<Operation, LoadParameterInstruction>) {
+                               std::is_same_v<Operation, LoadParameterInstruction> ||
+                               std::is_same_v<Operation, CreateTableRootInstruction> ||
+                               std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
             initialize(operation.output);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CopyInstruction> ||
@@ -1265,6 +1280,8 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, EnsureDatabaseInitializedInstruction>) {
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (auto result = require_initialized(operation.left); !result) {
               return result;
@@ -1416,6 +1433,12 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "delete_table";
     case InstructionKind::kUpdateTable:
       return "update_table";
+    case InstructionKind::kEnsureDatabaseInitialized:
+      return "ensure_database_initialized";
+    case InstructionKind::kCreateTableRoot:
+      return "create_table_root";
+    case InstructionKind::kIncrementSchemaCookie:
+      return "increment_schema_cookie";
     case InstructionKind::kCompare:
       return "compare";
     case InstructionKind::kCallScalar:

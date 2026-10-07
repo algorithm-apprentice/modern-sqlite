@@ -74,6 +74,7 @@ class TransactionWriter final {
   [[nodiscard]] Result<TableBtreeWriter> CreateTableBtree();
   [[nodiscard]] Result<IndexBtreeWriter> CreateIndexBtree(
       std::span<const IndexColumnOrder> columns);
+  [[nodiscard]] Result<std::uint32_t> IncrementSchemaCookie();
   [[nodiscard]] Result<TableBtreeWriter> OpenTableBtree(PageNumber root_page);
   [[nodiscard]] Result<IndexBtreeWriter> OpenIndexBtree(PageNumber root_page,
                                                         std::span<const IndexColumnOrder> columns);

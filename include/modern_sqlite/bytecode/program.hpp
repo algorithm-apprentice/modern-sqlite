@@ -330,6 +330,16 @@ struct UpdateTableInstruction {
   RegisterId record;
 };
 
+struct EnsureDatabaseInitializedInstruction {};
+
+struct CreateTableRootInstruction {
+  RegisterId output;
+};
+
+struct IncrementSchemaCookieInstruction {
+  RegisterId output;
+};
+
 struct CompareInstruction {
   SqlComparison comparison;
   TypeAffinity affinity;
@@ -370,8 +380,9 @@ using Instruction = std::variant<
     ClearRowIdListInstruction, AppendRowIdListInstruction, RewindRowIdListInstruction,
     NextRowIdListInstruction, SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
     ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
-    DeleteTableInstruction, UpdateTableInstruction, CompareInstruction, CallScalarInstruction,
-    JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+    DeleteTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
+    CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
+    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -404,6 +415,9 @@ enum class InstructionKind : std::uint8_t {
   kInsertTable,
   kDeleteTable,
   kUpdateTable,
+  kEnsureDatabaseInitialized,
+  kCreateTableRoot,
+  kIncrementSchemaCookie,
   kCompare,
   kCallScalar,
   kJump,

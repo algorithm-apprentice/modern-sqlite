@@ -219,6 +219,7 @@ class Pager final {
     return write_transaction_generation_;
   }
   [[nodiscard]] Status RandomBytes(MutableByteView output);
+  [[nodiscard]] Result<std::uint32_t> IncrementSchemaCookie();
   [[nodiscard]] std::optional<ErrorCode> write_failure_code() const noexcept;
   void ReportWriteCoordinatorFailure(ErrorCode code) noexcept;
   [[nodiscard]] Status MarkPageContentRequired(PageNumber page_number);
