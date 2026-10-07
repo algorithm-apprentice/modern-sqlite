@@ -7,6 +7,7 @@
 namespace modern_sqlite::fuzz {
 
 void RunWriteSqlInput(std::span<const std::uint8_t> input);
+void RunWriteDatabaseImageInput(std::span<const std::uint8_t> input);
 
 }  // namespace modern_sqlite::fuzz
 
