@@ -333,6 +333,51 @@ TEST(BytecodeProgramTest, VerifiesTypedTableDeleteAndRowidSeekModes) {
   EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(seek));
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Integer(7));
+  input.constants.push_back(SqlValue::Integer(8));
+  const std::array record_bytes{std::byte{2}, std::byte{0}};
+  input.constants.push_back(SqlValue::Blob(ByteBuffer::CopyOf(record_bytes)));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = false,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      UpdateTableInstruction{
+          .cursor = WriteCursor(0),
+          .old_rowid = Reg(0),
+          .new_rowid = Reg(1),
+          .record = Reg(2),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("update_table", InstructionKindName(InstructionKindOf(input.instructions[4])));
+
+  input.instructions.erase(input.instructions.begin() + 3);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());

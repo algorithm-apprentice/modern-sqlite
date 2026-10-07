@@ -367,6 +367,27 @@ DELETE operand as `kTypeMismatch`, propagates storage errors, treats an
 already-absent row as a successful no-op, and never publishes a
 last-insert-rowid event for DELETE.
 
+The executable UPDATE slice adds `UpdateTableInstruction`, which consumes an
+open write cursor plus initialized old-rowid, new-rowid, and encoded-record
+registers. The verifier enforces those operands and cursor lifetime.
+
+At execution the VM:
+
+1. converts both rowids losslessly to int64 and rejects NULL, fractional,
+   malformed, or out-of-range values with `kTypeMismatch`;
+2. point-checks that the old row still exists;
+3. when the rowid changes, point-checks the new rowid and returns
+   `kConstraint` before mutation if it already exists;
+4. uses the B-tree replacement path when both rowids are equal;
+5. otherwise deletes the old row and insert-only writes the new key and
+   record, relying on the statement rollback mode selected by physical
+   planning to restore the old row after any later failure; and
+6. increments the VM-local change count exactly once only after the complete
+   replacement succeeds.
+
+An already-absent old row is a successful no-op. UPDATE replacement never
+publishes a last-insert-rowid event.
+
 The lowering module is generalized from `read_lowering` to canonical
 `plan_lowering` naming when the first mutation program is added. The project
 retains no compatibility aliases. Its public boundary uses:

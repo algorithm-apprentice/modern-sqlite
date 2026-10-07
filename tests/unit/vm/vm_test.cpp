@@ -334,6 +334,60 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram TableUpdateProgram(SqlValue old_rowid, SqlValue new_rowid,
+                                                 SqlValue value) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.register_count = 4;
+  input.constants.push_back(std::move(old_rowid));
+  input.constants.push_back(std::move(new_rowid));
+  input.constants.push_back(std::move(value));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = true,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = true,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      BuildTableRecordInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(1),
+          .value_count = 2,
+          .output = Reg(3),
+      },
+      UpdateTableInstruction{
+          .cursor = WriteCursor(0),
+          .old_rowid = Reg(0),
+          .new_rowid = Reg(1),
+          .record = Reg(3),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] BytecodeProgram TableSeekProgram(SqlValue key, RowIdSeekMode mode) {
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
@@ -802,6 +856,61 @@ TEST(VmWriteTest, DeletesRowsAndSeeksStrictlyGreaterRowids) {
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(3, rows[0].first);
   ExpectText(rows[0].second[1], "third");
+}
+
+TEST(VmWriteTest, ReplacesAndMovesUpdatedRowsAtomically) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, 1, "first");
+  InsertDirectWriteRow(vfs, 3, "third");
+
+  const auto execute = [&](const BytecodeProgram& program) {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    Result<VmStep> stepped = vm.Step();
+    if (!stepped.has_value()) {
+      const Error error = std::move(stepped.error());
+      RequireStatus(vm.DetachExecutionContext());
+      RequireStatus(statement.Rollback());
+      return Result<std::uint64_t>{std::unexpected(error)};
+    }
+    const std::uint64_t changes = vm.change_count();
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+    return Result<std::uint64_t>{changes};
+  };
+
+  EXPECT_EQ(1U, TakeValue(execute(TableUpdateProgram(SqlValue::Integer(1), SqlValue::Integer(1),
+                                                     SqlValue::Text("same")))));
+  EXPECT_EQ(1U, TakeValue(execute(TableUpdateProgram(SqlValue::Integer(1), SqlValue::Text("2"),
+                                                     SqlValue::Integer(42)))));
+
+  const auto duplicate = execute(
+      TableUpdateProgram(SqlValue::Integer(2), SqlValue::Integer(3), SqlValue::Text("duplicate")));
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate.error().code());
+
+  EXPECT_EQ(0U, TakeValue(execute(TableUpdateProgram(SqlValue::Integer(99), SqlValue::Integer(100),
+                                                     SqlValue::Text("missing")))));
+
+  const auto null_rowid =
+      execute(TableUpdateProgram(SqlValue::Integer(2), SqlValue{}, SqlValue::Text("invalid")));
+  ASSERT_FALSE(null_rowid.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, null_rowid.error().code());
+
+  const auto rows = ReadWriteTableRows(vfs);
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(2, rows[0].first);
+  ExpectText(rows[0].second[1], "42");
+  EXPECT_EQ(3, rows[1].first);
+  ExpectText(rows[1].second[1], "third");
 }
 
 TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
