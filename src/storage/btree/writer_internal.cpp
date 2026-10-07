@@ -48,6 +48,10 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
   return MakeError(ErrorCode::kTooLarge, message);
 }
 
+[[nodiscard]] Error Constraint(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kConstraint, message);
+}
+
 [[nodiscard]] Error Internal(std::string_view message) noexcept {
   return MakeError(ErrorCode::kInternal, message);
 }
@@ -4070,6 +4074,118 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
   }
 
   current->ClearStagedCells();
+  current_index_ = 0U;
+  state_ = WritableCursorState::kInvalid;
+  return {};
+}
+
+Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeInsertMode mode,
+                                   BtreeWriteWorkspace& workspace) {
+  if (!table_) {
+    return std::unexpected(Misuse("table insertion requires a table B-tree cursor"));
+  }
+  auto seek = SeekTable(rowid);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (seek->exact && mode == BtreeInsertMode::kInsertOnly) {
+    return std::unexpected(Constraint("table rowid already exists"));
+  }
+
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return promoted;
+  }
+  auto opened = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage page = std::move(*opened);
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Status {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  if (seek->exact) {
+    auto view = CurrentPage();
+    if (!view.has_value()) {
+      return fail(std::move(view.error()));
+    }
+    auto old_cell = view->cell(seek->insertion_index);
+    if (!old_cell.has_value()) {
+      return fail(std::move(old_cell.error()));
+    }
+    if (old_cell->payload_size().value() == payload.size()) {
+      auto overwritten = page.OverwritePayload(seek->insertion_index, payload, workspace);
+      if (!overwritten.has_value()) {
+        return fail(std::move(overwritten.error()));
+      }
+      current_index_ = 0U;
+      state_ = WritableCursorState::kInvalid;
+      return {};
+    }
+  }
+
+  auto formatted = FillTableLeafCell(*owner_, geometry_, workspace, rowid, payload);
+  if (!formatted.has_value()) {
+    return fail(std::move(formatted.error()));
+  }
+
+  const std::size_t insertion_index = seek->insertion_index;
+  if (seek->exact) {
+    auto bytes = page.Bytes();
+    if (!bytes.has_value()) {
+      return fail(std::move(bytes.error()));
+    }
+    auto view = BtreePageView::Parse(*bytes, page.page_number_, geometry_);
+    if (!view.has_value()) {
+      return fail(std::move(view.error()));
+    }
+    auto old_offset = view->cell_offset(insertion_index);
+    auto old_cell = view->cell(insertion_index);
+    if (!old_offset.has_value()) {
+      return fail(std::move(old_offset.error()));
+    }
+    if (!old_cell.has_value()) {
+      return fail(std::move(old_cell.error()));
+    }
+
+    if (old_cell->encoded_size().value() == formatted->bytes.size() &&
+        old_cell->local_payload().size() == old_cell->payload_size().value()) {
+      auto valid = page.ValidateCellImage(formatted->bytes, std::nullopt);
+      if (!valid.has_value()) {
+        return fail(std::move(valid.error()));
+      }
+      owner_->NoteMutation();
+      std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(old_offset->value()),
+                   formatted->bytes.data(), formatted->bytes.size());
+      current_index_ = 0U;
+      state_ = WritableCursorState::kInvalid;
+      return {};
+    }
+
+    auto cleared = ClearCellOverflow(*owner_, geometry_, *old_cell);
+    if (!cleared.has_value()) {
+      return fail(std::move(cleared.error()));
+    }
+    auto dropped = page.DropCell(insertion_index);
+    if (!dropped.has_value()) {
+      return fail(std::move(dropped.error()));
+    }
+  }
+
+  auto inserted = page.InsertCell(insertion_index, formatted->bytes, std::nullopt, {}, workspace);
+  if (!inserted.has_value()) {
+    return fail(std::move(inserted.error()));
+  }
+  if (page.staged_count_ != 0U) {
+    return Balance(std::move(page), workspace);
+  }
+
   current_index_ = 0U;
   state_ = WritableCursorState::kInvalid;
   return {};

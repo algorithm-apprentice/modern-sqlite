@@ -315,6 +315,11 @@ struct IndexSeekResult {
   std::size_t tree_depth;
 };
 
+enum class BtreeInsertMode : std::uint8_t {
+  kInsertOnly,
+  kReplace,
+};
+
 class WritableCursor final {
  public:
   [[nodiscard]] static Result<WritableCursor> Open(MutationPageOwner& owner, PageNumber root_page,
@@ -335,6 +340,8 @@ class WritableCursor final {
   [[nodiscard]] Result<BtreePageView> CurrentPage() const;
   [[nodiscard]] Status PromoteCurrent();
   [[nodiscard]] Status Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status InsertTable(std::int64_t rowid, ByteView payload, BtreeInsertMode mode,
+                                   BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
