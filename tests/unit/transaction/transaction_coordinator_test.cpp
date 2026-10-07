@@ -748,7 +748,7 @@ TEST(TransactionCoordinatorModel, MixedTransactionsMatchReferenceMap) {
     std::map<std::int64_t, std::byte> working = durable;
 
     const std::int64_t first_key = static_cast<std::int64_t>((cycle * 7U) % 31U) + 1;
-    const std::byte first_value = static_cast<std::byte>((cycle + 1U) & 0xffU);
+    const auto first_value = static_cast<std::byte>((cycle + 1U) & 0xffU);
     {
       TransactionStatement statement = TakeValue(coordinator.BeginStatement(
           TransactionStatementOptions{.access = StatementAccess::kWrite}));
@@ -763,7 +763,7 @@ TEST(TransactionCoordinatorModel, MixedTransactionsMatchReferenceMap) {
     RequireStatus(coordinator.Savepoint(Utf8View{"model"}));
     const std::map<std::int64_t, std::byte> savepoint_model = working;
     const std::int64_t second_key = static_cast<std::int64_t>((cycle * 11U + 3U) % 31U) + 1;
-    const std::byte second_value = static_cast<std::byte>((cycle + 101U) & 0xffU);
+    const auto second_value = static_cast<std::byte>((cycle + 101U) & 0xffU);
     {
       TransactionStatement statement = TakeValue(coordinator.BeginStatement(
           TransactionStatementOptions{.access = StatementAccess::kWrite}));
