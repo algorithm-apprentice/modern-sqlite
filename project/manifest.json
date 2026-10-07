@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "transaction-coordinator-review",
+    "status": "transaction-coordinator",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -51,5 +51,5 @@
     "test": "ctest --preset dev-debug"
   },
   "currentNode": "implement-transaction-coordinator",
-  "currentNodeState": "review_pending"
+  "currentNodeState": "in_progress"
 }
