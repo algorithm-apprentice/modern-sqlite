@@ -52,6 +52,10 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
   return MakeError(ErrorCode::kConstraint, message);
 }
 
+[[nodiscard]] Error NotFound(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kNotFound, message);
+}
+
 [[nodiscard]] Error Internal(std::string_view message) noexcept {
   return MakeError(ErrorCode::kInternal, message);
 }
@@ -4217,6 +4221,55 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   }
   return InsertFormattedCell(std::move(page), seek->insertion_index, seek->exact, formatted->bytes,
                              left_child, workspace);
+}
+
+Status WritableCursor::DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace) {
+  if (!table_) {
+    return std::unexpected(Misuse("table deletion requires a table B-tree cursor"));
+  }
+  auto seek = SeekTable(rowid);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (!seek->exact) {
+    return std::unexpected(NotFound("table rowid does not exist"));
+  }
+
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return promoted;
+  }
+  auto opened = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage page = std::move(*opened);
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Status {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  auto view = CurrentPage();
+  if (!view.has_value()) {
+    return fail(std::move(view.error()));
+  }
+  auto cell = view->cell(seek->insertion_index);
+  if (!cell.has_value()) {
+    return fail(std::move(cell.error()));
+  }
+  auto cleared = ClearCellOverflow(*owner_, geometry_, *cell);
+  if (!cleared.has_value()) {
+    return fail(std::move(cleared.error()));
+  }
+  auto dropped = page.DropCell(seek->insertion_index);
+  if (!dropped.has_value()) {
+    return fail(std::move(dropped.error()));
+  }
+  return Balance(std::move(page), workspace);
 }
 
 Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t insertion_index,

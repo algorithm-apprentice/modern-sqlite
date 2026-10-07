@@ -347,6 +347,7 @@ class WritableCursor final {
                                    RecordCodecOptions options, BtreeInsertMode mode,
                                    std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
