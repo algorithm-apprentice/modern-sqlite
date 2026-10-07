@@ -22,7 +22,7 @@
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "modern_sqlite/vm/vm.hpp"
-#include "read_session_internal.hpp"
+#include "session_internal.hpp"
 
 namespace modern_sqlite {
 namespace {

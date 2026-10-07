@@ -40,6 +40,7 @@ add_executable(
   unit/runtime/function_registry_test.cpp
   unit/runtime/sql_value_test.cpp
   unit/session/read_session_test.cpp
+  unit/session/write_session_test.cpp
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/btree/writer_internal_test.cpp
@@ -576,6 +577,62 @@ set_tests_properties(
 add_executable(
   modern_sqlite_read_session_oom_test
   unit/session/read_session_oom_test.cpp
+)
+
+add_executable(
+  modern_sqlite_write_session_oom_test
+  unit/session/write_session_oom_test.cpp
+)
+target_include_directories(
+  modern_sqlite_write_session_oom_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  modern_sqlite_write_session_oom_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_write_session_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_session_oom_test)
+add_test(
+  NAME session.write_session_oom
+  COMMAND modern_sqlite_write_session_oom_test
+)
+set_tests_properties(
+  session.write_session_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_write_session_allocation_test
+  unit/session/write_session_allocation_test.cpp
+)
+target_include_directories(
+  modern_sqlite_write_session_allocation_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  modern_sqlite_write_session_allocation_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_write_session_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_session_allocation_test)
+add_test(
+  NAME session.write_session_allocation
+  COMMAND modern_sqlite_write_session_allocation_test
+)
+set_tests_properties(
+  session.write_session_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
 )
 
 add_executable(

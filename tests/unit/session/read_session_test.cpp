@@ -20,7 +20,7 @@
 
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
-#include "src/session/read_session_internal.hpp"
+#include "src/session/session_internal.hpp"
 
 namespace modern_sqlite {
 namespace {
