@@ -656,9 +656,9 @@ TEST(InsertLowering, RetainsLimitsRejectsUnsupportedMutationsAndMovedFromPlans) 
   EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded,
             TakeOptional(limited.error().program_error, "missing nested program error").code);
 
-  const PhysicalMutationPlan update =
-      OptimizeMutationOrThrow("UPDATE Items SET Name='updated'", catalog);
-  LowerPlanResult unsupported = LowerPlan(update);
+  const PhysicalMutationPlan create =
+      OptimizeMutationOrThrow("CREATE TABLE Other(id INTEGER PRIMARY KEY)", catalog);
+  LowerPlanResult unsupported = LowerPlan(create);
   ASSERT_FALSE(unsupported.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, unsupported.error().code);
 
@@ -893,6 +893,197 @@ TEST(DeleteLowering, ExecutesExactAndScanDeletesWithStatementRollback) {
   ASSERT_EQ(2U, restored.size());
   EXPECT_EQ(1, restored[0].first);
   EXPECT_EQ(2, restored[1].first);
+}
+
+TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+
+  const BytecodeProgram empty =
+      LowerMutationOrThrow("UPDATE Items SET Name='unused' WHERE 0", catalog);
+  EXPECT_EQ(ProgramStatementKind::kUpdate, empty.statement_kind());
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, empty.rollback_mode());
+  EXPECT_TRUE(empty.cursors().empty());
+  EXPECT_TRUE(empty.write_cursors().empty());
+  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(empty));
+
+  const BytecodeProgram exact =
+      LowerMutationOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, exact.rollback_mode());
+  EXPECT_TRUE(std::ranges::any_of(exact.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<UpdateTableInstruction>(instruction);
+  }));
+
+  const BytecodeProgram moving =
+      LowerMutationOrThrow("UPDATE Items SET id=?1 WHERE id=?2", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kStatement, moving.rollback_mode());
+  EXPECT_TRUE(std::ranges::any_of(moving.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<MustBeIntegerInstruction>(instruction);
+  }));
+
+  const BytecodeProgram scan =
+      LowerMutationOrThrow("UPDATE Items SET Name=Name||?1 WHERE Score>=?2", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kStatement, scan.rollback_mode());
+  bool greater_seek = false;
+  bool update = false;
+  for (const Instruction& instruction : scan.instructions()) {
+    if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
+      greater_seek = greater_seek || seek->mode == RowIdSeekMode::kGreater;
+    }
+    update = update || std::holds_alternative<UpdateTableInstruction>(instruction);
+  }
+  EXPECT_TRUE(greater_seek);
+  EXPECT_TRUE(update);
+
+  const BytecodeProgram function_scan = LowerMutationOrThrow(
+      "UPDATE Items SET Name=volatile_counter() WHERE Score>=0", catalog, custom.Binder());
+  std::optional<std::size_t> close;
+  std::optional<std::size_t> call;
+  std::optional<std::size_t> update_index;
+  for (std::size_t index = 0; index < function_scan.instructions().size(); ++index) {
+    const Instruction& instruction = function_scan.instructions()[index];
+    if (!close.has_value() && std::holds_alternative<CloseCursorInstruction>(instruction)) {
+      close = index;
+    }
+    if (!call.has_value() && std::holds_alternative<CallScalarInstruction>(instruction)) {
+      call = index;
+    }
+    if (!update_index.has_value() && std::holds_alternative<UpdateTableInstruction>(instruction)) {
+      update_index = index;
+    }
+  }
+  EXPECT_LT(TakeOptional(close, "missing UPDATE read close"),
+            TakeOptional(call, "missing UPDATE assignment call"));
+  EXPECT_LT(TakeOptional(call, "missing UPDATE assignment call"),
+            TakeOptional(update_index, "missing UPDATE point mutation"));
+
+  const PhysicalMutationPlan moving_scan =
+      OptimizeMutationOrThrow("UPDATE Items SET id=id+10 WHERE Score>=?1", catalog);
+  LowerPlanResult unsupported = LowerPlan(moving_scan);
+  ASSERT_FALSE(unsupported.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, unsupported.error().code);
+}
+
+TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto insert_item = [&](test::WritePagerFixedVfs& target_vfs, std::int64_t rowid,
+                               std::string name, std::int64_t score) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(SqlValue::Text(std::move(name)));
+    parameters.push_back(SqlValue::Integer(score));
+    return TakeValue(ExecuteMutationProgram(insert, target_vfs, parameters));
+  };
+  static_cast<void>(insert_item(vfs, 1, "alpha", 1));
+  static_cast<void>(insert_item(vfs, 2, "beta", 2));
+  static_cast<void>(insert_item(vfs, 3, "gamma", 3));
+
+  const BytecodeProgram exact =
+      LowerMutationOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
+  std::vector<SqlValue> exact_parameters;
+  exact_parameters.push_back(SqlValue::Integer(42));
+  exact_parameters.push_back(SqlValue::Integer(2));
+  const MutationOutcome exact_outcome =
+      TakeValue(ExecuteMutationProgram(exact, vfs, exact_parameters));
+  EXPECT_EQ(1U, exact_outcome.changes);
+  EXPECT_FALSE(exact_outcome.last_insert_rowid.has_value());
+
+  const BytecodeProgram move = LowerMutationOrThrow("UPDATE Items SET id=?1 WHERE id=?2", catalog);
+  std::vector<SqlValue> move_parameters;
+  move_parameters.push_back(SqlValue::Text("5"));
+  move_parameters.push_back(SqlValue::Integer(3));
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(move, vfs, move_parameters)).changes);
+
+  callback_count = 0;
+  const BytecodeProgram duplicates = LowerMutationOrThrow(
+      "UPDATE Items SET Name=volatile_counter(),name=volatile_counter() WHERE id=1", catalog,
+      custom.Binder());
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(duplicates, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ(2U, callback_count);
+
+  const BytecodeProgram scan =
+      LowerMutationOrThrow("UPDATE Items SET Score=Score+10 WHERE Score>=?1", catalog);
+  std::vector<SqlValue> scan_parameters;
+  scan_parameters.push_back(SqlValue::Integer(2));
+  EXPECT_EQ(2U, TakeValue(ExecuteMutationProgram(scan, vfs, scan_parameters)).changes);
+
+  std::vector<SqlValue> conflict_parameters;
+  conflict_parameters.push_back(SqlValue::Integer(2));
+  conflict_parameters.push_back(SqlValue::Integer(1));
+  const Result<MutationOutcome> conflict = ExecuteMutationProgram(move, vfs, conflict_parameters);
+  ASSERT_FALSE(conflict.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, conflict.error().code());
+
+  std::vector<SqlValue> null_parameters;
+  null_parameters.emplace_back();
+  null_parameters.push_back(SqlValue::Integer(1));
+  const Result<MutationOutcome> null_rowid = ExecuteMutationProgram(move, vfs, null_parameters);
+  ASSERT_FALSE(null_rowid.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, null_rowid.error().code());
+
+  std::vector<SqlValue> missing_parameters;
+  missing_parameters.push_back(SqlValue::Text("missing"));
+  missing_parameters.push_back(SqlValue::Integer(99));
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(exact, vfs, missing_parameters)).changes);
+
+  const auto rows = ReadMutationRows(vfs);
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(1, rows[0].first);
+  EXPECT_EQ("2", TextBytes(rows[0].second[1]));
+  EXPECT_EQ(1.0, TakeOptional(rows[0].second[2].real_value(), "missing row 1 score"));
+  EXPECT_EQ(2, rows[1].first);
+  EXPECT_EQ("42", TextBytes(rows[1].second[1]));
+  EXPECT_EQ(12.0, TakeOptional(rows[1].second[2].real_value(), "missing row 2 score"));
+  EXPECT_EQ(5, rows[2].first);
+  EXPECT_EQ("gamma", TextBytes(rows[2].second[1]));
+  EXPECT_EQ(13.0, TakeOptional(rows[2].second[2].real_value(), "missing row 5 score"));
+
+  const BytecodeProgram plain_insert =
+      LowerMutationOrThrow("INSERT INTO Plain(rowid,Value) VALUES(?1,?2)", catalog);
+  std::vector<SqlValue> plain_insert_parameters;
+  plain_insert_parameters.push_back(SqlValue::Integer(5));
+  plain_insert_parameters.push_back(SqlValue::Text("five"));
+  static_cast<void>(TakeValue(ExecuteMutationProgram(plain_insert, vfs, plain_insert_parameters)));
+  const BytecodeProgram plain_update =
+      LowerMutationOrThrow("UPDATE Plain SET Value=?1 WHERE rowid=?2", catalog);
+  std::vector<SqlValue> plain_update_parameters;
+  plain_update_parameters.push_back(SqlValue::Integer(42));
+  plain_update_parameters.push_back(SqlValue::Integer(5));
+  EXPECT_EQ(1U,
+            TakeValue(ExecuteMutationProgram(plain_update, vfs, plain_update_parameters)).changes);
+  const BytecodeProgram plain_move =
+      LowerMutationOrThrow("UPDATE Plain SET rowid=?1 WHERE rowid=?2", catalog);
+  std::vector<SqlValue> plain_move_parameters;
+  plain_move_parameters.push_back(SqlValue::Integer(6));
+  plain_move_parameters.push_back(SqlValue::Integer(5));
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(plain_move, vfs, plain_move_parameters)).changes);
+  const auto plain_rows = ReadMutationRows(vfs, PageNumber{3});
+  ASSERT_EQ(1U, plain_rows.size());
+  EXPECT_EQ(6, plain_rows[0].first);
+  EXPECT_EQ("42", TextBytes(plain_rows[0].second[0]));
+
+  test::WritePagerFixedVfs rollback_vfs{false};
+  InitializeMutationDatabase(rollback_vfs);
+  static_cast<void>(insert_item(rollback_vfs, 1, "first", 1));
+  static_cast<void>(insert_item(rollback_vfs, 2, "second", 2));
+  callback_count = 0;
+  const BytecodeProgram failing =
+      LowerMutationOrThrow("UPDATE Items SET Name=fail_after_one(Name)", catalog, custom.Binder());
+  const Result<MutationOutcome> failed =
+      ExecuteMutationProgram(failing, rollback_vfs, {}, custom.Vm());
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(2U, callback_count);
+  const auto restored = ReadMutationRows(rollback_vfs);
+  ASSERT_EQ(2U, restored.size());
+  EXPECT_EQ("first", TextBytes(restored[0].second[1]));
+  EXPECT_EQ("second", TextBytes(restored[1].second[1]));
 }
 
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
