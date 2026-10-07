@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "modern_sqlite/pager/pager.hpp"
 
@@ -28,6 +29,14 @@ namespace {
 
 [[nodiscard]] Error Misuse(std::string_view message) noexcept {
   return MakeError(ErrorCode::kMisuse, message);
+}
+
+[[nodiscard]] Error Generic(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kGeneric, message);
+}
+
+[[nodiscard]] Error Format(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kFormat, message);
 }
 
 [[nodiscard]] Error Internal(std::string_view message) noexcept {
@@ -68,6 +77,20 @@ namespace {
   }
 }
 
+[[nodiscard]] bool EqualSavepointName(std::string_view left, std::string_view right) noexcept {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < left.size(); ++index) {
+    const auto left_byte = static_cast<std::uint8_t>(static_cast<unsigned char>(left[index]));
+    const auto right_byte = static_cast<std::uint8_t>(static_cast<unsigned char>(right[index]));
+    if (SqliteToLower(left_byte) != SqliteToLower(right_byte)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 namespace transaction_detail {
@@ -87,6 +110,11 @@ struct ActiveStatement {
   bool implicit;
   bool epoch_ended = false;
   std::optional<JournalSavepointId> savepoint;
+};
+
+struct NamedSavepoint {
+  std::string name;
+  std::optional<JournalSavepointId> pager_id;
 };
 
 class CoordinatorState final {
@@ -229,6 +257,95 @@ class CoordinatorState final {
     return ContinueRollback();
   }
 
+  [[nodiscard]] Status Savepoint(Utf8View name) {
+    auto ready = CheckSavepointNameAndActivity(name);
+    if (!ready.has_value()) {
+      return ready;
+    }
+    if (terminal_phase_ != TerminalPhase::kNone) {
+      return std::unexpected(Misuse("transaction cleanup must finish before a new savepoint"));
+    }
+
+    std::string owned_name{name.bytes()};
+    savepoints_.reserve(savepoints_.size() + 1U);
+    std::optional<JournalSavepointId> pager_id;
+    if (pager_->in_write_transaction()) {
+      auto created = pager_->CreateSavepoint();
+      if (!created.has_value()) {
+        return AutomaticFullRollback(std::move(created.error()));
+      }
+      pager_id = *created;
+    }
+    savepoints_.push_back(NamedSavepoint{
+        .name = std::move(owned_name),
+        .pager_id = pager_id,
+    });
+    if (transaction_state_ == TransactionState::kAutocommit) {
+      transaction_state_ = TransactionState::kSavepoint;
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status Release(Utf8View name) {
+    auto ready = CheckSavepointNameAndActivity(name);
+    if (!ready.has_value()) {
+      return ready;
+    }
+    const auto found = FindSavepoint(name.bytes());
+    if (!found.has_value()) {
+      return std::unexpected(Generic("no such savepoint"));
+    }
+    if (transaction_state_ == TransactionState::kSavepoint && *found == 0U) {
+      if (terminal_phase_ == TerminalPhase::kRollbackAttempt ||
+          terminal_phase_ == TerminalPhase::kRollbackCleanup) {
+        return std::unexpected(Misuse("rollback cleanup cannot be completed by savepoint release"));
+      }
+      return Commit();
+    }
+    if (terminal_phase_ != TerminalPhase::kNone) {
+      return std::unexpected(Misuse("transaction cleanup must finish before savepoint release"));
+    }
+
+    const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
+    if (pager_id.has_value()) {
+      auto released = pager_->ReleaseSavepoint(*pager_id);
+      if (!released.has_value()) {
+        return AutomaticFullRollback(std::move(released.error()));
+      }
+    }
+    savepoints_.erase(savepoints_.begin() + static_cast<std::ptrdiff_t>(*found), savepoints_.end());
+    return {};
+  }
+
+  [[nodiscard]] Status RollbackTo(Utf8View name) {
+    auto ready = CheckSavepointNameAndActivity(name);
+    if (!ready.has_value()) {
+      return ready;
+    }
+    if (terminal_phase_ == TerminalPhase::kCommitCleanup ||
+        terminal_phase_ == TerminalPhase::kRollbackAttempt ||
+        terminal_phase_ == TerminalPhase::kRollbackCleanup) {
+      return std::unexpected(Misuse("transaction cleanup blocks savepoint rollback"));
+    }
+    const auto found = FindSavepoint(name.bytes());
+    if (!found.has_value()) {
+      return std::unexpected(Generic("no such savepoint"));
+    }
+
+    const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
+    if (pager_id.has_value()) {
+      writer_.reset();
+      auto rolled_back = pager_->RollbackToSavepoint(*pager_id);
+      if (!rolled_back.has_value()) {
+        return AutomaticFullRollback(std::move(rolled_back.error()));
+      }
+      terminal_phase_ = TerminalPhase::kNone;
+    }
+    savepoints_.erase(savepoints_.begin() + static_cast<std::ptrdiff_t>(*found + 1U),
+                      savepoints_.end());
+    return {};
+  }
+
   [[nodiscard]] Status BeginStatement(TransactionStatementOptions options, std::uint64_t token) {
     if (active_.has_value()) {
       return std::unexpected(Busy("another transaction statement is active"));
@@ -270,6 +387,10 @@ class CoordinatorState final {
         }
         return std::unexpected(std::move(primary));
       }
+    }
+    auto materialized = MaterializeSavepoints();
+    if (!materialized.has_value()) {
+      return materialized;
     }
 
     std::optional<JournalSavepointId> statement_savepoint;
@@ -459,6 +580,39 @@ class CoordinatorState final {
   }
 
  private:
+  [[nodiscard]] Status CheckSavepointNameAndActivity(Utf8View name) const {
+    if (active_.has_value()) {
+      return std::unexpected(Busy("savepoint control requires no active statement"));
+    }
+    if (!ValidateUtf8(name).has_value()) {
+      return std::unexpected(Format("savepoint name is not valid UTF-8"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] std::optional<std::size_t> FindSavepoint(std::string_view name) const noexcept {
+    for (std::size_t index = savepoints_.size(); index > 0U; --index) {
+      if (EqualSavepointName(savepoints_[index - 1U].name, name)) {
+        return index - 1U;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] Status MaterializeSavepoints() {
+    for (NamedSavepoint& savepoint : savepoints_) {
+      if (savepoint.pager_id.has_value()) {
+        continue;
+      }
+      auto created = pager_->CreateSavepoint();
+      if (!created.has_value()) {
+        return AutomaticFullRollback(std::move(created.error()));
+      }
+      savepoint.pager_id = *created;
+    }
+    return {};
+  }
+
   [[nodiscard]] ActiveStatement* CurrentStatement() noexcept {
     if (!active_.has_value()) {
       return nullptr;
@@ -594,6 +748,7 @@ class CoordinatorState final {
   void ResetLogicalState() noexcept {
     writer_.reset();
     active_.reset();
+    savepoints_.clear();
     transaction_state_ = TransactionState::kAutocommit;
     terminal_phase_ = TerminalPhase::kNone;
   }
@@ -601,6 +756,7 @@ class CoordinatorState final {
   std::unique_ptr<Pager> pager_;
   std::optional<BtreeWriteSession> writer_;
   std::optional<ActiveStatement> active_;
+  std::vector<NamedSavepoint> savepoints_;
   std::uint64_t next_statement_token_ = 0;
   TransactionState transaction_state_ = TransactionState::kAutocommit;
   TerminalPhase terminal_phase_ = TerminalPhase::kNone;
@@ -755,6 +911,45 @@ Status TransactionCoordinator::Rollback() {
   }
   try {
     return state_->Rollback();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Status TransactionCoordinator::Savepoint(Utf8View name) {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("transaction coordinator is moved from"));
+  }
+  try {
+    return state_->Savepoint(name);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Status TransactionCoordinator::Release(Utf8View name) {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("transaction coordinator is moved from"));
+  }
+  try {
+    return state_->Release(name);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Status TransactionCoordinator::RollbackTo(Utf8View name) {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("transaction coordinator is moved from"));
+  }
+  try {
+    return state_->RollbackTo(name);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {

@@ -8,6 +8,7 @@
 #include <optional>
 #include <ranges>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "modern_sqlite/pager/pager.hpp"
@@ -398,6 +399,241 @@ TEST(TransactionCoordinator, TransactionModeStatementCannotLaunderRollbackRequir
     RequireStatus(coordinator.Rollback());
   }
   EXPECT_TRUE(observed_rollback_required);
+}
+
+TEST(TransactionCoordinator, NamedSavepointsUseNewestCaseInsensitiveMatch) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Savepoint(Utf8View{"Outer"}));
+    EXPECT_EQ(TransactionState::kSavepoint, coordinator.state());
+    EXPECT_FALSE(coordinator.autocommit());
+
+    TransactionStatement first = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(first.writer()->InitializeDatabase());
+    TableBtreeWriter first_table = TakeValue(first.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array first_payload{std::byte{0x11}};
+    RequireStatus(first_table.Insert(1, first_payload));
+    RequireStatus(first.Succeed());
+
+    RequireStatus(coordinator.Savepoint(Utf8View{"dup"}));
+    TransactionStatement second = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    TableBtreeWriter second_table = TakeValue(second.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array second_payload{std::byte{0x22}};
+    RequireStatus(second_table.Insert(2, second_payload));
+    RequireStatus(second.Succeed());
+
+    RequireStatus(coordinator.Savepoint(Utf8View{"DUP"}));
+    TransactionStatement third = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    TableBtreeWriter third_table = TakeValue(third.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array third_payload{std::byte{0x33}};
+    RequireStatus(third_table.Insert(3, third_payload));
+    RequireStatus(third.Succeed());
+
+    RequireStatus(coordinator.RollbackTo(Utf8View{"DuP"}));
+    RequireStatus(coordinator.Release(Utf8View{"dUp"}));
+    RequireStatus(coordinator.RollbackTo(Utf8View{"OUTER"}));
+
+    TransactionStatement replacement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(replacement.writer()->InitializeDatabase());
+    TableBtreeWriter replacement_table =
+        TakeValue(replacement.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array replacement_payload{std::byte{0x44}};
+    RequireStatus(replacement_table.Insert(4, replacement_payload));
+    RequireStatus(replacement.Succeed());
+
+    RequireStatus(coordinator.Release(Utf8View{"outer"}));
+    EXPECT_TRUE(coordinator.autocommit());
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_EQ(4, TakeValue(cursor.rowid()));
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinator, TransactionSavepointReleaseRetriesCommittedCleanup) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Savepoint(Utf8View{"outer"}));
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(statement.writer()->InitializeDatabase());
+    TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array payload{std::byte{0x45}};
+    RequireStatus(table.Insert(1, payload));
+    RequireStatus(statement.Succeed());
+
+    vfs.FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
+    const auto cleanup_failure = coordinator.Release(Utf8View{"OUTER"});
+    ASSERT_FALSE(cleanup_failure.has_value());
+    EXPECT_EQ(ErrorCode::kIo, cleanup_failure.error().code());
+    EXPECT_EQ(TransactionState::kSavepoint, coordinator.state());
+
+    const auto forbidden_rollback = coordinator.RollbackTo(Utf8View{"outer"});
+    ASSERT_FALSE(forbidden_rollback.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, forbidden_rollback.error().code());
+
+    RequireStatus(coordinator.Release(Utf8View{"outer"}));
+    EXPECT_TRUE(coordinator.autocommit());
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_EQ(1, TakeValue(cursor.rowid()));
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinator, RollbackToRecoversRetryableTransactionSavepointCommitFailure) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Savepoint(Utf8View{"outer"}));
+    TransactionStatement first = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(first.writer()->InitializeDatabase());
+    TableBtreeWriter first_table = TakeValue(first.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array first_payload{std::byte{0x51}};
+    RequireStatus(first_table.Insert(1, first_payload));
+    RequireStatus(first.Succeed());
+
+    vfs.FailNextDatabaseLock(DatabaseLock::kExclusive, ErrorCode::kBusy);
+    const auto commit_failure = coordinator.Release(Utf8View{"outer"});
+    ASSERT_FALSE(commit_failure.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, commit_failure.error().code());
+    RequireStatus(coordinator.RollbackTo(Utf8View{"OUTER"}));
+
+    TransactionStatement replacement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(replacement.writer()->InitializeDatabase());
+    TableBtreeWriter replacement_table =
+        TakeValue(replacement.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array replacement_payload{std::byte{0x52}};
+    RequireStatus(replacement_table.Insert(2, replacement_payload));
+    RequireStatus(replacement.Succeed());
+    RequireStatus(coordinator.Release(Utf8View{"outer"}));
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_EQ(2, TakeValue(cursor.rowid()));
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinator, ReleaseRemovesMatchedAndNewerLogicalSavepoints) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  RequireStatus(coordinator.Begin());
+  RequireStatus(coordinator.Savepoint(Utf8View{"a"}));
+  RequireStatus(coordinator.Savepoint(Utf8View{"b"}));
+  RequireStatus(coordinator.Release(Utf8View{"A"}));
+
+  const auto missing = coordinator.RollbackTo(Utf8View{"b"});
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, missing.error().code());
+  RequireStatus(coordinator.Rollback());
+}
+
+TEST(TransactionCoordinator, ReleaseRemovesMatchedAndNewerMaterializedSavepoints) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Begin());
+    TransactionStatement first = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(first.writer()->InitializeDatabase());
+    TableBtreeWriter first_table = TakeValue(first.writer()->OpenTableBtree(PageNumber{1}));
+    const std::array payload{std::byte{0x55}};
+    RequireStatus(first_table.Insert(1, payload));
+    RequireStatus(first.Succeed());
+
+    RequireStatus(coordinator.Savepoint(Utf8View{"a"}));
+    TransactionStatement second = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    TableBtreeWriter second_table = TakeValue(second.writer()->OpenTableBtree(PageNumber{1}));
+    RequireStatus(second_table.Insert(2, payload));
+    RequireStatus(second.Succeed());
+
+    RequireStatus(coordinator.Savepoint(Utf8View{"b"}));
+    TransactionStatement third = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    TableBtreeWriter third_table = TakeValue(third.writer()->OpenTableBtree(PageNumber{1}));
+    RequireStatus(third_table.Insert(3, payload));
+    RequireStatus(third.Succeed());
+
+    RequireStatus(coordinator.Release(Utf8View{"A"}));
+    const auto missing = coordinator.RollbackTo(Utf8View{"b"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, missing.error().code());
+    RequireStatus(coordinator.Commit());
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    for (std::int64_t expected = 1; expected <= 3; ++expected) {
+      const bool has_row = expected == 1 ? TakeValue(cursor.First()) : TakeValue(cursor.Next());
+      ASSERT_TRUE(has_row);
+      EXPECT_EQ(expected, TakeValue(cursor.rowid()));
+    }
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinator, RejectsMalformedSavepointNameBeforeStateChange) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  const std::string malformed{"\xc0", 1U};
+  const auto rejected = coordinator.Savepoint(Utf8View{malformed});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kFormat, rejected.error().code());
+  EXPECT_TRUE(coordinator.autocommit());
+
+  RequireStatus(coordinator.Savepoint(Utf8View{""}));
+  RequireStatus(coordinator.Release(Utf8View{""}));
+  EXPECT_TRUE(coordinator.autocommit());
+}
+
+TEST(TransactionCoordinator, NamedSavepointControlRejectsActiveStatement) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  TransactionStatement statement = TakeValue(coordinator.BeginStatement());
+  const auto savepoint = coordinator.Savepoint(Utf8View{"blocked"});
+  const auto release = coordinator.Release(Utf8View{"blocked"});
+  const auto rollback_to = coordinator.RollbackTo(Utf8View{"blocked"});
+  ASSERT_FALSE(savepoint.has_value());
+  ASSERT_FALSE(release.has_value());
+  ASSERT_FALSE(rollback_to.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, savepoint.error().code());
+  EXPECT_EQ(ErrorCode::kBusy, release.error().code());
+  EXPECT_EQ(ErrorCode::kBusy, rollback_to.error().code());
+  RequireStatus(statement.Rollback());
 }
 
 }  // namespace
