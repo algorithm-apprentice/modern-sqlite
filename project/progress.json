@@ -40,5 +40,5 @@
     "implement-transaction-coordinator"
   ],
   "activeNode": "implement-dml-ddl",
-  "activeNodeState": "review_pending"
+  "activeNodeState": "in_progress"
 }
