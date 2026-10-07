@@ -3836,13 +3836,6 @@ Result<ByteView> CellArray::ResolveForTarget(std::size_t index, ByteView target,
 
 Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber root_page,
                                             bool table) {
-  auto active = owner.CheckActive();
-  if (!active.has_value()) {
-    return std::unexpected(std::move(active.error()));
-  }
-  if (root_page.value() == 0U) {
-    return std::unexpected(Misuse("writable cursor root page zero is invalid"));
-  }
   const DatabaseHeader* header = owner.pager().header();
   if (header == nullptr) {
     return std::unexpected(Misuse("writable cursor requires an initialized database"));
@@ -3850,6 +3843,18 @@ Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber
   auto geometry = BtreePageGeometry::Create(header->page_size(), header->usable_size());
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
+  }
+  return Open(owner, root_page, table, *geometry);
+}
+
+Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber root_page,
+                                            bool table, BtreePageGeometry geometry) {
+  auto active = owner.CheckActive();
+  if (!active.has_value()) {
+    return std::unexpected(std::move(active.error()));
+  }
+  if (root_page.value() == 0U) {
+    return std::unexpected(Misuse("writable cursor root page zero is invalid"));
   }
   const bool root_already_owned = owner.Find(root_page).has_value();
   auto root_slot = root_already_owned ? owner.Borrow(root_page) : owner.AcquireRead(root_page);
@@ -3863,7 +3868,7 @@ Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber
     }
     return std::unexpected(std::move(frame.error()));
   }
-  auto root = BtreePageView::Parse(frame->get().bytes(), root_page, *geometry);
+  auto root = BtreePageView::Parse(frame->get().bytes(), root_page, geometry);
   if (!root.has_value()) {
     if (!root_already_owned) {
       owner.Release(*root_slot);
@@ -3882,7 +3887,7 @@ Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber
     }
     return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
   }
-  return WritableCursor{owner, root_page, table, *geometry, *root_slot};
+  return WritableCursor{owner, root_page, table, geometry, *root_slot};
 }
 
 WritableCursor::WritableCursor(WritableCursor&& other) noexcept

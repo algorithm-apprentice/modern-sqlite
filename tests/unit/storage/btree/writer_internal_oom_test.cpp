@@ -18,6 +18,7 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/writer.hpp"
 #include "storage/btree/writer_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -681,6 +682,120 @@ template <typename Runner>
       .error = error,
       .invariant_holds = cursor_state_valid && failure_latched && rolled_back &&
                          std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
+[[nodiscard]] Outcome RunPublicTableInsert(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer first_payload = FilledBuffer(380U, std::byte{0x31});
+  {
+    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    if (!session.has_value()) {
+      return {};
+    }
+    auto table = session->OpenTableBtree(modern_sqlite::PageNumber{1});
+    if (!table.has_value() || !table->Insert(1, first_payload.view()).has_value()) {
+      return {};
+    }
+  }
+  if (!pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return {};
+  }
+  auto table = session->OpenTableBtree(modern_sqlite::PageNumber{1});
+  if (!table.has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer second_payload = FilledBuffer(380U, std::byte{0x72});
+
+  Arm(failure);
+  const auto inserted = table->Insert(2, second_payload.view());
+  const std::size_t allocations = Disarm();
+  const bool succeeded = inserted.has_value();
+  const modern_sqlite::ErrorCode error =
+      inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
+[[nodiscard]] Outcome RunPublicIndexInsert(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
+  };
+  modern_sqlite::PageNumber root_page;
+  {
+    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    if (!session.has_value()) {
+      return {};
+    }
+    auto index = session->CreateIndexBtree(columns);
+    if (!index.has_value()) {
+      return {};
+    }
+    root_page = index->root_page();
+  }
+  if (!pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return {};
+  }
+  auto index = session->OpenIndexBtree(root_page, columns);
+  if (!index.has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer blob{modern_sqlite::ByteCount{90}};
+  std::ranges::fill(blob.mutable_view(), std::byte{0x5a});
+  std::array<modern_sqlite::SqlValue, 1> key{
+      modern_sqlite::SqlValue::Blob(std::move(blob)),
+  };
+
+  Arm(failure);
+  const auto inserted = index->Insert(key);
+  const std::size_t allocations = Disarm();
+  const bool succeeded = inserted.has_value();
+  const modern_sqlite::ErrorCode error =
+      inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
   };
 }
 
@@ -1363,38 +1478,44 @@ int main() try {
   if (!ExhaustAllocations(RunTableInsert)) {
     return 10;
   }
-  if (!ExhaustAllocations(RunTableReplace)) {
+  if (!ExhaustAllocations(RunPublicTableInsert)) {
     return 11;
   }
-  if (!ExhaustAllocations(RunIndexInsert)) {
+  if (!ExhaustAllocations(RunPublicIndexInsert)) {
     return 12;
   }
-  if (!ExhaustAllocations(RunTableDelete)) {
+  if (!ExhaustAllocations(RunTableReplace)) {
     return 13;
   }
-  if (!ExhaustAllocations(RunOverflowTableDelete)) {
+  if (!ExhaustAllocations(RunIndexInsert)) {
     return 14;
   }
-  if (!ExhaustAllocations(RunIndexDelete)) {
+  if (!ExhaustAllocations(RunTableDelete)) {
     return 15;
   }
-  if (!ExhaustAllocations(RunBtreeClear)) {
+  if (!ExhaustAllocations(RunOverflowTableDelete)) {
     return 16;
   }
-  if (!ExhaustAllocations(RunRootDeepening)) {
+  if (!ExhaustAllocations(RunIndexDelete)) {
     return 17;
   }
-  if (!ExhaustAllocations(RunOverflowSeek)) {
+  if (!ExhaustAllocations(RunBtreeClear)) {
     return 18;
   }
-  if (!ExhaustAllocations(RunOverflowFormat)) {
+  if (!ExhaustAllocations(RunRootDeepening)) {
     return 19;
   }
-  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+  if (!ExhaustAllocations(RunOverflowSeek)) {
     return 20;
+  }
+  if (!ExhaustAllocations(RunOverflowFormat)) {
+    return 21;
+  }
+  if (!ExhaustAllocations(RunFreelistLeafMark)) {
+    return 22;
   }
   return 0;
 } catch (...) {
   failing_allocation.reset();
-  return 21;
+  return 23;
 }

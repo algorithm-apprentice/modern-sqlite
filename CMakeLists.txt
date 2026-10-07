@@ -113,6 +113,7 @@ set(
     src/session/read_session.cpp
     src/storage/btree/cursor.cpp
     src/storage/btree/page.cpp
+    src/storage/btree/writer.cpp
     src/storage/btree/writer_internal.cpp
     src/storage/cache/page_cache.cpp
     src/storage/database_format.cpp
@@ -500,6 +501,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/session/read_session.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/cursor.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/page.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/btree/writer.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/cache/page_cache.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/database_format.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/storage/journal/journal.hpp"
@@ -537,6 +539,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/session/read_session_internal.hpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/page.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/btree/writer.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/writer_internal.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/writer_internal.hpp"
   "${PROJECT_SOURCE_DIR}/src/storage/cache/page_cache.cpp"
@@ -595,6 +598,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/page_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_internal_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_internal_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/database_format_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/journal_allocation_test.cpp"
