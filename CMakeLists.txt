@@ -621,6 +621,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/vm/read_vm_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/format/record_codec_golden_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/rollback_journal_fixture.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/compatibility/btree_writer_sqlite_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/write_pager_sqlite_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzzer_main.cpp"
