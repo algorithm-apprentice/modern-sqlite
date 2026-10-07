@@ -85,6 +85,8 @@ Status PageCache::Pin::MarkClean() {
   return {};
 }
 
+bool PageCache::Pin::sole() const noexcept { return entry_ != nullptr && entry_->pin_count == 1U; }
+
 void PageCache::Pin::Reset() noexcept {
   if (cache_ == nullptr) {
     assert(entry_ == nullptr);

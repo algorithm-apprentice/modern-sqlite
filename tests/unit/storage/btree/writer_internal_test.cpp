@@ -4207,6 +4207,241 @@ TEST(BtreeDelete, InteriorIndexDeleteTransfersPredecessorOverflowOwnership) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeLifecycle, CreatesTableAndIndexRoots) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  {
+    MutationPageOwner owner{*pager};
+    const PageNumber table_root = TakeValue(CreateBtreeRoot(owner, geometry, true));
+    const PageNumber index_root = TakeValue(CreateBtreeRoot(owner, geometry, false));
+    EXPECT_EQ(PageNumber{2}, table_root);
+    EXPECT_EQ(PageNumber{3}, index_root);
+    const BtreePageView table = TakeValue(BtreePageView::Parse(
+        TakeValue(owner.Frame(TakeValue(owner.Borrow(table_root)))).get().bytes(), table_root,
+        geometry));
+    const BtreePageView index = TakeValue(BtreePageView::Parse(
+        TakeValue(owner.Frame(TakeValue(owner.Borrow(index_root)))).get().bytes(), index_root,
+        geometry));
+    EXPECT_EQ(BtreePageType::kLeafTable, table.type());
+    EXPECT_EQ(BtreePageType::kLeafIndex, index.type());
+    EXPECT_EQ(0U, table.cell_count());
+    EXPECT_EQ(0U, index.cell_count());
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeLifecycle, ClearsTableAndIndexTreesWhileRetainingTheirRoots) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber table_root;
+  PageNumber index_root;
+  {
+    MutationPageOwner owner{*pager};
+    table_root = TakeValue(CreateBtreeRoot(owner, geometry, true));
+    index_root = TakeValue(CreateBtreeRoot(owner, geometry, false));
+  }
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, table_root, true));
+    const ByteBuffer payload =
+        FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
+    RequireStatus(
+        cursor.InsertTable(rowid, payload.view(), BtreeInsertMode::kInsertOnly, workspace));
+  }
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  for (std::uint8_t marker = 1U; marker <= 12U; ++marker) {
+    ByteBuffer blob{ByteCount{90}};
+    std::ranges::fill(blob.mutable_view(), static_cast<std::byte>(marker));
+    std::array<SqlValue, 1> key{SqlValue::Blob(std::move(blob))};
+    const ByteBuffer record = TakeValue(EncodeRecord(key, options));
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, index_root, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
+                                     BtreeInsertMode::kInsertOnly, scratch, workspace));
+  }
+
+  {
+    MutationPageOwner owner{*pager};
+    EXPECT_EQ(6U, TakeValue(ClearBtree(owner, geometry, table_root)));
+  }
+  {
+    MutationPageOwner owner{*pager};
+    EXPECT_EQ(12U, TakeValue(ClearBtree(owner, geometry, index_root)));
+  }
+  const ByteBuffer table_image = SnapshotPage(*pager, table_root);
+  const ByteBuffer index_image = SnapshotPage(*pager, index_root);
+  const BtreePageView table =
+      TakeValue(BtreePageView::Parse(table_image.view(), table_root, geometry));
+  const BtreePageView index =
+      TakeValue(BtreePageView::Parse(index_image.view(), index_root, geometry));
+  EXPECT_EQ(BtreePageType::kLeafTable, table.type());
+  EXPECT_EQ(BtreePageType::kLeafIndex, index.type());
+  EXPECT_EQ(0U, table.cell_count());
+  EXPECT_EQ(0U, index.cell_count());
+  EXPECT_GT(Load32(SnapshotPage(*pager, PageNumber{1}).view(), 36U), 0U);
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeLifecycle, DropsAndReusesANonPageOneRoot) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
+  }
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, true));
+    const ByteBuffer payload =
+        FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
+    RequireStatus(
+        cursor.InsertTable(rowid, payload.view(), BtreeInsertMode::kInsertOnly, workspace));
+  }
+
+  {
+    MutationPageOwner owner{*pager};
+    RequireStatus(DropBtree(owner, geometry, root_page));
+  }
+  std::array<PageNumber, 3> reused_roots{};
+  {
+    MutationPageOwner owner{*pager};
+    for (PageNumber& reused : reused_roots) {
+      reused = TakeValue(CreateBtreeRoot(owner, geometry, false));
+    }
+  }
+  EXPECT_NE(reused_roots.end(), std::ranges::find(reused_roots, root_page));
+  const ByteBuffer root_image = SnapshotPage(*pager, root_page);
+  const BtreePageView root =
+      TakeValue(BtreePageView::Parse(root_image.view(), root_page, geometry));
+  EXPECT_EQ(BtreePageType::kLeafIndex, root.type());
+  EXPECT_EQ(0U, root.cell_count());
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeLifecycle, RejectsAChildCycleBeforeClearingTheRoot) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
+    const std::size_t root_slot = TakeValue(owner.Borrow(root_page));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Open(owner, root_slot, geometry));
+    RequireStatus(root.Zero(BtreePageType::kInteriorTable));
+    RequireStatus(root.SetRightmostChild(root_page));
+  }
+  const ByteBuffer before = SnapshotPage(*pager, root_page);
+  {
+    MutationPageOwner owner{*pager};
+    const auto cleared = ClearBtree(owner, geometry, root_page);
+    ASSERT_FALSE(cleared.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, cleared.error().code());
+  }
+  EXPECT_TRUE(std::ranges::equal(before.view(), SnapshotPage(*pager, root_page).view()));
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeLifecycle, RejectsDroppingAnExternallyPinnedRootBeforeFreelistMutation) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
+    const AllocatedBtreePage spare = TakeValue(AllocateBtreePage(owner, geometry));
+    RequireStatus(FreeBtreePage(owner, geometry, spare.page_number));
+  }
+  const ByteBuffer page_one_before = SnapshotPage(*pager, PageNumber{1});
+  const ByteBuffer root_before = SnapshotPage(*pager, root_page);
+  {
+    const auto external = TakeValue(pager->ReadPage(root_page));
+    MutationPageOwner owner{*pager};
+    const auto dropped = DropBtree(owner, geometry, root_page);
+    ASSERT_FALSE(dropped.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, dropped.error().code());
+    EXPECT_EQ(root_page, external.frame().page_number());
+  }
+  EXPECT_TRUE(
+      std::ranges::equal(page_one_before.view(), SnapshotPage(*pager, PageNumber{1}).view()));
+  EXPECT_TRUE(std::ranges::equal(root_before.view(), SnapshotPage(*pager, root_page).view()));
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeLifecycle, RejectsClearingAnExternallyPinnedOverflowPage) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
+  }
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  const ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, true));
+    RequireStatus(cursor.InsertTable(7, payload.view(), BtreeInsertMode::kInsertOnly, workspace));
+  }
+  PageNumber overflow_page;
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, true));
+    ASSERT_TRUE(TakeValue(cursor.SeekTable(7)).exact);
+    overflow_page = TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()))
+                        .first_overflow_page()
+                        .value_or(PageNumber{});
+    ASSERT_NE(PageNumber{}, overflow_page);
+  }
+  const ByteBuffer page_one_before = SnapshotPage(*pager, PageNumber{1});
+  const ByteBuffer root_before = SnapshotPage(*pager, root_page);
+  {
+    const auto external = TakeValue(pager->ReadPage(overflow_page));
+    MutationPageOwner owner{*pager};
+    const auto cleared = ClearBtree(owner, geometry, root_page);
+    ASSERT_FALSE(cleared.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, cleared.error().code());
+    EXPECT_EQ(overflow_page, external.frame().page_number());
+  }
+  EXPECT_TRUE(
+      std::ranges::equal(page_one_before.view(), SnapshotPage(*pager, PageNumber{1}).view()));
+  EXPECT_TRUE(std::ranges::equal(root_before.view(), SnapshotPage(*pager, root_page).view()));
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+  RequireStatus(pager->Rollback());
+}
+
 TEST(WritableCursor, SeeksTableRowsAndRetainsThePath) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<Pager> pager = OpenInitialized(vfs);

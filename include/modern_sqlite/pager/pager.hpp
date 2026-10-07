@@ -107,6 +107,7 @@ class ReadPagePin final {
   [[nodiscard]] const PageFrame& frame() const noexcept { return pin_.frame(); }
   [[nodiscard]] const PageFrame* operator->() const noexcept { return &frame(); }
   [[nodiscard]] const PageFrame& operator*() const noexcept { return frame(); }
+  [[nodiscard]] bool sole() const noexcept { return pin_.sole(); }
 
  private:
   friend class Pager;
@@ -128,6 +129,7 @@ class WritePagePin final {
   [[nodiscard]] const PageFrame* operator->() const noexcept { return &frame(); }
   [[nodiscard]] const PageFrame& operator*() const noexcept { return frame(); }
   [[nodiscard]] MutableByteView mutable_bytes() noexcept;
+  [[nodiscard]] bool sole() const noexcept { return pin_.sole(); }
 
  private:
   friend class Pager;

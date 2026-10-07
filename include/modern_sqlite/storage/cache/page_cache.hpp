@@ -82,6 +82,7 @@ class PageCache final {
     [[nodiscard]] Status MarkDirty();
     [[nodiscard]] Status MarkClean();
     [[nodiscard]] bool exclusive() const noexcept { return exclusive_; }
+    [[nodiscard]] bool sole() const noexcept;
 
    private:
     friend class PageCache;
