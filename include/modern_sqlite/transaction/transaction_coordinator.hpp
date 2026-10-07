@@ -9,6 +9,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "modern_sqlite/text/text.hpp"
 
 namespace modern_sqlite {
 
@@ -115,6 +116,9 @@ class TransactionCoordinator final {
   [[nodiscard]] Status Begin(TransactionMode mode = TransactionMode::kDeferred);
   [[nodiscard]] Status Commit();
   [[nodiscard]] Status Rollback();
+  [[nodiscard]] Status Savepoint(Utf8View name);
+  [[nodiscard]] Status Release(Utf8View name);
+  [[nodiscard]] Status RollbackTo(Utf8View name);
 
   [[nodiscard]] Result<TransactionStatement> BeginStatement(
       TransactionStatementOptions options = {});

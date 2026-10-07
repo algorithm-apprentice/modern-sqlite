@@ -40,6 +40,7 @@ struct WritePagerFileState {
   bool writes_are_durable = false;
   DatabaseLock lock = DatabaseLock::kNone;
   std::optional<FileSize> reported_size;
+  std::optional<std::pair<DatabaseLock, ErrorCode>> lock_failure;
   std::optional<std::pair<DatabaseLock, ErrorCode>> unlock_failure;
 };
 
@@ -158,6 +159,11 @@ class WritePagerMemoryFile final : public File {
   }
 
   [[nodiscard]] Status DoLock(DatabaseLock lock) override {
+    if (state_->lock_failure.has_value() && state_->lock_failure->first == lock) {
+      const ErrorCode code = state_->lock_failure->second;
+      state_->lock_failure.reset();
+      return std::unexpected(Error::Create(code, "injected fixed-file lock failure"));
+    }
     state_->lock = lock;
     return {};
   }
@@ -222,6 +228,10 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] std::size_t mutation_count() const noexcept { return crash_.mutation_count; }
 
   void SetDatabaseWritesDurable(bool durable) noexcept { main_.writes_are_durable = durable; }
+
+  void FailNextDatabaseLock(DatabaseLock lock, ErrorCode code) noexcept {
+    main_.lock_failure = std::pair{lock, code};
+  }
 
   void FailNextDatabaseUnlock(DatabaseLock lock, ErrorCode code) noexcept {
     main_.unlock_failure = std::pair{lock, code};
