@@ -5,8 +5,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <ranges>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -518,6 +520,108 @@ TEST(BtreeWriterCrash, EveryDeleteCutRecoversOldOrCommittedRows) {
 TEST(BtreeWriterCrash, EveryClearCutRecoversOldOrCommittedRows) {
   const CrashFixture fixture = MakeCrashFixture(3U);
   VerifyCrashCuts(fixture, CrashOperation::kClear, {});
+}
+
+TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  RequireStatus(test::InitializeEmptyBtreeImage(*pager));
+  RequireStatus(pager->Commit());
+  RequireStatus(pager->BeginWrite());
+
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  std::map<std::int64_t, std::byte> table_model;
+  std::set<std::int64_t> index_model;
+
+  for (std::size_t step = 0U; step < 300U; ++step) {
+    const std::int64_t key = static_cast<std::int64_t>((step * 37U) % 97U) + 1;
+    const std::byte value = static_cast<std::byte>(step & 0xffU);
+    const std::array payload{value, value, value, value, value, value, value, value};
+    switch (step % 4U) {
+      case 0U:
+        RequireStatus(table.Insert(key, payload, BtreeInsertMode::kReplace));
+        table_model.insert_or_assign(key, value);
+        break;
+      case 1U: {
+        const auto inserted = table.Insert(key, payload, BtreeInsertMode::kInsertOnly);
+        const bool exists = table_model.contains(key);
+        EXPECT_EQ(!exists, inserted.has_value());
+        if (exists) {
+          EXPECT_EQ(ErrorCode::kConstraint, inserted.error().code());
+        } else {
+          table_model.emplace(key, value);
+        }
+        break;
+      }
+      case 2U:
+        EXPECT_EQ(table_model.erase(key) != 0U, TakeValue(table.Delete(key)));
+        break;
+      case 3U:
+        RequireStatus(table.Insert(key, payload, BtreeInsertMode::kReplace));
+        table_model.insert_or_assign(key, value);
+        break;
+    }
+
+    std::array<SqlValue, 1> index_key{SqlValue::Integer(key)};
+    if (step % 3U == 0U) {
+      const auto inserted = index.Insert(index_key);
+      const bool exists = index_model.contains(key);
+      EXPECT_EQ(!exists, inserted.has_value());
+      if (exists) {
+        EXPECT_EQ(ErrorCode::kConstraint, inserted.error().code());
+      } else {
+        index_model.insert(key);
+      }
+    } else if (step % 3U == 1U) {
+      EXPECT_EQ(index_model.erase(key) != 0U, TakeValue(index.Delete(index_key)));
+    }
+  }
+
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, table.root_page()));
+    auto expected = table_model.begin();
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      ASSERT_NE(table_model.end(), expected);
+      EXPECT_EQ(expected->first, TakeValue(cursor.rowid()));
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      ASSERT_EQ(ByteCount{8}, payload.size());
+      EXPECT_TRUE(std::ranges::all_of(
+          payload.view(), [value = expected->second](std::byte byte) { return byte == value; }));
+      ++expected;
+      has_row = TakeValue(cursor.Next());
+    }
+    EXPECT_EQ(table_model.end(), expected);
+  }
+  {
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, index.root_page(), columns));
+    auto expected = index_model.begin();
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      ASSERT_NE(index_model.end(), expected);
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      const RecordView record = TakeValue(RecordView::Parse(payload.view()));
+      const RecordFieldView field = TakeValue(record.field(0U));
+      EXPECT_EQ(*expected, field.integer_value().value_or(0));
+      ++expected;
+      has_row = TakeValue(cursor.Next());
+    }
+    EXPECT_EQ(index_model.end(), expected);
+  }
+
+  EXPECT_EQ(73U, table_model.size());
+  EXPECT_EQ(32U, index_model.size());
+  EXPECT_EQ(table_model.size(), TakeValue(table.Clear()));
+  EXPECT_EQ(index_model.size(), TakeValue(index.Clear()));
+  RequireStatus(pager->Rollback());
 }
 
 }  // namespace
