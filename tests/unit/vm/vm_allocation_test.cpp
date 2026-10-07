@@ -125,11 +125,44 @@ int main() try {
     }
   }
   const std::size_t after = allocation_count.load(std::memory_order_relaxed);
+  if (after != before || checksum != 0) {
+    return 1;
+  }
+
+  ProgramInput rowid_list_input;
+  rowid_list_input.schema_version = input.schema_version;
+  rowid_list_input.register_count = 1;
+  rowid_list_input.constants.push_back(SqlValue::Integer(1));
+  rowid_list_input.instructions = {
+      ClearRowIdListInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      AppendRowIdListInstruction{.input = RegisterId(0)},
+      HaltInstruction{},
+  };
+  auto rowid_list_program = BytecodeProgram::Create(rowid_list_input);
+  if (!rowid_list_program.has_value()) {
+    return 1;
+  }
+  auto rowid_list_vm = Vm::Create(*rowid_list_program, VmEnvironment::Core());
+  if (!rowid_list_vm.has_value()) {
+    return 1;
+  }
+  const std::size_t before_rowid_list = allocation_count.load(std::memory_order_relaxed);
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    if (!rowid_list_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+      return 1;
+    }
+    const auto done = rowid_list_vm->Step();
+    if (!done.has_value() || *done != VmStep::kDone || !rowid_list_vm->Reset().has_value()) {
+      return 1;
+    }
+  }
+  const std::size_t after_rowid_list = allocation_count.load(std::memory_order_relaxed);
 
   if (!(*opened)->EndRead().has_value()) {
     return 1;
   }
-  return after == before && checksum == 0 ? 0 : 1;
+  return after_rowid_list == before_rowid_list + 1U ? 0 : 1;
 } catch (...) {
   return 1;
 }

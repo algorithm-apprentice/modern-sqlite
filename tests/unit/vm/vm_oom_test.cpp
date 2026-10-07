@@ -288,6 +288,39 @@ int main() try {
     return 1;
   }
 
+  ProgramInput rowid_list_input;
+  rowid_list_input.schema_version = SchemaVersionRequirement{
+      .schema_cookie = (*opened)->header()->schema_cookie(),
+      .generation = 0,
+  };
+  rowid_list_input.register_count = 1;
+  rowid_list_input.constants.push_back(SqlValue::Integer(1));
+  rowid_list_input.instructions = {
+      ClearRowIdListInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      AppendRowIdListInstruction{.input = RegisterId(0)},
+      HaltInstruction{},
+  };
+  auto rowid_list_program = BytecodeProgram::Create(rowid_list_input);
+  if (!rowid_list_program.has_value()) {
+    return 1;
+  }
+  auto rowid_list_vm = Vm::Create(*rowid_list_program, VmEnvironment::Core());
+  if (!rowid_list_vm.has_value() ||
+      !rowid_list_vm->AttachExecutionContext(VmExecutionContext{**opened, 0}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto rowid_list_failure = rowid_list_vm->Step();
+  fail_allocations = false;
+  if (rowid_list_failure.has_value() ||
+      rowid_list_failure.error().code() != ErrorCode::kOutOfMemory) {
+    return 1;
+  }
+  if (!rowid_list_vm->DetachExecutionContext().has_value()) {
+    return 1;
+  }
+
   if (!(*opened)->EndRead().has_value()) {
     return 1;
   }
