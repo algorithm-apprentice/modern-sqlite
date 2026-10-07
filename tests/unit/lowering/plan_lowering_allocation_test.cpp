@@ -128,6 +128,24 @@ bool fail_allocations = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan DeleteFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound = BindStatement(ParseTree("DELETE FROM Items WHERE Name=?1"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind DELETE lowering allocation fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan DELETE lowering allocation fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize DELETE lowering allocation fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -190,6 +208,22 @@ int main() try {
     }
     if (published == nullptr) {
       published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+    }
+  }
+
+  const PhysicalMutationPlan deletion = DeleteFixture(catalog);
+  constexpr std::size_t kExpectedDeleteAllocations = 32U;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    const LowerPlanResult lowered = LowerPlan(deletion);
+    count_allocations = false;
+    if (!lowered.has_value()) {
+      return 1;
+    }
+    const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+    if (allocations != kExpectedDeleteAllocations) {
+      return 1;
     }
   }
   if (published == nullptr) {
