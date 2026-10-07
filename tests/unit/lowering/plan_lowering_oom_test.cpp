@@ -167,6 +167,26 @@ bool inject_failure = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan UpdateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound = BindStatement(ParseTree("UPDATE Items SET Name=coalesce(?1,Name) "
+                                                      "WHERE stable_guard(?2)=1 AND Name<>?3"),
+                                            catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind UPDATE lowering OOM fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan UPDATE lowering OOM fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize UPDATE lowering OOM fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -192,6 +212,7 @@ int main() try {
   const PhysicalPlan physical = PhysicalFixture(catalog);
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
+  const PhysicalMutationPlan update = UpdateFixture(catalog);
 
   const auto verify_oom = [](const auto& plan) {
     allocation_index.store(0, std::memory_order_relaxed);
@@ -223,7 +244,9 @@ int main() try {
     return LowerPlan(plan).has_value();
   };
 
-  return verify_oom(physical) && verify_oom(mutation) && verify_oom(deletion) ? 0 : 1;
+  return verify_oom(physical) && verify_oom(mutation) && verify_oom(deletion) && verify_oom(update)
+             ? 0
+             : 1;
 } catch (...) {
   inject_failure = false;
   return 1;

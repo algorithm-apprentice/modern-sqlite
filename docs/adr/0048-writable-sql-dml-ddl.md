@@ -470,6 +470,40 @@ DELETE programs request write access, map physical atomicity to
 `ProgramRollbackMode`, publish change-count metadata, never publish a
 last-insert-rowid event, and have no result columns.
 
+The first UPDATE lowering slice handles:
+
+- `kEmpty`;
+- exact-rowid lookup with either a stable or changed rowid; and
+- table scans whose assignments are proven not to change rowid.
+
+It reuses the DELETE source snapshot and cursor-safe exact/scan control flow.
+After a candidate passes residual predicates, UPDATE:
+
+1. copies every old stored column from the source snapshot into one
+   contiguous replacement-value block;
+2. copies the old rowid into a separate new-rowid register;
+3. evaluates every assignment expression from left to right, including
+   duplicate assignments marked ineffective by binding;
+4. writes only effective ordinary assignments into their replacement-column
+   registers and only the effective hidden-rowid or INTEGER PRIMARY KEY
+   assignment into the new-rowid register;
+5. requires the new rowid to convert losslessly to int64;
+6. builds the complete replacement record; and
+7. emits `UpdateTableInstruction` with the old rowid, new rowid, and record.
+
+The source snapshot remains immutable while assignment expressions execute,
+so every right-hand side observes the original row even when an earlier
+assignment targets the same column. Exact rowid-changing UPDATE uses
+statement rollback as selected by the physical plan. Stable-rowid scans use
+the same reopen-and-strictly-greater loop as DELETE.
+
+Scan UPDATE with `collect_original_rowids=true` remains `kUnsupportedPlan` in
+this slice. Its following slice adds the bounded stable original-rowid
+collection required to prevent a moved row from being revisited.
+
+UPDATE programs publish change-count metadata, never publish a
+last-insert-rowid event, and have no result columns.
+
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.

@@ -103,6 +103,16 @@ class PlanLowerer final {
       parameters_ = bound_delete_->parameters();
       collations_ = bound_delete_->collations();
       functions_ = bound_delete_->functions();
+      source_columns_ = bound_delete_->source_columns();
+      return;
+    }
+    bound_update_ = std::get_if<BoundUpdate>(&plan.logical_plan().bound_statement());
+    if (bound_update_ != nullptr) {
+      expressions_ = bound_update_->expressions();
+      parameters_ = bound_update_->parameters();
+      collations_ = bound_update_->collations();
+      functions_ = bound_update_->functions();
+      source_columns_ = bound_update_->source_columns();
     }
   }
 
@@ -189,6 +199,10 @@ class PlanLowerer final {
     const auto* delete_plan = std::get_if<PhysicalDeleteMutation>(&mutation_plan_->payload());
     if (delete_plan != nullptr) {
       return RunDelete(*delete_plan);
+    }
+    const auto* update = std::get_if<PhysicalUpdateMutation>(&mutation_plan_->payload());
+    if (update != nullptr) {
+      return RunUpdate(*update);
     }
     return std::unexpected(UnsupportedFailure("physical mutation plan is not implemented"));
   }
@@ -309,7 +323,9 @@ class PlanLowerer final {
       return std::unexpected(std::move(symbols.error()));
     }
     if (delete_plan.access.kind != MutationAccessKind::kEmpty) {
-      if (auto read_cursor = AddDeleteReadCursorDescriptor(); !read_cursor.has_value()) {
+      if (auto read_cursor =
+              AddMutationReadCursorDescriptor(bound_delete_->target(), *bound_delete_->catalog());
+          !read_cursor.has_value()) {
         return std::unexpected(std::move(read_cursor.error()));
       }
       if (auto write_cursor = AddMutationWriteCursorDescriptor(bound_delete_->target(), nullptr);
@@ -323,6 +339,82 @@ class PlanLowerer final {
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
                                       "lowered DELETE bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
+  [[nodiscard]] LowerPlanResult RunUpdate(const PhysicalUpdateMutation& update) {
+    if (bound_update_ == nullptr ||
+        !std::holds_alternative<LogicalUpdateMutation>(mutation_plan_->logical_plan().payload())) {
+      return std::unexpected(InternalFailure("physical UPDATE plan has inconsistent ownership"));
+    }
+    if (bound_update_->catalog() == nullptr) {
+      return std::unexpected(InternalFailure("bound UPDATE does not retain a catalog"));
+    }
+    if (update.collect_original_rowids) {
+      return std::unexpected(
+          UnsupportedFailure("rowid-changing scan UPDATE requires stable rowid collection"));
+    }
+    if (auto layout = BuildUpdateRegisterLayout(update); !layout.has_value()) {
+      return std::unexpected(std::move(layout.error()));
+    }
+
+    const CatalogVersion version = bound_update_->required_catalog_version();
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = register_count_,
+                                                .parameters = parameter_count_,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    builder_.emplace(std::move(*created));
+
+    const ProgramRollbackMode rollback_mode = update.atomicity == MutationAtomicity::kStatement
+                                                  ? ProgramRollbackMode::kStatement
+                                                  : ProgramRollbackMode::kTransaction;
+    auto metadata = ConvertProgramResult(
+        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kUpdate,
+                                                   ProgramTransactionAccess::kWrite, rollback_mode,
+                                                   MutationResultMetadata{
+                                                       .publishes_changes = true,
+                                                       .publishes_last_insert_rowid = false,
+                                                   }),
+        "unable to set UPDATE execution metadata");
+    if (!metadata.has_value()) {
+      return std::unexpected(std::move(metadata.error()));
+    }
+    if (auto constants = AddBoundConstants(); !constants.has_value()) {
+      return std::unexpected(std::move(constants.error()));
+    }
+    if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
+      return std::unexpected(std::move(symbols.error()));
+    }
+    if (update.access.kind != MutationAccessKind::kEmpty) {
+      if (auto read_cursor =
+              AddMutationReadCursorDescriptor(bound_update_->target(), *bound_update_->catalog());
+          !read_cursor.has_value()) {
+        return std::unexpected(std::move(read_cursor.error()));
+      }
+      if (auto write_cursor = AddMutationWriteCursorDescriptor(bound_update_->target(), nullptr);
+          !write_cursor.has_value()) {
+        return std::unexpected(std::move(write_cursor.error()));
+      }
+    }
+    if (auto emitted = EmitUpdate(update); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+
+    auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
+                                      "lowered UPDATE bytecode failed verification");
     if (!built.has_value()) {
       return std::unexpected(std::move(built.error()));
     }
@@ -524,6 +616,23 @@ class PlanLowerer final {
     return FinishRegisterLayout();
   }
 
+  [[nodiscard]] LoweringResult<void> AllocateSourceSnapshotRegisters() {
+    auto source = AllocateRegisters(source_columns_.size());
+    if (!source.has_value()) {
+      return std::unexpected(std::move(source.error()));
+    }
+    source_snapshot_registers_.reserve(source_columns_.size());
+    for (std::size_t index = 0; index < source_columns_.size(); ++index) {
+      source_snapshot_registers_.emplace_back(source->value() + static_cast<std::uint32_t>(index));
+    }
+    auto rowid = AllocateRegisters(1);
+    if (!rowid.has_value()) {
+      return std::unexpected(std::move(rowid.error()));
+    }
+    source_rowid_register_ = *rowid;
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> BuildDeleteRegisterLayout(
       const PhysicalDeleteMutation& delete_plan) {
     if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
@@ -532,21 +641,38 @@ class PlanLowerer final {
     if (delete_plan.access.kind == MutationAccessKind::kEmpty) {
       return FinishRegisterLayout();
     }
+    if (auto snapshot = AllocateSourceSnapshotRegisters(); !snapshot.has_value()) {
+      return snapshot;
+    }
+    return FinishRegisterLayout();
+  }
 
-    const std::span<const BoundSourceColumn> source_columns = bound_delete_->source_columns();
-    auto source = AllocateRegisters(source_columns.size());
-    if (!source.has_value()) {
-      return std::unexpected(std::move(source.error()));
+  [[nodiscard]] LoweringResult<void> BuildUpdateRegisterLayout(
+      const PhysicalUpdateMutation& update) {
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
     }
-    source_snapshot_registers_.reserve(source_columns.size());
-    for (std::size_t index = 0; index < source_columns.size(); ++index) {
-      source_snapshot_registers_.emplace_back(source->value() + static_cast<std::uint32_t>(index));
+    if (update.access.kind == MutationAccessKind::kEmpty) {
+      return FinishRegisterLayout();
     }
-    auto rowid = AllocateRegisters(1);
-    if (!rowid.has_value()) {
-      return std::unexpected(std::move(rowid.error()));
+    if (auto snapshot = AllocateSourceSnapshotRegisters(); !snapshot.has_value()) {
+      return snapshot;
     }
-    source_rowid_register_ = *rowid;
+    auto values = AllocateRegisters(bound_update_->target().columns.size());
+    if (!values.has_value()) {
+      return std::unexpected(std::move(values.error()));
+    }
+    update_values_first_ = *values;
+    auto new_rowid = AllocateRegisters(1);
+    if (!new_rowid.has_value()) {
+      return std::unexpected(std::move(new_rowid.error()));
+    }
+    update_new_rowid_register_ = *new_rowid;
+    auto record = AllocateRegisters(1);
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    update_record_register_ = *record;
     return FinishRegisterLayout();
   }
 
@@ -771,13 +897,12 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> AddDeleteReadCursorDescriptor() {
-    const BoundMutationTarget& target = bound_delete_->target();
-    const CatalogSnapshot& catalog = *bound_delete_->catalog();
+  [[nodiscard]] LoweringResult<void> AddMutationReadCursorDescriptor(
+      const BoundMutationTarget& target, const CatalogSnapshot& catalog) {
     const CatalogTable& table = catalog.table(target.table);
     if (table.without_rowid || table.root_page != target.root_page ||
         table.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
-      return std::unexpected(InternalFailure("bound DELETE target table shape is invalid"));
+      return std::unexpected(InternalFailure("bound mutation target table shape is invalid"));
     }
 
     ReadCursorDescriptor descriptor{
@@ -787,14 +912,13 @@ class PlanLowerer final {
         .fields = {},
         .index_columns = {},
     };
-    const std::span<const BoundSourceColumn> source_columns = bound_delete_->source_columns();
-    descriptor.fields.reserve(source_columns.size());
-    source_field_real_affinity_.assign(source_columns.size(), false);
-    for (std::size_t index = 0; index < source_columns.size(); ++index) {
-      const BoundSourceColumn& source_column = source_columns[index];
+    descriptor.fields.reserve(source_columns_.size());
+    source_field_real_affinity_.assign(source_columns_.size(), false);
+    for (std::size_t index = 0; index < source_columns_.size(); ++index) {
+      const BoundSourceColumn& source_column = source_columns_[index];
       if (!source_column.catalog_column.has_value() ||
           source_column.catalog_column->value >= table.columns.size()) {
-        return std::unexpected(InternalFailure("bound DELETE source column is invalid"));
+        return std::unexpected(InternalFailure("bound mutation source column is invalid"));
       }
       const ColumnId column_id = *source_column.catalog_column;
       if (table.rowid_alias.has_value() && *table.rowid_alias == column_id) {
@@ -814,7 +938,7 @@ class PlanLowerer final {
     }
 
     auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
-                                       "unable to add the DELETE read cursor descriptor");
+                                       "unable to add the mutation read cursor descriptor");
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -1876,11 +2000,11 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> SnapshotDeleteRow() {
+  [[nodiscard]] LoweringResult<void> SnapshotMutationRow() {
     if (!cursor_.has_value() || !source_rowid_register_.has_value() ||
-        source_snapshot_registers_.size() != bound_delete_->source_columns().size() ||
+        source_snapshot_registers_.size() != source_columns_.size() ||
         source_field_real_affinity_.size() != source_snapshot_registers_.size()) {
-      return std::unexpected(InternalFailure("DELETE source snapshot metadata is incomplete"));
+      return std::unexpected(InternalFailure("mutation source snapshot metadata is incomplete"));
     }
     if (auto rowid = Append(ReadRowIdInstruction{
             .cursor = AssumeValue(cursor_),
@@ -1922,9 +2046,115 @@ class PlanLowerer final {
     });
   }
 
-  [[nodiscard]] LoweringResult<void> EmitDeleteExact(const PhysicalMutationAccess& access) {
+  [[nodiscard]] std::optional<RegisterId> SourceColumnRegister(ColumnId column) const noexcept {
+    for (std::size_t index = 0; index < source_columns_.size(); ++index) {
+      if (source_columns_[index].catalog_column == column) {
+        return source_snapshot_registers_[index];
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] LoweringResult<void> PrepareUpdateRecord() {
+    if (!update_values_first_.has_value() || !update_new_rowid_register_.has_value() ||
+        !update_record_register_.has_value() || !source_rowid_register_.has_value()) {
+      return std::unexpected(InternalFailure("UPDATE replacement resources are incomplete"));
+    }
+    const BoundMutationTarget& target = bound_update_->target();
+    for (std::size_t index = 0; index < target.columns.size(); ++index) {
+      const std::optional<RegisterId> source = SourceColumnRegister(target.columns[index].column);
+      if (!source.has_value()) {
+        return std::unexpected(InternalFailure("UPDATE target has no source snapshot column"));
+      }
+      if (auto copied = Append(CopyInstruction{
+              .input = AssumeValue(source),
+              .output = RegisterId{AssumeValue(update_values_first_).value() +
+                                   static_cast<std::uint32_t>(index)},
+          });
+          !copied.has_value()) {
+        return copied;
+      }
+    }
+    if (auto copied = Append(CopyInstruction{
+            .input = AssumeValue(source_rowid_register_),
+            .output = AssumeValue(update_new_rowid_register_),
+        });
+        !copied.has_value()) {
+      return copied;
+    }
+
+    for (const BoundUpdateAssignment& assignment : bound_update_->assignments()) {
+      RegisterId destination = Home(assignment.expression);
+      if (assignment.effective) {
+        if (assignment.target.rowid) {
+          destination = AssumeValue(update_new_rowid_register_);
+        } else if (assignment.target.column.has_value()) {
+          const std::optional<std::uint32_t> index =
+              TargetColumnIndex(target, *assignment.target.column);
+          if (!index.has_value()) {
+            return std::unexpected(
+                InternalFailure("effective UPDATE assignment targets an unknown column"));
+          }
+          destination = RegisterId{AssumeValue(update_values_first_).value() + AssumeValue(index)};
+        } else {
+          return std::unexpected(
+              InternalFailure("effective UPDATE assignment has no column or rowid target"));
+        }
+      }
+      if (auto emitted = EmitExpression(assignment.expression, destination); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    if (auto integer = Append(MustBeIntegerInstruction{
+            .input = AssumeValue(update_new_rowid_register_),
+            .output = AssumeValue(update_new_rowid_register_),
+        });
+        !integer.has_value()) {
+      return integer;
+    }
+    return Append(BuildTableRecordInstruction{
+        .cursor = AssumeValue(write_cursor_),
+        .first_value = AssumeValue(update_values_first_),
+        .value_count = static_cast<std::uint32_t>(target.columns.size()),
+        .output = AssumeValue(update_record_register_),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUpdatePoint() {
+    if (!write_cursor_.has_value() || !source_rowid_register_.has_value() ||
+        !update_new_rowid_register_.has_value() || !update_record_register_.has_value()) {
+      return std::unexpected(InternalFailure("UPDATE point mutation resources are incomplete"));
+    }
+    if (auto prepared = PrepareUpdateRecord(); !prepared.has_value()) {
+      return prepared;
+    }
+    return Append(UpdateTableInstruction{
+        .cursor = AssumeValue(write_cursor_),
+        .old_rowid = AssumeValue(source_rowid_register_),
+        .new_rowid = AssumeValue(update_new_rowid_register_),
+        .record = AssumeValue(update_record_register_),
+    });
+  }
+
+  enum class PointMutationKind : std::uint8_t {
+    kDelete,
+    kUpdate,
+  };
+
+  [[nodiscard]] LoweringResult<void> EmitPointMutation(PointMutationKind kind) {
+    switch (kind) {
+      case PointMutationKind::kDelete:
+        return EmitDeletePoint();
+      case PointMutationKind::kUpdate:
+        return EmitUpdatePoint();
+    }
+    return std::unexpected(InternalFailure("point mutation kind is invalid"));
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitMutationExact(const PhysicalMutationAccess& access,
+                                                       PointMutationKind kind) {
     if (!access.key.has_value() || !cursor_.has_value() || !write_cursor_.has_value()) {
-      return std::unexpected(InternalFailure("exact DELETE access metadata is incomplete"));
+      return std::unexpected(InternalFailure("exact mutation access metadata is incomplete"));
     }
 
     std::optional<Label> guard_completion;
@@ -1964,19 +2194,19 @@ class PlanLowerer final {
     auto sought =
         ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(AssumeValue(cursor_), key,
                                                                  *missing, RowIdSeekMode::kEqual),
-                             "unable to emit exact DELETE rowid seek");
+                             "unable to emit exact mutation rowid seek");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
-    if (auto snapshot = SnapshotDeleteRow(); !snapshot.has_value()) {
+    if (auto snapshot = SnapshotMutationRow(); !snapshot.has_value()) {
       return snapshot;
     }
     if (auto residuals = EmitMutationPredicates(access.residuals, *rejected);
         !residuals.has_value()) {
       return residuals;
     }
-    if (auto deleted = EmitDeletePoint(); !deleted.has_value()) {
-      return deleted;
+    if (auto mutated = EmitPointMutation(kind); !mutated.has_value()) {
+      return mutated;
     }
     if (auto bound = BindLabel(*rejected); !bound.has_value()) {
       return bound;
@@ -2013,10 +2243,11 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitDeleteScan(const PhysicalMutationAccess& access) {
+  [[nodiscard]] LoweringResult<void> EmitMutationScan(const PhysicalMutationAccess& access,
+                                                      PointMutationKind kind) {
     if (cursor_ == std::nullopt || write_cursor_ == std::nullopt ||
         !source_rowid_register_.has_value()) {
-      return std::unexpected(InternalFailure("scan DELETE access metadata is incomplete"));
+      return std::unexpected(InternalFailure("scan mutation access metadata is incomplete"));
     }
 
     std::optional<Label> guard_completion;
@@ -2055,22 +2286,22 @@ class PlanLowerer final {
     }
     auto rewound =
         ConvertProgramResult(AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *exhausted),
-                             "unable to emit DELETE scan rewind");
+                             "unable to emit mutation scan rewind");
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
     }
     if (auto bound = BindLabel(*candidate); !bound.has_value()) {
       return bound;
     }
-    if (auto snapshot = SnapshotDeleteRow(); !snapshot.has_value()) {
+    if (auto snapshot = SnapshotMutationRow(); !snapshot.has_value()) {
       return snapshot;
     }
     if (auto residuals = EmitMutationPredicates(access.residuals, *advance);
         !residuals.has_value()) {
       return residuals;
     }
-    if (auto deleted = EmitDeletePoint(); !deleted.has_value()) {
-      return deleted;
+    if (auto mutated = EmitPointMutation(kind); !mutated.has_value()) {
+      return mutated;
     }
     if (auto bound = BindLabel(*advance); !bound.has_value()) {
       return bound;
@@ -2083,7 +2314,7 @@ class PlanLowerer final {
         ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
                                  AssumeValue(cursor_), AssumeValue(source_rowid_register_),
                                  *exhausted, RowIdSeekMode::kGreater),
-                             "unable to emit DELETE scan advance");
+                             "unable to emit mutation scan advance");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
@@ -2120,11 +2351,23 @@ class PlanLowerer final {
       case MutationAccessKind::kEmpty:
         return Append(HaltInstruction{});
       case MutationAccessKind::kRowIdLookup:
-        return EmitDeleteExact(delete_plan.access);
+        return EmitMutationExact(delete_plan.access, PointMutationKind::kDelete);
       case MutationAccessKind::kTableScan:
-        return EmitDeleteScan(delete_plan.access);
+        return EmitMutationScan(delete_plan.access, PointMutationKind::kDelete);
     }
     return std::unexpected(InternalFailure("physical DELETE access kind is invalid"));
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUpdate(const PhysicalUpdateMutation& update) {
+    switch (update.access.kind) {
+      case MutationAccessKind::kEmpty:
+        return Append(HaltInstruction{});
+      case MutationAccessKind::kRowIdLookup:
+        return EmitMutationExact(update.access, PointMutationKind::kUpdate);
+      case MutationAccessKind::kTableScan:
+        return EmitMutationScan(update.access, PointMutationKind::kUpdate);
+    }
+    return std::unexpected(InternalFailure("physical UPDATE access kind is invalid"));
   }
 
   [[nodiscard]] LoweringResult<void> EmitInsert() {
@@ -2254,10 +2497,12 @@ class PlanLowerer final {
   const PhysicalMutationPlan* mutation_plan_ = nullptr;
   const BoundInsert* bound_insert_ = nullptr;
   const BoundDelete* bound_delete_ = nullptr;
+  const BoundUpdate* bound_update_ = nullptr;
   std::span<const BoundExpression> expressions_;
   std::span<const BoundParameter> parameters_;
   std::span<const BoundCollation> collations_;
   std::span<const BoundScalarFunction> functions_;
+  std::span<const BoundSourceColumn> source_columns_;
   ProgramLimits limits_;
 
   const PhysicalNode* leaf_ = nullptr;
@@ -2297,6 +2542,9 @@ class PlanLowerer final {
   std::optional<RegisterId> insert_rowid_register_;
   std::optional<RegisterId> insert_record_register_;
   std::vector<std::optional<ConstantId>> insert_default_constants_;
+  std::optional<RegisterId> update_values_first_;
+  std::optional<RegisterId> update_new_rowid_register_;
+  std::optional<RegisterId> update_record_register_;
   std::optional<WriteCursorId> write_cursor_;
 };
 
