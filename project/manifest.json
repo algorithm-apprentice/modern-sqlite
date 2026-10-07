@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "writable-mvp-harness-review",
+    "status": "writable-mvp-harness",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -51,5 +51,5 @@
     "test": "ctest --preset dev-debug"
   },
   "currentNode": "build-writable-mvp-harness",
-  "currentNodeState": "review_pending"
+  "currentNodeState": "in_progress"
 }

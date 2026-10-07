@@ -52,3 +52,4 @@ their corresponding implementation begins.
 46. [ADR-0046: Canonical Engineering and Reviewable Delivery](0046-canonical-engineering-and-reviewable-delivery.md)
 47. [ADR-0047: Reference-Faithful Single-Database Transaction Coordination](0047-single-database-transaction-coordinator.md)
 48. [ADR-0048: Writable SQL DML and CREATE TABLE Execution](0048-writable-sql-dml-ddl.md)
+49. [ADR-0049: Writable MVP Verification Harness](0049-writable-mvp-verification-harness.md)
