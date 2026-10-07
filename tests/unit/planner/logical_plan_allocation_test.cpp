@@ -100,6 +100,16 @@ bool fail_allocations = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindStatementResult bound =
+      modern_sqlite::BindStatement(ParseTree("DELETE FROM Items WHERE id=?1 AND Name=?2"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind logical mutation allocation fixture"};
+  }
+  return std::move(*bound);
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -146,6 +156,21 @@ int main() try {
   }
 
   const LogicalPlan& plan = *published;
+  BoundStatement mutation_bound = BindMutationFixture(catalog);
+  allocation_count.store(0, std::memory_order_relaxed);
+  count_allocations = true;
+  BuildLogicalStatementPlanResult mutation_result =
+      BuildLogicalStatementPlan(std::move(mutation_bound));
+  count_allocations = false;
+  if (!mutation_result.has_value()) {
+    return 1;
+  }
+  const std::size_t mutation_allocations = allocation_count.load(std::memory_order_relaxed);
+  if (mutation_allocations == 0U || mutation_allocations > 8U) {
+    return 1;
+  }
+  LogicalStatementPlan mutation_plan = std::move(*mutation_result);
+
   std::uint64_t checksum = 0;
   fail_allocations = true;
   checksum += plan.bound_select().source().size_bytes();
@@ -159,6 +184,10 @@ int main() try {
     checksum += LogicalNodeKindName(LogicalNodeKindOf(node)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
   }
+  const LogicalMutationPlan& mutation = std::get<LogicalMutationPlan>(mutation_plan);
+  checksum += static_cast<std::uint64_t>(LogicalMutationKindOf(mutation.payload()));
+  checksum += LogicalMutationKindName(LogicalMutationKindOf(mutation.payload())).size();
+  checksum += std::get<BoundDelete>(mutation.bound_statement()).expressions().size();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

@@ -249,6 +249,27 @@ The initial physical strategies are:
 - rowid-table scan plus point delete; and
 - rowid-table scan plus point replacement.
 
+`LogicalMutationPlan` owns the move-only bound mutation and one typed logical
+payload. `LogicalStatementPlan` is a variant of the existing SELECT
+`LogicalPlan`, one `LogicalMutationPlan`, or a typed transaction-control
+statement. Logical mutation payloads retain only statement semantics such as
+the predicate ID, whether UPDATE may change rowid, and whether CREATE is an
+`IF NOT EXISTS` no-op.
+
+`PhysicalMutationPlan` owns the logical mutation and publishes:
+
+- `kEmpty`, `kTableScan`, or `kRowIdLookup` access for UPDATE/DELETE;
+- stable statement-guard and residual-predicate expression IDs;
+- whether a scan UPDATE must collect qualifying original rowids before
+  mutation; and
+- transaction-atomic versus anonymous-statement atomicity.
+
+INSERT is one-row transaction-atomic work. CREATE TABLE always uses
+anonymous-statement atomicity when it mutates. Scan UPDATE/DELETE use
+anonymous-statement atomicity; exact-rowid DELETE and same-rowid UPDATE use
+transaction atomicity; and any UPDATE that can change rowid uses
+anonymous-statement atomicity.
+
 There is no cost-based write optimizer in this node. The optimizer validates
 the supported shape and chooses:
 

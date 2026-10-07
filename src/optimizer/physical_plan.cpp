@@ -49,12 +49,13 @@ struct PredicateAnalysis {
   return OptimizerFailure(OptimizerErrorCode::kInternalInvariant, detail);
 }
 
-[[nodiscard]] bool IsValidExpressionId(const BoundSelect& bound_select,
-                                       BoundExpressionId id) noexcept {
-  return id.value() < bound_select.expressions().size();
+template <typename Bound>
+[[nodiscard]] bool IsValidExpressionId(const Bound& bound, BoundExpressionId id) noexcept {
+  return id.value() < bound.expressions().size();
 }
 
-[[nodiscard]] BoundExpressionId TransparentPredicateId(const BoundSelect& bound_select,
+template <typename Bound>
+[[nodiscard]] BoundExpressionId TransparentPredicateId(const Bound& bound_select,
                                                        BoundExpressionId id) noexcept {
   while (IsValidExpressionId(bound_select, id)) {
     const BoundExpression& expression = bound_select.expression(id);
@@ -78,7 +79,8 @@ struct PredicateAnalysis {
   return id;
 }
 
-[[nodiscard]] BoundExpressionId TransparentRowIdOperandId(const BoundSelect& bound_select,
+template <typename Bound>
+[[nodiscard]] BoundExpressionId TransparentRowIdOperandId(const Bound& bound_select,
                                                           BoundExpressionId id) noexcept {
   while (IsValidExpressionId(bound_select, id)) {
     const BoundExpression& expression = bound_select.expression(id);
@@ -97,7 +99,8 @@ struct PredicateAnalysis {
   return id;
 }
 
-void CollectConjuncts(const BoundSelect& bound_select, BoundExpressionId id,
+template <typename Bound>
+void CollectConjuncts(const Bound& bound_select, BoundExpressionId id,
                       std::vector<BoundExpressionId>* output) {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, id);
   if (IsValidExpressionId(bound_select, transparent)) {
@@ -112,8 +115,8 @@ void CollectConjuncts(const BoundSelect& bound_select, BoundExpressionId id,
   output->push_back(id);
 }
 
-[[nodiscard]] std::size_t CountConjuncts(const BoundSelect& bound_select,
-                                         BoundExpressionId id) noexcept {
+template <typename Bound>
+[[nodiscard]] std::size_t CountConjuncts(const Bound& bound_select, BoundExpressionId id) noexcept {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, id);
   if (IsValidExpressionId(bound_select, transparent)) {
     const BoundExpression& expression = bound_select.expression(transparent);
@@ -126,8 +129,8 @@ void CollectConjuncts(const BoundSelect& bound_select, BoundExpressionId id,
   return 1;
 }
 
-template <typename Visitor>
-[[nodiscard]] bool VisitConjuncts(const BoundSelect& bound_select, BoundExpressionId id,
+template <typename Bound, typename Visitor>
+[[nodiscard]] bool VisitConjuncts(const Bound& bound_select, BoundExpressionId id,
                                   Visitor* visitor) {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, id);
   if (IsValidExpressionId(bound_select, transparent)) {
@@ -173,7 +176,8 @@ template <typename Visitor>
   return SqlTruthValue::kNull;
 }
 
-[[nodiscard]] std::optional<SqlTruthValue> ConstantTruth(const BoundSelect& bound_select,
+template <typename Bound>
+[[nodiscard]] std::optional<SqlTruthValue> ConstantTruth(const Bound& bound_select,
                                                          BoundExpressionId id) noexcept {
   id = TransparentPredicateId(bound_select, id);
   if (!IsValidExpressionId(bound_select, id)) {
@@ -223,8 +227,8 @@ template <typename Visitor>
   return std::nullopt;
 }
 
-[[nodiscard]] bool ExpressionDependsOnSource(const BoundSelect& bound_select,
-                                             BoundExpressionId id) {
+template <typename Bound>
+[[nodiscard]] bool ExpressionDependsOnSource(const Bound& bound_select, BoundExpressionId id) {
   if (!IsValidExpressionId(bound_select, id)) {
     return true;
   }
@@ -261,8 +265,8 @@ template <typename Visitor>
       expression.payload);
 }
 
-[[nodiscard]] bool ExpressionIsDeterministic(const BoundSelect& bound_select,
-                                             BoundExpressionId id) {
+template <typename Bound>
+[[nodiscard]] bool ExpressionIsDeterministic(const Bound& bound_select, BoundExpressionId id) {
   if (!IsValidExpressionId(bound_select, id)) {
     return false;
   }
@@ -305,12 +309,14 @@ template <typename Visitor>
       expression.payload);
 }
 
-[[nodiscard]] bool IsStatementGuard(const BoundSelect& bound_select, BoundExpressionId id) {
+template <typename Bound>
+[[nodiscard]] bool IsStatementGuard(const Bound& bound_select, BoundExpressionId id) {
   return !ExpressionDependsOnSource(bound_select, id) &&
          ExpressionIsDeterministic(bound_select, id);
 }
 
-[[nodiscard]] bool IsRowIdReference(const BoundSelect& bound_select, const SourceInfo& source,
+template <typename Bound>
+[[nodiscard]] bool IsRowIdReference(const Bound& bound_select, const SourceInfo& source,
                                     BoundExpressionId id) noexcept {
   if (!source.rowid_eligible) {
     return false;
@@ -337,7 +343,8 @@ template <typename Visitor>
          bound_select.source_columns()[column->column.value()].catalog_column == table.rowid_alias;
 }
 
-[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(const BoundSelect& bound_select,
+template <typename Bound>
+[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(const Bound& bound_select,
                                                               const SourceInfo& source,
                                                               BoundExpressionId predicate) {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, predicate);
@@ -401,10 +408,11 @@ template <typename Visitor>
   };
 }
 
-[[nodiscard]] PredicateAnalysis AnalyzePredicate(const BoundSelect& bound_select,
-                                                 const SourceInfo& source) {
+template <typename Bound>
+[[nodiscard]] PredicateAnalysis AnalyzePredicate(const Bound& bound_select,
+                                                 const SourceInfo& source,
+                                                 std::optional<BoundExpressionId> where) {
   PredicateAnalysis analysis;
-  const std::optional<BoundExpressionId> where = bound_select.where_expression();
   if (!where.has_value()) {
     return analysis;
   }
@@ -823,6 +831,14 @@ struct PhysicalPlan::Impl {
   PhysicalNodeId root{0};
 };
 
+struct PhysicalMutationPlan::Impl {
+  Impl(LogicalMutationPlan input, PhysicalMutationPayload mutation) noexcept
+      : logical_plan(std::move(input)), payload(std::move(mutation)) {}
+
+  LogicalMutationPlan logical_plan;
+  PhysicalMutationPayload payload;
+};
+
 namespace optimizer_detail {
 
 class PhysicalPlanBuilder final {
@@ -834,7 +850,8 @@ class PhysicalPlanBuilder final {
     }
 
     const SourceInfo source = ResolveSource(logical_plan);
-    PredicateAnalysis predicates = AnalyzePredicate(logical_plan.bound_select(), source);
+    PredicateAnalysis predicates = AnalyzePredicate(logical_plan.bound_select(), source,
+                                                    logical_plan.bound_select().where_expression());
     const std::size_t node_count =
         2U + static_cast<std::size_t>(!predicates.guards.empty()) +
         static_cast<std::size_t>(!predicates.residuals.empty()) +
@@ -959,6 +976,147 @@ class PhysicalPlanBuilder final {
   }
 };
 
+class PhysicalStatementPlanBuilder final {
+ public:
+  [[nodiscard]] static OptimizeLogicalStatementPlanResult Build(LogicalStatementPlan logical_plan) {
+    if (!LogicalStatementIsValid(logical_plan)) {
+      return std::unexpected{
+          OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical statement plan is invalid")};
+    }
+    if (std::holds_alternative<LogicalPlan>(logical_plan)) {
+      OptimizeLogicalPlanResult select =
+          OptimizeLogicalPlan(std::get<LogicalPlan>(std::move(logical_plan)));
+      if (!select.has_value()) {
+        return std::unexpected{std::move(select.error())};
+      }
+      return PhysicalStatementPlan{std::in_place_type<PhysicalPlan>, std::move(*select)};
+    }
+    if (std::holds_alternative<LogicalMutationPlan>(logical_plan)) {
+      return BuildMutation(std::get<LogicalMutationPlan>(std::move(logical_plan)));
+    }
+    if (std::holds_alternative<BoundBeginTransaction>(logical_plan)) {
+      return PhysicalStatementPlan{
+          std::in_place_type<BoundBeginTransaction>,
+          std::get<BoundBeginTransaction>(std::move(logical_plan)),
+      };
+    }
+    if (std::holds_alternative<BoundCommitTransaction>(logical_plan)) {
+      return PhysicalStatementPlan{
+          std::in_place_type<BoundCommitTransaction>,
+          std::get<BoundCommitTransaction>(std::move(logical_plan)),
+      };
+    }
+    if (std::holds_alternative<BoundRollbackTransaction>(logical_plan)) {
+      return PhysicalStatementPlan{
+          std::in_place_type<BoundRollbackTransaction>,
+          std::get<BoundRollbackTransaction>(std::move(logical_plan)),
+      };
+    }
+    if (std::holds_alternative<BoundSavepoint>(logical_plan)) {
+      return PhysicalStatementPlan{
+          std::in_place_type<BoundSavepoint>,
+          std::get<BoundSavepoint>(std::move(logical_plan)),
+      };
+    }
+    if (std::holds_alternative<BoundReleaseSavepoint>(logical_plan)) {
+      return PhysicalStatementPlan{
+          std::in_place_type<BoundReleaseSavepoint>,
+          std::get<BoundReleaseSavepoint>(std::move(logical_plan)),
+      };
+    }
+    return PhysicalStatementPlan{
+        std::in_place_type<BoundRollbackToSavepoint>,
+        std::get<BoundRollbackToSavepoint>(std::move(logical_plan)),
+    };
+  }
+
+ private:
+  [[nodiscard]] static bool LogicalStatementIsValid(const LogicalStatementPlan& plan) {
+    if (plan.valueless_by_exception()) {
+      return false;
+    }
+    return std::visit(
+        [](const auto& value) noexcept {
+          if constexpr (requires { value.valid(); }) {
+            return value.valid();
+          }
+          return true;
+        },
+        plan);
+  }
+
+  template <typename Bound>
+  [[nodiscard]] static PhysicalMutationAccess ChooseAccess(
+      const Bound& bound, const BoundMutationTarget& target,
+      std::optional<BoundExpressionId> predicate) {
+    const CatalogTable& table = bound.catalog()->table(target.table);
+    const SourceInfo source{
+        .single_row = false,
+        .source_kind = BoundSourceKind::kCatalogTable,
+        .table = target.table,
+        .root_page = target.root_page,
+        .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
+        .rowid_eligible = true,
+    };
+    PredicateAnalysis analysis = AnalyzePredicate(bound, source, predicate);
+    PhysicalMutationAccess access{
+        .kind = analysis.empty ? MutationAccessKind::kEmpty
+                               : (analysis.rowid_key.has_value() ? MutationAccessKind::kRowIdLookup
+                                                                 : MutationAccessKind::kTableScan),
+        .root_page = target.root_page,
+        .key = analysis.rowid_key,
+        .guards = std::move(analysis.guards),
+        .residuals = std::move(analysis.residuals),
+    };
+    return access;
+  }
+
+  [[nodiscard]] static OptimizeLogicalStatementPlanResult BuildMutation(
+      LogicalMutationPlan logical_plan) {
+    const BoundStatement& statement = logical_plan.bound_statement();
+    PhysicalMutationPayload payload;
+    if (std::holds_alternative<BoundInsert>(statement)) {
+      payload = PhysicalInsertMutation{};
+    } else if (const auto* update = std::get_if<BoundUpdate>(&statement); update != nullptr) {
+      PhysicalMutationAccess access =
+          ChooseAccess(*update, update->target(), update->where_expression());
+      const bool empty = access.kind == MutationAccessKind::kEmpty;
+      const bool scan = access.kind == MutationAccessKind::kTableScan;
+      payload = PhysicalUpdateMutation{
+          .access = std::move(access),
+          .atomicity = !empty && (scan || update->changes_rowid())
+                           ? MutationAtomicity::kStatement
+                           : MutationAtomicity::kTransaction,
+          .collect_original_rowids = scan && update->changes_rowid(),
+      };
+    } else if (const auto* delete_statement = std::get_if<BoundDelete>(&statement);
+               delete_statement != nullptr) {
+      PhysicalMutationAccess access = ChooseAccess(*delete_statement, delete_statement->target(),
+                                                   delete_statement->where_expression());
+      const bool scan = access.kind == MutationAccessKind::kTableScan;
+      payload = PhysicalDeleteMutation{
+          .access = std::move(access),
+          .atomicity = scan ? MutationAtomicity::kStatement : MutationAtomicity::kTransaction,
+      };
+    } else {
+      const auto& create = std::get<BoundCreateTable>(statement);
+      payload = PhysicalCreateTableMutation{
+          .no_op = create.no_op(),
+          .atomicity =
+              create.no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+      };
+    }
+
+    auto impl =
+        std::make_unique<PhysicalMutationPlan::Impl>(std::move(logical_plan), std::move(payload));
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork, 1U);
+    return PhysicalStatementPlan{
+        std::in_place_type<PhysicalMutationPlan>,
+        PhysicalMutationPlan{std::move(impl)},
+    };
+  }
+};
+
 }  // namespace optimizer_detail
 
 std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept {
@@ -971,6 +1129,28 @@ std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept {
       return "table_scan";
     case PhysicalAccessKind::kRowIdLookup:
       return "rowid_lookup";
+  }
+  return "unknown";
+}
+
+std::string_view MutationAccessKindName(MutationAccessKind kind) noexcept {
+  switch (kind) {
+    case MutationAccessKind::kEmpty:
+      return "empty";
+    case MutationAccessKind::kTableScan:
+      return "table_scan";
+    case MutationAccessKind::kRowIdLookup:
+      return "rowid_lookup";
+  }
+  return "unknown";
+}
+
+std::string_view MutationAtomicityName(MutationAtomicity atomicity) noexcept {
+  switch (atomicity) {
+    case MutationAtomicity::kTransaction:
+      return "transaction";
+    case MutationAtomicity::kStatement:
+      return "statement";
   }
   return "unknown";
 }
@@ -1060,6 +1240,29 @@ const AccessPathCandidate& PhysicalPlan::selected_candidate() const noexcept {
 
 OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan) {
   return optimizer_detail::PhysicalPlanBuilder::Build(std::move(logical_plan));
+}
+
+PhysicalMutationPlan::PhysicalMutationPlan(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+PhysicalMutationPlan::PhysicalMutationPlan(PhysicalMutationPlan&&) noexcept = default;
+
+PhysicalMutationPlan& PhysicalMutationPlan::operator=(PhysicalMutationPlan&&) noexcept = default;
+
+PhysicalMutationPlan::~PhysicalMutationPlan() = default;
+
+bool PhysicalMutationPlan::valid() const noexcept { return impl_ != nullptr; }
+
+const LogicalMutationPlan& PhysicalMutationPlan::logical_plan() const noexcept {
+  return impl_->logical_plan;
+}
+
+const PhysicalMutationPayload& PhysicalMutationPlan::payload() const noexcept {
+  return impl_->payload;
+}
+
+OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(LogicalStatementPlan logical_plan) {
+  return optimizer_detail::PhysicalStatementPlanBuilder::Build(std::move(logical_plan));
 }
 
 std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {

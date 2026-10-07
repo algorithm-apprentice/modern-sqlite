@@ -28,6 +28,10 @@ static_assert(!std::is_copy_constructible_v<PhysicalPlan>);
 static_assert(!std::is_copy_assignable_v<PhysicalPlan>);
 static_assert(std::is_nothrow_move_constructible_v<PhysicalPlan>);
 static_assert(std::is_nothrow_move_assignable_v<PhysicalPlan>);
+static_assert(!std::is_copy_constructible_v<PhysicalMutationPlan>);
+static_assert(std::is_nothrow_move_constructible_v<PhysicalMutationPlan>);
+static_assert(!std::is_copy_constructible_v<PhysicalStatementPlan>);
+static_assert(std::is_nothrow_move_constructible_v<PhysicalStatementPlan>);
 static_assert(!std::is_convertible_v<PhysicalNodeId, LogicalNodeId>);
 static_assert(!std::is_convertible_v<LogicalNodeId, PhysicalNodeId>);
 static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
@@ -187,6 +191,24 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
   return std::move(*physical);
 }
 
+[[nodiscard]] PhysicalStatementPlan OptimizeStatementOrThrow(
+    std::string_view sql, const CatalogSnapshotPtr& catalog,
+    BindEnvironment environment = BindEnvironment::Core()) {
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment);
+  if (!bound.has_value()) {
+    throw std::runtime_error{bound.error().detail};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{logical.error().detail};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value()) {
+    throw std::runtime_error{physical.error().detail};
+  }
+  return std::move(*physical);
+}
+
 [[nodiscard]] std::string QuoteSqlIdentifier(std::string_view name) {
   std::string result{"\""};
   for (const char byte : name) {
@@ -206,6 +228,13 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("rowid_lookup", PhysicalAccessKindName(PhysicalAccessKind::kRowIdLookup));
   EXPECT_EQ("unknown",
             PhysicalAccessKindName(static_cast<PhysicalAccessKind>(255)));  // NOLINT
+  EXPECT_EQ("empty", MutationAccessKindName(MutationAccessKind::kEmpty));
+  EXPECT_EQ("rowid_lookup", MutationAccessKindName(MutationAccessKind::kRowIdLookup));
+  EXPECT_EQ("unknown",
+            MutationAccessKindName(static_cast<MutationAccessKind>(255)));  // NOLINT
+  EXPECT_EQ("statement", MutationAtomicityName(MutationAtomicity::kStatement));
+  EXPECT_EQ("unknown",
+            MutationAtomicityName(static_cast<MutationAtomicity>(255)));  // NOLINT
 
   EXPECT_EQ("guard", PhysicalNodeKindName(PhysicalNodeKind::kGuard));
   EXPECT_EQ("projection", PhysicalNodeKindName(PhysicalNodeKind::kProjection));
@@ -220,6 +249,131 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             OptimizerError{.code = OptimizerErrorCode::kInvalidInput}.base_error_code());
   EXPECT_EQ(ErrorCode::kInternal,
             OptimizerError{.code = OptimizerErrorCode::kInternalInvariant}.base_error_code());
+}
+
+TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  PhysicalStatementPlan exact_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
+  const auto& exact_update_plan = std::get<PhysicalMutationPlan>(exact_update_statement);
+  const auto& exact_update = std::get<PhysicalUpdateMutation>(exact_update_plan.payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_update.access.kind);
+  EXPECT_TRUE(exact_update.access.key.has_value());
+  EXPECT_TRUE(exact_update.access.residuals.empty());
+  EXPECT_EQ(MutationAtomicity::kTransaction, exact_update.atomicity);
+  EXPECT_FALSE(exact_update.collect_original_rowids);
+
+  PhysicalStatementPlan exact_moving_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET id=id+1 WHERE id=?1", catalog);
+  const auto& exact_moving_update = std::get<PhysicalUpdateMutation>(
+      std::get<PhysicalMutationPlan>(exact_moving_update_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_moving_update.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, exact_moving_update.atomicity);
+  EXPECT_FALSE(exact_moving_update.collect_original_rowids);
+
+  PhysicalStatementPlan scan_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET Name=?1 WHERE Name=?2", catalog);
+  const auto& scan_update = std::get<PhysicalUpdateMutation>(
+      std::get<PhysicalMutationPlan>(scan_update_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kTableScan, scan_update.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, scan_update.atomicity);
+  EXPECT_FALSE(scan_update.collect_original_rowids);
+
+  PhysicalStatementPlan moving_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET id=id+1 WHERE Name=?1", catalog);
+  const auto& moving_update = std::get<PhysicalUpdateMutation>(
+      std::get<PhysicalMutationPlan>(moving_update_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kTableScan, moving_update.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, moving_update.atomicity);
+  EXPECT_TRUE(moving_update.collect_original_rowids);
+
+  PhysicalStatementPlan exact_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE rowid=?1", catalog);
+  const auto& exact_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(exact_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_delete.access.kind);
+  EXPECT_EQ(MutationAtomicity::kTransaction, exact_delete.atomicity);
+
+  PhysicalStatementPlan scan_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE Name=?1", catalog);
+  const auto& scan_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(scan_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kTableScan, scan_delete.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, scan_delete.atomicity);
+}
+
+TEST(PhysicalMutationPlan, PreservesGuardsResidualsAndEmptyPredicates) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  PhysicalStatementPlan guarded_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE stable_guard(?1)=1 AND id=?2 AND Name=?3",
+                               catalog, TestEnvironment());
+  const auto& guarded =
+      std::get<PhysicalDeleteMutation>(std::get<PhysicalMutationPlan>(guarded_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, guarded.access.kind);
+  ASSERT_EQ(1U, guarded.access.guards.size());
+  ASSERT_EQ(1U, guarded.access.residuals.size());
+
+  PhysicalStatementPlan empty_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET Name='x' WHERE 0", catalog);
+  const auto& empty =
+      std::get<PhysicalUpdateMutation>(std::get<PhysicalMutationPlan>(empty_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kEmpty, empty.access.kind);
+  EXPECT_EQ(MutationAtomicity::kTransaction, empty.atomicity);
+}
+
+TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  PhysicalStatementPlan insert_statement =
+      OptimizeStatementOrThrow("INSERT INTO Items(Name,id,Value) VALUES(?1,?2,?3)", catalog);
+  const auto& insert =
+      std::get<PhysicalInsertMutation>(std::get<PhysicalMutationPlan>(insert_statement).payload());
+  EXPECT_EQ(MutationAtomicity::kTransaction, insert.atomicity);
+
+  PhysicalStatementPlan create_statement =
+      OptimizeStatementOrThrow("CREATE TABLE NewItems(id INTEGER PRIMARY KEY)", catalog);
+  const auto& create = std::get<PhysicalCreateTableMutation>(
+      std::get<PhysicalMutationPlan>(create_statement).payload());
+  EXPECT_FALSE(create.no_op);
+  EXPECT_EQ(MutationAtomicity::kStatement, create.atomicity);
+
+  PhysicalStatementPlan no_op_statement =
+      OptimizeStatementOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", catalog);
+  const auto& no_op = std::get<PhysicalCreateTableMutation>(
+      std::get<PhysicalMutationPlan>(no_op_statement).payload());
+  EXPECT_TRUE(no_op.no_op);
+  EXPECT_EQ(MutationAtomicity::kTransaction, no_op.atomicity);
+
+  EXPECT_TRUE(std::holds_alternative<PhysicalPlan>(
+      OptimizeStatementOrThrow("SELECT Name FROM Items", catalog)));
+  EXPECT_TRUE(std::holds_alternative<BoundBeginTransaction>(
+      OptimizeStatementOrThrow("BEGIN IMMEDIATE", catalog)));
+}
+
+TEST(PhysicalMutationPlan, RejectsMovedFromLogicalMutationAndMovesOwnership) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  BindStatementResult bound = BindStatement(ParseTree("DELETE FROM Items WHERE id=?1"), catalog);
+  ASSERT_TRUE(bound.has_value());
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  ASSERT_TRUE(logical.has_value());
+
+  LogicalStatementPlan retained = std::move(*logical);
+  LogicalStatementPlan source = std::move(retained);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  OptimizeLogicalStatementPlanResult rejected = OptimizeLogicalStatementPlan(std::move(retained));
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(OptimizerErrorCode::kInvalidInput, rejected.error().code);
+
+  OptimizeLogicalStatementPlanResult built = OptimizeLogicalStatementPlan(std::move(source));
+  ASSERT_TRUE(built.has_value());
+  PhysicalMutationPlan plan = std::get<PhysicalMutationPlan>(std::move(*built));
+  const PhysicalMutationPlan moved = std::move(plan);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_FALSE(plan.valid());
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_TRUE(moved.valid());
 }
 
 TEST(PhysicalPlan, BuildsConstantRowAndMovesRetainedLogicalPlan) {

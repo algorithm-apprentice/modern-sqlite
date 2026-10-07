@@ -127,6 +127,23 @@ bool fail_allocations = false;
   return std::move(*logical);
 }
 
+[[nodiscard]] modern_sqlite::LogicalStatementPlan LogicalMutationFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound =
+      BindStatement(ParseTree("UPDATE Items SET id=id+1 "
+                              "WHERE stable_guard(?1)=1 AND rowid=?2 AND Name=?3"),
+                    catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind optimizer mutation allocation fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to build optimizer mutation allocation fixture"};
+  }
+  return std::move(*logical);
+}
+
 [[nodiscard]] std::size_t OptimizeAllocationCount(
     std::string_view sql, const modern_sqlite::CatalogSnapshotPtr& catalog,
     modern_sqlite::BindEnvironment environment = modern_sqlite::BindEnvironment::Core()) {
@@ -182,6 +199,21 @@ int main() try {
     return 1;
   }
 
+  LogicalStatementPlan mutation_logical = LogicalMutationFixture(catalog);
+  allocation_count.store(0, std::memory_order_relaxed);
+  count_allocations = true;
+  OptimizeLogicalStatementPlanResult mutation_result =
+      OptimizeLogicalStatementPlan(std::move(mutation_logical));
+  count_allocations = false;
+  if (!mutation_result.has_value()) {
+    return 1;
+  }
+  const std::size_t mutation_allocations = allocation_count.load(std::memory_order_relaxed);
+  if (mutation_allocations == 0U || mutation_allocations > 16U) {
+    return 1;
+  }
+  PhysicalStatementPlan mutation_plan = std::move(*mutation_result);
+
   LogicalPlan logical = LogicalFixture(kMixedSql, catalog, TestEnvironment());
   OptimizeLogicalPlanResult built = OptimizeLogicalPlan(std::move(logical));
   if (!built.has_value()) {
@@ -203,6 +235,12 @@ int main() try {
     checksum += PhysicalNodeKindName(PhysicalNodeKindOf(node)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
   }
+  const PhysicalMutationPlan& mutation = std::get<PhysicalMutationPlan>(mutation_plan);
+  const auto& update = std::get<PhysicalUpdateMutation>(mutation.payload());
+  checksum += static_cast<std::uint64_t>(update.access.kind);
+  checksum += update.access.guards.size();
+  checksum += update.access.residuals.size();
+  checksum += update.collect_original_rowids ? 1U : 0U;
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

@@ -13,12 +13,13 @@
 #include <vector>
 
 #include "modern_sqlite/base/result.hpp"
-#include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 
 namespace modern_sqlite {
 
 namespace planner_detail {
 class LogicalPlanBuilder;
+class LogicalStatementPlanBuilder;
 }  // namespace planner_detail
 
 class LogicalNodeId final {
@@ -115,6 +116,67 @@ class LogicalPlan final {
 using BuildLogicalPlanResult = std::expected<LogicalPlan, LogicalPlanError>;
 
 [[nodiscard]] BuildLogicalPlanResult BuildLogicalPlan(BoundSelect bound_select);
+
+struct LogicalInsertMutation {};
+
+struct LogicalUpdateMutation {
+  std::optional<BoundExpressionId> predicate{};
+  bool changes_rowid = false;
+};
+
+struct LogicalDeleteMutation {
+  std::optional<BoundExpressionId> predicate{};
+};
+
+struct LogicalCreateTableMutation {
+  bool no_op = false;
+};
+
+using LogicalMutationPayload = std::variant<LogicalInsertMutation, LogicalUpdateMutation,
+                                            LogicalDeleteMutation, LogicalCreateTableMutation>;
+
+enum class LogicalMutationKind : std::uint8_t {
+  kInsert,
+  kUpdate,
+  kDelete,
+  kCreateTable,
+};
+
+[[nodiscard]] LogicalMutationKind LogicalMutationKindOf(
+    const LogicalMutationPayload& payload) noexcept;
+[[nodiscard]] std::string_view LogicalMutationKindName(LogicalMutationKind kind) noexcept;
+
+class LogicalMutationPlan final {
+ public:
+  LogicalMutationPlan(const LogicalMutationPlan&) = delete;
+  LogicalMutationPlan& operator=(const LogicalMutationPlan&) = delete;
+  LogicalMutationPlan(LogicalMutationPlan&&) noexcept;
+  LogicalMutationPlan& operator=(LogicalMutationPlan&&) noexcept;
+  ~LogicalMutationPlan();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] const BoundStatement& bound_statement() const noexcept;
+  [[nodiscard]] const LogicalMutationPayload& payload() const noexcept;
+
+ private:
+  friend class planner_detail::LogicalStatementPlanBuilder;
+
+  struct Impl;
+
+  explicit LogicalMutationPlan(std::unique_ptr<Impl> impl) noexcept;
+
+  std::unique_ptr<Impl> impl_;
+};
+
+using LogicalStatementPlan =
+    std::variant<LogicalPlan, LogicalMutationPlan, BoundBeginTransaction, BoundCommitTransaction,
+                 BoundRollbackTransaction, BoundSavepoint, BoundReleaseSavepoint,
+                 BoundRollbackToSavepoint>;
+
+using BuildLogicalStatementPlanResult = std::expected<LogicalStatementPlan, LogicalPlanError>;
+
+[[nodiscard]] BuildLogicalStatementPlanResult BuildLogicalStatementPlan(
+    BoundStatement bound_statement);
 
 }  // namespace modern_sqlite
 
