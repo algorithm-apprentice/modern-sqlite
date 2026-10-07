@@ -331,6 +331,8 @@ class WritableCursor final {
  public:
   [[nodiscard]] static Result<WritableCursor> Open(MutationPageOwner& owner, PageNumber root_page,
                                                    bool table);
+  [[nodiscard]] static Result<WritableCursor> Open(MutationPageOwner& owner, PageNumber root_page,
+                                                   bool table, BtreePageGeometry geometry);
 
   WritableCursor(const WritableCursor&) = delete;
   WritableCursor& operator=(const WritableCursor&) = delete;

@@ -43,6 +43,7 @@ add_executable(
   unit/storage/btree/cursor_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/btree/writer_internal_test.cpp
+  unit/storage/btree/writer_test.cpp
   unit/storage/cache/page_cache_test.cpp
   unit/storage/database_format_test.cpp
   unit/storage/journal/journal_test.cpp

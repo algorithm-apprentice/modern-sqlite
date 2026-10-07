@@ -11,6 +11,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -673,9 +674,15 @@ Result<ByteBuffer> EncodeRecord(std::span<const SqlValue> values, RecordCodecOpt
   if (!measurements.has_value()) {
     return std::unexpected(std::move(measurements.error()));
   }
-  ByteBuffer encoded{ByteCount{measurements->total_size}};
-  EncodeMeasuredRecord(values, options, *measurements, encoded.mutable_view());
-  return encoded;
+  try {
+    ByteBuffer encoded{ByteCount{measurements->total_size}};
+    EncodeMeasuredRecord(values, options, *measurements, encoded.mutable_view());
+    return encoded;
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions options) {
