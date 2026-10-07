@@ -209,6 +209,31 @@ set_tests_properties(
 )
 
 add_executable(
+  modern_sqlite_write_fuzz_smoke_test
+  fuzz/write_sql_fuzz.cpp
+  fuzz/write_fuzz_smoke_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_write_fuzz_smoke_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_write_fuzz_smoke_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_fuzz_smoke_test)
+add_test(
+  NAME fuzz.write_smoke
+  COMMAND
+    modern_sqlite_write_fuzz_smoke_test
+    "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/write_sql"
+)
+set_tests_properties(
+  fuzz.write_smoke
+  PROPERTIES
+    LABELS fuzz
+    TIMEOUT 20
+)
+
+add_executable(
   modern_sqlite_bytecode_allocation_test
   unit/bytecode/program_allocation_test.cpp
 )

@@ -93,7 +93,7 @@ class VerificationLayeringTest(unittest.TestCase):
             )
 
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
-        allowed = {
+        read_allowed = {
             "read_fuzz.hpp",
             "modern_sqlite/session/read_session.hpp",
             "modern_sqlite/text/text.hpp",
@@ -103,9 +103,22 @@ class VerificationLayeringTest(unittest.TestCase):
             "tests/fuzz/database_image_fuzz.cpp",
         ):
             includes = self.quoted_includes(self.root / relative)
-            self.assertTrue(includes.issubset(allowed), (relative, includes))
+            self.assertTrue(
+                includes.issubset(read_allowed), (relative, includes)
+            )
             for include in includes:
                 self.assertFalse(include.startswith("src/"), (relative, include))
+
+        write_allowed = {
+            "write_fuzz.hpp",
+            "modern_sqlite/session/write_session.hpp",
+            "modern_sqlite/text/text.hpp",
+        }
+        relative = "tests/fuzz/write_sql_fuzz.cpp"
+        includes = self.quoted_includes(self.root / relative)
+        self.assertTrue(includes.issubset(write_allowed), (relative, includes))
+        for include in includes:
+            self.assertFalse(include.startswith("src/"), (relative, include))
 
     def test_ordinary_engine_target_has_no_fuzzer_runtime_flags(self) -> None:
         cmake = (self.root / "CMakeLists.txt").read_text(encoding="utf-8")
