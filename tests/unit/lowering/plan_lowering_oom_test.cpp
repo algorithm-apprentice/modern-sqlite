@@ -7,10 +7,12 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 #include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
-#include "modern_sqlite/lowering/read_lowering.hpp"
+#include "modern_sqlite/lowering/plan_lowering.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
@@ -49,7 +51,7 @@ bool inject_failure = false;
 [[nodiscard]] modern_sqlite::SyntaxTree ParseTree(std::string_view sql) {
   modern_sqlite::ParseResult parsed = modern_sqlite::ParseOne(modern_sqlite::Utf8View{sql});
   if (!parsed.has_value() || !parsed->tree.has_value()) {
-    throw std::runtime_error{"failed to parse lowering OOM fixture"};
+    throw std::runtime_error{"failed to parse plan lowering OOM fixture"};
   }
   return std::move(*parsed->tree);
 }
@@ -125,6 +127,26 @@ bool inject_failure = false;
   return std::move(*physical);
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan MutationFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound = BindStatement(
+      ParseTree("INSERT INTO Items(Name,id) VALUES(coalesce(?1,'fallback'),stable_guard(?2))"),
+      catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind mutation lowering OOM fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan mutation lowering OOM fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize mutation lowering OOM fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -148,35 +170,39 @@ int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan physical = PhysicalFixture(catalog);
+  const PhysicalMutationPlan mutation = MutationFixture(catalog);
 
-  allocation_index.store(0, std::memory_order_relaxed);
-  const LowerReadPlanResult baseline = LowerReadPlan(physical);
-  if (!baseline.has_value()) {
-    return 1;
-  }
-  const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
-  if (allocation_count == 0U || allocation_count > 128U) {
-    return 1;
-  }
-
-  for (std::size_t failure = 0; failure < allocation_count; ++failure) {
+  const auto verify_oom = [](const auto& plan) {
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const LowerReadPlanResult unexpected = LowerReadPlan(physical);
-    } catch (const std::bad_alloc&) {
-      threw = true;
+    const LowerPlanResult baseline = LowerPlan(plan);
+    if (!baseline.has_value()) {
+      return false;
     }
-    inject_failure = false;
-    if (!threw) {
-      return 1;
+    const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
+    if (allocation_count == 0U || allocation_count > 128U) {
+      return false;
     }
-  }
 
-  const LowerReadPlanResult recovered = LowerReadPlan(physical);
-  return recovered.has_value() ? 0 : 1;
+    for (std::size_t failure = 0; failure < allocation_count; ++failure) {
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const LowerPlanResult unexpected = LowerPlan(plan);
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return false;
+      }
+    }
+
+    return LowerPlan(plan).has_value();
+  };
+
+  return verify_oom(physical) && verify_oom(mutation) ? 0 : 1;
 } catch (...) {
   inject_failure = false;
   return 1;

@@ -1,4 +1,4 @@
-#include "modern_sqlite/lowering/read_lowering.hpp"
+#include "modern_sqlite/lowering/plan_lowering.hpp"
 
 #include <gtest/gtest.h>
 
@@ -17,21 +17,26 @@
 #include <vector>
 
 #include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/catalog/catalog_loader.hpp"
+#include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
+#include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
+#include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
 
-static_assert(!std::is_copy_constructible_v<LowerReadPlanResult>);
-static_assert(std::is_move_constructible_v<LowerReadPlanResult>);
+static_assert(!std::is_copy_constructible_v<LowerPlanResult>);
+static_assert(std::is_move_constructible_v<LowerPlanResult>);
 
 template <typename T>
 [[nodiscard]] T TakeValue(Result<T> result) {
@@ -110,6 +115,98 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
+[[nodiscard]] ExpressionId ColumnDefaultExpression(const SyntaxTree& tree,
+                                                   std::size_t column_index) {
+  const auto& table = std::get<CreateTableStatement>(tree.statement());
+  for (const ColumnConstraint& constraint : table.columns.at(column_index).constraints) {
+    if (const auto* default_value = std::get_if<DefaultColumnConstraint>(&constraint.payload);
+        default_value != nullptr) {
+      return default_value->expression;
+    }
+  }
+  throw std::runtime_error{"test column has no default expression"};
+}
+
+[[nodiscard]] CatalogSnapshotPtr MutationCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 0, .generation = 11},
+  };
+  SyntaxTree definition = ParseTree(
+      "CREATE TABLE Items("
+      "id INTEGER PRIMARY KEY NOT NULL DEFAULT 9, "
+      "Name TEXT NOT NULL DEFAULT 'seed', "
+      "Score REAL"
+      ")");
+  const ExpressionId id_default = ColumnDefaultExpression(definition, 0);
+  const ExpressionId name_default = ColumnDefaultExpression(definition, 1);
+  input.definitions.push_back(std::move(definition));
+  SyntaxTree plain_definition =
+      ParseTree("CREATE TABLE Plain(Value TEXT NOT NULL DEFAULT 'plain')");
+  const ExpressionId plain_default = ColumnDefaultExpression(plain_definition, 0);
+  input.definitions.push_back(std::move(plain_definition));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .not_null_conflict = ConflictAction::kDefault,
+                  .primary_key = true,
+                  .default_expression =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{0},
+                          .expression = id_default,
+                      },
+                  .missing_record_value = std::make_shared<const SqlValue>(SqlValue::Integer(9)),
+              },
+              CatalogColumnInput{
+                  .name = "Name",
+                  .declared_type = "TEXT",
+                  .not_null_conflict = ConflictAction::kDefault,
+                  .default_expression =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{0},
+                          .expression = name_default,
+                      },
+                  .missing_record_value = std::make_shared<const SqlValue>(SqlValue::Text("seed")),
+              },
+              CatalogColumnInput{
+                  .name = "Score",
+                  .declared_type = "REAL",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "Plain",
+      .root_page = RootPageId{3},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "TEXT",
+                  .not_null_conflict = ConflictAction::kDefault,
+                  .default_expression =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{1},
+                          .expression = plain_default,
+                      },
+                  .missing_record_value = std::make_shared<const SqlValue>(SqlValue::Text("plain")),
+              },
+          },
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] PhysicalPlan OptimizeOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
                                            BindEnvironment environment = BindEnvironment::Core()) {
   BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog, environment);
@@ -127,10 +224,42 @@ void RequireStatus(Status status) {
   return std::move(*physical);
 }
 
+[[nodiscard]] PhysicalMutationPlan OptimizeMutationOrThrow(
+    std::string_view sql, const CatalogSnapshotPtr& catalog,
+    BindEnvironment environment = BindEnvironment::Core()) {
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment);
+  if (!bound.has_value()) {
+    throw std::runtime_error{bound.error().detail};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{logical.error().detail};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value()) {
+    throw std::runtime_error{physical.error().detail};
+  }
+  if (!std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"lowering test statement did not produce a mutation plan"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 [[nodiscard]] BytecodeProgram LowerOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
                                            BindEnvironment environment = BindEnvironment::Core()) {
   const PhysicalPlan plan = OptimizeOrThrow(sql, catalog, environment);
-  LowerReadPlanResult lowered = LowerReadPlan(plan);
+  LowerPlanResult lowered = LowerPlan(plan);
+  if (!lowered.has_value()) {
+    throw std::runtime_error(lowered.error().detail);
+  }
+  return std::move(*lowered);
+}
+
+[[nodiscard]] BytecodeProgram LowerMutationOrThrow(
+    std::string_view sql, const CatalogSnapshotPtr& catalog,
+    BindEnvironment environment = BindEnvironment::Core()) {
+  const PhysicalMutationPlan plan = OptimizeMutationOrThrow(sql, catalog, environment);
+  LowerPlanResult lowered = LowerPlan(plan);
   if (!lowered.has_value()) {
     throw std::runtime_error(lowered.error().detail);
   }
@@ -176,6 +305,88 @@ void RequireStatus(Status status) {
   }
 }
 
+[[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to open lowering write-test pager"};
+  }
+  return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+}
+
+void InitializeMutationDatabase(test::WritePagerFixedVfs& vfs) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(statement.writer()->InitializeDatabase());
+  const TableBtreeWriter table = TakeValue(statement.writer()->CreateTableBtree());
+  if (table.root_page() != PageNumber{2}) {
+    throw std::runtime_error{"lowering write-test table root is not page 2"};
+  }
+  const TableBtreeWriter plain = TakeValue(statement.writer()->CreateTableBtree());
+  if (plain.root_page() != PageNumber{3}) {
+    throw std::runtime_error{"lowering write-test table root is not page 3"};
+  }
+  RequireStatus(statement.Succeed());
+}
+
+struct MutationOutcome {
+  std::uint64_t changes = 0;
+  std::optional<std::int64_t> last_insert_rowid{};
+};
+
+[[nodiscard]] Result<MutationOutcome> ExecuteMutationProgram(
+    const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
+    std::span<const SqlValue> parameters = {}, VmEnvironment environment = VmEnvironment::Core()) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  Vm vm = TakeValue(Vm::Create(program, environment));
+  for (std::size_t index = 0; index < parameters.size(); ++index) {
+    RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
+  }
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*statement.writer(), program.schema_version().generation}));
+  Result<VmStep> stepped = vm.Step();
+  if (!stepped.has_value()) {
+    const Error error = std::move(stepped.error());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+    return std::unexpected(error);
+  }
+  if (*stepped != VmStep::kDone) {
+    throw std::runtime_error{"mutation program unexpectedly produced a row"};
+  }
+  MutationOutcome outcome{
+      .changes = vm.change_count(),
+      .last_insert_rowid = vm.last_insert_rowid_event(),
+  };
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(statement.Succeed());
+  return outcome;
+}
+
+[[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadMutationRows(
+    test::WritePagerFixedVfs& vfs, PageNumber root_page = PageNumber{2}) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to reopen lowering write-test pager"};
+  }
+  RequireStatus(pager->BeginRead());
+  std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      const std::int64_t rowid = TakeValue(cursor.rowid());
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      rows.emplace_back(rowid, TakeValue(DecodeRecord(payload.view())));
+      has_row = TakeValue(cursor.Next());
+    }
+  }
+  RequireStatus(pager->EndRead());
+  return rows;
+}
+
 std::size_t callback_count = 0;
 
 [[nodiscard]] Result<SqlValue> ReturnOne(const ScalarFunctionContext&, std::span<const SqlValue>) {
@@ -188,7 +399,7 @@ std::size_t callback_count = 0;
 
 [[nodiscard]] Result<SqlValue> CountCall(const ScalarFunctionContext&, std::span<const SqlValue>) {
   ++callback_count;
-  return SqlValue::Integer(1);
+  return SqlValue::Integer(static_cast<std::int64_t>(callback_count));
 }
 
 [[nodiscard]] Result<SqlValue> FailCall(const ScalarFunctionContext&, std::span<const SqlValue>) {
@@ -223,27 +434,29 @@ struct CustomEnvironment {
   [[nodiscard]] VmEnvironment Vm() const noexcept { return VmEnvironment{registry, collations}; }
 };
 
-TEST(ReadLoweringApi, ExposesStableErrorsAndBaseMappings) {
-  EXPECT_EQ("invalid_input", ReadLoweringErrorCodeName(ReadLoweringErrorCode::kInvalidInput));
-  EXPECT_EQ("resource_limit", ReadLoweringErrorCodeName(ReadLoweringErrorCode::kResourceLimit));
+TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
+  EXPECT_EQ("invalid_input", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInvalidInput));
+  EXPECT_EQ("unsupported_plan", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kUnsupportedPlan));
+  EXPECT_EQ("resource_limit", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kResourceLimit));
   EXPECT_EQ("internal_invariant",
-            ReadLoweringErrorCodeName(ReadLoweringErrorCode::kInternalInvariant));
+            PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInternalInvariant));
   EXPECT_EQ("unknown",
-            ReadLoweringErrorCodeName(static_cast<ReadLoweringErrorCode>(255)));  // NOLINT
-
+            PlanLoweringErrorCodeName(static_cast<PlanLoweringErrorCode>(255)));  // NOLINT
   EXPECT_EQ(ErrorCode::kMisuse,
-            ReadLoweringError{.code = ReadLoweringErrorCode::kInvalidInput}.base_error_code());
+            PlanLoweringError{.code = PlanLoweringErrorCode::kInvalidInput}.base_error_code());
+  EXPECT_EQ(ErrorCode::kGeneric,
+            PlanLoweringError{.code = PlanLoweringErrorCode::kUnsupportedPlan}.base_error_code());
   EXPECT_EQ(ErrorCode::kTooLarge,
-            ReadLoweringError{.code = ReadLoweringErrorCode::kResourceLimit}.base_error_code());
+            PlanLoweringError{.code = PlanLoweringErrorCode::kResourceLimit}.base_error_code());
   EXPECT_EQ(ErrorCode::kInternal,
-            ReadLoweringError{.code = ReadLoweringErrorCode::kInternalInvariant}.base_error_code());
+            PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
 TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan plan = OptimizeOrThrow("SELECT 1 AS answer", catalog);
 
-  LowerReadPlanResult lowered = LowerReadPlan(plan);
+  LowerPlanResult lowered = LowerPlan(plan);
   ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
   EXPECT_EQ((SchemaVersionRequirement{.schema_cookie = 31, .generation = 17}),
             lowered->schema_version());
@@ -260,6 +473,187 @@ TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
             InstructionKinds(*lowered));
   EXPECT_EQ(lowered->instructions().size(),
             lowered->verification_metrics().reachable_instruction_count);
+}
+
+TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrder) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const PhysicalMutationPlan plan = OptimizeMutationOrThrow(
+      "INSERT INTO Items(Name,name,rowid,id,Score) VALUES(?1,?2,?3,?4,?5)", catalog);
+
+  LowerPlanResult lowered = LowerPlan(plan);
+  ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
+  EXPECT_EQ((SchemaVersionRequirement{.schema_cookie = 0, .generation = 11}),
+            lowered->schema_version());
+  EXPECT_EQ(ProgramStatementKind::kInsert, lowered->statement_kind());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, lowered->transaction_access());
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, lowered->rollback_mode());
+  EXPECT_TRUE(lowered->mutation_result().publishes_changes);
+  EXPECT_TRUE(lowered->mutation_result().publishes_last_insert_rowid);
+  EXPECT_TRUE(lowered->requires_database_snapshot());
+  EXPECT_EQ(5U, lowered->parameter_count());
+  EXPECT_TRUE(lowered->cursors().empty());
+  EXPECT_TRUE(lowered->result_columns().empty());
+
+  ASSERT_EQ(1U, lowered->write_cursors().size());
+  const WriteCursorDescriptor& cursor = lowered->write_cursor(WriteCursorId{0});
+  EXPECT_EQ(RootPageNumber{2}, cursor.root_page);
+  ASSERT_EQ(3U, cursor.columns.size());
+  EXPECT_EQ(std::optional<std::uint32_t>{0}, cursor.rowid_alias);
+  EXPECT_TRUE(cursor.columns[0].rowid_alias);
+  EXPECT_TRUE(cursor.columns[0].not_null);
+  EXPECT_FALSE(cursor.columns[0].default_value.has_value());
+  ASSERT_TRUE(cursor.columns[1].default_value.has_value());
+  const ConstantId name_default =
+      TakeOptional(cursor.columns[1].default_value, "missing name default");
+  EXPECT_EQ("seed", TextBytes(lowered->constant(name_default)));
+  EXPECT_EQ(TypeAffinity::kReal, cursor.columns[2].affinity);
+
+  std::vector<std::uint32_t> loaded_parameters;
+  for (const Instruction& instruction : lowered->instructions()) {
+    if (const auto* load = std::get_if<LoadParameterInstruction>(&instruction); load != nullptr) {
+      loaded_parameters.push_back(load->parameter.value());
+    }
+  }
+  EXPECT_EQ((std::vector<std::uint32_t>{0, 1, 2, 3, 4}), loaded_parameters);
+  EXPECT_EQ((std::vector{
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadConstant,
+                InstructionKind::kLoadParameter,
+                InstructionKind::kLoadParameter,
+                InstructionKind::kLoadParameter,
+                InstructionKind::kLoadParameter,
+                InstructionKind::kLoadParameter,
+                InstructionKind::kOpenWrite,
+                InstructionKind::kResolveInsertRowId,
+                InstructionKind::kBuildTableRecord,
+                InstructionKind::kInsertTable,
+                InstructionKind::kCloseWrite,
+                InstructionKind::kHalt,
+            }),
+            InstructionKinds(*lowered));
+}
+
+TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+
+  callback_count = 0;
+  const BytecodeProgram duplicate = LowerMutationOrThrow(
+      "INSERT INTO Items(Name,name,Score) "
+      "VALUES(volatile_counter(),volatile_counter(),?1)",
+      catalog, custom.Binder());
+  std::vector<SqlValue> duplicate_parameters;
+  duplicate_parameters.push_back(SqlValue::Integer(7));
+  const MutationOutcome duplicate_outcome =
+      TakeValue(ExecuteMutationProgram(duplicate, vfs, duplicate_parameters, custom.Vm()));
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(1U, duplicate_outcome.changes);
+  EXPECT_EQ(std::optional<std::int64_t>{1}, duplicate_outcome.last_insert_rowid);
+
+  const BytecodeProgram defaults =
+      LowerMutationOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);
+  const MutationOutcome default_outcome = TakeValue(ExecuteMutationProgram(defaults, vfs));
+  EXPECT_EQ(1U, default_outcome.changes);
+  EXPECT_EQ(std::optional<std::int64_t>{2}, default_outcome.last_insert_rowid);
+
+  const BytecodeProgram rowid =
+      LowerMutationOrThrow("INSERT INTO Items(rowid,id,Name) VALUES(?1,?2,?3)", catalog);
+  std::vector<SqlValue> rowid_parameters;
+  rowid_parameters.push_back(SqlValue::Integer(10));
+  rowid_parameters.push_back(SqlValue::Text("11"));
+  rowid_parameters.push_back(SqlValue::Text("alias"));
+  const MutationOutcome rowid_outcome =
+      TakeValue(ExecuteMutationProgram(rowid, vfs, rowid_parameters));
+  EXPECT_EQ(1U, rowid_outcome.changes);
+  EXPECT_EQ(std::optional<std::int64_t>{11}, rowid_outcome.last_insert_rowid);
+
+  const BytecodeProgram plain_default =
+      LowerMutationOrThrow("INSERT INTO Plain DEFAULT VALUES", catalog);
+  const MutationOutcome plain_default_outcome =
+      TakeValue(ExecuteMutationProgram(plain_default, vfs));
+  EXPECT_EQ(std::optional<std::int64_t>{1}, plain_default_outcome.last_insert_rowid);
+
+  const BytecodeProgram plain_explicit =
+      LowerMutationOrThrow("INSERT INTO Plain(rowid,Value) VALUES(?1,?2)", catalog);
+  std::vector<SqlValue> plain_parameters;
+  plain_parameters.push_back(SqlValue::Text("20"));
+  plain_parameters.push_back(SqlValue::Integer(42));
+  const MutationOutcome plain_explicit_outcome =
+      TakeValue(ExecuteMutationProgram(plain_explicit, vfs, plain_parameters));
+  EXPECT_EQ(std::optional<std::int64_t>{20}, plain_explicit_outcome.last_insert_rowid);
+
+  const BytecodeProgram null_plain =
+      LowerMutationOrThrow("INSERT INTO Plain(Value) VALUES(NULL)", catalog);
+  const Result<MutationOutcome> null_failed = ExecuteMutationProgram(null_plain, vfs);
+  ASSERT_FALSE(null_failed.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, null_failed.error().code());
+
+  callback_count = 0;
+  const BytecodeProgram failing = LowerMutationOrThrow(
+      "INSERT INTO Items(Name,name) VALUES('kept',failing())", catalog, custom.Binder());
+  const Result<MutationOutcome> failed = ExecuteMutationProgram(failing, vfs, {}, custom.Vm());
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  const auto rows = ReadMutationRows(vfs);
+  ASSERT_EQ(3U, rows.size());
+
+  EXPECT_EQ(1, rows[0].first);
+  ASSERT_EQ(3U, rows[0].second.size());
+  EXPECT_EQ(SqlValueType::kNull, rows[0].second[0].type());
+  EXPECT_EQ("1", TextBytes(rows[0].second[1]));
+  EXPECT_DOUBLE_EQ(7.0, TakeOptional(rows[0].second[2].real_value(), "expected REAL score"));
+
+  EXPECT_EQ(2, rows[1].first);
+  EXPECT_EQ(SqlValueType::kNull, rows[1].second[0].type());
+  EXPECT_EQ("seed", TextBytes(rows[1].second[1]));
+  EXPECT_EQ(SqlValueType::kNull, rows[1].second[2].type());
+
+  EXPECT_EQ(11, rows[2].first);
+  EXPECT_EQ(SqlValueType::kNull, rows[2].second[0].type());
+  EXPECT_EQ("alias", TextBytes(rows[2].second[1]));
+  EXPECT_EQ(SqlValueType::kNull, rows[2].second[2].type());
+
+  const auto plain_rows = ReadMutationRows(vfs, PageNumber{3});
+  ASSERT_EQ(2U, plain_rows.size());
+  EXPECT_EQ(1, plain_rows[0].first);
+  ASSERT_EQ(1U, plain_rows[0].second.size());
+  EXPECT_EQ("plain", TextBytes(plain_rows[0].second[0]));
+  EXPECT_EQ(20, plain_rows[1].first);
+  EXPECT_EQ("42", TextBytes(plain_rows[1].second[0]));
+}
+
+TEST(InsertLowering, RetainsLimitsRejectsUnsupportedMutationsAndMovedFromPlans) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  PhysicalMutationPlan plan = OptimizeMutationOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);
+
+  ProgramLimits limits;
+  limits.maximum_constants = 1;
+  LowerPlanResult limited = LowerPlan(plan, limits);
+  ASSERT_FALSE(limited.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
+  ASSERT_TRUE(limited.error().program_error.has_value());
+  EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded,
+            TakeOptional(limited.error().program_error, "missing nested program error").code);
+
+  const PhysicalMutationPlan update =
+      OptimizeMutationOrThrow("UPDATE Items SET Name='updated'", catalog);
+  LowerPlanResult unsupported = LowerPlan(update);
+  ASSERT_FALSE(unsupported.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, unsupported.error().code);
+
+  const PhysicalMutationPlan moved = std::move(plan);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  LowerPlanResult invalid = LowerPlan(plan);
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kInvalidInput, invalid.error().code);
+  EXPECT_TRUE(LowerPlan(moved).has_value());
 }
 
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
@@ -298,17 +692,17 @@ TEST(ReadLowering, RetainsExactProgramLimitFailuresAndRejectsMovedFromPlans) {
 
   ProgramLimits limits;
   limits.maximum_instructions = 2;
-  LowerReadPlanResult limited = LowerReadPlan(plan, limits);
+  LowerPlanResult limited = LowerPlan(plan, limits);
   ASSERT_FALSE(limited.has_value());
-  EXPECT_EQ(ReadLoweringErrorCode::kResourceLimit, limited.error().code);
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
   ASSERT_TRUE(limited.error().program_error.has_value());
   EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded,
             TakeOptional(limited.error().program_error, "missing nested program error").code);
 
   const PhysicalPlan moved = std::move(plan);
   // NOLINTNEXTLINE(bugprone-use-after-move)
-  ASSERT_FALSE(LowerReadPlan(plan).has_value());
-  EXPECT_TRUE(LowerReadPlan(moved).has_value());
+  ASSERT_FALSE(LowerPlan(plan).has_value());
+  EXPECT_TRUE(LowerPlan(moved).has_value());
 }
 
 TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
@@ -317,9 +711,9 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
                                 ProgramErrorCode expected) {
     SCOPED_TRACE(sql);
     const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
-    LowerReadPlanResult lowered = LowerReadPlan(plan, limits);
+    LowerPlanResult lowered = LowerPlan(plan, limits);
     ASSERT_FALSE(lowered.has_value());
-    EXPECT_EQ(ReadLoweringErrorCode::kResourceLimit, lowered.error().code);
+    EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, lowered.error().code);
     ASSERT_TRUE(lowered.error().program_error.has_value());
     EXPECT_EQ(expected,
               TakeOptional(lowered.error().program_error, "missing nested program error").code);

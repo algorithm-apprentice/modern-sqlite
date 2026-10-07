@@ -95,10 +95,10 @@ occurrences, or move runtime name resolution into the compiler.
 
 ## Decision
 
-Add read lowering under:
+Add read lowering under the canonical plan-lowering module:
 
-- `include/modern_sqlite/lowering/read_lowering.hpp`; and
-- `src/lowering/read_lowering.cpp`.
+- `include/modern_sqlite/lowering/plan_lowering.hpp`; and
+- `src/lowering/plan_lowering.cpp`.
 
 Extend the typed bytecode and VM with:
 
@@ -110,28 +110,29 @@ Extend the typed bytecode and VM with:
 The public contract is:
 
 ```cpp
-enum class ReadLoweringErrorCode : std::uint8_t {
+enum class PlanLoweringErrorCode : std::uint8_t {
   kInvalidInput,
+  kUnsupportedPlan,
   kResourceLimit,
   kInternalInvariant,
 };
 
-struct ReadLoweringError {
-  ReadLoweringErrorCode code =
-      ReadLoweringErrorCode::kInternalInvariant;
+struct PlanLoweringError {
+  PlanLoweringErrorCode code =
+      PlanLoweringErrorCode::kInternalInvariant;
   std::optional<ProgramError> program_error{};
   std::string detail{};
 
   [[nodiscard]] ErrorCode base_error_code() const noexcept;
 };
 
-[[nodiscard]] std::string_view ReadLoweringErrorCodeName(
-    ReadLoweringErrorCode code) noexcept;
+[[nodiscard]] std::string_view PlanLoweringErrorCodeName(
+    PlanLoweringErrorCode code) noexcept;
 
-using LowerReadPlanResult =
-    std::expected<BytecodeProgram, ReadLoweringError>;
+using LowerPlanResult =
+    std::expected<BytecodeProgram, PlanLoweringError>;
 
-[[nodiscard]] LowerReadPlanResult LowerReadPlan(
+[[nodiscard]] LowerPlanResult LowerPlan(
     const PhysicalPlan& plan, ProgramLimits limits = {});
 ```
 
@@ -691,7 +692,7 @@ The builder receives:
 - caller-supplied `ProgramLimits`.
 
 `ProgramBuilder::Build()` resolves labels and runs the bytecode verifier.
-`LowerReadPlan()` publishes a program only after:
+`LowerPlan()` publishes a program only after:
 
 - every resource reference is in range;
 - every result range matches result metadata;

@@ -7,7 +7,7 @@ class LoweringLayeringTest(unittest.TestCase):
     def test_public_header_exposes_only_direct_lowering_contracts(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[2]
         header = (
-            root / "include/modern_sqlite/lowering/read_lowering.hpp"
+            root / "include/modern_sqlite/lowering/plan_lowering.hpp"
         ).read_text(encoding="utf-8")
         includes = set(
             re.findall(r'^#include "([^"]+)"', header, flags=re.MULTILINE)
@@ -23,7 +23,7 @@ class LoweringLayeringTest(unittest.TestCase):
 
     def test_source_does_not_reach_into_execution_or_session_layers(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[2]
-        source = (root / "src/lowering/read_lowering.cpp").read_text(
+        source = (root / "src/lowering/plan_lowering.cpp").read_text(
             encoding="utf-8"
         )
         includes = set(

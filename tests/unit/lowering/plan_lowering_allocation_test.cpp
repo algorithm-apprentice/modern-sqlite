@@ -9,10 +9,12 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 #include "modern_sqlite/binder/bound_select.hpp"
+#include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
-#include "modern_sqlite/lowering/read_lowering.hpp"
+#include "modern_sqlite/lowering/plan_lowering.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 
@@ -52,7 +54,7 @@ bool fail_allocations = false;
 [[nodiscard]] modern_sqlite::SyntaxTree ParseTree(std::string_view sql) {
   modern_sqlite::ParseResult parsed = modern_sqlite::ParseOne(modern_sqlite::Utf8View{sql});
   if (!parsed.has_value() || !parsed->tree.has_value()) {
-    throw std::runtime_error{"failed to parse lowering allocation fixture"};
+    throw std::runtime_error{"failed to parse plan lowering allocation fixture"};
   }
   return std::move(*parsed->tree);
 }
@@ -107,6 +109,25 @@ bool fail_allocations = false;
   return std::move(*physical);
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan MutationFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound =
+      BindStatement(ParseTree("INSERT INTO Items(Name,id) VALUES(?1,?2)"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind mutation lowering allocation fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan mutation lowering allocation fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize mutation lowering allocation fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -141,7 +162,7 @@ int main() try {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
       allocation_count.store(0, std::memory_order_relaxed);
       count_allocations = true;
-      LowerReadPlanResult lowered = LowerReadPlan(physical_plans[plan_index]);
+      const LowerPlanResult lowered = LowerPlan(physical_plans[plan_index]);
       count_allocations = false;
       if (!lowered.has_value()) {
         return 1;
@@ -150,9 +171,25 @@ int main() try {
       if (allocations != kExpectedAllocations[plan_index]) {
         return 1;
       }
-      if (plan_index + 1U == physical_plans.size() && published == nullptr) {
-        published = std::make_unique<BytecodeProgram>(std::move(*lowered));
-      }
+    }
+  }
+
+  const PhysicalMutationPlan mutation = MutationFixture(catalog);
+  constexpr std::size_t kExpectedMutationAllocations = 21U;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    LowerPlanResult lowered = LowerPlan(mutation);
+    count_allocations = false;
+    if (!lowered.has_value()) {
+      return 1;
+    }
+    const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+    if (allocations != kExpectedMutationAllocations) {
+      return 1;
+    }
+    if (published == nullptr) {
+      published = std::make_unique<BytecodeProgram>(std::move(*lowered));
     }
   }
   if (published == nullptr) {
@@ -166,6 +203,7 @@ int main() try {
   checksum += published->constants().size();
   checksum += published->symbols().size();
   checksum += published->cursors().size();
+  checksum += published->write_cursors().size();
   checksum += published->result_columns().size();
   checksum += published->instructions().size();
   checksum += published->verification_metrics().reachable_instruction_count;
