@@ -353,10 +353,6 @@ class PlanLowerer final {
     if (bound_update_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound UPDATE does not retain a catalog"));
     }
-    if (update.collect_original_rowids) {
-      return std::unexpected(
-          UnsupportedFailure("rowid-changing scan UPDATE requires stable rowid collection"));
-    }
     if (auto layout = BuildUpdateRegisterLayout(update); !layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
@@ -2358,6 +2354,182 @@ class PlanLowerer final {
     return std::unexpected(InternalFailure("physical DELETE access kind is invalid"));
   }
 
+  [[nodiscard]] LoweringResult<void> EmitCollectedUpdateScan(const PhysicalMutationAccess& access) {
+    if (!cursor_.has_value() || !write_cursor_.has_value() || !source_rowid_register_.has_value()) {
+      return std::unexpected(InternalFailure("collected UPDATE scan resources are incomplete"));
+    }
+
+    std::optional<Label> guard_completion;
+    if (!access.guards.empty()) {
+      auto completion = CreateLabel();
+      if (!completion.has_value()) {
+        return std::unexpected(std::move(completion.error()));
+      }
+      guard_completion = *completion;
+      if (auto guards = EmitMutationPredicates(access.guards, *guard_completion);
+          !guards.has_value()) {
+        return guards;
+      }
+    }
+
+    if (auto cleared = Append(ClearRowIdListInstruction{}); !cleared.has_value()) {
+      return cleared;
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto collection_exhausted = CreateLabel();
+    auto collection_candidate = CreateLabel();
+    auto collection_advance = CreateLabel();
+    if (!collection_exhausted.has_value()) {
+      return std::unexpected(std::move(collection_exhausted.error()));
+    }
+    if (!collection_candidate.has_value()) {
+      return std::unexpected(std::move(collection_candidate.error()));
+    }
+    if (!collection_advance.has_value()) {
+      return std::unexpected(std::move(collection_advance.error()));
+    }
+    auto rewound = ConvertProgramResult(
+        AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *collection_exhausted),
+        "unable to emit UPDATE collection rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*collection_candidate); !bound.has_value()) {
+      return bound;
+    }
+    if (auto snapshot = SnapshotMutationRow(); !snapshot.has_value()) {
+      return snapshot;
+    }
+    if (auto residuals = EmitMutationPredicates(access.residuals, *collection_advance);
+        !residuals.has_value()) {
+      return residuals;
+    }
+    if (auto appended = Append(AppendRowIdListInstruction{
+            .input = AssumeValue(source_rowid_register_),
+        });
+        !appended.has_value()) {
+      return appended;
+    }
+    if (auto bound = BindLabel(*collection_advance); !bound.has_value()) {
+      return bound;
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto sought =
+        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
+                                 AssumeValue(cursor_), AssumeValue(source_rowid_register_),
+                                 *collection_exhausted, RowIdSeekMode::kGreater),
+                             "unable to emit UPDATE collection advance");
+    if (!sought.has_value()) {
+      return std::unexpected(std::move(sought.error()));
+    }
+    if (auto jumped = EmitJump(*collection_candidate); !jumped.has_value()) {
+      return jumped;
+    }
+
+    if (auto bound = BindLabel(*collection_exhausted); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !closed.has_value()) {
+      return closed;
+    }
+
+    auto no_matches = CreateLabel();
+    auto update_loop = CreateLabel();
+    auto missing_row = CreateLabel();
+    auto list_advance = CreateLabel();
+    if (!no_matches.has_value()) {
+      return std::unexpected(std::move(no_matches.error()));
+    }
+    if (!update_loop.has_value()) {
+      return std::unexpected(std::move(update_loop.error()));
+    }
+    if (!missing_row.has_value()) {
+      return std::unexpected(std::move(missing_row.error()));
+    }
+    if (!list_advance.has_value()) {
+      return std::unexpected(std::move(list_advance.error()));
+    }
+    auto list_rewound = ConvertProgramResult(
+        AssumeValue(builder_).EmitRewindRowIdList(AssumeValue(source_rowid_register_), *no_matches),
+        "unable to rewind collected UPDATE rowids");
+    if (!list_rewound.has_value()) {
+      return std::unexpected(std::move(list_rewound.error()));
+    }
+    if (auto opened = Append(OpenWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto bound = BindLabel(*update_loop); !bound.has_value()) {
+      return bound;
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto row_sought =
+        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
+                                 AssumeValue(cursor_), AssumeValue(source_rowid_register_),
+                                 *missing_row, RowIdSeekMode::kEqual),
+                             "unable to seek a collected UPDATE rowid");
+    if (!row_sought.has_value()) {
+      return std::unexpected(std::move(row_sought.error()));
+    }
+    if (auto snapshot = SnapshotMutationRow(); !snapshot.has_value()) {
+      return snapshot;
+    }
+    if (auto updated = EmitUpdatePoint(); !updated.has_value()) {
+      return updated;
+    }
+    if (auto jumped = EmitJump(*list_advance); !jumped.has_value()) {
+      return jumped;
+    }
+
+    if (auto bound = BindLabel(*missing_row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (auto bound = BindLabel(*list_advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(
+        AssumeValue(builder_).EmitNextRowIdList(AssumeValue(source_rowid_register_), *update_loop),
+        "unable to advance collected UPDATE rowids");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+
+    if (auto bound = BindLabel(*no_matches); !bound.has_value()) {
+      return bound;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (guard_completion.has_value()) {
+      if (auto bound = BindLabel(*guard_completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> EmitUpdate(const PhysicalUpdateMutation& update) {
     switch (update.access.kind) {
       case MutationAccessKind::kEmpty:
@@ -2365,6 +2537,9 @@ class PlanLowerer final {
       case MutationAccessKind::kRowIdLookup:
         return EmitMutationExact(update.access, PointMutationKind::kUpdate);
       case MutationAccessKind::kTableScan:
+        if (update.collect_original_rowids) {
+          return EmitCollectedUpdateScan(update.access);
+        }
         return EmitMutationScan(update.access, PointMutationKind::kUpdate);
     }
     return std::unexpected(InternalFailure("physical UPDATE access kind is invalid"));

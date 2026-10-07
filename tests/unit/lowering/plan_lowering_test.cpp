@@ -957,11 +957,18 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
   EXPECT_LT(TakeOptional(call, "missing UPDATE assignment call"),
             TakeOptional(update_index, "missing UPDATE point mutation"));
 
-  const PhysicalMutationPlan moving_scan =
-      OptimizeMutationOrThrow("UPDATE Items SET id=id+10 WHERE Score>=?1", catalog);
-  LowerPlanResult unsupported = LowerPlan(moving_scan);
-  ASSERT_FALSE(unsupported.has_value());
-  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, unsupported.error().code);
+  const BytecodeProgram moving_scan =
+      LowerMutationOrThrow("UPDATE Items SET id=id+10 WHERE Score>=?1", catalog);
+  EXPECT_EQ(ProgramRollbackMode::kStatement, moving_scan.rollback_mode());
+  const auto kinds = InstructionKinds(moving_scan);
+  const auto has_kind = [&](InstructionKind kind) {
+    return std::ranges::find(kinds, kind) != kinds.end();
+  };
+  EXPECT_TRUE(has_kind(InstructionKind::kClearRowIdList));
+  EXPECT_TRUE(has_kind(InstructionKind::kAppendRowIdList));
+  EXPECT_TRUE(has_kind(InstructionKind::kRewindRowIdList));
+  EXPECT_TRUE(has_kind(InstructionKind::kNextRowIdList));
+  EXPECT_TRUE(has_kind(InstructionKind::kUpdateTable));
 }
 
 TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
@@ -1067,6 +1074,73 @@ TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
   ASSERT_EQ(1U, plain_rows.size());
   EXPECT_EQ(6, plain_rows[0].first);
   EXPECT_EQ("42", TextBytes(plain_rows[0].second[0]));
+
+  test::WritePagerFixedVfs moving_vfs{false};
+  InitializeMutationDatabase(moving_vfs);
+  static_cast<void>(insert_item(moving_vfs, 1, "one", 1));
+  static_cast<void>(insert_item(moving_vfs, 2, "two", 2));
+  static_cast<void>(insert_item(moving_vfs, 3, "three", 3));
+  const BytecodeProgram moving_scan =
+      LowerMutationOrThrow("UPDATE Items SET id=id+10,Name=Name||'x' WHERE Score>=1", catalog);
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(moving_scan, moving_vfs)).changes);
+  const auto moved_rows = ReadMutationRows(moving_vfs);
+  ASSERT_EQ(3U, moved_rows.size());
+  EXPECT_EQ(11, moved_rows[0].first);
+  EXPECT_EQ("onex", TextBytes(moved_rows[0].second[1]));
+  EXPECT_EQ(12, moved_rows[1].first);
+  EXPECT_EQ("twox", TextBytes(moved_rows[1].second[1]));
+  EXPECT_EQ(13, moved_rows[2].first);
+  EXPECT_EQ("threex", TextBytes(moved_rows[2].second[1]));
+
+  test::WritePagerFixedVfs conflict_vfs{false};
+  InitializeMutationDatabase(conflict_vfs);
+  static_cast<void>(insert_item(conflict_vfs, 1, "one", 1));
+  static_cast<void>(insert_item(conflict_vfs, 2, "two", 2));
+  const BytecodeProgram moving_conflict = LowerMutationOrThrow("UPDATE Items SET id=id+1", catalog);
+  const Result<MutationOutcome> moving_conflict_result =
+      ExecuteMutationProgram(moving_conflict, conflict_vfs);
+  ASSERT_FALSE(moving_conflict_result.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, moving_conflict_result.error().code());
+  const auto conflict_rows = ReadMutationRows(conflict_vfs);
+  ASSERT_EQ(2U, conflict_rows.size());
+  EXPECT_EQ(1, conflict_rows[0].first);
+  EXPECT_EQ(2, conflict_rows[1].first);
+
+  test::WritePagerFixedVfs collection_failure_vfs{false};
+  InitializeMutationDatabase(collection_failure_vfs);
+  static_cast<void>(insert_item(collection_failure_vfs, 1, "one", 1));
+  static_cast<void>(insert_item(collection_failure_vfs, 2, "two", 2));
+  callback_count = 0;
+  const BytecodeProgram collection_failure = LowerMutationOrThrow(
+      "UPDATE Items SET id=id+10 WHERE fail_after_one(Score)", catalog, custom.Binder());
+  const Result<MutationOutcome> collection_failed =
+      ExecuteMutationProgram(collection_failure, collection_failure_vfs, {}, custom.Vm());
+  ASSERT_FALSE(collection_failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, collection_failed.error().code());
+  EXPECT_EQ(2U, callback_count);
+  const auto collection_restored = ReadMutationRows(collection_failure_vfs);
+  ASSERT_EQ(2U, collection_restored.size());
+  EXPECT_EQ(1, collection_restored[0].first);
+  EXPECT_EQ(2, collection_restored[1].first);
+
+  test::WritePagerFixedVfs moving_failure_vfs{false};
+  InitializeMutationDatabase(moving_failure_vfs);
+  static_cast<void>(insert_item(moving_failure_vfs, 1, "one", 1));
+  static_cast<void>(insert_item(moving_failure_vfs, 2, "two", 2));
+  callback_count = 0;
+  const BytecodeProgram moving_failure = LowerMutationOrThrow(
+      "UPDATE Items SET id=id+10,Name=fail_after_one(Name)", catalog, custom.Binder());
+  const Result<MutationOutcome> moving_failed =
+      ExecuteMutationProgram(moving_failure, moving_failure_vfs, {}, custom.Vm());
+  ASSERT_FALSE(moving_failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, moving_failed.error().code());
+  EXPECT_EQ(2U, callback_count);
+  const auto moving_restored = ReadMutationRows(moving_failure_vfs);
+  ASSERT_EQ(2U, moving_restored.size());
+  EXPECT_EQ(1, moving_restored[0].first);
+  EXPECT_EQ("one", TextBytes(moving_restored[0].second[1]));
+  EXPECT_EQ(2, moving_restored[1].first);
+  EXPECT_EQ("two", TextBytes(moving_restored[1].second[1]));
 
   test::WritePagerFixedVfs rollback_vfs{false};
   InitializeMutationDatabase(rollback_vfs);

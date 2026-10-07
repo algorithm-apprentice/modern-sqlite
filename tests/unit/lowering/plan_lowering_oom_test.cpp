@@ -170,9 +170,10 @@ bool inject_failure = false;
 [[nodiscard]] modern_sqlite::PhysicalMutationPlan UpdateFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   using namespace modern_sqlite;
-  BindStatementResult bound = BindStatement(ParseTree("UPDATE Items SET Name=coalesce(?1,Name) "
-                                                      "WHERE stable_guard(?2)=1 AND Name<>?3"),
-                                            catalog, TestEnvironment());
+  BindStatementResult bound =
+      BindStatement(ParseTree("UPDATE Items SET id=id+10, Name=coalesce(?1,Name) "
+                              "WHERE stable_guard(?2)=1 AND Name<>?3"),
+                    catalog, TestEnvironment());
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind UPDATE lowering OOM fixture"};
   }
