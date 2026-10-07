@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -728,6 +729,101 @@ TEST(TransactionCoordinator, NamedSavepointControlRejectsActiveStatement) {
   EXPECT_EQ(ErrorCode::kBusy, release.error().code());
   EXPECT_EQ(ErrorCode::kBusy, rollback_to.error().code());
   RequireStatus(statement.Rollback());
+}
+
+TEST(TransactionCoordinatorModel, MixedTransactionsMatchReferenceMap) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    TransactionStatement initialize = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(initialize.writer()->InitializeDatabase());
+    RequireStatus(initialize.Succeed());
+  }
+
+  std::map<std::int64_t, std::byte> durable;
+  for (std::size_t cycle = 0U; cycle < 120U; ++cycle) {
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Begin());
+    std::map<std::int64_t, std::byte> working = durable;
+
+    const std::int64_t first_key = static_cast<std::int64_t>((cycle * 7U) % 31U) + 1;
+    const std::byte first_value = static_cast<std::byte>((cycle + 1U) & 0xffU);
+    {
+      TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+          TransactionStatementOptions{.access = StatementAccess::kWrite}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      std::array<std::byte, 8> payload{};
+      std::ranges::fill(payload, first_value);
+      RequireStatus(table.Insert(first_key, payload, BtreeInsertMode::kReplace));
+      RequireStatus(statement.Succeed());
+      working.insert_or_assign(first_key, first_value);
+    }
+
+    RequireStatus(coordinator.Savepoint(Utf8View{"model"}));
+    const std::map<std::int64_t, std::byte> savepoint_model = working;
+    const std::int64_t second_key = static_cast<std::int64_t>((cycle * 11U + 3U) % 31U) + 1;
+    const std::byte second_value = static_cast<std::byte>((cycle + 101U) & 0xffU);
+    {
+      TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+          TransactionStatementOptions{.access = StatementAccess::kWrite}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      std::array<std::byte, 8> payload{};
+      std::ranges::fill(payload, second_value);
+      RequireStatus(table.Insert(second_key, payload, BtreeInsertMode::kReplace));
+      if (cycle % 3U == 0U) {
+        RequireStatus(statement.Rollback());
+      } else {
+        RequireStatus(statement.Succeed());
+        working.insert_or_assign(second_key, second_value);
+      }
+    }
+
+    if (cycle % 4U == 0U) {
+      RequireStatus(coordinator.RollbackTo(Utf8View{"MODEL"}));
+      working = savepoint_model;
+      RequireStatus(coordinator.Release(Utf8View{"model"}));
+    } else {
+      RequireStatus(coordinator.Release(Utf8View{"MODEL"}));
+    }
+
+    const std::int64_t delete_key = static_cast<std::int64_t>((cycle * 13U + 5U) % 31U) + 1;
+    {
+      TransactionStatement statement = TakeValue(coordinator.BeginStatement(
+          TransactionStatementOptions{.access = StatementAccess::kWrite}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      EXPECT_EQ(working.erase(delete_key) != 0U, TakeValue(table.Delete(delete_key)));
+      RequireStatus(statement.Succeed());
+    }
+
+    if (cycle % 5U == 0U) {
+      RequireStatus(coordinator.Rollback());
+    } else {
+      RequireStatus(coordinator.Commit());
+      durable = std::move(working);
+    }
+  }
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    auto expected = durable.begin();
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      ASSERT_NE(durable.end(), expected);
+      EXPECT_EQ(expected->first, TakeValue(cursor.rowid()));
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      ASSERT_EQ(ByteCount{8}, payload.size());
+      EXPECT_TRUE(std::ranges::all_of(
+          payload.view(), [value = expected->second](std::byte byte) { return byte == value; }));
+      ++expected;
+      has_row = TakeValue(cursor.Next());
+    }
+    EXPECT_EQ(durable.end(), expected);
+  }
+  RequireStatus(pager->EndRead());
 }
 
 }  // namespace

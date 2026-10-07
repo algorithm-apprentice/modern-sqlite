@@ -47,6 +47,7 @@ struct WritePagerFileState {
 struct WritePagerCrashState {
   std::optional<std::size_t> fail_after_mutation;
   std::size_t mutation_count = 0;
+  std::size_t database_write_count = 0;
   bool cut_triggered = false;
 
   [[nodiscard]] bool CutAfterMutation() noexcept {
@@ -64,8 +65,11 @@ template <std::size_t Capacity>
 class WritePagerMemoryFile final : public File {
  public:
   WritePagerMemoryFile(WritePagerFileState<Capacity>& state, WritePagerCrashState& crash,
-                       bool delete_on_close) noexcept
-      : state_(&state), crash_(&crash), delete_on_close_(delete_on_close) {}
+                       bool delete_on_close, bool database_file) noexcept
+      : state_(&state),
+        crash_(&crash),
+        delete_on_close_(delete_on_close),
+        database_file_(database_file) {}
 
   ~WritePagerMemoryFile() override {
     state_->lock = DatabaseLock::kNone;
@@ -114,6 +118,9 @@ class WritePagerMemoryFile final : public File {
       state_->durable_bytes = state_->bytes;
       state_->durable_size = state_->size;
       state_->durable_present = true;
+    }
+    if (database_file_) {
+      ++crash_->database_write_count;
     }
     if (crash_->CutAfterMutation()) {
       return std::unexpected(Error::Create(ErrorCode::kIo, "injected crash after fixed write"));
@@ -206,6 +213,7 @@ class WritePagerMemoryFile final : public File {
   WritePagerFileState<Capacity>* state_;
   WritePagerCrashState* crash_;
   bool delete_on_close_;
+  bool database_file_;
 };
 
 template <std::size_t Capacity>
@@ -227,6 +235,10 @@ class WritePagerMemoryVfs final : public Vfs {
 
   [[nodiscard]] std::size_t mutation_count() const noexcept { return crash_.mutation_count; }
 
+  [[nodiscard]] std::size_t database_write_count() const noexcept {
+    return crash_.database_write_count;
+  }
+
   void SetDatabaseWritesDurable(bool durable) noexcept { main_.writes_are_durable = durable; }
 
   void FailNextDatabaseLock(DatabaseLock lock, ErrorCode code) noexcept {
@@ -240,6 +252,7 @@ class WritePagerMemoryVfs final : public Vfs {
   void ArmCrashCut(std::optional<std::size_t> cut) noexcept {
     crash_.fail_after_mutation = cut;
     crash_.mutation_count = 0U;
+    crash_.database_write_count = 0U;
     crash_.cut_triggered = false;
   }
 
@@ -335,8 +348,8 @@ class WritePagerMemoryVfs final : public Vfs {
     }
     try {
       return OpenedFile{
-          .file = std::make_unique<WritePagerMemoryFile<Capacity>>(*state, crash_,
-                                                                   options.delete_on_close),
+          .file = std::make_unique<WritePagerMemoryFile<Capacity>>(
+              *state, crash_, options.delete_on_close, state == &main_),
           .access = options.access,
       };
     } catch (const std::bad_alloc&) {
