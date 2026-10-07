@@ -598,6 +598,14 @@ class CoordinatorState final {
     return (*writer)->CreateIndexBtree(columns);
   }
 
+  [[nodiscard]] Result<std::uint32_t> IncrementSchemaCookie(std::uint64_t token) {
+    auto writer = WriterFor(token);
+    if (!writer.has_value()) {
+      return std::unexpected(std::move(writer.error()));
+    }
+    return pager_->IncrementSchemaCookie();
+  }
+
   [[nodiscard]] Result<TableBtreeWriter> OpenTableBtree(std::uint64_t token, PageNumber root_page) {
     auto writer = WriterFor(token);
     if (!writer.has_value()) {
@@ -876,6 +884,10 @@ Result<TableBtreeWriter> TransactionWriter::CreateTableBtree() {
 Result<IndexBtreeWriter> TransactionWriter::CreateIndexBtree(
     std::span<const IndexColumnOrder> columns) {
   return state_->CreateIndexBtree(token_, columns);
+}
+
+Result<std::uint32_t> TransactionWriter::IncrementSchemaCookie() {
+  return state_->IncrementSchemaCookie(token_);
 }
 
 Result<TableBtreeWriter> TransactionWriter::OpenTableBtree(PageNumber root_page) {

@@ -705,6 +705,26 @@ The B-tree layer gains only typed page-1 helpers required for:
 - schema-table rowid selection; and
 - schema row insertion through the existing table writer.
 
+The executable CREATE TABLE primitive slice adds:
+
+- `EnsureDatabaseInitializedInstruction`, which initializes the SQLite page-1
+  image only when the writable Pager still has zero pages;
+- `CreateTableRootInstruction`, which calls the existing table-root allocator
+  and writes the new root page number as an INTEGER register value; and
+- `IncrementSchemaCookieInstruction`, which journals page 1, increments the
+  unsigned 32-bit schema cookie at header offset 40, and then updates the
+  Pager's current in-memory header.
+
+`TransactionWriter::IncrementSchemaCookie()` is the only new transaction
+capability. It validates the statement token before forwarding to Pager.
+Rollback and savepoint playback restore both page-1 bytes and the in-memory
+header through the existing Pager snapshot/header refresh paths.
+
+CREATE root creation and schema-cookie instructions publish no user change
+count or last-insert-rowid event. The later lowering slice uses the existing
+write-cursor, generated-rowid, record-build, and insert-only instructions for
+the `sqlite_schema` row itself.
+
 Persistent format code still performs no filesystem I/O.
 
 Prepared statements compiled against the old catalog generation reprepare

@@ -388,6 +388,33 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram CreateTablePrimitiveProgram(bool fail_after_cookie) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kCreateTable;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.register_count = fail_after_cookie ? 3U : 2U;
+  if (fail_after_cookie) {
+    input.constants.emplace_back();
+  }
+  input.instructions = {
+      EnsureDatabaseInitializedInstruction{},
+      CreateTableRootInstruction{.output = Reg(0)},
+      IncrementSchemaCookieInstruction{.output = Reg(1)},
+  };
+  if (fail_after_cookie) {
+    input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(2)});
+    input.instructions.emplace_back(MustBeIntegerInstruction{
+        .input = Reg(2),
+        .output = Reg(2),
+    });
+  }
+  input.instructions.emplace_back(HaltInstruction{});
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] BytecodeProgram TableSeekProgram(SqlValue key, RowIdSeekMode mode) {
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
@@ -993,6 +1020,59 @@ TEST(VmWriteTest, ReplacesAndMovesUpdatedRowsAtomically) {
   ExpectText(rows[0].second[1], "42");
   EXPECT_EQ(3, rows[1].first);
   ExpectText(rows[1].second[1], "third");
+}
+
+TEST(VmWriteTest, CreatesTableRootsAndIncrementsSchemaCookieAtomically) {
+  test::WritePagerFixedVfs vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    const BytecodeProgram program = CreateTablePrimitiveProgram(false);
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(0U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    ASSERT_NE(nullptr, pager->header());
+    EXPECT_EQ(1U, pager->header()->schema_cookie());
+    EXPECT_EQ(2U, pager->page_count());
+    {
+      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      EXPECT_FALSE(TakeValue(table.First()));
+    }
+    RequireStatus(pager->EndRead());
+  }
+
+  test::WritePagerFixedVfs rollback_vfs{false};
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(rollback_vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    const BytecodeProgram program = CreateTablePrimitiveProgram(true);
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto failed = vm.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kTypeMismatch, failed.error().code());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
+  EXPECT_TRUE(rollback_vfs.database_bytes().empty());
 }
 
 TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {

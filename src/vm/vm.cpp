@@ -1083,10 +1083,12 @@ struct Vm::Impl {
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
-    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
-      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    if (program_->mutation_result().publishes_changes) {
+      if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+        return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+      }
+      ++change_count_;
     }
-    ++change_count_;
     if (program_->mutation_result().publishes_last_insert_rowid) {
       last_insert_rowid_event_ = *rowid;
     }
@@ -1175,6 +1177,51 @@ struct Vm::Impl {
     }
     ++change_count_;
     return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const EnsureDatabaseInitializedInstruction&) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "database initialization requires a transaction writer"));
+    }
+    if (pager_->page_count() != 0U) {
+      return std::nullopt;
+    }
+    Status initialized = writer_->InitializeDatabase();
+    if (!initialized.has_value()) {
+      return std::unexpected(std::move(initialized.error()));
+    }
+    Status validated = ValidateSchema();
+    if (!validated.has_value()) {
+      return std::unexpected(std::move(validated.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CreateTableRootInstruction& operation) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "table root creation requires a transaction writer"));
+    }
+    auto table = writer_->CreateTableBtree();
+    if (!table.has_value()) {
+      return std::unexpected(std::move(table.error()));
+    }
+    return SetRegister(operation.output,
+                       SqlValue::Integer(static_cast<std::int64_t>(table->root_page().value())));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const IncrementSchemaCookieInstruction& operation) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "schema cookie increment requires a transaction writer"));
+    }
+    auto cookie = writer_->IncrementSchemaCookie();
+    if (!cookie.has_value()) {
+      return std::unexpected(std::move(cookie.error()));
+    }
+    return SetRegister(operation.output, SqlValue::Integer(static_cast<std::int64_t>(*cookie)));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {

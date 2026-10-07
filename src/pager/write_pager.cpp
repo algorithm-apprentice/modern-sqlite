@@ -425,6 +425,35 @@ Result<WritePagePin> Pager::WritePage(ReadPagePin&& read_pin) {
   }
 }
 
+Result<std::uint32_t> Pager::IncrementSchemaCookie() {
+  if (current_page_count_ == 0U) {
+    return std::unexpected(Misuse("schema cookie increment requires an initialized database"));
+  }
+  auto page_one = WritePage(PageNumber{1});
+  if (!page_one.has_value()) {
+    return std::unexpected(std::move(page_one.error()));
+  }
+  const MutableByteView bytes = page_one->mutable_bytes();
+  constexpr std::size_t kSchemaCookieOffset = 40U;
+  if (bytes.size() < kSchemaCookieOffset + sizeof(std::uint32_t)) {
+    return std::unexpected(
+        MakeError(ErrorCode::kCorruption, "database page 1 is too small for the schema cookie"));
+  }
+  const auto encoded = std::span<const std::byte, sizeof(std::uint32_t)>{
+      bytes.data() + kSchemaCookieOffset, sizeof(std::uint32_t)};
+  const std::uint32_t next = LoadBigEndian<std::uint32_t>(encoded) + 1U;
+  StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, sizeof(std::uint32_t)>{bytes.data() + kSchemaCookieOffset,
+                                                  sizeof(std::uint32_t)},
+      next);
+  auto parsed = ParseDatabaseHeader(bytes);
+  if (!parsed.has_value()) {
+    return std::unexpected(std::move(parsed.error()));
+  }
+  current_header_ = *parsed;
+  return next;
+}
+
 Status Pager::PermutePageNumbers(std::span<const PageNumberRekey> pages) {
   if (state_ == PagerState::kError) {
     return StoredError();
