@@ -482,8 +482,8 @@ template <typename T>
   };
 }
 
-void VerifyScenario(const CrashScenario& scenario, ByteView initial_image,
-                    bool writes_are_durable) {
+void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool writes_are_durable,
+                    WriteSessionCrashVerification verification) {
   try {
     const ScenarioBaseline baseline = CreateBaseline(scenario, initial_image, writes_are_durable);
     const RecoveryImages images{
@@ -495,6 +495,15 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image,
       try {
         const CrashSnapshot crashed = RunCut(scenario, initial_image, writes_are_durable, cut);
         const RecoveryResult first = Recover(crashed, images, scenario.terminal);
+        if (verification.verify != nullptr) {
+          if (!first.snapshot.main.present ||
+              first.snapshot.main.size > first.snapshot.main.bytes.size()) {
+            throw std::runtime_error{"recovery produced an invalid main-database snapshot"};
+          }
+          verification.verify(verification.context, scenario.id, cut, writes_are_durable,
+                              first.terminal,
+                              ByteView{first.snapshot.main.bytes}.first(first.snapshot.main.size));
+        }
         const RecoveryResult second = Recover(first.snapshot, images, scenario.terminal);
         if (first.terminal != second.terminal || second.persistent_mutations != 0U) {
           throw std::runtime_error{"recovery is not idempotent"};
@@ -514,22 +523,27 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image,
   }
 }
 
-void VerifyScenarioBothDurabilities(const CrashScenario& scenario, ByteView initial_image) {
-  VerifyScenario(scenario, initial_image, false);
-  VerifyScenario(scenario, initial_image, true);
+void VerifyScenarioBothDurabilities(const CrashScenario& scenario, ByteView initial_image,
+                                    WriteSessionCrashVerification verification) {
+  VerifyScenario(scenario, initial_image, false, verification);
+  VerifyScenario(scenario, initial_image, true, verification);
 }
 
 }  // namespace
 
-void RunWriteSessionCrashHarness() {
+void RunWriteSessionCrashHarness() { RunWriteSessionCrashHarness({}); }
+
+void RunWriteSessionCrashHarness(WriteSessionCrashVerification verification) {
   const ByteBuffer initial_image = CreateInitialImage();
-  VerifyScenarioBothDurabilities(ImplicitInsertScenario(), initial_image.view());
+  VerifyScenarioBothDurabilities(ImplicitInsertScenario(), initial_image.view(), verification);
 }
 
-void RunWriteSessionTransactionCrashHarness() {
+void RunWriteSessionTransactionCrashHarness() { RunWriteSessionTransactionCrashHarness({}); }
+
+void RunWriteSessionTransactionCrashHarness(WriteSessionCrashVerification verification) {
   const ByteBuffer initial_image = CreateInitialImage();
   for (const CrashScenario& scenario : TransactionScenarios()) {
-    VerifyScenarioBothDurabilities(scenario, initial_image.view());
+    VerifyScenarioBothDurabilities(scenario, initial_image.view(), verification);
   }
 }
 

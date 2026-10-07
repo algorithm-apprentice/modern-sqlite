@@ -21,6 +21,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "tests/compatibility/write_session_crash_harness.hpp"
 
 namespace {
 
@@ -172,6 +173,98 @@ void ExecuteModern(modern_sqlite::WriteSession& session, std::string_view sql) {
 void VerifyIntegrity(sqlite3* database) {
   if (QueryText(database, "PRAGMA integrity_check") != "ok") {
     throw std::runtime_error{"SQLite integrity_check failed"};
+  }
+}
+
+void WriteImage(const std::filesystem::path& path, modern_sqlite::ByteView image) {
+  std::error_code error;
+  static_cast<void>(std::filesystem::remove(path, error));
+  static_cast<void>(std::filesystem::remove(path.string() + "-journal", error));
+  std::ofstream output{path, std::ios::binary | std::ios::trunc};
+  output.write(reinterpret_cast<const char*>(image.data()),
+               static_cast<std::streamsize>(image.size()));
+  if (!output) {
+    throw std::runtime_error{"could not write recovered write-session image"};
+  }
+}
+
+struct CrashExpectedState {
+  std::string_view rows;
+  bool temp_visible;
+};
+
+[[nodiscard]] CrashExpectedState ExpectedCrashState(std::string_view scenario, bool terminal) {
+  constexpr CrashExpectedState kInitial{
+      .rows = "1:one,2:two,3:three",
+      .temp_visible = false,
+  };
+  if (!terminal || scenario == "create-full-rollback" || scenario == "create-rollback-to" ||
+      scenario == "full-dml-rollback") {
+    return kInitial;
+  }
+  if (scenario == "implicit-insert") {
+    return CrashExpectedState{.rows = "1:one,2:two,3:three,4:four", .temp_visible = false};
+  }
+  if (scenario == "implicit-create") {
+    return CrashExpectedState{.rows = kInitial.rows, .temp_visible = true};
+  }
+  if (scenario == "exact-rowid-move") {
+    return CrashExpectedState{.rows = "2:two,3:three,10:moved", .temp_visible = false};
+  }
+  if (scenario == "scan-rowid-move") {
+    return CrashExpectedState{.rows = "1:one,12:twox,13:threex", .temp_visible = false};
+  }
+  if (scenario == "scan-delete") {
+    return CrashExpectedState{.rows = "1:one", .temp_visible = false};
+  }
+  if (scenario == "explicit-commit") {
+    return CrashExpectedState{.rows = "1:updated,3:three,4:four", .temp_visible = false};
+  }
+  if (scenario == "constraint-then-commit") {
+    return CrashExpectedState{
+        .rows = "1:one,2:two,3:three,4:kept",
+        .temp_visible = false,
+    };
+  }
+  if (scenario == "named-rollback-then-commit") {
+    return CrashExpectedState{.rows = "1:outer,2:two,3:three", .temp_visible = false};
+  }
+  if (scenario == "transaction-savepoint-release") {
+    return CrashExpectedState{
+        .rows = "1:one,2:two,3:three,4:savepoint",
+        .temp_visible = false,
+    };
+  }
+  throw std::runtime_error{"unknown write-session crash scenario"};
+}
+
+struct CrashVerifierContext {
+  const TemporaryDirectory* directory;
+  std::size_t sequence = 0;
+};
+
+void VerifyCrashImageWithSqlite(void* raw_context, std::string_view scenario, std::size_t cut,
+                                bool writes_are_durable, bool terminal,
+                                modern_sqlite::ByteView image) {
+  if (raw_context == nullptr) {
+    throw std::runtime_error{"write-session crash verifier context is missing"};
+  }
+  auto& context = *static_cast<CrashVerifierContext*>(raw_context);
+  const std::filesystem::path path =
+      context.directory->DatabasePath("crash-" + std::to_string(context.sequence++));
+  WriteImage(path, image);
+  const Database sqlite{path, kReadOnlyFlags};
+  VerifyIntegrity(sqlite.get());
+  const CrashExpectedState expected = ExpectedCrashState(scenario, terminal);
+  const std::string rows = QueryText(
+      sqlite.get(),
+      "SELECT group_concat(id||':'||Name,',') FROM (SELECT id,Name FROM Items ORDER BY id)");
+  const bool temp_visible =
+      QueryInteger(sqlite.get(), "SELECT count(*) FROM sqlite_schema WHERE name='Temp'") == 1;
+  if (rows != expected.rows || temp_visible != expected.temp_visible) {
+    throw std::runtime_error{std::string{scenario} + " cut=" + std::to_string(cut) +
+                             " durability=" + (writes_are_durable ? "durable" : "volatile") +
+                             " disagrees in pinned SQLite"};
   }
 }
 
@@ -627,6 +720,13 @@ void VerifySqliteCreated(const std::filesystem::path& path) {
 
 int main() try {
   const TemporaryDirectory directory;
+  CrashVerifierContext crash_context{.directory = &directory};
+  const modern_sqlite::test::WriteSessionCrashVerification crash_verification{
+      .context = &crash_context,
+      .verify = VerifyCrashImageWithSqlite,
+  };
+  modern_sqlite::test::RunWriteSessionCrashHarness(crash_verification);
+  modern_sqlite::test::RunWriteSessionTransactionCrashHarness(crash_verification);
   VerifyDifferentialTrace(directory.DatabasePath("modern-trace"),
                           directory.DatabasePath("sqlite-trace"));
   VerifyModernCreated(directory.DatabasePath("modern-created"));

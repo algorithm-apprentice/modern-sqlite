@@ -1034,7 +1034,13 @@ if(TARGET modern_sqlite_benchmark_sqlite)
 
   add_executable(
     modern_sqlite_write_session_sqlite_compatibility
+    compatibility/write_session_crash_harness.cpp
     compatibility/write_session_sqlite_compatibility.cpp
+  )
+  target_include_directories(
+    modern_sqlite_write_session_sqlite_compatibility
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}"
   )
   target_link_libraries(
     modern_sqlite_write_session_sqlite_compatibility
