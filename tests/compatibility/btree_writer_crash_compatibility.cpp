@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -33,13 +34,21 @@ namespace {
 
 constexpr int kReadOnlyFlags = SQLITE_OPEN_READONLY + SQLITE_OPEN_NOMUTEX;
 constexpr int kCreateFlags = SQLITE_OPEN_READWRITE + SQLITE_OPEN_CREATE + SQLITE_OPEN_NOMUTEX;
+constexpr std::int64_t kInsertTargetRowid = 2;
+constexpr std::int64_t kQuickTargetRowid = 7;
 constexpr std::int64_t kNonRootTargetRowid = 10;
 constexpr std::int64_t kReuseTargetRowid = 99;
 
 enum class CrashOperation : std::uint8_t {
+  kLocalInsert,
+  kOverflowInsert,
+  kQuickBalance,
   kNonRootBalance,
+  kRootDeepening,
+  kRootShallowing,
   kInteriorPredecessorDelete,
   kFreelistReuse,
+  kClear,
   kDrop,
 };
 
@@ -51,6 +60,10 @@ struct CrashFixture {
   std::int64_t target_rowid;
   std::int64_t schema_rowid;
   ByteBuffer target_blob;
+  std::int64_t old_row_count;
+  std::int64_t committed_row_count;
+  std::int64_t old_freelist_count;
+  std::int64_t committed_freelist_count;
 };
 
 template <typename T>
@@ -69,30 +82,48 @@ void RequireStatus(Status status) {
 
 [[nodiscard]] std::string_view OperationName(CrashOperation operation) noexcept {
   switch (operation) {
+    case CrashOperation::kLocalInsert:
+      return "local-insert";
+    case CrashOperation::kOverflowInsert:
+      return "overflow-insert";
+    case CrashOperation::kQuickBalance:
+      return "quick-balance";
     case CrashOperation::kNonRootBalance:
       return "non-root-balance";
+    case CrashOperation::kRootDeepening:
+      return "root-deepening";
+    case CrashOperation::kRootShallowing:
+      return "root-shallowing";
     case CrashOperation::kInteriorPredecessorDelete:
       return "interior-predecessor-delete";
     case CrashOperation::kFreelistReuse:
       return "freelist-reuse";
+    case CrashOperation::kClear:
+      return "clear";
     case CrashOperation::kDrop:
       return "drop";
   }
   return "unknown";
 }
 
-[[nodiscard]] std::int64_t ExpectedFreelistCount(CrashOperation operation,
-                                                 bool committed) noexcept {
+[[nodiscard]] std::size_t TargetPayloadSize(CrashOperation operation) noexcept {
   switch (operation) {
-    case CrashOperation::kNonRootBalance:
-    case CrashOperation::kInteriorPredecessorDelete:
-      return 0;
+    case CrashOperation::kLocalInsert:
+      return 8U;
+    case CrashOperation::kOverflowInsert:
     case CrashOperation::kFreelistReuse:
-      return committed ? 0 : 1;
+      return 2'000U;
+    case CrashOperation::kQuickBalance:
+    case CrashOperation::kNonRootBalance:
+    case CrashOperation::kRootDeepening:
+    case CrashOperation::kRootShallowing:
+      return 380U;
+    case CrashOperation::kInteriorPredecessorDelete:
+    case CrashOperation::kClear:
     case CrashOperation::kDrop:
-      return committed ? 1 : 0;
+      return 0U;
   }
-  return -1;
+  return 0U;
 }
 
 class TemporaryDirectory final {
@@ -257,11 +288,40 @@ void ConfigureFixture(sqlite3* database) {
   const std::filesystem::path path = directory.FixturePath(operation);
   PageNumber table_root;
   PageNumber index_root;
+  std::int64_t target_rowid = 0;
   std::int64_t schema_rowid = 0;
+  std::int64_t old_row_count = 0;
+  std::int64_t committed_row_count = 0;
+  std::int64_t old_freelist_count = 0;
+  std::int64_t committed_freelist_count = 0;
   {
     const Database database{path, kCreateFlags};
     ConfigureFixture(database.get());
     switch (operation) {
+      case CrashOperation::kLocalInsert:
+      case CrashOperation::kOverflowInsert:
+        Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+        Execute(database.get(), "INSERT INTO items VALUES(1,zeroblob(8))");
+        table_root = QueryPageNumber(database.get(),
+                                     "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kInsertTargetRowid;
+        old_row_count = 1;
+        committed_row_count = 2;
+        break;
+      case CrashOperation::kQuickBalance:
+        Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+        Execute(database.get(), "BEGIN");
+        for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
+          Execute(database.get(),
+                  "INSERT INTO items VALUES(" + std::to_string(rowid) + ",zeroblob(380))");
+        }
+        Execute(database.get(), "COMMIT");
+        table_root = QueryPageNumber(database.get(),
+                                     "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kQuickTargetRowid;
+        old_row_count = 6;
+        committed_row_count = 7;
+        break;
       case CrashOperation::kNonRootBalance:
         Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
         Execute(database.get(), "BEGIN");
@@ -272,6 +332,27 @@ void ConfigureFixture(sqlite3* database) {
         Execute(database.get(), "COMMIT");
         table_root = QueryPageNumber(database.get(),
                                      "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kNonRootTargetRowid;
+        old_row_count = 9;
+        committed_row_count = 10;
+        break;
+      case CrashOperation::kRootDeepening:
+        Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+        Execute(database.get(), "INSERT INTO items VALUES(1,zeroblob(380))");
+        table_root = QueryPageNumber(database.get(),
+                                     "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kInsertTargetRowid;
+        old_row_count = 1;
+        committed_row_count = 2;
+        break;
+      case CrashOperation::kRootShallowing:
+        Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+        Execute(database.get(), "INSERT INTO items VALUES(1,zeroblob(380)),(2,zeroblob(380))");
+        table_root = QueryPageNumber(database.get(),
+                                     "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kInsertTargetRowid;
+        old_row_count = 2;
+        committed_row_count = 1;
         break;
       case CrashOperation::kInteriorPredecessorDelete:
         Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, key BLOB NOT NULL)");
@@ -287,6 +368,8 @@ void ConfigureFixture(sqlite3* database) {
                                      "SELECT rootpage FROM sqlite_schema WHERE name='items'");
         index_root = QueryPageNumber(
             database.get(), "SELECT rootpage FROM sqlite_schema WHERE name='idx_items_key'");
+        old_row_count = 24;
+        committed_row_count = 23;
         break;
       case CrashOperation::kFreelistReuse:
         Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
@@ -295,6 +378,19 @@ void ConfigureFixture(sqlite3* database) {
         Execute(database.get(), "DROP TABLE scratch");
         table_root = QueryPageNumber(database.get(),
                                      "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        target_rowid = kReuseTargetRowid;
+        old_row_count = 1;
+        committed_row_count = 2;
+        break;
+      case CrashOperation::kClear:
+        Execute(database.get(), "CREATE TABLE items(id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+        Execute(database.get(),
+                "INSERT INTO items VALUES(1,zeroblob(380)),(2,zeroblob(380)),"
+                "(3,zeroblob(380))");
+        table_root = QueryPageNumber(database.get(),
+                                     "SELECT rootpage FROM sqlite_schema WHERE name='items'");
+        old_row_count = 3;
+        committed_row_count = 0;
         break;
       case CrashOperation::kDrop:
         Execute(database.get(), "CREATE TABLE keeper(id INTEGER PRIMARY KEY)");
@@ -304,14 +400,37 @@ void ConfigureFixture(sqlite3* database) {
                                      "SELECT rootpage FROM sqlite_schema WHERE name='doomed'");
         schema_rowid =
             QueryInteger(database.get(), "SELECT rowid FROM sqlite_schema WHERE name='doomed'");
+        old_row_count = 1;
+        committed_row_count = 0;
         break;
     }
     if (QueryText(database.get(), "PRAGMA integrity_check") != "ok") {
       throw std::runtime_error("SQLite rejected a generated crash fixture");
     }
-    if (QueryInteger(database.get(), "PRAGMA freelist_count") !=
-        ExpectedFreelistCount(operation, false)) {
+    old_freelist_count = QueryInteger(database.get(), "PRAGMA freelist_count");
+    const std::int64_t expected_old_freelist = operation == CrashOperation::kFreelistReuse ? 1 : 0;
+    if (old_freelist_count != expected_old_freelist) {
       throw std::runtime_error("generated crash fixture has the wrong freelist count");
+    }
+    switch (operation) {
+      case CrashOperation::kRootShallowing:
+      case CrashOperation::kClear:
+        committed_freelist_count = QueryInteger(database.get(), "PRAGMA page_count") - 2;
+        break;
+      case CrashOperation::kFreelistReuse:
+        committed_freelist_count = 0;
+        break;
+      case CrashOperation::kDrop:
+        committed_freelist_count = old_freelist_count + 1;
+        break;
+      case CrashOperation::kLocalInsert:
+      case CrashOperation::kOverflowInsert:
+      case CrashOperation::kQuickBalance:
+      case CrashOperation::kNonRootBalance:
+      case CrashOperation::kRootDeepening:
+      case CrashOperation::kInteriorPredecessorDelete:
+        committed_freelist_count = old_freelist_count;
+        break;
     }
   }
   return CrashFixture{
@@ -319,10 +438,13 @@ void ConfigureFixture(sqlite3* database) {
       .image = ReadImage(path),
       .table_root = table_root,
       .index_root = index_root,
-      .target_rowid =
-          operation == CrashOperation::kNonRootBalance ? kNonRootTargetRowid : kReuseTargetRowid,
+      .target_rowid = target_rowid,
       .schema_rowid = schema_rowid,
       .target_blob = {},
+      .old_row_count = old_row_count,
+      .committed_row_count = committed_row_count,
+      .old_freelist_count = old_freelist_count,
+      .committed_freelist_count = committed_freelist_count,
   };
 }
 
@@ -360,6 +482,74 @@ void ValidateNonRootFixture(const CrashFixture& fixture) {
     }
     if (child_index == 0U || child_index >= root.cell_count()) {
       throw std::runtime_error("non-root crash target is not in a middle sibling");
+    }
+  }
+  RequireStatus(pager->EndRead());
+}
+
+void ValidateTableFixture(const CrashFixture& fixture) {
+  if (fixture.operation == CrashOperation::kNonRootBalance) {
+    ValidateNonRootFixture(fixture);
+    return;
+  }
+  if (fixture.operation == CrashOperation::kInteriorPredecessorDelete ||
+      fixture.operation == CrashOperation::kFreelistReuse ||
+      fixture.operation == CrashOperation::kDrop) {
+    return;
+  }
+
+  WritePagerFixedVfs vfs{false};
+  vfs.LoadDatabase(fixture.image.view());
+  std::unique_ptr<Pager> pager = OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error("could not open table crash fixture");
+  }
+  RequireStatus(pager->BeginRead());
+  {
+    const DatabaseHeader* header = pager->header();
+    if (header == nullptr) {
+      throw std::runtime_error("table crash fixture has no database header");
+    }
+    const BtreePageGeometry geometry =
+        TakeValue(BtreePageGeometry::Create(header->page_size(), header->usable_size()));
+    const auto root_pin = TakeValue(pager->ReadPage(fixture.table_root));
+    const BtreePageView root =
+        TakeValue(BtreePageView::Parse(root_pin.frame().bytes(), fixture.table_root, geometry));
+    switch (fixture.operation) {
+      case CrashOperation::kLocalInsert:
+      case CrashOperation::kOverflowInsert:
+      case CrashOperation::kRootDeepening:
+        if (root.type() != BtreePageType::kLeafTable) {
+          throw std::runtime_error("table crash fixture expected a leaf root");
+        }
+        break;
+      case CrashOperation::kQuickBalance: {
+        const std::optional<PageNumber> rightmost_child = root.rightmost_child();
+        if (root.type() != BtreePageType::kInteriorTable || !rightmost_child.has_value()) {
+          throw std::runtime_error("quick-balance fixture expected an interior table root");
+        }
+        const PageNumber rightmost = *rightmost_child;
+        const auto leaf_pin = TakeValue(pager->ReadPage(rightmost));
+        const BtreePageView leaf =
+            TakeValue(BtreePageView::Parse(leaf_pin.frame().bytes(), rightmost, geometry));
+        if (leaf.type() != BtreePageType::kLeafTable || leaf.cell_count() == 0U ||
+            TakeValue(leaf.cell(leaf.cell_count() - 1U)).rowid() !=
+                std::optional<std::int64_t>{kQuickTargetRowid - 1}) {
+          throw std::runtime_error("quick-balance fixture has the wrong rightmost leaf");
+        }
+        break;
+      }
+      case CrashOperation::kRootShallowing:
+      case CrashOperation::kClear:
+        if (root.type() != BtreePageType::kInteriorTable) {
+          throw std::runtime_error("table crash fixture expected an interior root");
+        }
+        break;
+      case CrashOperation::kNonRootBalance:
+      case CrashOperation::kInteriorPredecessorDelete:
+      case CrashOperation::kFreelistReuse:
+      case CrashOperation::kDrop:
+        break;
     }
   }
   RequireStatus(pager->EndRead());
@@ -426,24 +616,63 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
   };
 }
 
-[[nodiscard]] bool ApplyCrashOperation(WritePagerFixedVfs& vfs, const CrashFixture& fixture) {
-  std::unique_ptr<Pager> pager = OpenWritePager(vfs, 64U);
-  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+[[nodiscard]] bool ApplyCrashOperation(WritePagerFixedVfs& vfs, const CrashFixture& fixture,
+                                       std::string* failure = nullptr) {
+  const auto fail = [failure](std::string message) {
+    if (failure != nullptr) {
+      *failure = std::move(message);
+    }
     return false;
+  };
+  std::unique_ptr<Pager> pager = OpenWritePager(vfs, 1U);
+  if (pager == nullptr) {
+    return fail("open failed");
+  }
+  const Status read = pager->BeginRead();
+  if (!read.has_value()) {
+    return fail("begin read failed: " + read.error().ToString());
+  }
+  const Status write = pager->BeginWrite();
+  if (!write.has_value()) {
+    return fail("begin write failed: " + write.error().ToString());
   }
   auto session = BtreeWriteSession::Open(*pager);
   if (!session.has_value()) {
-    return false;
+    return fail("session open failed: " + session.error().ToString());
   }
   switch (fixture.operation) {
-    case CrashOperation::kNonRootBalance: {
+    case CrashOperation::kLocalInsert:
+    case CrashOperation::kOverflowInsert:
+    case CrashOperation::kQuickBalance:
+    case CrashOperation::kNonRootBalance:
+    case CrashOperation::kRootDeepening: {
       auto table = session->OpenTableBtree(fixture.table_root);
       if (!table.has_value()) {
-        return false;
+        return fail("table open failed: " + table.error().ToString());
       }
-      const ByteBuffer payload = TableBlobRecord(380U, std::byte{0x0a});
-      if (!table->Insert(fixture.target_rowid, payload.view()).has_value()) {
-        return false;
+      std::size_t payload_size = 380U;
+      if (fixture.operation == CrashOperation::kLocalInsert) {
+        payload_size = 8U;
+      } else if (fixture.operation == CrashOperation::kOverflowInsert) {
+        payload_size = 2'000U;
+      }
+      const ByteBuffer payload = TableBlobRecord(
+          payload_size, static_cast<std::byte>(static_cast<std::uint8_t>(fixture.target_rowid)));
+      const Status inserted = table->Insert(fixture.target_rowid, payload.view());
+      if (!inserted.has_value()) {
+        return fail("table insert failed: " + inserted.error().ToString());
+      }
+      break;
+    }
+    case CrashOperation::kRootShallowing: {
+      auto table = session->OpenTableBtree(fixture.table_root);
+      if (!table.has_value()) {
+        return fail("table open failed: " + table.error().ToString());
+      }
+      const auto deleted = table->Delete(fixture.target_rowid);
+      if (!deleted.has_value() || !*deleted) {
+        return fail(deleted.has_value() ? "table delete missed target"
+                                        : "table delete failed: " + deleted.error().ToString());
       }
       break;
     }
@@ -452,25 +681,37 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
       const auto columns = IndexColumns();
       auto index = session->OpenIndexBtree(fixture.index_root, columns);
       if (!table.has_value() || !index.has_value()) {
-        return false;
+        return fail("interior-delete writer open failed");
       }
       auto target = InteriorTarget(fixture);
       const auto deleted_index = index->Delete(target);
       const auto deleted_table = table->Delete(fixture.target_rowid);
       if (!deleted_index.has_value() || !*deleted_index || !deleted_table.has_value() ||
           !*deleted_table) {
-        return false;
+        return fail("interior-delete mutation failed");
       }
       break;
     }
     case CrashOperation::kFreelistReuse: {
       auto table = session->OpenTableBtree(fixture.table_root);
       if (!table.has_value()) {
-        return false;
+        return fail("table open failed: " + table.error().ToString());
       }
       const ByteBuffer payload = TableBlobRecord(2'000U, std::byte{0x63});
-      if (!table->Insert(fixture.target_rowid, payload.view()).has_value()) {
-        return false;
+      const Status inserted = table->Insert(fixture.target_rowid, payload.view());
+      if (!inserted.has_value()) {
+        return fail("freelist-reuse insert failed: " + inserted.error().ToString());
+      }
+      break;
+    }
+    case CrashOperation::kClear: {
+      auto table = session->OpenTableBtree(fixture.table_root);
+      if (!table.has_value()) {
+        return fail("table open failed: " + table.error().ToString());
+      }
+      const auto cleared = table->Clear();
+      if (!cleared.has_value() || std::cmp_not_equal(*cleared, fixture.old_row_count)) {
+        return fail("clear failed or returned the wrong row count");
       }
       break;
     }
@@ -478,19 +719,39 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
       auto schema = session->OpenTableBtree(PageNumber{1});
       auto table = session->OpenTableBtree(fixture.table_root);
       if (!schema.has_value() || !table.has_value()) {
-        return false;
+        return fail("drop writer open failed");
       }
       const auto deleted_schema = schema->Delete(fixture.schema_rowid);
       if (!deleted_schema.has_value() || !*deleted_schema || !table->Drop().has_value()) {
-        return false;
+        return fail("drop mutation failed");
       }
       break;
     }
   }
-  if (!pager->Commit().has_value()) {
-    return false;
+  {
+    const auto pressure_page = pager->WritePage(PageNumber{1});
+    if (!pressure_page.has_value()) {
+      return fail("pressure page failed: " + pressure_page.error().ToString());
+    }
   }
-  return pager->EndRead().has_value();
+  for (std::size_t attempt = 0U;
+       attempt < 2U && pager->state() != PagerState::kWriterDatabaseModified; ++attempt) {
+    {
+      const auto spill_trigger = pager->ReadPage(PageNumber{1});
+      if (!spill_trigger.has_value()) {
+        return fail("spill trigger failed: " + spill_trigger.error().ToString());
+      }
+    }
+  }
+  if (pager->state() != PagerState::kWriterDatabaseModified) {
+    return fail("mutation did not force a pre-commit database spill");
+  }
+  const Status committed = pager->Commit();
+  if (!committed.has_value()) {
+    return fail("commit failed: " + committed.error().ToString());
+  }
+  const Status ended = pager->EndRead();
+  return ended.has_value() ? true : fail("end read failed: " + ended.error().ToString());
 }
 
 void RecoverOnce(WritePagerFixedVfs& vfs) {
@@ -510,18 +771,40 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
     throw std::runtime_error("Modern SQLite could not inspect a recovered image");
   }
   RequireStatus(pager->BeginRead());
+  const std::int64_t expected_freelist =
+      committed ? fixture.committed_freelist_count : fixture.old_freelist_count;
   if (pager->header() == nullptr ||
-      pager->header()->freelist_page_count() !=
-          static_cast<std::uint32_t>(ExpectedFreelistCount(fixture.operation, committed))) {
+      pager->header()->freelist_page_count() != static_cast<std::uint32_t>(expected_freelist)) {
     throw std::runtime_error("Modern SQLite read the wrong recovered freelist count");
   }
 
   switch (fixture.operation) {
+    case CrashOperation::kLocalInsert:
+    case CrashOperation::kOverflowInsert:
+    case CrashOperation::kQuickBalance:
     case CrashOperation::kNonRootBalance:
-    case CrashOperation::kFreelistReuse: {
+    case CrashOperation::kRootDeepening:
+    case CrashOperation::kRootShallowing:
+    case CrashOperation::kFreelistReuse:
+    case CrashOperation::kClear: {
       TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager, fixture.table_root));
-      if (TakeValue(table.Seek(fixture.target_rowid, BtreeSeekMode::kEqual)) != committed) {
-        throw std::runtime_error("Modern SQLite read the wrong recovered table state");
+      if (fixture.target_rowid != 0) {
+        const bool expected_target =
+            fixture.operation == CrashOperation::kRootShallowing ? !committed : committed;
+        if (TakeValue(table.Seek(fixture.target_rowid, BtreeSeekMode::kEqual)) != expected_target) {
+          throw std::runtime_error("Modern SQLite read the wrong recovered table target");
+        }
+      }
+      std::int64_t row_count = 0;
+      if (TakeValue(table.First())) {
+        do {
+          ++row_count;
+        } while (TakeValue(table.Next()));
+      }
+      const std::int64_t expected_rows =
+          committed ? fixture.committed_row_count : fixture.old_row_count;
+      if (row_count != expected_rows) {
+        throw std::runtime_error("Modern SQLite read the wrong recovered table row count");
       }
       break;
     }
@@ -536,6 +819,23 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
       const bool index_has_target = TakeValue(index.Seek(target, BtreeSeekMode::kEqual));
       if (table_has_target == committed || index_has_target == committed) {
         throw std::runtime_error("Modern SQLite read a partial interior-delete state");
+      }
+      std::int64_t table_rows = 0;
+      if (TakeValue(table.First())) {
+        do {
+          ++table_rows;
+        } while (TakeValue(table.Next()));
+      }
+      std::int64_t index_rows = 0;
+      if (TakeValue(index.First())) {
+        do {
+          ++index_rows;
+        } while (TakeValue(index.Next()));
+      }
+      const std::int64_t expected_rows =
+          committed ? fixture.committed_row_count : fixture.old_row_count;
+      if (table_rows != expected_rows || index_rows != expected_rows) {
+        throw std::runtime_error("Modern SQLite read the wrong interior-delete row count");
       }
       break;
     }
@@ -562,34 +862,45 @@ void VerifySqliteState(const TemporaryDirectory& directory, const CrashFixture& 
   if (QueryText(database.get(), "PRAGMA integrity_check") != "ok") {
     throw std::runtime_error("SQLite integrity_check rejected a recovered image");
   }
-  if (QueryInteger(database.get(), "PRAGMA freelist_count") !=
-      ExpectedFreelistCount(fixture.operation, committed)) {
+  const std::int64_t expected_freelist =
+      committed ? fixture.committed_freelist_count : fixture.old_freelist_count;
+  if (QueryInteger(database.get(), "PRAGMA freelist_count") != expected_freelist) {
     throw std::runtime_error("SQLite read the wrong recovered freelist count");
   }
 
   switch (fixture.operation) {
+    case CrashOperation::kLocalInsert:
+    case CrashOperation::kOverflowInsert:
+    case CrashOperation::kQuickBalance:
     case CrashOperation::kNonRootBalance:
-      if (QueryInteger(database.get(), "SELECT count(*) FROM items") != (committed ? 10 : 9) ||
-          QueryInteger(database.get(), "SELECT count(*) FROM items WHERE id=10") !=
-              (committed ? 1 : 0)) {
-        throw std::runtime_error("SQLite read the wrong recovered non-root balance state");
+    case CrashOperation::kRootDeepening:
+    case CrashOperation::kRootShallowing:
+    case CrashOperation::kFreelistReuse:
+    case CrashOperation::kClear: {
+      const std::int64_t expected_rows =
+          committed ? fixture.committed_row_count : fixture.old_row_count;
+      if (QueryInteger(database.get(), "SELECT count(*) FROM items") != expected_rows) {
+        throw std::runtime_error("SQLite read the wrong recovered table row count");
+      }
+      if (fixture.target_rowid != 0) {
+        const bool expected_target =
+            fixture.operation == CrashOperation::kRootShallowing ? !committed : committed;
+        const std::string target_query =
+            "SELECT count(*) FROM items WHERE id=" + std::to_string(fixture.target_rowid) +
+            " AND length(data)=" + std::to_string(TargetPayloadSize(fixture.operation));
+        if (QueryInteger(database.get(), target_query) != (expected_target ? 1 : 0)) {
+          throw std::runtime_error("SQLite read the wrong recovered table target");
+        }
       }
       break;
+    }
     case CrashOperation::kInteriorPredecessorDelete:
       if (QueryInteger(database.get(), "SELECT count(*) FROM items INDEXED BY idx_items_key") !=
-              (committed ? 23 : 24) ||
+              (committed ? fixture.committed_row_count : fixture.old_row_count) ||
           QueryInteger(database.get(),
                        "SELECT count(*) FROM items INDEXED BY idx_items_key WHERE id=" +
                            std::to_string(fixture.target_rowid)) != (committed ? 0 : 1)) {
         throw std::runtime_error("SQLite read the wrong recovered interior-delete state");
-      }
-      break;
-    case CrashOperation::kFreelistReuse:
-      if (QueryInteger(database.get(), "SELECT count(*) FROM items") != (committed ? 2 : 1) ||
-          QueryInteger(database.get(),
-                       "SELECT count(*) FROM items WHERE id=99 AND length(data)=2000") !=
-              (committed ? 1 : 0)) {
-        throw std::runtime_error("SQLite read the wrong recovered freelist-reuse state");
       }
       break;
     case CrashOperation::kDrop:
@@ -607,8 +918,10 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
     baseline.LoadDatabase(fixture.image.view());
     baseline.SetDatabaseWritesDurable(writes_are_durable);
     baseline.ArmCrashCut(std::nullopt);
-    if (!ApplyCrashOperation(baseline, fixture)) {
-      throw std::runtime_error("could not create the committed crash baseline");
+    std::string failure;
+    if (!ApplyCrashOperation(baseline, fixture, &failure)) {
+      throw std::runtime_error(std::string{OperationName(fixture.operation)} +
+                               " could not create the committed crash baseline: " + failure);
     }
     const ByteBuffer committed_image = ByteBuffer::CopyOf(baseline.database_bytes());
     const std::size_t mutation_count = baseline.mutation_count();
@@ -647,12 +960,14 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
 void RunBtreeWriterCrashCompatibility() {
   const TemporaryDirectory directory;
   for (const CrashOperation operation :
-       {CrashOperation::kNonRootBalance, CrashOperation::kInteriorPredecessorDelete,
-        CrashOperation::kFreelistReuse, CrashOperation::kDrop}) {
+       {CrashOperation::kLocalInsert, CrashOperation::kOverflowInsert,
+        CrashOperation::kQuickBalance, CrashOperation::kNonRootBalance,
+        CrashOperation::kRootDeepening, CrashOperation::kRootShallowing,
+        CrashOperation::kInteriorPredecessorDelete, CrashOperation::kFreelistReuse,
+        CrashOperation::kClear, CrashOperation::kDrop}) {
     CrashFixture fixture = CreateFixtureFile(directory, operation);
-    if (operation == CrashOperation::kNonRootBalance) {
-      ValidateNonRootFixture(fixture);
-    } else if (operation == CrashOperation::kInteriorPredecessorDelete) {
+    ValidateTableFixture(fixture);
+    if (operation == CrashOperation::kInteriorPredecessorDelete) {
       DiscoverInteriorDeleteTarget(fixture);
     }
     VerifyModernState(fixture, fixture.image.view(), false);
