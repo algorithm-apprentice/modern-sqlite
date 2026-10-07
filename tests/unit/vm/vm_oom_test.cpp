@@ -373,6 +373,96 @@ int main() try {
   if (!insert_vm->DetachExecutionContext().has_value() || !statement->Rollback().has_value()) {
     return 1;
   }
+
+  test::WritePagerFixedVfs delete_vfs{false};
+  std::unique_ptr<Pager> delete_pager = test::OpenWritePager(delete_vfs, 64U);
+  if (delete_pager == nullptr) {
+    return 1;
+  }
+  auto delete_coordinator = TransactionCoordinator::Open(std::move(delete_pager));
+  if (!delete_coordinator.has_value()) {
+    return 1;
+  }
+  auto initialize_statement = delete_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!initialize_statement.has_value() || initialize_statement->writer() == nullptr ||
+      !initialize_statement->writer()->InitializeDatabase().has_value() ||
+      !initialize_statement->Succeed().has_value()) {
+    return 1;
+  }
+  auto seed_statement = delete_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!seed_statement.has_value() || seed_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto seed_vm = Vm::Create(*insert_program, VmEnvironment::Core());
+  if (!seed_vm.has_value() ||
+      !seed_vm->AttachExecutionContext(VmExecutionContext{*seed_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  const auto seeded = seed_vm->Step();
+  if (!seeded.has_value() || *seeded != VmStep::kDone ||
+      !seed_vm->DetachExecutionContext().has_value() || !seed_statement->Succeed().has_value()) {
+    return 1;
+  }
+
+  ProgramInput delete_input;
+  delete_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  delete_input.statement_kind = ProgramStatementKind::kDelete;
+  delete_input.transaction_access = ProgramTransactionAccess::kWrite;
+  delete_input.mutation_result.publishes_changes = true;
+  delete_input.register_count = 1;
+  delete_input.constants.push_back(SqlValue::Integer(1));
+  delete_input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = false,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = true,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  delete_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      OpenWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      DeleteTableInstruction{.cursor = WriteCursorId(0), .rowid = RegisterId(0)},
+      HaltInstruction{},
+  };
+  auto delete_program = BytecodeProgram::Create(delete_input);
+  auto delete_statement = delete_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!delete_program.has_value() || !delete_statement.has_value() ||
+      delete_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto delete_vm = Vm::Create(*delete_program, VmEnvironment::Core());
+  if (!delete_vm.has_value() ||
+      !delete_vm->AttachExecutionContext(VmExecutionContext{*delete_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto delete_failure = delete_vm->Step();
+  fail_allocations = false;
+  if (delete_failure.has_value() || delete_failure.error().code() != ErrorCode::kOutOfMemory ||
+      delete_vm->change_count() != 0U) {
+    return 1;
+  }
+  if (!delete_vm->DetachExecutionContext().has_value() ||
+      !delete_statement->Rollback().has_value()) {
+    return 1;
+  }
   return 0;
 } catch (...) {
   fail_allocations = false;

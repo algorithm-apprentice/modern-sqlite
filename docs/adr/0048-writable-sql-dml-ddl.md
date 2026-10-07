@@ -348,6 +348,25 @@ Program verification requires every INSERT operand and contiguous register
 range to be in bounds and initialized, and requires the referenced write
 cursor to be open for rowid resolution, record construction, and insertion.
 
+The executable DELETE slice extends the existing rowid seek and write
+instruction set with:
+
+- `RowIdSeekMode::kEqual` and `RowIdSeekMode::kGreater`, carried by
+  `SeekRowIdInstruction`, so a closed-and-reopened scan can seek strictly
+  beyond its last owned rowid without exposing B-tree cursor types to
+  lowering; and
+- `DeleteTableInstruction`, which consumes one initialized rowid register and
+  one open write cursor, performs one point delete, and increments the
+  VM-local change count only when a row was actually removed.
+
+The verifier rejects invalid seek modes, requires rowid seeks to use a
+rowid-table read cursor, and requires DELETE operands to reference an open
+write cursor and an initialized register. The VM maps seek modes directly to
+the B-tree's exact or strictly-greater seek, rejects a malformed non-integer
+DELETE operand as `kTypeMismatch`, propagates storage errors, treats an
+already-absent row as a successful no-op, and never publishes a
+last-insert-rowid event for DELETE.
+
 The lowering module is generalized from `read_lowering` to canonical
 `plan_lowering` naming when the first mutation program is added. The project
 retains no compatibility aliases. Its public boundary uses:
@@ -445,7 +464,8 @@ cursor.
 UPDATE and DELETE therefore use this first-version loop:
 
 1. open a read cursor and seek the next rowid;
-2. copy the rowid and complete record bytes needed by expression evaluation;
+2. copy the rowid and every bound source field needed by expression
+   evaluation into owned VM registers;
 3. close the read cursor and release every page pin;
 4. evaluate the predicate and replacement expressions;
 5. perform one typed point delete/replace through `TransactionWriter`;

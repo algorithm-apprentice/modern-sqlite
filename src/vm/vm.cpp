@@ -1090,6 +1090,29 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const DeleteTableInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.table.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "delete used a closed write cursor"));
+    }
+    const std::optional<std::int64_t> rowid = LosslessRowId(Register(operation.rowid));
+    if (!rowid.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    auto deleted = runtime.table->Delete(*rowid);
+    if (!deleted.has_value()) {
+      return std::unexpected(std::move(deleted.error()));
+    }
+    if (!*deleted) {
+      return std::nullopt;
+    }
+    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    }
+    ++change_count_;
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
@@ -1146,7 +1169,17 @@ struct Vm::Impl {
       program_counter_ = operation.missing_target.value();
       return std::nullopt;
     }
-    auto found = cursor->Seek(*rowid, BtreeSeekMode::kEqual);
+    BtreeSeekMode mode = BtreeSeekMode::kEqual;
+    switch (operation.mode) {
+      case RowIdSeekMode::kEqual:
+        break;
+      case RowIdSeekMode::kGreater:
+        mode = BtreeSeekMode::kGreater;
+        break;
+      default:
+        return std::unexpected(VmError(ErrorCode::kInternal, "unknown rowid seek mode"));
+    }
+    auto found = cursor->Seek(*rowid, mode);
     if (!found.has_value()) {
       return std::unexpected(std::move(found.error()));
     }

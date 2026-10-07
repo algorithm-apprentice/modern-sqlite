@@ -275,6 +275,64 @@ TEST(BytecodeProgramTest, VerifiesTypedTableInsertInstructions) {
   EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedTableDeleteAndRowidSeekModes) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kDelete;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result.publishes_changes = true;
+  input.register_count = 1;
+  input.constants.push_back(SqlValue::Integer(7));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = false,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = std::nullopt,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      DeleteTableInstruction{.cursor = WriteCursor(0), .rowid = Reg(0)},
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("delete_table", InstructionKindName(InstructionKindOf(input.instructions[2])));
+
+  input.instructions.erase(input.instructions.begin() + 1);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
+
+  ProgramInput seek;
+  seek.register_count = 1;
+  seek.constants.push_back(SqlValue::Integer(7));
+  seek.cursors.push_back(RowIdCursorDescriptor());
+  seek.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      SeekRowIdInstruction{
+          .cursor = Cursor(0),
+          .key = Reg(0),
+          .missing_target = Address(5),
+          .mode = RowIdSeekMode::kGreater,
+      },
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(seek).has_value());
+
+  std::get<SeekRowIdInstruction>(seek.instructions[2]).mode =
+      static_cast<RowIdSeekMode>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(seek));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
@@ -571,7 +629,7 @@ TEST(BytecodeProgramTest, BuilderResolvesSeekSuccessAndMissingPaths) {
   ASSERT_TRUE(done.has_value());
   ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = *constant, .output = Reg(0)}));
   ASSERT_TRUE(builder.Append(OpenReadCursorInstruction{.cursor = *cursor}));
-  ASSERT_TRUE(builder.EmitSeekRowId(*cursor, Reg(0), *missing));
+  ASSERT_TRUE(builder.EmitSeekRowId(*cursor, Reg(0), *missing, RowIdSeekMode::kGreater));
   ASSERT_TRUE(builder.Append(CloseCursorInstruction{.cursor = *cursor}));
   ASSERT_TRUE(builder.EmitJump(*done));
   ASSERT_TRUE(builder.BindLabel(*missing).has_value());
@@ -583,6 +641,8 @@ TEST(BytecodeProgramTest, BuilderResolvesSeekSuccessAndMissingPaths) {
   auto program = std::move(builder).Build({});
   ASSERT_TRUE(program.has_value());
   EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).missing_target, Address(5));
+  EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).mode,
+            RowIdSeekMode::kGreater);
 }
 
 TEST(BytecodeProgramTest, VerifiesPositionedCursorScanAcrossLoopEdges) {
