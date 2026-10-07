@@ -245,6 +245,7 @@ jobs:
               modern_sqlite_read_diagnostics \
               modern_sqlite_benchmark_sqlite_shared \
               modern_sqlite_btree_writer_sqlite_compatibility \
+              modern_sqlite_transaction_sqlite_compatibility \
               modern_sqlite_write_pager_sqlite_compatibility \
               modern_sqlite_rollback_journal_fixture
       - name: Run benchmark smoke and fixture contracts
@@ -252,7 +253,7 @@ jobs:
         run: |
           ctest --test-dir build/benchmark \
             --output-on-failure \
-            -R '^(performance\.read_(benchmark_cli|fixture_regeneration)|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|write_pager_sqlite))$'
+            -R '^(performance\.read_(benchmark_cli|fixture_regeneration)|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|transaction_sqlite|write_pager_sqlite))$'
       - name: Report compiler cache
         if: github.event_name == 'push' || matrix.run_on_pr
         run: ccache --show-stats

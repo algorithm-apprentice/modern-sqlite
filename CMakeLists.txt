@@ -629,6 +629,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/compatibility/btree_writer_crash_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/btree_writer_crash_compatibility.hpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/btree_writer_sqlite_compatibility.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/compatibility/transaction_sqlite_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/compatibility/write_pager_sqlite_compatibility.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/database_image_fuzzer_main.cpp"
