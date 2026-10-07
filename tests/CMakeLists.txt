@@ -181,6 +181,32 @@ gtest_discover_tests(
 )
 
 add_executable(
+  modern_sqlite_write_session_crash_test
+  compatibility/write_session_crash_harness.cpp
+  compatibility/write_session_crash_test.cpp
+)
+target_include_directories(
+  modern_sqlite_write_session_crash_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+)
+target_link_libraries(
+  modern_sqlite_write_session_crash_test
+  PRIVATE
+    modern_sqlite::modern_sqlite
+    GTest::gtest_main
+)
+modern_sqlite_set_project_warnings(modern_sqlite_write_session_crash_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_write_session_crash_test)
+gtest_discover_tests(
+  modern_sqlite_write_session_crash_test
+  DISCOVERY_MODE PRE_TEST
+  PROPERTIES
+    LABELS compatibility
+    TIMEOUT 30
+)
+
+add_executable(
   modern_sqlite_read_fuzz_smoke_test
   fuzz/database_image_fuzz.cpp
   fuzz/read_fuzz_smoke_test.cpp

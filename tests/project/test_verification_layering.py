@@ -141,6 +141,26 @@ class VerificationLayeringTest(unittest.TestCase):
             cmake,
         )
 
+    def test_write_crash_harness_uses_public_session_and_test_vfs(self) -> None:
+        includes = self.quoted_includes(
+            self.root
+            / "tests/compatibility/write_session_crash_harness.cpp"
+        )
+        self.assertSetEqual(
+            {
+                "modern_sqlite/base/bytes.hpp",
+                "modern_sqlite/base/result.hpp",
+                "modern_sqlite/runtime/sql_value.hpp",
+                "modern_sqlite/session/write_session.hpp",
+                "modern_sqlite/text/text.hpp",
+                "tests/compatibility/write_session_crash_harness.hpp",
+                "tests/unit/pager/write_pager_test_support.hpp",
+            },
+            includes,
+        )
+        for include in includes:
+            self.assertFalse(include.startswith("src/"), include)
+
 
 if __name__ == "__main__":
     unittest.main()
