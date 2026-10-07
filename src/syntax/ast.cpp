@@ -871,17 +871,17 @@ class Validator final {
               if (values.values.empty()) {
                 return Misuse("insert values source must not be empty");
               }
-              ByteOffset previous_end = values.span.begin();
+              ByteOffset previous_value_end = values.span.begin();
               for (const ExpressionId expression : values.values) {
                 const Status status = ReferenceExpression(expression, values.span, std::nullopt);
                 if (!status.has_value()) {
                   return status;
                 }
                 const SourceSpan expression_span = expressions_[expression.value].span;
-                if (expression_span.begin() < previous_end) {
+                if (expression_span.begin() < previous_value_end) {
                   return Misuse("insert values must be in source order");
                 }
-                previous_end = expression_span.end();
+                previous_value_end = expression_span.end();
               }
               return Status{};
             },
