@@ -1076,7 +1076,9 @@ class PhysicalStatementPlanBuilder final {
     const BoundStatement& statement = logical_plan.bound_statement();
     PhysicalMutationPayload payload;
     if (std::holds_alternative<BoundInsert>(statement)) {
-      payload = PhysicalInsertMutation{};
+      payload = PhysicalInsertMutation{
+          .atomicity = MutationAtomicity::kStatement,
+      };
     } else if (const auto* update = std::get_if<BoundUpdate>(&statement); update != nullptr) {
       PhysicalMutationAccess access =
           ChooseAccess(*update, update->target(), update->where_expression());
@@ -1084,19 +1086,17 @@ class PhysicalStatementPlanBuilder final {
       const bool scan = access.kind == MutationAccessKind::kTableScan;
       payload = PhysicalUpdateMutation{
           .access = std::move(access),
-          .atomicity = !empty && (scan || update->changes_rowid())
-                           ? MutationAtomicity::kStatement
-                           : MutationAtomicity::kTransaction,
+          .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
           .collect_original_rowids = scan && update->changes_rowid(),
       };
     } else if (const auto* delete_statement = std::get_if<BoundDelete>(&statement);
                delete_statement != nullptr) {
       PhysicalMutationAccess access = ChooseAccess(*delete_statement, delete_statement->target(),
                                                    delete_statement->where_expression());
-      const bool scan = access.kind == MutationAccessKind::kTableScan;
+      const bool empty = access.kind == MutationAccessKind::kEmpty;
       payload = PhysicalDeleteMutation{
           .access = std::move(access),
-          .atomicity = scan ? MutationAtomicity::kStatement : MutationAtomicity::kTransaction,
+          .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
       };
     } else {
       const auto& create = std::get<BoundCreateTable>(statement);

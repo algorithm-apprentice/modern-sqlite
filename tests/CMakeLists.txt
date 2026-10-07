@@ -959,6 +959,34 @@ if(TARGET modern_sqlite_benchmark_sqlite)
   )
 
   add_executable(
+    modern_sqlite_write_session_sqlite_compatibility
+    compatibility/write_session_sqlite_compatibility.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_write_session_sqlite_compatibility
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(
+    modern_sqlite_write_session_sqlite_compatibility
+    PRIVATE
+  )
+  modern_sqlite_enable_clang_tidy(
+    modern_sqlite_write_session_sqlite_compatibility
+  )
+  add_test(
+    NAME compatibility.write_session_sqlite
+    COMMAND modern_sqlite_write_session_sqlite_compatibility
+  )
+  set_tests_properties(
+    compatibility.write_session_sqlite
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
+
+  add_executable(
     modern_sqlite_rollback_journal_fixture
     compatibility/rollback_journal_fixture.cpp
   )

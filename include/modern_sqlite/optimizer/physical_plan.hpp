@@ -190,7 +190,7 @@ struct PhysicalMutationAccess {
 };
 
 struct PhysicalInsertMutation {
-  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
 };
 
 struct PhysicalUpdateMutation {

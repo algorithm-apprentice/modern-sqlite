@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "dml-ddl",
+    "status": "writable-mvp-harness-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -50,6 +50,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "implement-dml-ddl",
-  "currentNodeState": "in_progress"
+  "currentNode": "build-writable-mvp-harness",
+  "currentNodeState": "review_pending"
 }

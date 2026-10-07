@@ -118,8 +118,11 @@ TEST(WriteSession, ExecutesWritablePipelineAndPublishesConnectionState) {
   const auto duplicate_result = duplicate.Step();
   ASSERT_FALSE(duplicate_result.has_value());
   EXPECT_EQ(ErrorCode::kConstraint, duplicate_result.error().code());
-  EXPECT_EQ(1U, session.changes());
+  EXPECT_EQ(0U, session.changes());
   EXPECT_EQ(1, session.last_insert_rowid());
+  const Status duplicate_finalize = duplicate.Finalize();
+  ASSERT_FALSE(duplicate_finalize.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_finalize.error().code());
 
   auto rows = QueryRows(session, "SELECT id,Name,Score FROM Items");
   ASSERT_EQ(1U, rows.size());
@@ -145,6 +148,21 @@ TEST(WriteSession, MapsTransactionsSavepointsAndRollbackVisibility) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();
   ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO Items VALUES(9,'kept')");
+  WriteStatement duplicate = PrepareOne(session, "INSERT INTO Items VALUES(9,'duplicate')");
+  const auto duplicate_result = duplicate.Step();
+  ASSERT_FALSE(duplicate_result.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_result.error().code());
+  EXPECT_EQ(0U, session.changes());
+  EXPECT_FALSE(session.autocommit());
+  auto retained = QueryRows(session, "SELECT Name FROM Items WHERE id=9");
+  ASSERT_EQ(1U, retained.size());
+  EXPECT_EQ("kept", Text(retained[0][0]));
+  ExecuteDone(session, "COMMIT");
+  EXPECT_TRUE(session.autocommit());
+  ExecuteDone(session, "DELETE FROM Items WHERE id=9");
 
   ExecuteDone(session, "BEGIN IMMEDIATE");
   EXPECT_FALSE(session.autocommit());
@@ -241,6 +259,26 @@ TEST(WriteSession, PreparedStatementsRetainZombieSessionState) {
   EXPECT_EQ("one", Text(survivor->row()[0]));
   EXPECT_EQ(WriteStep::kDone, TakeValue(survivor->Step()));
   RequireStatus(survivor->Finalize());
+}
+
+TEST(WriteSession, RetriesTransactionControlCleanupBeforeCatalogRefresh) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+
+  WriteStatement commit = PrepareOne(session, "COMMIT");
+  fixture.vfs->FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
+  const auto failed = commit.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(WriteStep::kDone, TakeValue(commit.Step()));
+  EXPECT_TRUE(session.autocommit());
+
+  const auto rows = QueryRows(session, "SELECT id FROM Items");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
 }
 
 }  // namespace

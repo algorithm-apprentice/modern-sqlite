@@ -513,7 +513,7 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
             lowered->schema_version());
   EXPECT_EQ(ProgramStatementKind::kInsert, lowered->statement_kind());
   EXPECT_EQ(ProgramTransactionAccess::kWrite, lowered->transaction_access());
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, lowered->rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, lowered->rollback_mode());
   EXPECT_TRUE(lowered->mutation_result().publishes_changes);
   EXPECT_TRUE(lowered->mutation_result().publishes_last_insert_rowid);
   EXPECT_TRUE(lowered->requires_database_snapshot());
@@ -693,7 +693,7 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
 
   const BytecodeProgram exact =
       LowerMutationOrThrow("DELETE FROM Items WHERE id=?1 AND Name=?2", catalog);
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, exact.rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, exact.rollback_mode());
   ASSERT_EQ(1U, exact.cursors().size());
   ASSERT_EQ(1U, exact.write_cursors().size());
   EXPECT_EQ(RootPageNumber{2}, exact.cursor(CursorId{0}).root_page);
@@ -915,7 +915,7 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
 
   const BytecodeProgram exact =
       LowerMutationOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, exact.rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, exact.rollback_mode());
   EXPECT_TRUE(std::ranges::any_of(exact.instructions(), [](const Instruction& instruction) {
     return std::holds_alternative<UpdateTableInstruction>(instruction);
   }));
