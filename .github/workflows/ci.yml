@@ -21,6 +21,7 @@ concurrency:
 jobs:
   build-and-test:
     name: build-and-test (${{ matrix.os }}, ${{ matrix.preset }})
+    timeout-minutes: 20
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 500M
@@ -162,6 +163,7 @@ jobs:
 
   read-performance-contract:
     name: read-performance-contract (${{ matrix.os }})
+    timeout-minutes: 20
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 500M
