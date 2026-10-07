@@ -36,8 +36,9 @@
     "implement-journal-contracts",
     "implement-rollback-journal",
     "implement-write-pager",
-    "implement-btree-write"
+    "implement-btree-write",
+    "implement-transaction-coordinator"
   ],
-  "activeNode": "implement-transaction-coordinator",
-  "activeNodeState": "in_progress"
+  "activeNode": "implement-dml-ddl",
+  "activeNodeState": "review_pending"
 }
