@@ -251,6 +251,8 @@ class CoordinatorState final {
           .access = options.access,
           .rollback = options.rollback,
           .implicit = implicit,
+          .epoch_ended = false,
+          .savepoint = std::nullopt,
       };
       return {};
     }
@@ -306,6 +308,7 @@ class CoordinatorState final {
         .access = options.access,
         .rollback = options.rollback,
         .implicit = implicit,
+        .epoch_ended = false,
         .savepoint = statement_savepoint,
     };
     return {};
