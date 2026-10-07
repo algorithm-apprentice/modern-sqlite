@@ -35,6 +35,9 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/transaction/transaction_coordinator.hpp"
+#include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -48,6 +51,9 @@ constexpr std::uint64_t kCatalogGeneration = 17;
 
 [[nodiscard]] constexpr RegisterId Reg(std::uint32_t value) { return RegisterId(value); }
 [[nodiscard]] constexpr CursorId Cursor(std::uint32_t value) { return CursorId(value); }
+[[nodiscard]] constexpr WriteCursorId WriteCursor(std::uint32_t value) {
+  return WriteCursorId(value);
+}
 [[nodiscard]] constexpr ParameterId Parameter(std::uint32_t value) { return ParameterId(value); }
 [[nodiscard]] constexpr ConstantId Constant(std::uint32_t value) { return ConstantId(value); }
 [[nodiscard]] constexpr SymbolId Symbol(std::uint32_t value) { return SymbolId(value); }
@@ -214,6 +220,116 @@ class TemporaryDatabase final {
   Vm vm = TakeValue(Vm::Create(program, environment, limits));
   RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
   return vm;
+}
+
+[[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to open VM write-test pager"};
+  }
+  return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+}
+
+[[nodiscard]] ByteBuffer InitializedWriteDatabase(test::WritePagerFixedVfs& vfs) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(statement.writer()->InitializeDatabase());
+  RequireStatus(statement.Succeed());
+  return ByteBuffer::CopyOf(vfs.database_bytes());
+}
+
+[[nodiscard]] BytecodeProgram TableInsertProgram(SqlValue rowid, SqlValue value,
+                                                 bool not_null = true) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kInsert;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
+  input.register_count = 4;
+  input.constants.push_back(std::move(rowid));
+  input.constants.push_back(std::move(value));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = true,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = not_null,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(2)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      ResolveInsertRowIdInstruction{
+          .cursor = WriteCursor(0),
+          .input = Reg(0),
+          .output = Reg(1),
+      },
+      BuildTableRecordInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(1),
+          .value_count = 2,
+          .output = Reg(3),
+      },
+      InsertTableInstruction{
+          .cursor = WriteCursor(0),
+          .rowid = Reg(1),
+          .record = Reg(3),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+void InsertDirectWriteRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid, std::string value) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+  std::vector<SqlValue> fields;
+  fields.emplace_back();
+  fields.push_back(SqlValue::Text(std::move(value)));
+  const ByteBuffer record = TakeValue(EncodeRecord(fields));
+  RequireStatus(table.Insert(rowid, record.view()));
+  RequireStatus(statement.Succeed());
+}
+
+[[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadWriteTableRows(
+    test::WritePagerFixedVfs& vfs) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to reopen VM write-test pager"};
+  }
+  RequireStatus(pager->BeginRead());
+  std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      const std::int64_t rowid = TakeValue(cursor.rowid());
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      rows.emplace_back(rowid, TakeValue(DecodeRecord(payload.view())));
+      has_row = TakeValue(cursor.Next());
+    }
+  }
+  RequireStatus(pager->EndRead());
+  return rows;
 }
 
 void ExpectInteger(const SqlValue& value, std::int64_t expected) {
@@ -391,6 +507,159 @@ TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
   ASSERT_FALSE(missing_writer.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_writer.error().code());
   EXPECT_FALSE(write_vm.has_execution_context());
+}
+
+TEST(VmWriteTest, InsertsGeneratedRowidRecordAndPublishesMutationResults) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  ASSERT_NE(nullptr, statement.writer());
+
+  const BytecodeProgram program = TableInsertProgram(SqlValue{}, SqlValue::Integer(42));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_EQ(1U, vm.change_count());
+  EXPECT_EQ(std::optional<std::int64_t>{1}, vm.last_insert_rowid_event());
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(statement.Succeed());
+
+  const auto rows = ReadWriteTableRows(vfs);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0].first);
+  ASSERT_EQ(2U, rows[0].second.size());
+  EXPECT_EQ(SqlValueType::kNull, rows[0].second[0].type());
+  ExpectText(rows[0].second[1], "42");
+}
+
+TEST(VmWriteTest, RejectsDuplicateRowidAndNotNullBeforePublishingChanges) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram seed = TableInsertProgram(SqlValue::Integer(1), SqlValue::Text("seed"));
+    Vm vm = TakeValue(Vm::Create(seed, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram duplicate =
+        TableInsertProgram(SqlValue::Text("1"), SqlValue::Text("duplicate"));
+    Vm vm = TakeValue(Vm::Create(duplicate, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto inserted = vm.Step();
+    ASSERT_FALSE(inserted.has_value());
+    EXPECT_EQ(ErrorCode::kConstraint, inserted.error().code());
+    EXPECT_EQ(0U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram fractional =
+        TableInsertProgram(SqlValue::Text("1.5"), SqlValue::Text("fractional"));
+    Vm vm = TakeValue(Vm::Create(fractional, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto inserted = vm.Step();
+    ASSERT_FALSE(inserted.has_value());
+    EXPECT_EQ(ErrorCode::kTypeMismatch, inserted.error().code());
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram not_null = TableInsertProgram(SqlValue{}, SqlValue{});
+    Vm vm = TakeValue(Vm::Create(not_null, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto inserted = vm.Step();
+    ASSERT_FALSE(inserted.has_value());
+    EXPECT_EQ(ErrorCode::kConstraint, inserted.error().code());
+    EXPECT_EQ(0U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
+
+  const auto rows = ReadWriteTableRows(vfs);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0].first);
+  ExpectText(rows[0].second[1], "seed");
+}
+
+TEST(VmWriteTest, GeneratesRowidsAcrossNegativeAndRandomBoundaries) {
+  {
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(InitializedWriteDatabase(vfs));
+    InsertDirectWriteRow(vfs, -1, "negative");
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableInsertProgram(SqlValue{}, SqlValue::Text("zero"));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(std::optional<std::int64_t>{0}, vm.last_insert_rowid_event());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(InitializedWriteDatabase(vfs));
+    InsertDirectWriteRow(vfs, std::numeric_limits<std::int64_t>::max(), "maximum");
+    vfs.SetRandomByte(std::byte{0});
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableInsertProgram(SqlValue{}, SqlValue::Text("random"));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const std::size_t random_calls_before = vfs.random_call_count();
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(std::optional<std::int64_t>{1}, vm.last_insert_rowid_event());
+    EXPECT_GE(vfs.random_call_count() - random_calls_before, 1U);
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(InitializedWriteDatabase(vfs));
+    InsertDirectWriteRow(vfs, 1, "collision");
+    InsertDirectWriteRow(vfs, std::numeric_limits<std::int64_t>::max(), "maximum");
+    vfs.SetRandomByte(std::byte{0});
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableInsertProgram(SqlValue{}, SqlValue::Text("full"));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const std::size_t random_calls_before = vfs.random_call_count();
+    const auto inserted = vm.Step();
+    ASSERT_FALSE(inserted.has_value());
+    EXPECT_EQ(ErrorCode::kFull, inserted.error().code());
+    EXPECT_EQ(100U, vfs.random_call_count() - random_calls_before);
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
 }
 
 TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {

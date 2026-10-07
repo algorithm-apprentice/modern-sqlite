@@ -218,6 +218,7 @@ class Pager final {
   [[nodiscard]] std::uint64_t write_transaction_generation() const noexcept {
     return write_transaction_generation_;
   }
+  [[nodiscard]] Status RandomBytes(MutableByteView output);
   [[nodiscard]] std::optional<ErrorCode> write_failure_code() const noexcept;
   void ReportWriteCoordinatorFailure(ErrorCode code) noexcept;
   [[nodiscard]] Status MarkPageContentRequired(PageNumber page_number);

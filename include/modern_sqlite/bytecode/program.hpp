@@ -238,8 +238,16 @@ struct OpenReadCursorInstruction {
   CursorId cursor;
 };
 
+struct OpenWriteCursorInstruction {
+  WriteCursorId cursor;
+};
+
 struct CloseCursorInstruction {
   CursorId cursor;
+};
+
+struct CloseWriteCursorInstruction {
+  WriteCursorId cursor;
 };
 
 struct RewindInstruction {
@@ -267,6 +275,25 @@ struct ReadFieldInstruction {
 struct ReadRowIdInstruction {
   CursorId cursor;
   RegisterId output;
+};
+
+struct ResolveInsertRowIdInstruction {
+  WriteCursorId cursor;
+  RegisterId input;
+  RegisterId output;
+};
+
+struct BuildTableRecordInstruction {
+  WriteCursorId cursor;
+  RegisterId first_value;
+  std::uint32_t value_count;
+  RegisterId output;
+};
+
+struct InsertTableInstruction {
+  WriteCursorId cursor;
+  RegisterId rowid;
+  RegisterId record;
 };
 
 struct CompareInstruction {
@@ -301,14 +328,14 @@ struct ResultRowInstruction {
   std::uint32_t count;
 };
 
-using Instruction =
-    std::variant<HaltInstruction, LoadConstantInstruction, LoadParameterInstruction,
-                 CopyInstruction, UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction,
-                 MustBeIntegerInstruction, RealAffinityInstruction, CastInstruction,
-                 OpenReadCursorInstruction, CloseCursorInstruction, RewindInstruction,
-                 NextInstruction, SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
-                 CompareInstruction, CallScalarInstruction, JumpInstruction, JumpIfInstruction,
-                 ResultRowInstruction>;
+using Instruction = std::variant<
+    HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
+    UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
+    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction, OpenWriteCursorInstruction,
+    CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
+    SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
+    BuildTableRecordInstruction, InsertTableInstruction, CompareInstruction, CallScalarInstruction,
+    JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -324,12 +351,17 @@ enum class InstructionKind : std::uint8_t {
   kRealAffinity,
   kCast,
   kOpenRead,
+  kOpenWrite,
   kClose,
+  kCloseWrite,
   kRewind,
   kNext,
   kSeekRowId,
   kReadField,
   kReadRowId,
+  kResolveInsertRowId,
+  kBuildTableRecord,
+  kInsertTable,
   kCompare,
   kCallScalar,
   kJump,

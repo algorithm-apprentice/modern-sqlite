@@ -8,7 +8,9 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
+#include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace {
 
@@ -286,6 +288,89 @@ int main() try {
   }
 
   if (!(*opened)->EndRead().has_value()) {
+    return 1;
+  }
+
+  test::WritePagerFixedVfs write_vfs{false};
+  std::unique_ptr<Pager> write_pager = test::OpenWritePager(write_vfs, 64U);
+  if (write_pager == nullptr) {
+    return 1;
+  }
+  auto coordinator = TransactionCoordinator::Open(std::move(write_pager));
+  if (!coordinator.has_value()) {
+    return 1;
+  }
+  auto statement =
+      coordinator->BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!statement.has_value() || statement->writer() == nullptr ||
+      !statement->writer()->InitializeDatabase().has_value()) {
+    return 1;
+  }
+  ProgramInput insert_input;
+  insert_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  insert_input.statement_kind = ProgramStatementKind::kInsert;
+  insert_input.transaction_access = ProgramTransactionAccess::kWrite;
+  insert_input.register_count = 4;
+  insert_input.constants.emplace_back();
+  insert_input.constants.push_back(SqlValue::Text("value"));
+  insert_input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = false,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = true,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  insert_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(2)},
+      OpenWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      ResolveInsertRowIdInstruction{
+          .cursor = WriteCursorId(0),
+          .input = RegisterId(0),
+          .output = RegisterId(1),
+      },
+      BuildTableRecordInstruction{
+          .cursor = WriteCursorId(0),
+          .first_value = RegisterId(1),
+          .value_count = 2,
+          .output = RegisterId(3),
+      },
+      InsertTableInstruction{
+          .cursor = WriteCursorId(0),
+          .rowid = RegisterId(1),
+          .record = RegisterId(3),
+      },
+      HaltInstruction{},
+  };
+  auto insert_program = BytecodeProgram::Create(insert_input);
+  if (!insert_program.has_value()) {
+    return 1;
+  }
+  auto insert_vm = Vm::Create(*insert_program, VmEnvironment::Core());
+  if (!insert_vm.has_value() ||
+      !insert_vm->AttachExecutionContext(VmExecutionContext{*statement->writer(), 0}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto insert_failure = insert_vm->Step();
+  fail_allocations = false;
+  if (insert_failure.has_value() || insert_failure.error().code() != ErrorCode::kOutOfMemory ||
+      insert_vm->change_count() != 0U) {
+    return 1;
+  }
+  if (!insert_vm->DetachExecutionContext().has_value() || !statement->Rollback().has_value()) {
     return 1;
   }
   return 0;

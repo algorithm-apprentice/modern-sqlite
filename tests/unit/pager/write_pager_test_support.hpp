@@ -271,8 +271,10 @@ class WritePagerMemoryVfs final : public Vfs {
     return subjournal_.write_count;
   }
   [[nodiscard]] std::size_t total_journal_deletes() const noexcept { return journal_delete_count_; }
+  [[nodiscard]] std::size_t random_call_count() const noexcept { return random_call_count_; }
 
   void SetDatabaseWritesDurable(bool durable) noexcept { main_.writes_are_durable = durable; }
+  void SetRandomByte(std::byte value) noexcept { random_byte_ = value; }
 
   void FailNextDatabaseLock(DatabaseLock lock, ErrorCode code) noexcept {
     main_.lock_failure = std::pair{lock, code};
@@ -319,6 +321,7 @@ class WritePagerMemoryVfs final : public Vfs {
     wal_ = {};
     crash_ = {};
     journal_delete_count_ = 0U;
+    random_call_count_ = 0U;
   }
 
   void SetReportedPageCount(std::uint32_t page_count) noexcept {
@@ -442,7 +445,8 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   [[nodiscard]] Result<ByteCount> DoRandomBytes(MutableByteView output) override {
-    std::ranges::fill(output, std::byte{0x5a});
+    ++random_call_count_;
+    std::ranges::fill(output, random_byte_);
     return ByteCount{output.size()};
   }
 
@@ -461,6 +465,8 @@ class WritePagerMemoryVfs final : public Vfs {
   WritePagerFileState<Capacity> wal_;
   WritePagerCrashState crash_;
   std::size_t journal_delete_count_ = 0;
+  std::size_t random_call_count_ = 0;
+  std::byte random_byte_{0x5a};
 };
 
 using WritePagerFixedVfs = WritePagerMemoryVfs<kWritePagerFileCapacity>;
