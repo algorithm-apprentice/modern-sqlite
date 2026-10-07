@@ -5,7 +5,7 @@
 
 ## Context
 
-The read VM, lowering layer, and prepared-statement session need a common
+The VM, lowering layer, and prepared-statement session need a common
 executable representation. The representation must be compact enough for a
 dispatch loop, expressive enough for the first read-only milestone, and
 strict enough that the VM can execute trusted instructions without repeating

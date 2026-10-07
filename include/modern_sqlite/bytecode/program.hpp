@@ -34,6 +34,7 @@ class BytecodeId final {
 struct InstructionAddressTag;
 struct RegisterIdTag;
 struct CursorIdTag;
+struct WriteCursorIdTag;
 struct ParameterIdTag;
 struct ConstantIdTag;
 struct SymbolIdTag;
@@ -43,6 +44,7 @@ struct CursorFieldIdTag;
 using InstructionAddress = BytecodeId<InstructionAddressTag>;
 using RegisterId = BytecodeId<RegisterIdTag>;
 using CursorId = BytecodeId<CursorIdTag>;
+using WriteCursorId = BytecodeId<WriteCursorIdTag>;
 using ParameterId = BytecodeId<ParameterIdTag>;
 using ConstantId = BytecodeId<ConstantIdTag>;
 using SymbolId = BytecodeId<SymbolIdTag>;
@@ -52,6 +54,24 @@ using CursorFieldId = BytecodeId<CursorFieldIdTag>;
 enum class CursorStorageKind : std::uint8_t {
   kRowIdTable,
   kIndex,
+};
+
+enum class ProgramStatementKind : std::uint8_t {
+  kSelect,
+  kInsert,
+  kUpdate,
+  kDelete,
+  kCreateTable,
+};
+
+enum class ProgramTransactionAccess : std::uint8_t {
+  kRead,
+  kWrite,
+};
+
+enum class ProgramRollbackMode : std::uint8_t {
+  kTransaction,
+  kStatement,
 };
 
 enum class CursorFieldSourceKind : std::uint8_t {
@@ -120,6 +140,26 @@ struct ReadCursorDescriptor {
   std::uint32_t record_field_count;
   std::vector<CursorFieldSource> fields;
   std::vector<IndexColumnMetadata> index_columns;
+};
+
+struct WriteColumnDescriptor {
+  TypeAffinity affinity = TypeAffinity::kNone;
+  bool not_null = false;
+  bool rowid_alias = false;
+  std::optional<ConstantId> default_value{};
+};
+
+struct WriteCursorDescriptor {
+  RootPageNumber root_page;
+  std::vector<WriteColumnDescriptor> columns;
+  std::optional<std::uint32_t> rowid_alias{};
+};
+
+struct MutationResultMetadata {
+  bool publishes_changes = false;
+  bool publishes_last_insert_rowid = false;
+
+  constexpr auto operator<=>(const MutationResultMetadata&) const noexcept = default;
 };
 
 struct ResultColumnMetadata {
@@ -302,12 +342,17 @@ enum class InstructionKind : std::uint8_t {
 
 struct ProgramInput {
   SchemaVersionRequirement schema_version;
+  ProgramStatementKind statement_kind = ProgramStatementKind::kSelect;
+  ProgramTransactionAccess transaction_access = ProgramTransactionAccess::kRead;
+  ProgramRollbackMode rollback_mode = ProgramRollbackMode::kTransaction;
+  MutationResultMetadata mutation_result{};
   std::uint32_t register_count = 0;
   std::uint32_t parameter_count = 0;
-  bool requires_read_transaction = false;
+  bool requires_database_snapshot = false;
   std::vector<SqlValue> constants;
   std::vector<std::string> symbols;
   std::vector<ReadCursorDescriptor> cursors;
+  std::vector<WriteCursorDescriptor> write_cursors;
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
 };
@@ -341,6 +386,7 @@ enum class ProgramErrorCode : std::uint8_t {
   kAnalysisWorkLimitExceeded,
   kInvalidRootPage,
   kInvalidCursorDescriptor,
+  kInvalidExecutionMetadata,
   kInvalidRegister,
   kInvalidRegisterRange,
   kInvalidParameter,
@@ -411,15 +457,28 @@ class BytecodeProgram final {
   [[nodiscard]] const SchemaVersionRequirement& schema_version() const noexcept {
     return input_.schema_version;
   }
+  [[nodiscard]] ProgramStatementKind statement_kind() const noexcept {
+    return input_.statement_kind;
+  }
+  [[nodiscard]] ProgramTransactionAccess transaction_access() const noexcept {
+    return input_.transaction_access;
+  }
+  [[nodiscard]] ProgramRollbackMode rollback_mode() const noexcept { return input_.rollback_mode; }
+  [[nodiscard]] const MutationResultMetadata& mutation_result() const noexcept {
+    return input_.mutation_result;
+  }
   [[nodiscard]] std::uint32_t register_count() const noexcept { return input_.register_count; }
   [[nodiscard]] std::uint32_t parameter_count() const noexcept { return input_.parameter_count; }
-  [[nodiscard]] bool requires_read_transaction() const noexcept {
-    return input_.requires_read_transaction;
+  [[nodiscard]] bool requires_database_snapshot() const noexcept {
+    return input_.requires_database_snapshot;
   }
   [[nodiscard]] std::span<const SqlValue> constants() const noexcept { return input_.constants; }
   [[nodiscard]] std::span<const std::string> symbols() const noexcept { return input_.symbols; }
   [[nodiscard]] std::span<const ReadCursorDescriptor> cursors() const noexcept {
     return input_.cursors;
+  }
+  [[nodiscard]] std::span<const WriteCursorDescriptor> write_cursors() const noexcept {
+    return input_.write_cursors;
   }
   [[nodiscard]] std::span<const ResultColumnMetadata> result_columns() const noexcept {
     return input_.result_columns;
@@ -434,6 +493,7 @@ class BytecodeProgram final {
   [[nodiscard]] const SqlValue& constant(ConstantId id) const noexcept;
   [[nodiscard]] std::string_view symbol(SymbolId id) const noexcept;
   [[nodiscard]] const ReadCursorDescriptor& cursor(CursorId id) const noexcept;
+  [[nodiscard]] const WriteCursorDescriptor& write_cursor(WriteCursorId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
 
  private:
@@ -473,7 +533,11 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<ConstantId> AddConstant(SqlValue value);
   [[nodiscard]] ProgramResult<SymbolId> AddSymbol(std::string symbol);
   [[nodiscard]] ProgramResult<CursorId> AddCursor(ReadCursorDescriptor cursor);
-  [[nodiscard]] ProgramResult<void> RequireReadTransaction();
+  [[nodiscard]] ProgramResult<WriteCursorId> AddWriteCursor(WriteCursorDescriptor cursor);
+  [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
+      ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
+      ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
+  [[nodiscard]] ProgramResult<void> RequireDatabaseSnapshot();
 
   [[nodiscard]] ProgramResult<Label> CreateLabel();
   [[nodiscard]] ProgramResult<void> BindLabel(Label label);

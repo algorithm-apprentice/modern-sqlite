@@ -251,6 +251,7 @@ flowchart TD
   BTREE --> VM
   RECORD --> VM
   FUNCTIONS --> VM
+  TRANSACTION --> VM
   CATALOG --> SESSION
   BINDER --> SESSION
   LOWERING --> SESSION
@@ -288,7 +289,7 @@ flowchart TD
 | `optimizer` | Access paths, join order, physical plan | VM instruction mutation |
 | `lowering` | Physical plan to bytecode | Runtime execution state |
 | `transaction` | Connection-level transaction and savepoint coordination | Parser details |
-| `vm` | Registers, cursors, opcode execution, result suspension | AST and optimizer types |
+| `vm` | Registers, cursors, opcode execution, result suspension, execution-scoped transaction capabilities | AST and optimizer types |
 | `session` | Open, prepare, step, reset, finalize, schema refresh | Platform implementation details |
 | `api` | Public RAII C++ facade and later C compatibility layer | Internal ownership |
 | `diagnostics` | Read-only format and storage inspection | Database mutation |

@@ -1,7 +1,11 @@
-# ADR-0032: Read-Only Bytecode Virtual Machine
+# ADR-0032: Bytecode Virtual Machine
 
 - Status: Accepted
 - Date: 2026-10-04
+
+ADR-0048 generalizes the original read-only names and separates preparation
+from execution attachment. The current canonical API is documented below;
+the read instruction semantics and evidence in this ADR remain unchanged.
 
 ## Context
 
@@ -60,8 +64,8 @@ database, registration, schema, resource, and I/O failures explicitly.
 
 Add the read-only executor under:
 
-- `include/modern_sqlite/vm/read_vm.hpp`; and
-- `src/vm/read_vm.cpp`.
+- `include/modern_sqlite/vm/vm.hpp`; and
+- `src/vm/vm.cpp`.
 
 ### Public execution boundary
 
@@ -69,7 +73,7 @@ The public contract is move-only and hides runtime storage behind an
 implementation pointer:
 
 ```cpp
-enum class ReadVmState : std::uint8_t {
+enum class VmState : std::uint8_t {
   kReady,
   kRow,
   kDone,
@@ -77,66 +81,76 @@ enum class ReadVmState : std::uint8_t {
   kInvalid,
 };
 
-enum class ReadVmStep : std::uint8_t {
+enum class VmStep : std::uint8_t {
   kRow,
   kDone,
 };
 
-struct ReadVmLimits {
+struct VmLimits {
   std::size_t maximum_value_bytes = 1'000'000'000;
   std::uint64_t maximum_instructions_per_step =
       std::numeric_limits<std::uint64_t>::max();
 };
 
-class ReadVmEnvironment final {
+class VmEnvironment final {
  public:
-  ReadVmEnvironment(
-      ReadPager& pager,
-      std::uint64_t catalog_generation,
+  VmEnvironment(
       const FunctionRegistry& functions,
       std::span<const Collation* const> collations) noexcept;
 
-  static ReadVmEnvironment Core(
-      ReadPager& pager,
-      std::uint64_t catalog_generation) noexcept;
+  static VmEnvironment Core() noexcept;
 };
 
-class ReadVm final {
+class VmExecutionContext final {
  public:
-  static Result<ReadVm> Create(
-      const BytecodeProgram& program,
-      ReadVmEnvironment environment,
-      ReadVmLimits limits = {});
-  static Result<ReadVm> Create(
-      BytecodeProgram&& program,
-      ReadVmEnvironment environment,
-      ReadVmLimits limits = {}) = delete;
-  static Result<ReadVm> Create(
-      const BytecodeProgram&& program,
-      ReadVmEnvironment environment,
-      ReadVmLimits limits = {}) = delete;
+  VmExecutionContext(
+      Pager& pager,
+      std::uint64_t catalog_generation) noexcept;
+  VmExecutionContext(
+      Pager& pager,
+      std::uint64_t catalog_generation,
+      TransactionWriter& writer) noexcept;
+};
 
-  ReadVm(ReadVm&&) noexcept;
-  ReadVm& operator=(ReadVm&&) noexcept;
-  ~ReadVm();
+class Vm final {
+ public:
+  static Result<Vm> Create(
+      const BytecodeProgram& program,
+      VmEnvironment environment,
+      VmLimits limits = {});
+  static Result<Vm> Create(
+      BytecodeProgram&& program,
+      VmEnvironment environment,
+      VmLimits limits = {}) = delete;
+  static Result<Vm> Create(
+      const BytecodeProgram&& program,
+      VmEnvironment environment,
+      VmLimits limits = {}) = delete;
+
+  Vm(Vm&&) noexcept;
+  Vm& operator=(Vm&&) noexcept;
+  ~Vm();
 
   Status Bind(ParameterId parameter, const SqlValue& value);
   Status ClearBindings();
-  Result<ReadVmStep> Step();
+  Status AttachExecutionContext(VmExecutionContext context);
+  Status DetachExecutionContext();
+  Result<VmStep> Step();
   Status Reset();
 
-  ReadVmState state() const noexcept;
+  VmState state() const noexcept;
+  bool has_execution_context() const noexcept;
   std::span<const SqlValue> row() const noexcept;
   std::uint64_t executed_instruction_count() const noexcept;
 };
 ```
 
-`ReadVm` borrows the program, pager, resolved scalar-function descriptors, and
-every resolved collation. The program and pager must remain alive at stable
-addresses and must not be moved while the VM exists. Rvalue programs are
-rejected at compile time. The future prepared statement keeps its program at a
-stable address, for example in unique ownership, so moving the statement does
-not invalidate a live VM.
+`Vm` permanently borrows the program and resolved scalar-function and
+collation descriptors. It borrows a Pager and optional `TransactionWriter`
+only while one `VmExecutionContext` is attached. The program must remain alive
+at a stable address while the VM exists. The attached Pager and writer must
+remain alive at stable addresses until detach or reset. Rvalue programs are
+rejected at compile time.
 
 `FunctionRegistry` is itself a borrowed span. The descriptor array and every
 borrowed function-name string behind that registry must therefore outlive the
@@ -148,7 +162,7 @@ synchronous `Create()` call because the VM copies the resolved pointers.
 The VM owns registers, parameter values, cursor slots, record scratch
 storage, resolved runtime handles, and execution state.
 
-`ReadVmEnvironment::Core()` uses the process-wide core function registry and a
+`VmEnvironment::Core()` uses the process-wide core function registry and a
 static pointer array containing the `BINARY`, `NOCASE`, and `RTRIM` singleton
 collations. An explicit environment may supply a connection-owned immutable
 function registry and a borrowed collation list. Collation names use SQLite
@@ -160,19 +174,23 @@ declarations where practical. Project tests reject dependencies on syntax,
 catalog, binder, logical-plan, optimizer, lowering, session, API, and
 diagnostics headers.
 
-### Initialization and atomic schema validation
+### Initialization, execution attachment, and atomic schema validation
 
-`ReadVm::Create()` requires an active `ReadPager` read transaction. It reads
-the schema cookie from the pager header, using zero for an empty database, and
+`Vm::Create()` is storage-independent. It allocates registers, parameters,
+cursor slots, and scratch state and resolves functions and collations without
+borrowing a Pager or transaction capability.
+
+`AttachExecutionContext()` is accepted only by a detached ready VM. It
 compares:
 
 - that cookie with `BytecodeProgram::schema_version().schema_cookie`; and
-- the environment's retained catalog generation with
+- the context's retained catalog generation with
   `BytecodeProgram::schema_version().generation`.
 
-Either mismatch returns `kSchemaChanged`. The check occurs before runtime
-symbol resolution or cursor opening. Creation leaves the VM ready but not
-attached permanently to that pager snapshot.
+Either mismatch returns `kSchemaChanged`. A write program additionally
+requires a non-null statement-scoped `TransactionWriter`. A program marked as
+requiring a database snapshot requires the corresponding active Pager
+transaction. Failed attachment retains no context.
 
 The first `Step()` from `kReady` begins one execution lifetime. It repeats the
 schema-cookie and catalog-generation checks in the caller's then-active read
@@ -181,19 +199,19 @@ from `kRow` requires that same transaction and snapshot identity. The
 execution therefore cannot switch snapshots while cursors or result values
 are live.
 
-Successful halt or execution error ends that execution lifetime. `Reset()`
-also closes resources and detaches the VM from the completed snapshot. A
-later `Step()` from `kReady` may attach to a new data snapshot after an
+Successful halt or execution error ends that execution lifetime but leaves
+the closed context attached until the statement layer detaches it. Ordinary
+detach is rejected while a result row is suspended. `Reset()` is the explicit
+abort path: it closes resources and detaches the context. A later execution
+may attach to a new data snapshot after an
 ordinary data-only change, provided the schema cookie and retained catalog
 generation still match the immutable program. A schema change still returns
 `kSchemaChanged` and requires session-level refresh or recompilation.
 
-The VM does not begin or end transactions. The future session layer begins or
-joins the read transaction before creation, keeps it active across every row
-suspension, resets or destroys the VM before ending a statement-owned
-transaction, and supplies the generation of the retained catalog snapshot.
-This node therefore does not create an early dependency on the later
-transaction coordinator.
+The VM does not begin, commit, or roll back transactions. The session layer
+begins or joins the required transaction, attaches its execution context,
+keeps it active across every row suspension, and detaches or resets the VM
+before ending the statement capability.
 
 Creation performs all runtime name resolution:
 
@@ -238,14 +256,14 @@ register. Register mutations therefore never modify bindings.
 - exposes a const span over the selected register range;
 - saves the following instruction as the resume address;
 - enters `kRow`; and
-- returns `ReadVmStep::kRow` without closing cursors.
+- returns `VmStep::kRow` without closing cursors.
 
 The row remains valid only until the next `Step()`, `Reset()`, move operation,
 or destruction. A zero-column result is represented by `kRow` plus an empty
 span, so it remains distinguishable from no current row.
 
 `HaltInstruction` closes all cursors, invalidates the current row, enters
-`kDone`, and returns `ReadVmStep::kDone`. Any execution error closes all
+`kDone`, and returns `VmStep::kDone`. Any execution error closes all
 cursors, invalidates the row, enters `kError`, and returns the error. The
 destructor also closes every cursor through ordinary RAII.
 
@@ -501,7 +519,7 @@ The VM returns the existing `Result` and `Status` aliases.
 - record, cursor, pager, cache, VFS, and function failures propagate their
   typed errors unchanged.
 
-`ReadVm::Create()`, `Bind()`, and `Step()` are allocation boundaries.
+`Vm::Create()`, `Bind()`, and `Step()` are allocation boundaries.
 `std::bad_alloc` is converted to `Error::OutOfMemory()`.
 
 `ScalarFunctionCallback` is not declared `noexcept`. If any other exception
@@ -571,8 +589,8 @@ hand-authored program equivalent to:
 SELECT id, binary_key FROM cursor_sample;
 ```
 
-Modern SQLite uses one verified program with `ReadVm::Step()` and
-`ReadVm::Reset()`. Pinned SQLite uses one prepared statement with
+Modern SQLite uses one verified program with `Vm::Step()` and
+`Vm::Reset()`. Pinned SQLite uses one prepared statement with
 `sqlite3_step()` and `sqlite3_reset()`. Both use an explicit read transaction,
 a warm page cache, the same 166 rows, and verification outside timed loops.
 The benchmark reports median nanoseconds per row, VM instructions,

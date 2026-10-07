@@ -1,4 +1,4 @@
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 
 #include <gtest/gtest.h>
 
@@ -39,10 +39,10 @@
 namespace modern_sqlite {
 namespace {
 
-static_assert(!std::is_copy_constructible_v<ReadVm>);
-static_assert(!std::is_copy_assignable_v<ReadVm>);
-static_assert(std::is_nothrow_move_constructible_v<ReadVm>);
-static_assert(std::is_nothrow_move_assignable_v<ReadVm>);
+static_assert(!std::is_copy_constructible_v<Vm>);
+static_assert(!std::is_copy_assignable_v<Vm>);
+static_assert(std::is_nothrow_move_constructible_v<Vm>);
+static_assert(std::is_nothrow_move_assignable_v<Vm>);
 
 constexpr std::uint64_t kCatalogGeneration = 17;
 
@@ -117,7 +117,7 @@ class TemporaryDatabase final {
     static std::atomic<std::uint64_t> sequence{0};
     const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
     path_ = std::filesystem::temp_directory_path() /
-            ("modern-sqlite-read-vm-" + std::to_string(timestamp) + "-" +
+            ("modern-sqlite-vm-" + std::to_string(timestamp) + "-" +
              std::to_string(sequence.fetch_add(1)) + ".db");
     journal_path_ = path_;
     journal_path_ += "-journal";
@@ -184,12 +184,12 @@ class TemporaryDatabase final {
     std::vector<ReadCursorDescriptor> cursors, std::vector<ResultColumnMetadata> result_columns,
     std::vector<Instruction> instructions,
     std::optional<SchemaVersionRequirement> schema = std::nullopt,
-    bool requires_read_transaction = false) {
+    bool requires_database_snapshot = false) {
   ProgramInput input;
   input.schema_version = schema.value_or(CurrentSchema(pager));
   input.register_count = register_count;
   input.parameter_count = parameter_count;
-  input.requires_read_transaction = requires_read_transaction;
+  input.requires_database_snapshot = requires_database_snapshot;
   input.constants = std::move(constants);
   input.symbols = std::move(symbols);
   input.cursors = std::move(cursors);
@@ -199,12 +199,21 @@ class TemporaryDatabase final {
 }
 // NOLINTEND(bugprone-easily-swappable-parameters)
 
-[[nodiscard]] const SqlValue& OnlyRowValue(const ReadVm& vm) {
+[[nodiscard]] const SqlValue& OnlyRowValue(const Vm& vm) {
   const std::span<const SqlValue> row = vm.row();
   if (row.size() != 1U) {
     throw std::runtime_error("expected exactly one VM result value");
   }
   return row.front();
+}
+
+[[nodiscard]] Vm CreateAttachedVm(const BytecodeProgram& program, Pager& pager,
+                                  std::uint64_t catalog_generation,
+                                  VmEnvironment environment = VmEnvironment::Core(),
+                                  VmLimits limits = {}) {
+  Vm vm = TakeValue(Vm::Create(program, environment, limits));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
+  return vm;
 }
 
 void ExpectInteger(const SqlValue& value, std::int64_t expected) {
@@ -265,7 +274,7 @@ void ExpectText(const SqlValue& value, std::string_view expected) {
   };
 }
 
-class ReadVmTest : public ::testing::Test {
+class VmTest : public ::testing::Test {
  protected:
   void SetUp() override {
     pager_ = TakeValue(
@@ -280,16 +289,15 @@ class ReadVmTest : public ::testing::Test {
     }
   }
 
-  [[nodiscard]] ReadVm CreateCoreVm(const BytecodeProgram& program, ReadVmLimits limits = {}) {
-    return TakeValue(
-        ReadVm::Create(program, ReadVmEnvironment::Core(*pager_, kCatalogGeneration), limits));
+  [[nodiscard]] Vm CreateCoreVm(const BytecodeProgram& program, VmLimits limits = {}) {
+    return CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment::Core(), limits);
   }
 
   PosixVfs vfs_;
   std::unique_ptr<Pager> pager_;
 };
 
-TEST_F(ReadVmTest, ExecutesBindingsRowsHaltAndReset) {
+TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(40));
   const BytecodeProgram program =
@@ -307,21 +315,21 @@ TEST_F(ReadVmTest, ExecutesBindingsRowsHaltAndReset) {
                        HaltInstruction{},
                    });
 
-  ReadVm vm = CreateCoreVm(program);
-  EXPECT_EQ(vm.state(), ReadVmState::kReady);
+  Vm vm = CreateCoreVm(program);
+  EXPECT_EQ(vm.state(), VmState::kReady);
 
   const SqlValue binding = SqlValue::Integer(2);
   RequireStatus(vm.Bind(Parameter(0), binding));
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
-  EXPECT_EQ(vm.state(), ReadVmState::kRow);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
+  EXPECT_EQ(vm.state(), VmState::kRow);
   ExpectInteger(OnlyRowValue(vm), 42);
   EXPECT_EQ(vm.executed_instruction_count(), 4U);
   const Status rebound_while_suspended = vm.Bind(Parameter(0), binding);
   ASSERT_FALSE(rebound_while_suspended.has_value());
   EXPECT_EQ(rebound_while_suspended.error().code(), ErrorCode::kMisuse);
 
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kDone);
-  EXPECT_EQ(vm.state(), ReadVmState::kDone);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
+  EXPECT_EQ(vm.state(), VmState::kDone);
   EXPECT_TRUE(vm.row().empty());
   EXPECT_EQ(vm.executed_instruction_count(), 5U);
   const auto repeated = vm.Step();
@@ -329,18 +337,63 @@ TEST_F(ReadVmTest, ExecutesBindingsRowsHaltAndReset) {
   EXPECT_EQ(repeated.error().code(), ErrorCode::kMisuse);
 
   RequireStatus(vm.Reset());
-  EXPECT_EQ(vm.state(), ReadVmState::kReady);
+  EXPECT_EQ(vm.state(), VmState::kReady);
   EXPECT_EQ(vm.executed_instruction_count(), 0U);
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 42);
 
   RequireStatus(vm.Reset());
   RequireStatus(vm.ClearBindings());
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(vm).type(), SqlValueType::kNull);
 }
 
-TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
+TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(7));
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 1, 0, std::move(constants), {}, {}, {ResultColumn()},
+                   {
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  EXPECT_FALSE(vm.has_execution_context());
+  const auto detached_step = vm.Step();
+  ASSERT_FALSE(detached_step.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, detached_step.error().code());
+  EXPECT_EQ(VmState::kReady, vm.state());
+
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_TRUE(vm.has_execution_context());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const Status suspended_detach = vm.DetachExecutionContext();
+  ASSERT_FALSE(suspended_detach.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, suspended_detach.error().code());
+
+  RequireStatus(vm.Reset());
+  EXPECT_FALSE(vm.has_execution_context());
+  EXPECT_EQ(VmState::kReady, vm.state());
+
+  ProgramInput write_input;
+  write_input.schema_version = CurrentSchema(*pager_);
+  write_input.statement_kind = ProgramStatementKind::kUpdate;
+  write_input.transaction_access = ProgramTransactionAccess::kWrite;
+  write_input.instructions.emplace_back(HaltInstruction{});
+  const BytecodeProgram write_program = TakeProgramValue(BytecodeProgram::Create(write_input));
+  Vm write_vm = TakeValue(Vm::Create(write_program, VmEnvironment::Core()));
+  const Status missing_writer =
+      write_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+  ASSERT_FALSE(missing_writer.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_writer.error().code());
+  EXPECT_FALSE(write_vm.has_execution_context());
+}
+
+TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 1, 0,
       [] {
@@ -355,20 +408,21 @@ TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
           HaltInstruction{},
       },
       std::nullopt, true);
-  ReadVm vm = CreateCoreVm(program);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 7);
   RequireStatus(pager_->EndRead());
 
   const auto resumed = vm.Step();
   ASSERT_FALSE(resumed.has_value());
   EXPECT_EQ(resumed.error().code(), ErrorCode::kMisuse);
-  EXPECT_EQ(vm.state(), ReadVmState::kError);
+  EXPECT_EQ(vm.state(), VmState::kError);
   EXPECT_TRUE(vm.row().empty());
 
   RequireStatus(vm.Reset());
   RequireStatus(pager_->BeginRead());
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 7);
 }
 
@@ -383,9 +437,8 @@ TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
                        ResultRowInstruction{.first = Reg(1), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(pager, kCatalogGeneration)));
-  if (TakeValue(vm.Step()) != ReadVmStep::kRow) {
+  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("unary VM program did not yield a row");
   }
   return OnlyRowValue(vm).Clone();
@@ -410,15 +463,14 @@ TEST_F(ReadVmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
                        ResultRowInstruction{.first = Reg(2), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(pager, kCatalogGeneration)));
-  if (TakeValue(vm.Step()) != ReadVmStep::kRow) {
+  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("binary VM program did not yield a row");
   }
   return OnlyRowValue(vm).Clone();
 }
 
-TEST_F(ReadVmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
+TEST_F(VmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
   ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("5")), -5);
   ExpectReal(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("1.5")), -1.5);
   ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("abc")), 0);
@@ -466,7 +518,7 @@ TEST_F(ReadVmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
                 0);
 }
 
-TEST_F(ReadVmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
+TEST_F(VmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
   ExpectText(EvaluateBinary(*pager_, BinaryOperation::kConcatenate, SqlValue::Integer(12),
                             SqlValue::Real(3.5)),
              "123.5");
@@ -521,15 +573,14 @@ TEST_F(ReadVmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
                        ResultRowInstruction{.first = Reg(1), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(pager, kCatalogGeneration)));
-  if (TakeValue(vm.Step()) != ReadVmStep::kRow) {
+  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("conditional VM program did not yield a row");
   }
   return OnlyRowValue(vm).Clone();
 }
 
-TEST_F(ReadVmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
+TEST_F(VmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Text("42.5"));
   const BytecodeProgram conversion =
@@ -551,8 +602,8 @@ TEST_F(ReadVmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
                        ResultRowInstruction{.first = Reg(0), .count = 3},
                        HaltInstruction{},
                    });
-  ReadVm conversion_vm = CreateCoreVm(conversion);
-  ASSERT_EQ(TakeValue(conversion_vm.Step()), ReadVmStep::kRow);
+  Vm conversion_vm = CreateCoreVm(conversion);
+  ASSERT_EQ(TakeValue(conversion_vm.Step()), VmStep::kRow);
   ASSERT_EQ(conversion_vm.row().size(), 3U);
   ExpectText(conversion_vm.row()[0], "42.5");
   ExpectReal(conversion_vm.row()[1], 42.5);
@@ -566,7 +617,7 @@ TEST_F(ReadVmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue{}), 0);
 }
 
-TEST_F(ReadVmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
+TEST_F(VmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Text("7.0"));
   constants.push_back(SqlValue::Integer(8));
@@ -584,8 +635,8 @@ TEST_F(ReadVmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
           ResultRowInstruction{.first = Reg(3), .count = 3},
           HaltInstruction{},
       });
-  ReadVm conversion_vm = CreateCoreVm(conversion);
-  ASSERT_EQ(TakeValue(conversion_vm.Step()), ReadVmStep::kRow);
+  Vm conversion_vm = CreateCoreVm(conversion);
+  ASSERT_EQ(TakeValue(conversion_vm.Step()), VmStep::kRow);
   ExpectInteger(conversion_vm.row()[0], 7);
   ExpectReal(conversion_vm.row()[1], 8.0);
   ExpectText(conversion_vm.row()[2], "9");
@@ -600,7 +651,7 @@ TEST_F(ReadVmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm invalid_vm = CreateCoreVm(invalid);
+  Vm invalid_vm = CreateCoreVm(invalid);
   const auto failed = invalid_vm.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, failed.error().code());
@@ -616,13 +667,13 @@ TEST_F(ReadVmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm nan_vm = CreateCoreVm(nan);
+  Vm nan_vm = CreateCoreVm(nan);
   const auto nan_failed = nan_vm.Step();
   ASSERT_FALSE(nan_failed.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, nan_failed.error().code());
 }
 
-TEST_F(ReadVmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
+TEST_F(VmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(2));
   constants.push_back(SqlValue::Integer(10));
@@ -655,8 +706,8 @@ TEST_F(ReadVmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
                        HaltInstruction{},
                    });
 
-  ReadVm vm = CreateCoreVm(program);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ASSERT_EQ(vm.row().size(), 2U);
   ExpectInteger(vm.row()[0], 1);
   EXPECT_EQ(vm.row()[1].type(), SqlValueType::kNull);
@@ -684,8 +735,8 @@ TEST_F(ReadVmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
                        ResultRowInstruction{.first = Reg(2), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm comparison_vm = CreateCoreVm(text_comparison);
-  ASSERT_EQ(TakeValue(comparison_vm.Step()), ReadVmStep::kRow);
+  Vm comparison_vm = CreateCoreVm(text_comparison);
+  ASSERT_EQ(TakeValue(comparison_vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(comparison_vm), 0);
 }
 
@@ -698,7 +749,7 @@ class LengthCollation final : public Collation {
   }
 };
 
-TEST_F(ReadVmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations) {
+TEST_F(VmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Text("a"));
   constants.push_back(SqlValue::Text("bb"));
@@ -720,9 +771,9 @@ TEST_F(ReadVmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations
                    });
   const LengthCollation length;
   const std::array<const Collation*, 1> collations{&length};
-  ReadVm custom_vm = TakeValue(ReadVm::Create(
-      custom, ReadVmEnvironment{*pager_, kCatalogGeneration, CoreFunctionRegistry(), collations}));
-  ASSERT_EQ(TakeValue(custom_vm.Step()), ReadVmStep::kRow);
+  Vm custom_vm = CreateAttachedVm(custom, *pager_, kCatalogGeneration,
+                                  VmEnvironment{CoreFunctionRegistry(), collations});
+  ASSERT_EQ(TakeValue(custom_vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(custom_vm), 1);
 
   const BytecodeProgram missing_collation =
@@ -748,8 +799,7 @@ TEST_F(ReadVmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations
                        ResultRowInstruction{.first = Reg(2), .count = 1},
                        HaltInstruction{},
                    });
-  const auto unresolved_collation =
-      ReadVm::Create(missing_collation, ReadVmEnvironment::Core(*pager_, kCatalogGeneration));
+  const auto unresolved_collation = Vm::Create(missing_collation, VmEnvironment::Core());
   ASSERT_FALSE(unresolved_collation.has_value());
   EXPECT_EQ(unresolved_collation.error().code(), ErrorCode::kGeneric);
 
@@ -766,54 +816,58 @@ TEST_F(ReadVmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  const auto unresolved_function =
-      ReadVm::Create(missing_function, ReadVmEnvironment::Core(*pager_, kCatalogGeneration));
+  const auto unresolved_function = Vm::Create(missing_function, VmEnvironment::Core());
   ASSERT_FALSE(unresolved_function.has_value());
   EXPECT_EQ(unresolved_function.error().code(), ErrorCode::kGeneric);
 }
 
-TEST_F(ReadVmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
+TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
   const BytecodeProgram halt =
       BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}}, std::nullopt, true);
 
-  const auto generation_mismatch =
-      ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration + 1U));
-  ASSERT_FALSE(generation_mismatch.has_value());
-  EXPECT_EQ(generation_mismatch.error().code(), ErrorCode::kSchemaChanged);
+  Vm generation_mismatch = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
+  const Status generation_attach = generation_mismatch.AttachExecutionContext(
+      VmExecutionContext{*pager_, kCatalogGeneration + 1U});
+  ASSERT_FALSE(generation_attach.has_value());
+  EXPECT_EQ(generation_attach.error().code(), ErrorCode::kSchemaChanged);
 
   SchemaVersionRequirement wrong_cookie = CurrentSchema(*pager_);
   ++wrong_cookie.schema_cookie;
   const BytecodeProgram wrong_schema =
       BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}}, wrong_cookie);
-  const auto cookie_mismatch =
-      ReadVm::Create(wrong_schema, ReadVmEnvironment::Core(*pager_, kCatalogGeneration));
-  ASSERT_FALSE(cookie_mismatch.has_value());
-  EXPECT_EQ(cookie_mismatch.error().code(), ErrorCode::kSchemaChanged);
+  Vm cookie_mismatch = TakeValue(Vm::Create(wrong_schema, VmEnvironment::Core()));
+  const Status cookie_attach =
+      cookie_mismatch.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+  ASSERT_FALSE(cookie_attach.has_value());
+  EXPECT_EQ(cookie_attach.error().code(), ErrorCode::kSchemaChanged);
 
   RequireStatus(pager_->EndRead());
-  const auto inactive = ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration));
-  ASSERT_FALSE(inactive.has_value());
-  EXPECT_EQ(inactive.error().code(), ErrorCode::kMisuse);
-  const auto inactive_stale =
-      ReadVm::Create(halt, ReadVmEnvironment::Core(*pager_, kCatalogGeneration + 1U));
-  ASSERT_FALSE(inactive_stale.has_value());
-  EXPECT_EQ(inactive_stale.error().code(), ErrorCode::kMisuse);
+  Vm inactive = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
+  const Status inactive_attach =
+      inactive.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+  ASSERT_FALSE(inactive_attach.has_value());
+  EXPECT_EQ(inactive_attach.error().code(), ErrorCode::kMisuse);
+  Vm inactive_stale = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
+  const Status inactive_stale_attach =
+      inactive_stale.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration + 1U});
+  ASSERT_FALSE(inactive_stale_attach.has_value());
+  EXPECT_EQ(inactive_stale_attach.error().code(), ErrorCode::kMisuse);
   RequireStatus(pager_->BeginRead());
 
   const BytecodeProgram loop =
       BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {JumpInstruction{.target = Address(0)}});
-  ReadVm vm = CreateCoreVm(loop, ReadVmLimits{
-                                     .maximum_value_bytes = 1'000'000'000,
-                                     .maximum_instructions_per_step = 10,
-                                 });
+  Vm vm = CreateCoreVm(loop, VmLimits{
+                                 .maximum_value_bytes = 1'000'000'000,
+                                 .maximum_instructions_per_step = 10,
+                             });
   const auto interrupted = vm.Step();
   ASSERT_FALSE(interrupted.has_value());
   EXPECT_EQ(interrupted.error().code(), ErrorCode::kInterrupted);
-  EXPECT_EQ(vm.state(), ReadVmState::kError);
+  EXPECT_EQ(vm.state(), VmState::kError);
   EXPECT_EQ(vm.executed_instruction_count(), 10U);
 }
 
-TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
+TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   std::vector<std::byte> bytes = ReadBytes(FixturePath());
   TemporaryDatabase database(bytes);
   PosixVfs vfs;
@@ -830,10 +884,9 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
                        HaltInstruction{},
                    },
                    std::nullopt, true);
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kDone);
+  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kDone);
   RequireStatus(vm.Reset());
   RequireStatus(pager->EndRead());
 
@@ -843,7 +896,8 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   database.Rewrite(bytes);
 
   RequireStatus(pager->BeginRead());
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 9);
   RequireStatus(vm.Reset());
   RequireStatus(pager->EndRead());
@@ -877,17 +931,17 @@ TEST(ReadVmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
       });
 }
 
-TEST_F(ReadVmTest, ScansTableRowsAndClosesCursorsAtHalt) {
+TEST_F(VmTest, ScansTableRowsAndClosesCursorsAtHalt) {
   const BytecodeProgram program = TableScanProgram(*pager_);
-  ReadVm vm = CreateCoreVm(program);
+  Vm vm = CreateCoreVm(program);
 
   std::size_t rows = 0;
   std::int64_t first_rowid = 0;
   std::int64_t last_rowid = 0;
   std::string first_key;
   while (true) {
-    const ReadVmStep step = TakeValue(vm.Step());
-    if (step == ReadVmStep::kDone) {
+    const VmStep step = TakeValue(vm.Step());
+    if (step == VmStep::kDone) {
       break;
     }
     ASSERT_EQ(vm.row().size(), 2U);
@@ -909,10 +963,10 @@ TEST_F(ReadVmTest, ScansTableRowsAndClosesCursorsAtHalt) {
   RequireStatus(pager_->EndRead());
 }
 
-TEST_F(ReadVmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
+TEST_F(VmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
   const BytecodeProgram program = TableScanProgram(*pager_);
-  ReadVm vm = CreateCoreVm(program);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
 
   const Status pinned = pager_->EndRead();
   ASSERT_FALSE(pinned.has_value());
@@ -923,8 +977,8 @@ TEST_F(ReadVmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
 
   RequireStatus(pager_->BeginRead());
   {
-    ReadVm scoped_vm = CreateCoreVm(program);
-    ASSERT_EQ(TakeValue(scoped_vm.Step()), ReadVmStep::kRow);
+    Vm scoped_vm = CreateCoreVm(program);
+    ASSERT_EQ(TakeValue(scoped_vm.Step()), VmStep::kRow);
     const Status scoped_pin = pager_->EndRead();
     ASSERT_FALSE(scoped_pin.has_value());
     EXPECT_EQ(scoped_pin.error().code(), ErrorCode::kBusy);
@@ -959,19 +1013,19 @@ TEST_F(ReadVmTest, KeepsCursorPinsAcrossRowsAndReleasesThemOnReset) {
       });
 }
 
-TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields) {
+TEST_F(VmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields) {
   const BytecodeProgram payload_program =
       SeekFieldProgram(*pager_, CursorFieldSource{
                                     .kind = CursorFieldSourceKind::kRecordField,
                                     .record_field = 6,
                                 });
-  ReadVm payload_vm = CreateCoreVm(payload_program);
+  Vm payload_vm = CreateCoreVm(payload_program);
   const SqlValue key = SqlValue::Text("44.0");
   RequireStatus(payload_vm.Bind(Parameter(0), key));
-  ASSERT_EQ(TakeValue(payload_vm.Step()), ReadVmStep::kRow);
+  ASSERT_EQ(TakeValue(payload_vm.Step()), VmStep::kRow);
   ASSERT_EQ(OnlyRowValue(payload_vm).type(), SqlValueType::kBlob);
   EXPECT_EQ(OnlyRowValue(payload_vm).blob_value().value_or(ByteView{}).size(), 3000U);
-  EXPECT_EQ(TakeValue(payload_vm.Step()), ReadVmStep::kDone);
+  EXPECT_EQ(TakeValue(payload_vm.Step()), VmStep::kDone);
 
   const BytecodeProgram missing_program =
       SeekFieldProgram(*pager_,
@@ -980,10 +1034,10 @@ TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields)
                            .record_field = 7,
                        },
                        8);
-  ReadVm missing_vm = CreateCoreVm(missing_program);
+  Vm missing_vm = CreateCoreVm(missing_program);
   const SqlValue integer_key = SqlValue::Integer(44);
   RequireStatus(missing_vm.Bind(Parameter(0), integer_key));
-  ASSERT_EQ(TakeValue(missing_vm.Step()), ReadVmStep::kRow);
+  ASSERT_EQ(TakeValue(missing_vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
 
   std::vector<SqlValue> default_constants;
@@ -997,9 +1051,9 @@ TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields)
                            .missing_value = Constant(0),
                        },
                        8, std::move(default_constants));
-  ReadVm default_vm = CreateCoreVm(default_program);
+  Vm default_vm = CreateCoreVm(default_program);
   RequireStatus(default_vm.Bind(Parameter(0), integer_key));
-  ASSERT_EQ(TakeValue(default_vm.Step()), ReadVmStep::kRow);
+  ASSERT_EQ(TakeValue(default_vm.Step()), VmStep::kRow);
   ExpectText(OnlyRowValue(default_vm), "legacy");
 
   const BytecodeProgram unsupported_program =
@@ -1010,7 +1064,7 @@ TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields)
                            .missing_value_kind = MissingFieldValueKind::kUnsupported,
                        },
                        8);
-  ReadVm unsupported_vm = CreateCoreVm(unsupported_program);
+  Vm unsupported_vm = CreateCoreVm(unsupported_program);
   RequireStatus(unsupported_vm.Bind(Parameter(0), integer_key));
   const auto unsupported = unsupported_vm.Step();
   ASSERT_FALSE(unsupported.has_value());
@@ -1019,23 +1073,26 @@ TEST_F(ReadVmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields)
   RequireStatus(missing_vm.Reset());
   const SqlValue fractional = SqlValue::Real(44.5);
   RequireStatus(missing_vm.Bind(Parameter(0), fractional));
-  EXPECT_EQ(TakeValue(missing_vm.Step()), ReadVmStep::kDone);
+  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(TakeValue(missing_vm.Step()), VmStep::kDone);
 
   RequireStatus(missing_vm.Reset());
   const SqlValue rounded_past_max =
       SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::max()));
   RequireStatus(missing_vm.Bind(Parameter(0), rounded_past_max));
-  EXPECT_EQ(TakeValue(missing_vm.Step()), ReadVmStep::kDone);
+  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(TakeValue(missing_vm.Step()), VmStep::kDone);
 
   RequireStatus(missing_vm.Reset());
   const SqlValue minimum =
       SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::min()));
   RequireStatus(missing_vm.Bind(Parameter(0), minimum));
-  ASSERT_EQ(TakeValue(missing_vm.Step()), ReadVmStep::kRow);
+  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  ASSERT_EQ(TakeValue(missing_vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
 }
 
-TEST_F(ReadVmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
+TEST_F(VmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {"BINARY"}, {BinaryIndexDescriptor()},
       {ResultColumn("binary_key"), ResultColumn("id")},
@@ -1049,14 +1106,14 @@ TEST_F(ReadVmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
           CloseCursorInstruction{.cursor = Cursor(0)},
           HaltInstruction{},
       });
-  ReadVm vm = CreateCoreVm(program);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ASSERT_EQ(vm.row().size(), 2U);
   ExpectText(vm.row()[0], "bin-00");
   ExpectInteger(vm.row()[1], 13);
 }
 
-TEST_F(ReadVmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
+TEST_F(VmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {},
       {
@@ -1077,12 +1134,12 @@ TEST_F(ReadVmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
           HaltInstruction{},
           HaltInstruction{},
       });
-  ReadVm vm = CreateCoreVm(program);
-  ASSERT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ASSERT_EQ(vm.row().size(), 2U);
   ExpectInteger(vm.row()[0], std::numeric_limits<std::int64_t>::min());
   ExpectInteger(vm.row()[1], std::numeric_limits<std::int64_t>::min());
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kDone);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
 }
 
 [[nodiscard]] Result<SqlValue> ThrowingFunction(const ScalarFunctionContext&,
@@ -1090,7 +1147,7 @@ TEST_F(ReadVmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
   throw std::runtime_error("expected scalar callback failure");
 }
 
-TEST_F(ReadVmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
+TEST_F(VmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
   const std::array<ScalarFunction, 1> functions{
       ScalarFunction{"throwing", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ThrowingFunction},
@@ -1118,8 +1175,8 @@ TEST_F(ReadVmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
                        CloseCursorInstruction{.cursor = Cursor(0)},
                        HaltInstruction{},
                    });
-  ReadVm vm = TakeValue(ReadVm::Create(
-      program, ReadVmEnvironment{*pager_, kCatalogGeneration, registry, collations}));
+  Vm vm =
+      CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
 
   EXPECT_THROW(
       {
@@ -1127,11 +1184,11 @@ TEST_F(ReadVmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
         EXPECT_FALSE(result.has_value());
       },
       std::runtime_error);
-  EXPECT_EQ(vm.state(), ReadVmState::kError);
+  EXPECT_EQ(vm.state(), VmState::kError);
   RequireStatus(pager_->EndRead());
 }
 
-TEST_F(ReadVmTest, EnforcesValueLimitsAtCreationBindingAndExecution) {
+TEST_F(VmTest, EnforcesValueLimitsAtCreationBindingAndExecution) {
   std::vector<SqlValue> constant;
   constant.push_back(SqlValue::Text("abcd"));
   const BytecodeProgram constant_program =
@@ -1142,8 +1199,7 @@ TEST_F(ReadVmTest, EnforcesValueLimitsAtCreationBindingAndExecution) {
                        HaltInstruction{},
                    });
   const auto oversized_constant =
-      ReadVm::Create(constant_program, ReadVmEnvironment::Core(*pager_, kCatalogGeneration),
-                     ReadVmLimits{.maximum_value_bytes = 3});
+      Vm::Create(constant_program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 3});
   ASSERT_FALSE(oversized_constant.has_value());
   EXPECT_EQ(oversized_constant.error().code(), ErrorCode::kTooLarge);
 
@@ -1154,7 +1210,7 @@ TEST_F(ReadVmTest, EnforcesValueLimitsAtCreationBindingAndExecution) {
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm parameter_vm = CreateCoreVm(parameter_program, ReadVmLimits{.maximum_value_bytes = 3});
+  Vm parameter_vm = CreateCoreVm(parameter_program, VmLimits{.maximum_value_bytes = 3});
   const SqlValue oversized_binding = SqlValue::Text("abcd");
   const Status bound = parameter_vm.Bind(Parameter(0), oversized_binding);
   ASSERT_FALSE(bound.has_value());
@@ -1177,14 +1233,14 @@ TEST_F(ReadVmTest, EnforcesValueLimitsAtCreationBindingAndExecution) {
                        ResultRowInstruction{.first = Reg(2), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm concat_vm = CreateCoreVm(concat_program, ReadVmLimits{.maximum_value_bytes = 3});
+  Vm concat_vm = CreateCoreVm(concat_program, VmLimits{.maximum_value_bytes = 3});
   const auto concatenated = concat_vm.Step();
   ASSERT_FALSE(concatenated.has_value());
   EXPECT_EQ(concatenated.error().code(), ErrorCode::kTooLarge);
-  EXPECT_EQ(concat_vm.state(), ReadVmState::kError);
+  EXPECT_EQ(concat_vm.state(), VmState::kError);
 }
 
-TEST_F(ReadVmTest, UsesSharedDatabaseFormatNormalization) {
+TEST_F(VmTest, UsesSharedDatabaseFormatNormalization) {
   std::vector<std::byte> bytes = ReadBytes(FixturePath());
   Write32(bytes, 44, 0);
   Write32(bytes, 56, 0);
@@ -1203,19 +1259,18 @@ TEST_F(ReadVmTest, UsesSharedDatabaseFormatNormalization) {
                                                    CloseCursorInstruction{.cursor = Cursor(0)},
                                                    HaltInstruction{},
                                                });
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kDone);
+  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
   RequireStatus(pager->EndRead());
 }
 
-TEST_F(ReadVmTest, MovedFromMachinesRejectOperations) {
+TEST_F(VmTest, MovedFromMachinesRejectOperations) {
   const BytecodeProgram program = BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}});
-  ReadVm source = CreateCoreVm(program);
-  ReadVm destination = std::move(source);
+  Vm source = CreateCoreVm(program);
+  Vm destination = std::move(source);
 
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-  EXPECT_EQ(source.state(), ReadVmState::kInvalid);
+  EXPECT_EQ(source.state(), VmState::kInvalid);
   const auto stepped = source.Step();
   ASSERT_FALSE(stepped.has_value());
   EXPECT_EQ(stepped.error().code(), ErrorCode::kMisuse);
@@ -1224,10 +1279,10 @@ TEST_F(ReadVmTest, MovedFromMachinesRejectOperations) {
   EXPECT_EQ(reset.error().code(), ErrorCode::kMisuse);
   // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
 
-  EXPECT_EQ(TakeValue(destination.Step()), ReadVmStep::kDone);
+  EXPECT_EQ(TakeValue(destination.Step()), VmStep::kDone);
 }
 
-TEST(ReadVm, ExecutesTransactionFreeProgramsAndPublishesBindingsWithoutAPagerSnapshot) {
+TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
@@ -1238,45 +1293,43 @@ TEST(ReadVm, ExecutesTransactionFreeProgramsAndPublishesBindingsWithoutAPagerSna
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  ASSERT_FALSE(program.requires_read_transaction());
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
+  ASSERT_FALSE(program.requires_database_snapshot());
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   const SqlValue value = SqlValue::Integer(41);
   RequireStatus(vm.Bind(Parameter(0), value));
   ASSERT_EQ(1U, vm.bindings().size());
   ExpectInteger(vm.bindings().front(), 41);
   RequireStatus(pager->EndRead());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
 
-  EXPECT_EQ(ReadVmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm), 41);
-  EXPECT_EQ(ReadVmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
   RequireStatus(vm.Reset());
   ASSERT_EQ(1U, vm.bindings().size());
   ExpectInteger(vm.bindings().front(), 41);
 }
 
-TEST(ReadVm, RejectsTransactionRequiredProgramsWithoutAPagerSnapshot) {
+TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
   RequireStatus(pager->BeginRead());
   ProgramInput input;
   input.schema_version = CurrentSchema(*pager);
-  input.requires_read_transaction = true;
+  input.requires_database_snapshot = true;
   input.instructions.emplace_back(HaltInstruction{});
   const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
-  ReadVm vm =
-      TakeValue(ReadVm::Create(program, ReadVmEnvironment::Core(*pager, kCatalogGeneration)));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(pager->EndRead());
 
-  const auto stepped = vm.Step();
-
-  ASSERT_FALSE(stepped.has_value());
-  EXPECT_EQ(ErrorCode::kMisuse, stepped.error().code());
-  EXPECT_EQ(ReadVmState::kError, vm.state());
+  const Status attached = vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration});
+  ASSERT_FALSE(attached.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
+  EXPECT_EQ(VmState::kReady, vm.state());
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
-TEST_F(ReadVmTest, RecordsExecutedInstructionsWhenInstrumentationIsEnabled) {
+TEST_F(VmTest, RecordsExecutedInstructionsWhenInstrumentationIsEnabled) {
   const BytecodeProgram program =
       BuildProgram(*pager_, 1, 0,
                    [] {
@@ -1290,13 +1343,13 @@ TEST_F(ReadVmTest, RecordsExecutedInstructionsWhenInstrumentationIsEnabled) {
                        ResultRowInstruction{.first = Reg(0), .count = 1},
                        HaltInstruction{},
                    });
-  ReadVm vm = CreateCoreVm(program);
+  Vm vm = CreateCoreVm(program);
   instrumentation::CounterCollection counters;
   const instrumentation::ScopedCounterCollection collection(counters);
 
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kRow);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   EXPECT_EQ(counters.Value(instrumentation::Counter::kVmInstructions), 2U);
-  EXPECT_EQ(TakeValue(vm.Step()), ReadVmStep::kDone);
+  EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
   EXPECT_EQ(counters.Value(instrumentation::Counter::kVmInstructions), 3U);
 }
 #endif

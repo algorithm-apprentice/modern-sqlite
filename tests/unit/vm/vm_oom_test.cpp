@@ -8,7 +8,7 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 
 namespace {
 
@@ -97,24 +97,27 @@ int main() try {
   }
 
   fail_allocations = true;
-  const auto create_failure = ReadVm::Create(*program, ReadVmEnvironment::Core(**opened, 17));
+  const auto create_failure = Vm::Create(*program, VmEnvironment::Core());
   fail_allocations = false;
   if (create_failure.has_value() || create_failure.error().code() != ErrorCode::kOutOfMemory) {
     return 1;
   }
 
-  auto created = ReadVm::Create(*program, ReadVmEnvironment::Core(**opened, 17));
+  auto created = Vm::Create(*program, VmEnvironment::Core());
   if (!created.has_value()) {
     return 1;
   }
-  ReadVm& vm = *created;
+  Vm& vm = *created;
+  if (!vm.AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
   const SqlValue binding = SqlValue::Text(std::string(256, 'b'));
 
   fail_allocations = true;
   const Status bind_failure = vm.Bind(ParameterId(0), binding);
   fail_allocations = false;
   if (bind_failure.has_value() || bind_failure.error().code() != ErrorCode::kOutOfMemory ||
-      vm.state() != ReadVmState::kReady) {
+      vm.state() != VmState::kReady) {
     return 1;
   }
 
@@ -122,15 +125,15 @@ int main() try {
   const auto step_failure = vm.Step();
   fail_allocations = false;
   if (step_failure.has_value() || step_failure.error().code() != ErrorCode::kOutOfMemory ||
-      vm.state() != ReadVmState::kError) {
+      vm.state() != VmState::kError) {
     return 1;
   }
 
-  auto movable = ReadVm::Create(*program, ReadVmEnvironment::Core(**opened, 17));
+  auto movable = Vm::Create(*program, VmEnvironment::Core());
   if (!movable.has_value()) {
     return 1;
   }
-  const ReadVm destination = std::move(*movable);
+  const Vm destination = std::move(*movable);
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   fail_allocations = true;
   const auto moved_step = movable->Step();
@@ -145,7 +148,7 @@ int main() try {
     return 1;
   }
   // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-  if (destination.state() != ReadVmState::kReady) {
+  if (destination.state() != VmState::kReady) {
     return 1;
   }
 
@@ -173,14 +176,16 @@ int main() try {
   if (!branch_program.has_value()) {
     return 1;
   }
-  auto branch_vm = ReadVm::Create(*branch_program, ReadVmEnvironment::Core(**opened, 17));
-  if (!branch_vm.has_value() || !branch_vm->Step().has_value()) {
+  auto branch_vm = Vm::Create(*branch_program, VmEnvironment::Core());
+  if (!branch_vm.has_value() ||
+      !branch_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value() ||
+      !branch_vm->Step().has_value()) {
     return 1;
   }
   fail_allocations = true;
   const auto branch_done = branch_vm->Step();
   fail_allocations = false;
-  if (!branch_done.has_value() || *branch_done != ReadVmStep::kDone) {
+  if (!branch_done.has_value() || *branch_done != VmStep::kDone) {
     return 1;
   }
 
@@ -217,14 +222,16 @@ int main() try {
   if (!bitwise_program.has_value()) {
     return 1;
   }
-  auto bitwise_vm = ReadVm::Create(*bitwise_program, ReadVmEnvironment::Core(**opened, 17));
-  if (!bitwise_vm.has_value() || !bitwise_vm->Step().has_value()) {
+  auto bitwise_vm = Vm::Create(*bitwise_program, VmEnvironment::Core());
+  if (!bitwise_vm.has_value() ||
+      !bitwise_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value() ||
+      !bitwise_vm->Step().has_value()) {
     return 1;
   }
   fail_allocations = true;
   const auto bitwise_done = bitwise_vm->Step();
   fail_allocations = false;
-  if (!bitwise_done.has_value() || *bitwise_done != ReadVmStep::kDone) {
+  if (!bitwise_done.has_value() || *bitwise_done != VmStep::kDone) {
     return 1;
   }
 
@@ -261,9 +268,11 @@ int main() try {
   if (!concatenate_program.has_value()) {
     return 1;
   }
-  auto concatenate_vm = ReadVm::Create(*concatenate_program, ReadVmEnvironment::Core(**opened, 17),
-                                       ReadVmLimits{.maximum_value_bytes = 150});
-  if (!concatenate_vm.has_value() || !concatenate_vm->Step().has_value()) {
+  auto concatenate_vm =
+      Vm::Create(*concatenate_program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 150});
+  if (!concatenate_vm.has_value() ||
+      !concatenate_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value() ||
+      !concatenate_vm->Step().has_value()) {
     return 1;
   }
   minimum_failing_size = 64;

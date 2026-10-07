@@ -1,4 +1,4 @@
-#include "modern_sqlite/vm/read_vm.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,11 +29,12 @@
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "modern_sqlite/transaction/transaction_coordinator.hpp"
 
 namespace modern_sqlite {
 namespace {
 
-using DispatchResult = Result<std::optional<ReadVmStep>>;
+using DispatchResult = Result<std::optional<VmStep>>;
 
 [[nodiscard]] Error VmError(ErrorCode code, std::string message) {
   return Error::Create(code, std::move(message));
@@ -234,11 +235,9 @@ struct RuntimeCursor {
 
 }  // namespace
 
-struct ReadVm::Impl {
-  Impl(const BytecodeProgram& program, ReadVmEnvironment environment, ReadVmLimits limits)
+struct Vm::Impl {
+  Impl(const BytecodeProgram& program, VmEnvironment environment, VmLimits limits)
       : program_(&program),
-        pager_(environment.pager_),
-        catalog_generation_(environment.catalog_generation_),
         functions_(environment.functions_),
         available_collations_(environment.collations_),
         limits_(limits),
@@ -248,7 +247,7 @@ struct ReadVm::Impl {
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
-    if (pager_ == nullptr || functions_ == nullptr) {
+    if (functions_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "VM environment is incomplete"));
     }
     for (const Collation* collation : available_collations_) {
@@ -262,11 +261,6 @@ struct ReadVm::Impl {
         return std::unexpected(
             VmError(ErrorCode::kTooLarge, "bytecode constant exceeds the VM value limit"));
       }
-    }
-
-    Status schema = ValidateSchema();
-    if (!schema.has_value()) {
-      return schema;
     }
 
     for (const ReadCursorDescriptor& descriptor : program_->cursors()) {
@@ -309,11 +303,55 @@ struct ReadVm::Impl {
           .collation = *collation,
       });
     }
+    functions_ = nullptr;
+    available_collations_ = {};
+    return {};
+  }
+
+  [[nodiscard]] Status AttachExecutionContext(VmExecutionContext context) {
+    if (state_ != VmState::kReady || pager_ != nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "execution context can only attach to a detached ready VM"));
+    }
+    if (context.pager_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "VM execution context is incomplete"));
+    }
+    if (program_->transaction_access() == ProgramTransactionAccess::kWrite &&
+        context.writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "write bytecode requires a transaction writer"));
+    }
+    pager_ = context.pager_;
+    catalog_generation_ = context.catalog_generation_;
+    writer_ = context.writer_;
+    Status schema = ValidateSchema();
+    if (!schema.has_value()) {
+      pager_ = nullptr;
+      catalog_generation_ = 0;
+      writer_ = nullptr;
+      return schema;
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status DetachExecutionContext() {
+    if (pager_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "VM execution context is not attached"));
+    }
+    if (state_ == VmState::kRow) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "cannot detach a VM while a result row is suspended"));
+    }
+    CloseAllCursors();
+    execution_data_version_.reset();
+    pager_ = nullptr;
+    catalog_generation_ = 0;
+    writer_ = nullptr;
     return {};
   }
 
   [[nodiscard]] Status Bind(ParameterId parameter, const SqlValue& value) {
-    if (state_ != ReadVmState::kReady) {
+    if (state_ != VmState::kReady) {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "parameters can only be bound while the VM is ready"));
     }
@@ -330,7 +368,7 @@ struct ReadVm::Impl {
   }
 
   [[nodiscard]] Status ClearBindings() {
-    if (state_ != ReadVmState::kReady) {
+    if (state_ != VmState::kReady) {
       return std::unexpected(VmError(
           ErrorCode::kMisuse, "parameter bindings can only be cleared while the VM is ready"));
     }
@@ -340,29 +378,33 @@ struct ReadVm::Impl {
     return {};
   }
 
-  [[nodiscard]] Result<ReadVmStep> Step() {
-    if (state_ != ReadVmState::kReady && state_ != ReadVmState::kRow) {
+  [[nodiscard]] Result<VmStep> Step() {
+    if (state_ != VmState::kReady && state_ != VmState::kRow) {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "the VM cannot step from its current state"));
     }
+    if (pager_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "the VM has no attached execution context"));
+    }
 
-    if (state_ == ReadVmState::kReady) {
+    if (state_ == VmState::kReady) {
       Status schema = ValidateSchema();
       if (!schema.has_value()) {
         return Fail(std::move(schema.error()));
       }
-      if (program_->requires_read_transaction()) {
+      if (program_->requires_database_snapshot()) {
         execution_data_version_ = pager_->data_version();
       } else {
         execution_data_version_.reset();
       }
     } else {
       ClearRow();
-      if (program_->requires_read_transaction() && !pager_->in_read_transaction()) {
+      if (program_->requires_database_snapshot() && !pager_->in_read_transaction()) {
         return Fail(
-            VmError(ErrorCode::kMisuse, "the read transaction ended while the VM was suspended"));
+            VmError(ErrorCode::kMisuse, "the database snapshot ended while the VM was suspended"));
       }
-      if (program_->requires_read_transaction() &&
+      if (program_->requires_database_snapshot() &&
           (!execution_data_version_.has_value() ||
            pager_->data_version() != *execution_data_version_)) {
         return Fail(VmError(ErrorCode::kSchemaChanged,
@@ -394,7 +436,7 @@ struct ReadVm::Impl {
     }
   }
 
-  [[nodiscard]] Status Reset() noexcept {
+  [[nodiscard]] Status Reset() {
     CloseAllCursors();
     for (SqlValue& value : registers_) {
       value = {};
@@ -403,12 +445,15 @@ struct ReadVm::Impl {
     execution_data_version_.reset();
     program_counter_ = 0;
     executed_instruction_count_ = 0;
-    state_ = ReadVmState::kReady;
+    state_ = VmState::kReady;
+    pager_ = nullptr;
+    catalog_generation_ = 0;
+    writer_ = nullptr;
     return {};
   }
 
   [[nodiscard]] std::span<const SqlValue> row() const noexcept {
-    if (state_ != ReadVmState::kRow || row_count_ == 0U) {
+    if (state_ != VmState::kRow || row_count_ == 0U) {
       return {};
     }
     return std::span<const SqlValue>{registers_}.subspan(row_first_, row_count_);
@@ -416,11 +461,11 @@ struct ReadVm::Impl {
 
   [[nodiscard]] std::span<const SqlValue> bindings() const noexcept { return parameters_; }
 
-  [[nodiscard]] Result<ReadVmStep> Fail(Error error) noexcept {
+  [[nodiscard]] Result<VmStep> Fail(Error error) noexcept {
     CloseAllCursors();
     ClearRow();
     execution_data_version_.reset();
-    state_ = ReadVmState::kError;
+    state_ = VmState::kError;
     return std::unexpected(std::move(error));
   }
 
@@ -428,13 +473,14 @@ struct ReadVm::Impl {
     CloseAllCursors();
     ClearRow();
     execution_data_version_.reset();
-    state_ = ReadVmState::kError;
+    state_ = VmState::kError;
   }
 
   [[nodiscard]] Status ValidateSchema() {
     const SchemaVersionRequirement expected = program_->schema_version();
-    if (!pager_->in_read_transaction() && program_->requires_read_transaction()) {
-      return std::unexpected(VmError(ErrorCode::kMisuse, "an active read transaction is required"));
+    if (!pager_->in_read_transaction() && program_->requires_database_snapshot()) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "an active database snapshot is required"));
     }
     if (catalog_generation_ != expected.generation) {
       return std::unexpected(
@@ -462,7 +508,7 @@ struct ReadVm::Impl {
     }
     if (*encoding != DatabaseTextEncoding::kUtf8) {
       return std::unexpected(
-          VmError(ErrorCode::kProtocol, "the read VM currently supports only UTF-8 databases"));
+          VmError(ErrorCode::kProtocol, "the VM currently supports only UTF-8 databases"));
     }
     record_options_.schema_format = *schema_format;
     return {};
@@ -1044,16 +1090,16 @@ struct ReadVm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResultRowInstruction& operation) {
     row_first_ = operation.first.value();
     row_count_ = operation.count;
-    state_ = ReadVmState::kRow;
-    return ReadVmStep::kRow;
+    state_ = VmState::kRow;
+    return VmStep::kRow;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
     CloseAllCursors();
     ClearRow();
     execution_data_version_.reset();
-    state_ = ReadVmState::kDone;
-    return ReadVmStep::kDone;
+    state_ = VmState::kDone;
+    return VmStep::kDone;
   }
 
   [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlValue value) {
@@ -1163,18 +1209,19 @@ struct ReadVm::Impl {
   }
 
   const BytecodeProgram* program_;
-  Pager* pager_;
-  std::uint64_t catalog_generation_;
+  Pager* pager_ = nullptr;
+  std::uint64_t catalog_generation_ = 0;
+  TransactionWriter* writer_ = nullptr;
   const FunctionRegistry* functions_;
   std::span<const Collation* const> available_collations_;
-  ReadVmLimits limits_;
+  VmLimits limits_;
   std::vector<SqlValue> registers_;
   std::vector<SqlValue> parameters_;
   std::vector<RuntimeCursor> cursors_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;
-  ReadVmState state_ = ReadVmState::kReady;
+  VmState state_ = VmState::kReady;
   std::uint32_t program_counter_ = 0;
   std::uint32_t row_first_ = 0;
   std::uint32_t row_count_ = 0;
@@ -1182,38 +1229,41 @@ struct ReadVm::Impl {
   std::optional<std::uint64_t> execution_data_version_;
 };
 
-ReadVmEnvironment ReadVmEnvironment::Core(Pager& pager, std::uint64_t catalog_generation) noexcept {
+VmExecutionContext::VmExecutionContext(TransactionWriter& writer,
+                                       std::uint64_t catalog_generation) noexcept
+    : pager_(&writer.pager()), catalog_generation_(catalog_generation), writer_(&writer) {}
+
+VmEnvironment VmEnvironment::Core() noexcept {
   static const std::array<const Collation*, 3> collations{
       &BinaryCollation(),
       &NoCaseCollation(),
       &RTrimCollation(),
   };
-  return {pager, catalog_generation, CoreFunctionRegistry(), collations};
+  return {CoreFunctionRegistry(), collations};
 }
 
-Result<ReadVm> ReadVm::Create(const BytecodeProgram& program, ReadVmEnvironment environment,
-                              ReadVmLimits limits) {
+Result<Vm> Vm::Create(const BytecodeProgram& program, VmEnvironment environment, VmLimits limits) {
   try {
     auto impl = std::make_unique<Impl>(program, environment, limits);
     Status initialized = impl->Initialize();
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    return ReadVm(std::move(impl));
+    return Vm(std::move(impl));
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
 }
 
-ReadVm::ReadVm(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+Vm::Vm(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 
-ReadVm::ReadVm(ReadVm&&) noexcept = default;
+Vm::Vm(Vm&&) noexcept = default;
 
-ReadVm& ReadVm::operator=(ReadVm&&) noexcept = default;
+Vm& Vm::operator=(Vm&&) noexcept = default;
 
-ReadVm::~ReadVm() = default;
+Vm::~Vm() = default;
 
-Status ReadVm::Bind(ParameterId parameter, const SqlValue& value) {
+Status Vm::Bind(ParameterId parameter, const SqlValue& value) {
   try {
     if (impl_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "cannot bind a moved-from VM"));
@@ -1224,14 +1274,30 @@ Status ReadVm::Bind(ParameterId parameter, const SqlValue& value) {
   }
 }
 
-Status ReadVm::ClearBindings() {
+Status Vm::ClearBindings() {
   if (impl_ == nullptr) {
     return std::unexpected(VmError(ErrorCode::kMisuse, "cannot clear bindings on a moved-from VM"));
   }
   return impl_->ClearBindings();
 }
 
-Result<ReadVmStep> ReadVm::Step() {
+Status Vm::AttachExecutionContext(VmExecutionContext context) {
+  if (impl_ == nullptr) {
+    return std::unexpected(
+        VmError(ErrorCode::kMisuse, "cannot attach execution context to a moved-from VM"));
+  }
+  return impl_->AttachExecutionContext(context);
+}
+
+Status Vm::DetachExecutionContext() {
+  if (impl_ == nullptr) {
+    return std::unexpected(
+        VmError(ErrorCode::kMisuse, "cannot detach execution context from a moved-from VM"));
+  }
+  return impl_->DetachExecutionContext();
+}
+
+Result<VmStep> Vm::Step() {
   try {
     if (impl_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "cannot step a moved-from VM"));
@@ -1250,26 +1316,28 @@ Result<ReadVmStep> ReadVm::Step() {
   }
 }
 
-Status ReadVm::Reset() {
+Status Vm::Reset() {
   if (impl_ == nullptr) {
     return std::unexpected(VmError(ErrorCode::kMisuse, "cannot reset a moved-from VM"));
   }
   return impl_->Reset();
 }
 
-ReadVmState ReadVm::state() const noexcept {
-  return impl_ == nullptr ? ReadVmState::kInvalid : impl_->state_;
+VmState Vm::state() const noexcept { return impl_ == nullptr ? VmState::kInvalid : impl_->state_; }
+
+bool Vm::has_execution_context() const noexcept {
+  return impl_ != nullptr && impl_->pager_ != nullptr;
 }
 
-std::span<const SqlValue> ReadVm::row() const noexcept {
+std::span<const SqlValue> Vm::row() const noexcept {
   return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->row();
 }
 
-std::span<const SqlValue> ReadVm::bindings() const noexcept {
+std::span<const SqlValue> Vm::bindings() const noexcept {
   return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->bindings();
 }
 
-std::uint64_t ReadVm::executed_instruction_count() const noexcept {
+std::uint64_t Vm::executed_instruction_count() const noexcept {
   return impl_ == nullptr ? 0U : impl_->executed_instruction_count_;
 }
 

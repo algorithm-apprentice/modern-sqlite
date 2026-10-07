@@ -14,9 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
+#include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
@@ -259,6 +261,7 @@ TEST(TransactionCoordinator, OwnsPagerAndStartsDeferredOrImmediateTransactions) 
     RequireStatus(coordinator.Rollback());
     EXPECT_TRUE(coordinator.autocommit());
   }
+
   {
     test::WritePagerFixedVfs vfs{false};
     TransactionCoordinator coordinator = OpenCoordinator(vfs);
@@ -267,6 +270,29 @@ TEST(TransactionCoordinator, OwnsPagerAndStartsDeferredOrImmediateTransactions) 
     RequireStatus(coordinator.Rollback());
     EXPECT_TRUE(coordinator.autocommit());
   }
+}
+
+TEST(TransactionCoordinator, SuppliesStatementScopedVmExecutionContext) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  ASSERT_NE(nullptr, statement.writer());
+
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 5};
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.requires_database_snapshot = true;
+  input.instructions.emplace_back(HaltInstruction{});
+  auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  Vm vm = TakeValue(Vm::Create(*program, VmEnvironment::Core()));
+
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 5}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(statement.Rollback());
 }
 
 TEST(TransactionCoordinator, RejectsInvalidPagerOwnershipAndStatementOptions) {

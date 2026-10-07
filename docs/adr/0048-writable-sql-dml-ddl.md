@@ -284,10 +284,10 @@ or mutable catalog state.
 
 Rename the execution-neutral types:
 
-- `ReadVm` -> `Vm`;
-- `ReadVmEnvironment` -> `VmEnvironment`;
-- `ReadVmState` -> `VmState`; and
-- `ReadVmStep` -> `VmStep`.
+- `Vm` -> `Vm`;
+- `VmEnvironment` -> `VmEnvironment`;
+- `VmState` -> `VmState`; and
+- `VmStep` -> `VmStep`.
 
 Do not retain compatibility aliases; the project is not released and one
 canonical API avoids permanent read/write naming debt.
@@ -299,6 +299,20 @@ canonical API avoids permanent read/write naming debt.
 - write-cursor descriptors;
 - mutation result metadata; and
 - typed mutation instructions.
+
+The execution-neutral metadata is:
+
+- `ProgramStatementKind`;
+- `ProgramTransactionAccess`;
+- `ProgramRollbackMode`;
+- `requires_database_snapshot`;
+- typed `ReadCursorDescriptor` and `WriteCursorDescriptor` arrays; and
+- `MutationResultMetadata`.
+
+Read cursor IDs and write cursor IDs are distinct strong types. Program
+verification validates write roots, rowid-alias positions, column defaults,
+NOT NULL metadata, and the consistency of statement kind, access, rollback,
+result, and cursor metadata before publication.
 
 The initial mutation instructions mirror SQLite mechanisms through Modern
 types:
@@ -316,6 +330,19 @@ types:
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.
+
+`VmEnvironment` contains only the synchronous function and collation
+registries used during `Vm::Create()`. `VmExecutionContext` is attached later
+and carries the Pager, catalog generation, and optional statement-scoped
+`TransactionWriter`. A write program cannot attach a context without a
+writer. A program that requires a database snapshot cannot attach without
+the corresponding active Pager transaction.
+
+Ordinary detach is rejected while a result row is suspended. Reset is the
+explicit abort path: it closes runtime cursors, clears the row, and detaches
+the context before returning ready. These rules make the statement layer's
+capability lifetime explicit rather than relying on a prepared VM to retain
+transaction-owned pointers.
 
 After `BeginStatement()`, the session attaches one execution-scoped context
 containing:

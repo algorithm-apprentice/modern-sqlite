@@ -100,7 +100,7 @@ Add read lowering under:
 - `include/modern_sqlite/lowering/read_lowering.hpp`; and
 - `src/lowering/read_lowering.cpp`.
 
-Extend the typed bytecode and read VM with:
+Extend the typed bytecode and VM with:
 
 - `MustBeIntegerInstruction`; and
 - `RealAffinityInstruction`.
@@ -257,7 +257,7 @@ The program does not retain:
 - mutable lowering state.
 
 The VM continues to resolve symbol names against the execution environment
-once during `ReadVm::Create()`.
+once during `Vm::Create()`.
 
 Parameter names and `BoundSelect::registration_generation()` remain in the
 retained physical plan rather than executable bytecode. The next prepared
