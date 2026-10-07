@@ -543,7 +543,7 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
 
   for (std::size_t step = 0U; step < 300U; ++step) {
     const std::int64_t key = static_cast<std::int64_t>((step * 37U) % 97U) + 1;
-    const std::byte value = static_cast<std::byte>(step & 0xffU);
+    const auto value = static_cast<std::byte>(step & 0xffU);
     const std::array payload{value, value, value, value, value, value, value, value};
     switch (step % 4U) {
       case 0U:
@@ -568,6 +568,8 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
         RequireStatus(table.Insert(key, payload, BtreeInsertMode::kReplace));
         table_model.insert_or_assign(key, value);
         break;
+      default:
+        throw std::runtime_error("mixed table model selected an invalid operation");
     }
 
     std::array<SqlValue, 1> index_key{SqlValue::Integer(key)};
