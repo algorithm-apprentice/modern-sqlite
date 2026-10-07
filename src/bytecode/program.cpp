@@ -576,6 +576,13 @@ template <typename T>
     }
     return {};
   };
+  const auto check_write_cursor = [&](WriteCursorId id,
+                                      std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.write_cursors.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursor, instruction, id.value()));
+    }
+    return {};
+  };
   const auto check_symbol = [&](SymbolId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.symbols.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSymbol, instruction, id.value()));
@@ -658,6 +665,9 @@ template <typename T>
           } else if constexpr (std::is_same_v<Operation, OpenReadCursorInstruction> ||
                                std::is_same_v<Operation, CloseCursorInstruction>) {
             return check_cursor(operation.cursor, index);
+          } else if constexpr (std::is_same_v<Operation, OpenWriteCursorInstruction> ||
+                               std::is_same_v<Operation, CloseWriteCursorInstruction>) {
+            return check_write_cursor(operation.cursor, index);
           } else if constexpr (std::is_same_v<Operation, RewindInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
@@ -698,6 +708,37 @@ template <typename T>
                                              index, operation.cursor.value()));
             }
             return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, ResolveInsertRowIdInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (auto result = check_register(operation.input, index); !result) {
+              return result;
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (operation.value_count !=
+                input.write_cursors[operation.cursor.value()].columns.size()) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.value_count));
+            }
+            if (auto result = check_range(operation.first_value, operation.value_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, InsertTableInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (auto result = check_register(operation.rowid, index); !result) {
+              return result;
+            }
+            return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -767,8 +808,7 @@ void SetBit(std::span<std::uint64_t> words, std::size_t bit, bool value) noexcep
 }
 
 [[nodiscard]] CursorState GetCursorState(std::span<const std::uint64_t> state,
-                                         std::size_t register_words, CursorId cursor) noexcept {
-  const std::size_t index = cursor.value();
+                                         std::size_t register_words, std::size_t index) noexcept {
   const std::size_t shift = (index % kCursorsPerWord) * 2;
   const std::uint64_t word = state[register_words + (index / kCursorsPerWord)];
   return static_cast<CursorState>((word >> shift) & 0x3U);
@@ -783,13 +823,22 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   state[word_index] = (state[word_index] & ~mask) | (static_cast<std::uint64_t>(value) << shift);
 }
 
+void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, std::size_t index,
+                    CursorState value) noexcept {
+  const std::size_t shift = (index % kCursorsPerWord) * 2;
+  const std::size_t word_index = register_words + (index / kCursorsPerWord);
+  const std::uint64_t mask = std::uint64_t{0x3} << shift;
+  state[word_index] = (state[word_index] & ~mask) | (static_cast<std::uint64_t>(value) << shift);
+}
+
 [[nodiscard]] ProgramResult<ProgramVerificationMetrics> AnalyzeProgram(const ProgramInput& input,
                                                                        const ProgramLimits& limits,
                                                                        std::size_t owned_bytes) {
   const std::size_t instruction_count = input.instructions.size();
   const std::size_t register_words =
       CeilingDivide(static_cast<std::size_t>(input.register_count), kBitsPerWord);
-  const std::size_t cursor_words = CeilingDivide(input.cursors.size(), kCursorsPerWord);
+  const std::size_t total_cursor_count = input.cursors.size() + input.write_cursors.size();
+  const std::size_t cursor_words = CeilingDivide(total_cursor_count, kCursorsPerWord);
   const std::size_t state_words = register_words + cursor_words;
 
   std::size_t stored_state_words = 0;
@@ -850,11 +899,9 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
         const std::size_t index = register_words + word;
         if (current[index] != incoming[index]) {
           std::size_t cursor_index = word * kCursorsPerWord;
-          for (; cursor_index < input.cursors.size(); ++cursor_index) {
-            if (GetCursorState(current, register_words,
-                               CursorId(static_cast<std::uint32_t>(cursor_index))) !=
-                GetCursorState(incoming, register_words,
-                               CursorId(static_cast<std::uint32_t>(cursor_index)))) {
+          for (; cursor_index < total_cursor_count; ++cursor_index) {
+            if (GetCursorState(current, register_words, cursor_index) !=
+                GetCursorState(incoming, register_words, cursor_index)) {
               break;
             }
           }
@@ -905,10 +952,19 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       SetBit(state.first(register_words), id.value(), true);
     };
     const auto cursor_state = [&](CursorId cursor) noexcept {
-      return GetCursorState(state, register_words, cursor);
+      return GetCursorState(state, register_words, cursor.value());
     };
     const auto set_cursor_state = [&](CursorId cursor, CursorState value) noexcept {
       SetCursorState(state, register_words, cursor, value);
+    };
+    const auto write_cursor_index = [&](WriteCursorId cursor) noexcept {
+      return input.cursors.size() + cursor.value();
+    };
+    const auto write_cursor_state = [&](WriteCursorId cursor) noexcept {
+      return GetCursorState(state, register_words, write_cursor_index(cursor));
+    };
+    const auto set_write_cursor_state = [&](WriteCursorId cursor, CursorState value) noexcept {
+      SetCursorState(state, register_words, write_cursor_index(cursor), value);
     };
     const auto fallthrough = [&]() -> ProgramResult<void> {
       if (instruction_index + 1 >= instruction_count) {
@@ -927,6 +983,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       if (cursor_state(cursor) != CursorState::kPositioned) {
         return std::unexpected(
             ErrorAt(ProgramErrorCode::kCursorNotPositioned, instruction_index, cursor.value()));
+      }
+      return {};
+    };
+    const auto require_write_open = [&](WriteCursorId cursor) -> ProgramResult<void> {
+      if (write_cursor_state(cursor) == CursorState::kClosed) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCursorNotOpen, instruction_index, cursor.value()));
       }
       return {};
     };
@@ -967,12 +1030,26 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OpenWriteCursorInstruction>) {
+            if (write_cursor_state(operation.cursor) != CursorState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyOpen,
+                                             instruction_index, operation.cursor.value()));
+            }
+            set_write_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CloseCursorInstruction>) {
             if (cursor_state(operation.cursor) == CursorState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyClosed,
                                              instruction_index, operation.cursor.value()));
             }
             set_cursor_state(operation.cursor, CursorState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CloseWriteCursorInstruction>) {
+            if (write_cursor_state(operation.cursor) == CursorState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyClosed,
+                                             instruction_index, operation.cursor.value()));
+            }
+            set_write_cursor_state(operation.cursor, CursorState::kClosed);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, RewindInstruction>) {
             if (auto result = require_open(operation.cursor); !result) {
@@ -1012,6 +1089,36 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResolveInsertRowIdInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.input); !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_value, operation.value_count);
+                !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, InsertTableInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.rowid); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.record); !result) {
+              return result;
+            }
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (auto result = require_initialized(operation.left); !result) {
@@ -1130,8 +1237,12 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "cast";
     case InstructionKind::kOpenRead:
       return "open_read";
+    case InstructionKind::kOpenWrite:
+      return "open_write";
     case InstructionKind::kClose:
       return "close";
+    case InstructionKind::kCloseWrite:
+      return "close_write";
     case InstructionKind::kRewind:
       return "rewind";
     case InstructionKind::kNext:
@@ -1142,6 +1253,12 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "read_field";
     case InstructionKind::kReadRowId:
       return "read_rowid";
+    case InstructionKind::kResolveInsertRowId:
+      return "resolve_insert_rowid";
+    case InstructionKind::kBuildTableRecord:
+      return "build_table_record";
+    case InstructionKind::kInsertTable:
+      return "insert_table";
     case InstructionKind::kCompare:
       return "compare";
     case InstructionKind::kCallScalar:

@@ -327,6 +327,27 @@ types:
 - increment the schema cookie; and
 - report a VM-local mutation count and user-insert rowid event.
 
+The first executable INSERT slice defines these concrete typed instructions:
+
+- `OpenWriteCursorInstruction` and `CloseWriteCursorInstruction` acquire and
+  release the table writer selected by a `WriteCursorDescriptor`;
+- `ResolveInsertRowIdInstruction` consumes one initialized register, validates
+  a non-NULL value losslessly as int64 or generates a rowid, and writes the
+  resulting integer to its output register;
+- `BuildTableRecordInstruction` consumes one contiguous initialized register
+  block whose size exactly matches the descriptor's stored columns, applies
+  affinity and NOT NULL checks to ordinary stored columns, stores NULL for the
+  already-resolved rowid alias, and writes encoded record bytes to its output
+  register; and
+- `InsertTableInstruction` consumes the resolved rowid and encoded record,
+  performs insert-only B-tree mutation, increments the VM-local change count,
+  and publishes the user-insert rowid event when requested by program
+  metadata.
+
+Program verification requires every INSERT operand and contiguous register
+range to be in bounds and initialized, and requires the referenced write
+cursor to be open for rowid resolution, record construction, and insertion.
+
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.

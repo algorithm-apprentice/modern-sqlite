@@ -16,6 +16,7 @@
 namespace modern_sqlite {
 
 class VmExecutionContext;
+class Vm;
 
 class Pager;
 enum class PagerState : std::uint8_t;
@@ -80,11 +81,13 @@ class TransactionWriter final {
  private:
   friend class transaction_detail::CoordinatorState;
   friend class VmExecutionContext;
+  friend class Vm;
 
   TransactionWriter(transaction_detail::CoordinatorState& state, std::uint64_t token) noexcept
       : state_(&state), token_(token) {}
 
   [[nodiscard]] Pager& pager() noexcept;
+  [[nodiscard]] Status RandomBytes(MutableByteView output);
 
   transaction_detail::CoordinatorState* state_;
   std::uint64_t token_;

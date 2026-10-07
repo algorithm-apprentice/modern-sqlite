@@ -527,6 +527,12 @@ add_executable(
   modern_sqlite_vm_oom_test
   unit/vm/vm_oom_test.cpp
 )
+target_include_directories(
+  modern_sqlite_vm_oom_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
+)
 target_link_libraries(
   modern_sqlite_vm_oom_test
   PRIVATE

@@ -233,6 +233,10 @@ struct RuntimeCursor {
   bool fields_decoded = false;
 };
 
+struct RuntimeWriteCursor {
+  std::optional<TableBtreeWriter> table;
+};
+
 }  // namespace
 
 struct Vm::Impl {
@@ -244,6 +248,7 @@ struct Vm::Impl {
         registers_(program.register_count()),
         parameters_(program.parameter_count()),
         cursors_(program.cursors().size()),
+        write_cursors_(program.write_cursors().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
@@ -445,6 +450,8 @@ struct Vm::Impl {
     execution_data_version_.reset();
     program_counter_ = 0;
     executed_instruction_count_ = 0;
+    change_count_ = 0;
+    last_insert_rowid_event_.reset();
     state_ = VmState::kReady;
     pager_ = nullptr;
     catalog_generation_ = 0;
@@ -962,6 +969,127 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenWriteCursorInstruction& operation) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "write cursor requires a transaction writer"));
+    }
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
+    if (!table.has_value()) {
+      return std::unexpected(std::move(table.error()));
+    }
+    WriteCursor(operation.cursor).table = std::move(*table);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const CloseWriteCursorInstruction& operation) {
+    WriteCursor(operation.cursor).table.reset();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const ResolveInsertRowIdInstruction& operation) {
+    const SqlValue& input = Register(operation.input);
+    if (input.type() != SqlValueType::kNull) {
+      const std::optional<std::int64_t> rowid = LosslessRowId(input);
+      if (!rowid.has_value()) {
+        return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+      }
+      return SetRegister(operation.output, SqlValue::Integer(*rowid));
+    }
+
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    auto has_last = cursor->Last();
+    if (!has_last.has_value()) {
+      return std::unexpected(std::move(has_last.error()));
+    }
+    if (!*has_last) {
+      return SetRegister(operation.output, SqlValue::Integer(1));
+    }
+    auto maximum = cursor->rowid();
+    if (!maximum.has_value()) {
+      return std::unexpected(std::move(maximum.error()));
+    }
+    if (*maximum < std::numeric_limits<std::int64_t>::max()) {
+      return SetRegister(operation.output, SqlValue::Integer(*maximum + 1));
+    }
+
+    constexpr std::uint64_t kRandomRowIdMask =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) >> 1U;
+    for (std::size_t attempt = 0; attempt < 100U; ++attempt) {
+      std::array<std::byte, sizeof(std::uint64_t)> random{};
+      Status generated = writer_->RandomBytes(MutableByteView{random});
+      if (!generated.has_value()) {
+        return std::unexpected(std::move(generated.error()));
+      }
+      const auto bits = std::bit_cast<std::uint64_t>(random);
+      const auto candidate = static_cast<std::int64_t>((bits & kRandomRowIdMask) + 1U);
+      auto found = cursor->Seek(candidate, BtreeSeekMode::kEqual);
+      if (!found.has_value()) {
+        return std::unexpected(std::move(found.error()));
+      }
+      if (!*found) {
+        return SetRegister(operation.output, SqlValue::Integer(candidate));
+      }
+    }
+    return std::unexpected(VmError(ErrorCode::kFull, "database or disk is full"));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const BuildTableRecordInstruction& operation) {
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    std::vector<SqlValue> values;
+    values.reserve(descriptor.columns.size());
+    for (std::size_t index = 0; index < descriptor.columns.size(); ++index) {
+      const WriteColumnDescriptor& column = descriptor.columns[index];
+      SqlValue value = column.rowid_alias
+                           ? SqlValue{}
+                           : ApplyAffinity(Register(RegisterId(operation.first_value.value() +
+                                                               static_cast<std::uint32_t>(index)))
+                                               .Clone(),
+                                           column.affinity);
+      if (!column.rowid_alias && column.not_null && value.type() == SqlValueType::kNull) {
+        return std::unexpected(VmError(ErrorCode::kConstraint, "NOT NULL constraint failed"));
+      }
+      values.push_back(std::move(value));
+    }
+    auto encoded = EncodeRecord(values, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    return SetRegister(operation.output, SqlValue::Blob(std::move(*encoded)));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertTableInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.table.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "insert used a closed write cursor"));
+    }
+    const std::optional<std::int64_t> rowid = LosslessRowId(Register(operation.rowid));
+    const std::optional<ByteView> record = Register(operation.record).blob_value();
+    if (!rowid.has_value() || !record.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    Status inserted = runtime.table->Insert(*rowid, *record, BtreeInsertMode::kInsertOnly);
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    }
+    ++change_count_;
+    if (program_->mutation_result().publishes_last_insert_rowid) {
+      last_insert_rowid_event_ = *rowid;
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
@@ -1118,6 +1246,10 @@ struct Vm::Impl {
     return cursors_[cursor_id.value()];
   }
 
+  [[nodiscard]] RuntimeWriteCursor& WriteCursor(WriteCursorId cursor_id) noexcept {
+    return write_cursors_[cursor_id.value()];
+  }
+
   [[nodiscard]] Result<SqlValue> ReadRecordField(RuntimeCursor& runtime,
                                                  std::uint32_t field_index) {
     if (!runtime.fields_decoded) {
@@ -1206,6 +1338,9 @@ struct Vm::Impl {
       cursor.ClearRecordCache();
       cursor.storage = std::monostate{};
     }
+    for (RuntimeWriteCursor& cursor : write_cursors_) {
+      cursor.table.reset();
+    }
   }
 
   const BytecodeProgram* program_;
@@ -1218,6 +1353,7 @@ struct Vm::Impl {
   std::vector<SqlValue> registers_;
   std::vector<SqlValue> parameters_;
   std::vector<RuntimeCursor> cursors_;
+  std::vector<RuntimeWriteCursor> write_cursors_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;
@@ -1226,6 +1362,8 @@ struct Vm::Impl {
   std::uint32_t row_first_ = 0;
   std::uint32_t row_count_ = 0;
   std::uint64_t executed_instruction_count_ = 0;
+  std::uint64_t change_count_ = 0;
+  std::optional<std::int64_t> last_insert_rowid_event_;
   std::optional<std::uint64_t> execution_data_version_;
 };
 
@@ -1339,6 +1477,14 @@ std::span<const SqlValue> Vm::bindings() const noexcept {
 
 std::uint64_t Vm::executed_instruction_count() const noexcept {
   return impl_ == nullptr ? 0U : impl_->executed_instruction_count_;
+}
+
+std::uint64_t Vm::change_count() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->change_count_;
+}
+
+std::optional<std::int64_t> Vm::last_insert_rowid_event() const noexcept {
+  return impl_ == nullptr ? std::nullopt : impl_->last_insert_rowid_event_;
 }
 
 }  // namespace modern_sqlite

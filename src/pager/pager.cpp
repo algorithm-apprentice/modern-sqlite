@@ -228,6 +228,8 @@ Pager::~Pager() {
   assert(cache_ == nullptr || cache_->pin_count() == 0);
 }
 
+Status Pager::RandomBytes(MutableByteView output) { return vfs_->RandomBytes(output); }
+
 Status Pager::BeginRead() {
   if (state_ == PagerState::kError) {
     return StoredError();

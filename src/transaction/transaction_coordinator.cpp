@@ -142,6 +142,14 @@ class CoordinatorState final {
     return *pager_;
   }
 
+  [[nodiscard]] Status WriterRandomBytes(std::uint64_t token, MutableByteView output) {
+    if (!active_.has_value() || active_->token != token ||
+        active_->access != StatementAccess::kWrite) {
+      return std::unexpected(Misuse("transaction writer capability is stale"));
+    }
+    return pager_->RandomBytes(output);
+  }
+
   [[nodiscard]] TransactionWorkCounters work_counters() const noexcept { return counters_; }
 
   [[nodiscard]] Result<std::uint64_t> ReserveStatementToken(TransactionStatementOptions options) {
@@ -880,6 +888,10 @@ Result<IndexBtreeWriter> TransactionWriter::OpenIndexBtree(
 }
 
 Pager& TransactionWriter::pager() noexcept { return state_->WriterPager(token_); }
+
+Status TransactionWriter::RandomBytes(MutableByteView output) {
+  return state_->WriterRandomBytes(token_, output);
+}
 
 Result<TransactionCoordinator> TransactionCoordinator::Open(std::unique_ptr<Pager> pager) {
   if (pager == nullptr) {

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include "modern_sqlite/base/result.hpp"
@@ -92,6 +93,8 @@ class Vm final {
   [[nodiscard]] std::span<const SqlValue> row() const noexcept;
   [[nodiscard]] std::span<const SqlValue> bindings() const noexcept;
   [[nodiscard]] std::uint64_t executed_instruction_count() const noexcept;
+  [[nodiscard]] std::uint64_t change_count() const noexcept;
+  [[nodiscard]] std::optional<std::int64_t> last_insert_rowid_event() const noexcept;
 
  private:
   struct Impl;

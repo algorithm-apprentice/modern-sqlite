@@ -194,6 +194,87 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   }
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedTableInsertInstructions) {
+  const std::array<Instruction, 5> instructions{
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      ResolveInsertRowIdInstruction{
+          .cursor = WriteCursor(0),
+          .input = Reg(0),
+          .output = Reg(1),
+      },
+      BuildTableRecordInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(1),
+          .value_count = 2,
+          .output = Reg(3),
+      },
+      InsertTableInstruction{
+          .cursor = WriteCursor(0),
+          .rowid = Reg(1),
+          .record = Reg(3),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+  };
+  const std::array<std::string_view, 5> names{
+      "open_write", "resolve_insert_rowid", "build_table_record", "insert_table", "close_write",
+  };
+  for (std::size_t index = 0; index < instructions.size(); ++index) {
+    EXPECT_EQ(names[index], InstructionKindName(InstructionKindOf(instructions[index])));
+  }
+
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kInsert;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.register_count = 4;
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = false,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = true,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.constants.emplace_back();
+  input.constants.push_back(SqlValue::Text("value"));
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(2)},
+      instructions[0],
+      instructions[1],
+      instructions[2],
+      instructions[3],
+      instructions[4],
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+
+  input.instructions[2] = OpenWriteCursorInstruction{.cursor = WriteCursor(1)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidCursor, VerifyError(input));
+  input.instructions[2] = instructions[0];
+
+  std::get<BuildTableRecordInstruction>(input.instructions[4]).value_count = 1;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+  input.instructions[4] = instructions[2];
+
+  std::get<ResolveInsertRowIdInstruction>(input.instructions[3]).input = Reg(3);
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, VerifyError(input));
+  input.instructions[3] = instructions[1];
+
+  input.instructions.erase(input.instructions.begin() + 2);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
