@@ -67,6 +67,27 @@ struct WritePagerCrashState {
 };
 
 template <std::size_t Capacity>
+struct WritePagerDurableFileSnapshot {
+  std::array<std::byte, Capacity> bytes{};
+  std::size_t size = 0;
+  bool present = false;
+  bool writes_are_durable = false;
+  std::optional<FileSize> reported_size{};
+};
+
+template <std::size_t Capacity>
+struct WritePagerCrashSnapshot {
+  WritePagerDurableFileSnapshot<Capacity> main;
+  WritePagerDurableFileSnapshot<Capacity> journal;
+  WritePagerDurableFileSnapshot<Capacity> subjournal;
+  WritePagerDurableFileSnapshot<Capacity> wal;
+  std::size_t mutation_count = 0;
+  std::size_t database_write_count = 0;
+  bool cut_triggered = false;
+  std::byte random_byte{0x5a};
+};
+
+template <std::size_t Capacity>
 class WritePagerMemoryFile final : public File {
  public:
   WritePagerMemoryFile(WritePagerFileState<Capacity>& state, WritePagerCrashState& crash,
@@ -307,6 +328,34 @@ class WritePagerMemoryVfs final : public Vfs {
     crash_.cut_triggered = false;
   }
 
+  [[nodiscard]] WritePagerCrashSnapshot<Capacity> CrashAndSnapshot() noexcept {
+    const std::size_t mutation_count = crash_.mutation_count;
+    const std::size_t database_write_count = crash_.database_write_count;
+    const bool cut_triggered = crash_.cut_triggered;
+    Crash();
+    return WritePagerCrashSnapshot<Capacity>{
+        .main = SnapshotFile(main_),
+        .journal = SnapshotFile(journal_),
+        .subjournal = SnapshotFile(subjournal_),
+        .wal = SnapshotFile(wal_),
+        .mutation_count = mutation_count,
+        .database_write_count = database_write_count,
+        .cut_triggered = cut_triggered,
+        .random_byte = random_byte_,
+    };
+  }
+
+  void LoadCrashSnapshot(const WritePagerCrashSnapshot<Capacity>& snapshot) noexcept {
+    LoadSnapshotFile(main_, snapshot.main);
+    LoadSnapshotFile(journal_, snapshot.journal);
+    LoadSnapshotFile(subjournal_, snapshot.subjournal);
+    LoadSnapshotFile(wal_, snapshot.wal);
+    crash_ = {};
+    journal_delete_count_ = 0U;
+    random_call_count_ = 0U;
+    random_byte_ = snapshot.random_byte;
+  }
+
   void LoadDatabase(ByteView bytes) noexcept {
     main_ = {};
     const std::size_t count = std::min(bytes.size(), main_.bytes.size());
@@ -364,6 +413,30 @@ class WritePagerMemoryVfs final : public Vfs {
     state.size = state.durable_size;
     state.present = state.durable_present;
     state.lock = DatabaseLock::kNone;
+  }
+
+  [[nodiscard]] static WritePagerDurableFileSnapshot<Capacity> SnapshotFile(
+      const WritePagerFileState<Capacity>& state) noexcept {
+    return WritePagerDurableFileSnapshot<Capacity>{
+        .bytes = state.bytes,
+        .size = state.size,
+        .present = state.present,
+        .writes_are_durable = state.writes_are_durable,
+        .reported_size = state.reported_size,
+    };
+  }
+
+  static void LoadSnapshotFile(WritePagerFileState<Capacity>& state,
+                               const WritePagerDurableFileSnapshot<Capacity>& snapshot) noexcept {
+    state = {};
+    state.bytes = snapshot.bytes;
+    state.durable_bytes = snapshot.bytes;
+    state.size = snapshot.size;
+    state.durable_size = snapshot.size;
+    state.present = snapshot.present;
+    state.durable_present = snapshot.present;
+    state.writes_are_durable = snapshot.writes_are_durable;
+    state.reported_size = snapshot.reported_size;
   }
 
   void Store32(std::size_t offset, std::uint32_t value) noexcept {
