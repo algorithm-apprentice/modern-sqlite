@@ -1207,6 +1207,303 @@ class Parser final {
     }};
   }
 
+  [[nodiscard]] StatementResult ParseInsert() {
+    const Token insert_keyword = Consume();
+    if (Peek().kind == TokenKind::kOr) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    TokenResult into = Expect(TokenKind::kInto, ParseExpectation::kStatement);
+    if (!into.has_value()) {
+      return std::unexpected(into.error());
+    }
+    NameResult table = ParseQualifiedName(2U, NameClass::kNm);
+    if (!table.has_value()) {
+      return std::unexpected(table.error());
+    }
+    if (Peek().kind == TokenKind::kAs) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+
+    std::vector<SourceSpan> columns;
+    if (ConsumeIf(TokenKind::kLeftParenthesis)) {
+      while (true) {
+        if (columns.size() >= options_.maximum_columns) {
+          return std::unexpected(ResourceLimit(Peek()));
+        }
+        TokenResult column = ParseNameToken(NameClass::kNm);
+        if (!column.has_value()) {
+          return std::unexpected(column.error());
+        }
+        columns.push_back(column->span);
+        if (!ConsumeIf(TokenKind::kComma)) {
+          break;
+        }
+      }
+      TokenResult right =
+          Expect(TokenKind::kRightParenthesis, ParseExpectation::kCommaOrRightParenthesis);
+      if (!right.has_value()) {
+        return std::unexpected(right.error());
+      }
+    }
+
+    InsertSource source;
+    if (Peek().kind == TokenKind::kDefault) {
+      const Token default_keyword = Consume();
+      TokenResult values_keyword = Expect(TokenKind::kValues, ParseExpectation::kStatement);
+      if (!values_keyword.has_value()) {
+        return std::unexpected(values_keyword.error());
+      }
+      source = InsertDefaultValuesSource{
+          .span = MakeSpan(default_keyword.span.begin(), values_keyword->span.end()),
+      };
+    } else {
+      if (Peek().kind == TokenKind::kSelect) {
+        return std::unexpected(Unsupported(Peek()));
+      }
+      TokenResult values_keyword = Expect(TokenKind::kValues, ParseExpectation::kStatement);
+      if (!values_keyword.has_value()) {
+        return std::unexpected(values_keyword.error());
+      }
+      TokenResult left = Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
+      if (!left.has_value()) {
+        return std::unexpected(left.error());
+      }
+      std::vector<ExpressionId> values;
+      while (true) {
+        if (values.size() >= options_.maximum_columns) {
+          return std::unexpected(ResourceLimit(Peek()));
+        }
+        ExpressionResult value = ParseGeneralExpression();
+        if (!value.has_value()) {
+          return std::unexpected(value.error());
+        }
+        values.push_back(*value);
+        if (!ConsumeIf(TokenKind::kComma)) {
+          break;
+        }
+      }
+      TokenResult right =
+          Expect(TokenKind::kRightParenthesis, ParseExpectation::kCommaOrRightParenthesis);
+      if (!right.has_value()) {
+        return std::unexpected(right.error());
+      }
+      if (Peek().kind == TokenKind::kComma || Peek().kind == TokenKind::kUnion ||
+          Peek().kind == TokenKind::kIntersect || Peek().kind == TokenKind::kExcept) {
+        return std::unexpected(Unsupported(Peek()));
+      }
+      source = InsertValuesSource{
+          .span = MakeSpan(values_keyword->span.begin(), right->span.end()),
+          .values = std::move(values),
+      };
+    }
+
+    if (Peek().kind == TokenKind::kReturning || Peek().kind == TokenKind::kOn) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{InsertStatement{
+        .span = MakeSpan(insert_keyword.span.begin(), last_consumed_end_),
+        .table = std::move(*table),
+        .columns = std::move(columns),
+        .source = std::move(source),
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseUpdate() {
+    const Token update_keyword = Consume();
+    if (Peek().kind == TokenKind::kOr) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    NameResult table = ParseQualifiedName(2U, NameClass::kNm);
+    if (!table.has_value()) {
+      return std::unexpected(table.error());
+    }
+    if (Peek().kind == TokenKind::kAs || Peek().kind == TokenKind::kIndexed ||
+        (Peek().kind == TokenKind::kNot && Peek(1).kind == TokenKind::kIndexed)) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    TokenResult set_keyword = Expect(TokenKind::kSet, ParseExpectation::kStatement);
+    if (!set_keyword.has_value()) {
+      return std::unexpected(set_keyword.error());
+    }
+
+    std::vector<UpdateAssignment> assignments;
+    while (true) {
+      if (assignments.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
+      if (Peek().kind == TokenKind::kLeftParenthesis) {
+        return std::unexpected(Unsupported(Peek()));
+      }
+      TokenResult column = ParseNameToken(NameClass::kNm);
+      if (!column.has_value()) {
+        return std::unexpected(column.error());
+      }
+      TokenResult equal = Expect(TokenKind::kEquality, ParseExpectation::kExpression);
+      if (!equal.has_value()) {
+        return std::unexpected(equal.error());
+      }
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      assignments.push_back(UpdateAssignment{
+          .span = MakeSpan(column->span.begin(), expressions_[expression->value].span.end()),
+          .column = column->span,
+          .expression = *expression,
+      });
+      if (!ConsumeIf(TokenKind::kComma)) {
+        break;
+      }
+    }
+
+    std::optional<ExpressionId> where;
+    if (ConsumeIf(TokenKind::kWhere)) {
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      where = *expression;
+    }
+    if (Peek().kind == TokenKind::kFrom || Peek().kind == TokenKind::kReturning ||
+        Peek().kind == TokenKind::kOrder || Peek().kind == TokenKind::kLimit) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{UpdateStatement{
+        .span = MakeSpan(update_keyword.span.begin(), last_consumed_end_),
+        .table = std::move(*table),
+        .assignments = std::move(assignments),
+        .where = where,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseDelete() {
+    const Token delete_keyword = Consume();
+    TokenResult from = Expect(TokenKind::kFrom, ParseExpectation::kStatement);
+    if (!from.has_value()) {
+      return std::unexpected(from.error());
+    }
+    NameResult table = ParseQualifiedName(2U, NameClass::kNm);
+    if (!table.has_value()) {
+      return std::unexpected(table.error());
+    }
+    if (Peek().kind == TokenKind::kAs || Peek().kind == TokenKind::kIndexed ||
+        (Peek().kind == TokenKind::kNot && Peek(1).kind == TokenKind::kIndexed)) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    std::optional<ExpressionId> where;
+    if (ConsumeIf(TokenKind::kWhere)) {
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      where = *expression;
+    }
+    if (Peek().kind == TokenKind::kReturning || Peek().kind == TokenKind::kOrder ||
+        Peek().kind == TokenKind::kLimit) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{DeleteStatement{
+        .span = MakeSpan(delete_keyword.span.begin(), last_consumed_end_),
+        .table = std::move(*table),
+        .where = where,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseBegin() {
+    const Token begin_keyword = Consume();
+    BeginTransactionMode mode = BeginTransactionMode::kDeferred;
+    if (ConsumeIf(TokenKind::kDeferred)) {
+      mode = BeginTransactionMode::kDeferred;
+    } else if (ConsumeIf(TokenKind::kImmediate)) {
+      mode = BeginTransactionMode::kImmediate;
+    } else if (Peek().kind == TokenKind::kExclusive) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    const bool transaction_keyword = ConsumeIf(TokenKind::kTransaction);
+    if (transaction_keyword && IsNameToken(Peek().kind, NameClass::kNm)) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{BeginTransactionStatement{
+        .span = MakeSpan(begin_keyword.span.begin(), last_consumed_end_),
+        .mode = mode,
+        .transaction_keyword = transaction_keyword,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseCommit() {
+    const Token keyword = Consume();
+    const bool transaction_keyword = ConsumeIf(TokenKind::kTransaction);
+    if (transaction_keyword && IsNameToken(Peek().kind, NameClass::kNm)) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{CommitTransactionStatement{
+        .span = MakeSpan(keyword.span.begin(), last_consumed_end_),
+        .syntax = keyword.kind == TokenKind::kEnd ? CommitTransactionSyntax::kEnd
+                                                  : CommitTransactionSyntax::kCommit,
+        .transaction_keyword = transaction_keyword,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseRollback() {
+    const Token rollback_keyword = Consume();
+    const bool transaction_keyword = ConsumeIf(TokenKind::kTransaction);
+    if (transaction_keyword && IsNameToken(Peek().kind, NameClass::kNm)) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    if (!ConsumeIf(TokenKind::kTo)) {
+      return Statement{RollbackTransactionStatement{
+          .span = MakeSpan(rollback_keyword.span.begin(), last_consumed_end_),
+          .transaction_keyword = transaction_keyword,
+      }};
+    }
+    const bool savepoint_keyword = ConsumeIf(TokenKind::kSavepoint);
+    TokenResult name = ParseNameToken(NameClass::kNm);
+    if (!name.has_value()) {
+      return std::unexpected(name.error());
+    }
+    if (Peek().kind == TokenKind::kDot) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{RollbackToSavepointStatement{
+        .span = MakeSpan(rollback_keyword.span.begin(), last_consumed_end_),
+        .name = name->span,
+        .transaction_keyword = transaction_keyword,
+        .savepoint_keyword = savepoint_keyword,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseSavepoint() {
+    const Token savepoint_keyword = Consume();
+    TokenResult name = ParseNameToken(NameClass::kNm);
+    if (!name.has_value()) {
+      return std::unexpected(name.error());
+    }
+    if (Peek().kind == TokenKind::kDot) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{SavepointStatement{
+        .span = MakeSpan(savepoint_keyword.span.begin(), last_consumed_end_),
+        .name = name->span,
+    }};
+  }
+
+  [[nodiscard]] StatementResult ParseRelease() {
+    const Token release_keyword = Consume();
+    const bool savepoint_keyword = ConsumeIf(TokenKind::kSavepoint);
+    TokenResult name = ParseNameToken(NameClass::kNm);
+    if (!name.has_value()) {
+      return std::unexpected(name.error());
+    }
+    if (Peek().kind == TokenKind::kDot) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    return Statement{ReleaseSavepointStatement{
+        .span = MakeSpan(release_keyword.span.begin(), last_consumed_end_),
+        .name = name->span,
+        .savepoint_keyword = savepoint_keyword,
+    }};
+  }
+
   [[nodiscard]] std::expected<bool, ParseError> ParseIfNotExists() {
     if (!ConsumeIf(TokenKind::kIf)) {
       return false;
@@ -1924,6 +2221,30 @@ class Parser final {
     }
     if (token.kind == TokenKind::kCreate) {
       return ParseCreate();
+    }
+    if (token.kind == TokenKind::kInsert) {
+      return ParseInsert();
+    }
+    if (token.kind == TokenKind::kUpdate) {
+      return ParseUpdate();
+    }
+    if (token.kind == TokenKind::kDelete) {
+      return ParseDelete();
+    }
+    if (token.kind == TokenKind::kBegin) {
+      return ParseBegin();
+    }
+    if (token.kind == TokenKind::kCommit || token.kind == TokenKind::kEnd) {
+      return ParseCommit();
+    }
+    if (token.kind == TokenKind::kRollback) {
+      return ParseRollback();
+    }
+    if (token.kind == TokenKind::kSavepoint) {
+      return ParseSavepoint();
+    }
+    if (token.kind == TokenKind::kRelease) {
+      return ParseRelease();
     }
     if (IsUnsupportedStatementStart(token.kind)) {
       return std::unexpected(Unsupported(token));

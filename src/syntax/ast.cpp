@@ -135,6 +135,24 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
   return false;
 }
 
+[[nodiscard]] constexpr bool IsValid(BeginTransactionMode value) noexcept {
+  switch (value) {
+    case BeginTransactionMode::kDeferred:
+    case BeginTransactionMode::kImmediate:
+      return true;
+  }
+  return false;
+}
+
+[[nodiscard]] constexpr bool IsValid(CommitTransactionSyntax value) noexcept {
+  switch (value) {
+    case CommitTransactionSyntax::kCommit:
+    case CommitTransactionSyntax::kEnd:
+      return true;
+  }
+  return false;
+}
+
 class Validator final {
  public:
   Validator(std::size_t source_size, std::span<const Expression> expressions)
@@ -162,6 +180,29 @@ class Validator final {
             [this](const SelectStatement& select) { return ValidateSelect(select); },
             [this](const CreateTableStatement& table) { return ValidateCreateTable(table); },
             [this](const CreateIndexStatement& index) { return ValidateCreateIndex(index); },
+            [this](const InsertStatement& insert) { return ValidateInsert(insert); },
+            [this](const UpdateStatement& update) { return ValidateUpdate(update); },
+            [this](const DeleteStatement& delete_statement) {
+              return ValidateDelete(delete_statement);
+            },
+            [this](const BeginTransactionStatement& transaction) {
+              return ValidateBegin(transaction);
+            },
+            [this](const CommitTransactionStatement& transaction) {
+              return ValidateCommit(transaction);
+            },
+            [this](const RollbackTransactionStatement& transaction) {
+              return ValidateTransaction(transaction.span);
+            },
+            [this](const SavepointStatement& savepoint) {
+              return ValidateSavepoint(savepoint.span, savepoint.name);
+            },
+            [this](const ReleaseSavepointStatement& savepoint) {
+              return ValidateSavepoint(savepoint.span, savepoint.name);
+            },
+            [this](const RollbackToSavepointStatement& savepoint) {
+              return ValidateSavepoint(savepoint.span, savepoint.name);
+            },
         },
         statement);
     if (!statement_status.has_value()) {
@@ -788,6 +829,188 @@ class Validator final {
     }
     if (index.where.has_value()) {
       return ReferenceExpression(*index.where, index.span, std::nullopt);
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateInsert(const InsertStatement& insert) {
+    const Status root_status = ValidateRootSpan(insert.span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    const Status table_status = ValidateName(insert.table, insert.span, 2U);
+    if (!table_status.has_value()) {
+      return table_status;
+    }
+    ByteOffset previous_end = insert.table.span.end();
+    for (const SourceSpan column : insert.columns) {
+      const Status column_status = ValidateContainedSpan(column, insert.span);
+      if (!column_status.has_value()) {
+        return column_status;
+      }
+      if (column.begin() < previous_end) {
+        return Misuse("insert columns must be in source order");
+      }
+      previous_end = column.end();
+    }
+    if (insert.source.valueless_by_exception()) {
+      return Misuse("insert source variant must contain a value");
+    }
+    const SourceSpan source_span =
+        std::visit([](const auto& source) { return source.span; }, insert.source);
+    if (source_span.begin() < previous_end) {
+      return Misuse("insert source must follow its target columns");
+    }
+    const Status source_status = std::visit(
+        Overloaded{
+            [this, &insert](const InsertValuesSource& values) {
+              const Status span_status = ValidateContainedSpan(values.span, insert.span);
+              if (!span_status.has_value()) {
+                return span_status;
+              }
+              if (values.values.empty()) {
+                return Misuse("insert values source must not be empty");
+              }
+              ByteOffset previous_value_end = values.span.begin();
+              for (const ExpressionId expression : values.values) {
+                const Status status = ReferenceExpression(expression, values.span, std::nullopt);
+                if (!status.has_value()) {
+                  return status;
+                }
+                const SourceSpan expression_span = expressions_[expression.value].span;
+                if (expression_span.begin() < previous_value_end) {
+                  return Misuse("insert values must be in source order");
+                }
+                previous_value_end = expression_span.end();
+              }
+              return Status{};
+            },
+            [this, &insert](const InsertDefaultValuesSource& defaults) {
+              return ValidateContainedSpan(defaults.span, insert.span);
+            },
+        },
+        insert.source);
+    if (!source_status.has_value()) {
+      return source_status;
+    }
+    if (source_span.end() != insert.span.end()) {
+      return Misuse("insert source must end the statement");
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateUpdate(const UpdateStatement& update) {
+    const Status root_status = ValidateRootSpan(update.span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    const Status table_status = ValidateName(update.table, update.span, 2U);
+    if (!table_status.has_value()) {
+      return table_status;
+    }
+    if (update.assignments.empty()) {
+      return Misuse("update statement requires at least one assignment");
+    }
+    ByteOffset previous_end = update.table.span.end();
+    for (const UpdateAssignment& assignment : update.assignments) {
+      const Status span_status = ValidateContainedSpan(assignment.span, update.span);
+      if (!span_status.has_value()) {
+        return span_status;
+      }
+      const Status column_status = ValidateContainedSpan(assignment.column, assignment.span);
+      if (!column_status.has_value()) {
+        return column_status;
+      }
+      if (assignment.span.begin() < previous_end) {
+        return Misuse("update assignments must be in source order");
+      }
+      if (assignment.column.begin() != assignment.span.begin()) {
+        return Misuse("update assignment must begin with its column");
+      }
+      const Status expression_status =
+          ReferenceExpression(assignment.expression, assignment.span, std::nullopt);
+      if (!expression_status.has_value()) {
+        return expression_status;
+      }
+      const SourceSpan expression_span = expressions_[assignment.expression.value].span;
+      if (assignment.column.end() > expression_span.begin() ||
+          expression_span.end() != assignment.span.end()) {
+        return Misuse("update assignment spans are not ordered");
+      }
+      previous_end = assignment.span.end();
+    }
+    if (update.where.has_value()) {
+      const Status where_status = ReferenceExpression(*update.where, update.span, std::nullopt);
+      if (!where_status.has_value()) {
+        return where_status;
+      }
+      const SourceSpan where_span = expressions_[update.where->value].span;
+      if (where_span.begin() < previous_end || where_span.end() != update.span.end()) {
+        return Misuse("update predicate must follow assignments and end the statement");
+      }
+      return {};
+    }
+    if (previous_end != update.span.end()) {
+      return Misuse("final update assignment must end the statement");
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateDelete(const DeleteStatement& delete_statement) {
+    const Status root_status = ValidateRootSpan(delete_statement.span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    const Status table_status = ValidateName(delete_statement.table, delete_statement.span, 2U);
+    if (!table_status.has_value()) {
+      return table_status;
+    }
+    if (delete_statement.where.has_value()) {
+      const Status where_status =
+          ReferenceExpression(*delete_statement.where, delete_statement.span, std::nullopt);
+      if (!where_status.has_value()) {
+        return where_status;
+      }
+      const SourceSpan where_span = expressions_[delete_statement.where->value].span;
+      if (where_span.begin() < delete_statement.table.span.end() ||
+          where_span.end() != delete_statement.span.end()) {
+        return Misuse("delete predicate must follow the table and end the statement");
+      }
+      return {};
+    }
+    if (delete_statement.table.span.end() != delete_statement.span.end()) {
+      return Misuse("delete table must end a predicate-free statement");
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateTransaction(SourceSpan span) const { return ValidateRootSpan(span); }
+
+  [[nodiscard]] Status ValidateBegin(const BeginTransactionStatement& transaction) const {
+    if (!IsValid(transaction.mode)) {
+      return Misuse("begin-transaction mode is invalid");
+    }
+    return ValidateTransaction(transaction.span);
+  }
+
+  [[nodiscard]] Status ValidateCommit(const CommitTransactionStatement& transaction) const {
+    if (!IsValid(transaction.syntax)) {
+      return Misuse("commit-transaction syntax is invalid");
+    }
+    return ValidateTransaction(transaction.span);
+  }
+
+  [[nodiscard]] Status ValidateSavepoint(SourceSpan span, SourceSpan name) const {
+    const Status root_status = ValidateRootSpan(span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    const Status name_status = ValidateContainedSpan(name, span);
+    if (!name_status.has_value()) {
+      return name_status;
+    }
+    if (name.begin() <= span.begin() || name.end() != span.end()) {
+      return Misuse("savepoint name must be the final statement component");
     }
     return {};
   }

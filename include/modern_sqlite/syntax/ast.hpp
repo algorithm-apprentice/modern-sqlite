@@ -290,7 +290,93 @@ struct CreateIndexStatement {
   std::optional<ExpressionId> where{};
 };
 
-using Statement = std::variant<SelectStatement, CreateTableStatement, CreateIndexStatement>;
+struct InsertValuesSource {
+  SourceSpan span;
+  std::vector<ExpressionId> values;
+};
+
+struct InsertDefaultValuesSource {
+  SourceSpan span;
+};
+
+using InsertSource = std::variant<InsertValuesSource, InsertDefaultValuesSource>;
+
+struct InsertStatement {
+  SourceSpan span;
+  QualifiedName table;
+  std::vector<SourceSpan> columns;
+  InsertSource source;
+};
+
+struct UpdateAssignment {
+  SourceSpan span;
+  SourceSpan column;
+  ExpressionId expression;
+};
+
+struct UpdateStatement {
+  SourceSpan span;
+  QualifiedName table;
+  std::vector<UpdateAssignment> assignments;
+  std::optional<ExpressionId> where{};
+};
+
+struct DeleteStatement {
+  SourceSpan span;
+  QualifiedName table;
+  std::optional<ExpressionId> where{};
+};
+
+enum class BeginTransactionMode : std::uint8_t {
+  kDeferred,
+  kImmediate,
+};
+
+enum class CommitTransactionSyntax : std::uint8_t {
+  kCommit,
+  kEnd,
+};
+
+struct BeginTransactionStatement {
+  SourceSpan span;
+  BeginTransactionMode mode = BeginTransactionMode::kDeferred;
+  bool transaction_keyword = false;
+};
+
+struct CommitTransactionStatement {
+  SourceSpan span;
+  CommitTransactionSyntax syntax = CommitTransactionSyntax::kCommit;
+  bool transaction_keyword = false;
+};
+
+struct RollbackTransactionStatement {
+  SourceSpan span;
+  bool transaction_keyword = false;
+};
+
+struct SavepointStatement {
+  SourceSpan span;
+  SourceSpan name;
+};
+
+struct ReleaseSavepointStatement {
+  SourceSpan span;
+  SourceSpan name;
+  bool savepoint_keyword = false;
+};
+
+struct RollbackToSavepointStatement {
+  SourceSpan span;
+  SourceSpan name;
+  bool transaction_keyword = false;
+  bool savepoint_keyword = false;
+};
+
+using Statement =
+    std::variant<SelectStatement, CreateTableStatement, CreateIndexStatement, InsertStatement,
+                 UpdateStatement, DeleteStatement, BeginTransactionStatement,
+                 CommitTransactionStatement, RollbackTransactionStatement, SavepointStatement,
+                 ReleaseSavepointStatement, RollbackToSavepointStatement>;
 
 class SyntaxTree final {
  public:

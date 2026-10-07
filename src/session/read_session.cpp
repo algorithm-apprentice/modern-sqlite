@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "modern_sqlite/binder/bound_select.hpp"
@@ -723,6 +724,10 @@ Result<ReadPrepareOutput> ReadSession::Prepare(Utf8View source) {
           .statement = std::nullopt,
           .next_offset = parsed->next_offset,
       };
+    }
+    if (!std::holds_alternative<SelectStatement>(parsed->tree->statement())) {
+      return std::unexpected(
+          SessionError(ErrorCode::kGeneric, "read session only supports SELECT statements"));
     }
 
     const std::size_t consumed = parsed->next_offset.value();
