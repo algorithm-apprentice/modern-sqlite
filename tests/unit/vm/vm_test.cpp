@@ -297,6 +297,79 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram TableDeleteProgram(SqlValue rowid) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kDelete;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result.publishes_changes = true;
+  input.register_count = 1;
+  input.constants.push_back(std::move(rowid));
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .columns =
+          {
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kInteger,
+                  .not_null = true,
+                  .rowid_alias = true,
+                  .default_value = std::nullopt,
+              },
+              WriteColumnDescriptor{
+                  .affinity = TypeAffinity::kText,
+                  .not_null = false,
+                  .rowid_alias = false,
+                  .default_value = std::nullopt,
+              },
+          },
+      .rowid_alias = 0,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      DeleteTableInstruction{.cursor = WriteCursor(0), .rowid = Reg(0)},
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram TableSeekProgram(SqlValue key, RowIdSeekMode mode) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.register_count = 2;
+  input.constants.push_back(std::move(key));
+  input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns = {},
+  });
+  input.result_columns.push_back(ResultColumnMetadata{
+      .name = "rowid",
+      .declared_type = "INTEGER",
+      .affinity = TypeAffinity::kInteger,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      SeekRowIdInstruction{
+          .cursor = Cursor(0),
+          .key = Reg(0),
+          .missing_target = Address(7),
+          .mode = mode,
+      },
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 void InsertDirectWriteRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid, std::string value) {
   TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
   TransactionStatement statement = TakeValue(
@@ -660,6 +733,75 @@ TEST(VmWriteTest, GeneratesRowidsAcrossNegativeAndRandomBoundaries) {
     RequireStatus(vm.DetachExecutionContext());
     RequireStatus(statement.Rollback());
   }
+}
+
+TEST(VmWriteTest, DeletesRowsAndSeeksStrictlyGreaterRowids) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, 1, "first");
+  InsertDirectWriteRow(vfs, 3, "third");
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableDeleteProgram(SqlValue::Integer(1));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(1U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableDeleteProgram(SqlValue::Integer(2));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    const BytecodeProgram program = TableDeleteProgram(SqlValue::Text("not-rowid"));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto deleted = vm.Step();
+    ASSERT_FALSE(deleted.has_value());
+    EXPECT_EQ(ErrorCode::kTypeMismatch, deleted.error().code());
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
+  }
+
+  {
+    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    const BytecodeProgram program = TableSeekProgram(SqlValue::Integer(1), RowIdSeekMode::kGreater);
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(1U, vm.row().size());
+    EXPECT_EQ(3, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(pager->EndRead());
+  }
+
+  const auto rows = ReadWriteTableRows(vfs);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0].first);
+  ExpectText(rows[0].second[1], "third");
 }
 
 TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {

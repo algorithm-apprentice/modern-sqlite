@@ -260,10 +260,16 @@ struct NextInstruction {
   InstructionAddress next_target;
 };
 
+enum class RowIdSeekMode : std::uint8_t {
+  kEqual,
+  kGreater,
+};
+
 struct SeekRowIdInstruction {
   CursorId cursor;
   RegisterId key;
   InstructionAddress missing_target;
+  RowIdSeekMode mode = RowIdSeekMode::kEqual;
 };
 
 struct ReadFieldInstruction {
@@ -294,6 +300,11 @@ struct InsertTableInstruction {
   WriteCursorId cursor;
   RegisterId rowid;
   RegisterId record;
+};
+
+struct DeleteTableInstruction {
+  WriteCursorId cursor;
+  RegisterId rowid;
 };
 
 struct CompareInstruction {
@@ -334,8 +345,8 @@ using Instruction = std::variant<
     RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction, OpenWriteCursorInstruction,
     CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
     SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
-    BuildTableRecordInstruction, InsertTableInstruction, CompareInstruction, CallScalarInstruction,
-    JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+    BuildTableRecordInstruction, InsertTableInstruction, DeleteTableInstruction, CompareInstruction,
+    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -362,6 +373,7 @@ enum class InstructionKind : std::uint8_t {
   kResolveInsertRowId,
   kBuildTableRecord,
   kInsertTable,
+  kDeleteTable,
   kCompare,
   kCallScalar,
   kJump,
@@ -577,8 +589,9 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> Append(Instruction instruction);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitRewind(CursorId cursor, Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNext(CursorId cursor, Label next_target);
-  [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(CursorId cursor, RegisterId key,
-                                                                Label missing_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
+      CursorId cursor, RegisterId key, Label missing_target,
+      RowIdSeekMode mode = RowIdSeekMode::kEqual);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJump(Label target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJumpIf(RegisterId input,
                                                              JumpCondition condition, Label target);
@@ -599,6 +612,7 @@ class ProgramBuilder final {
     CursorId cursor;
     RegisterId key;
     Label target;
+    RowIdSeekMode mode;
   };
   struct PendingJump {
     Label target;

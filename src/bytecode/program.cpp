@@ -174,6 +174,15 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(RowIdSeekMode mode) noexcept {
+  switch (mode) {
+    case RowIdSeekMode::kEqual:
+    case RowIdSeekMode::kGreater:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(UnaryOperation operation) noexcept {
   switch (operation) {
     case UnaryOperation::kNegate:
@@ -682,6 +691,9 @@ template <typename T>
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
             }
+            if (!IsValid(operation.mode)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+            }
             if (input.cursors[operation.cursor.value()].storage != CursorStorageKind::kRowIdTable) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kRowIdOperationRequiresRowIdTable,
                                              index, operation.cursor.value()));
@@ -739,6 +751,11 @@ template <typename T>
               return result;
             }
             return check_register(operation.record, index);
+          } else if constexpr (std::is_same_v<Operation, DeleteTableInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            return check_register(operation.rowid, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1120,6 +1137,14 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, DeleteTableInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.rowid); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (auto result = require_initialized(operation.left); !result) {
               return result;
@@ -1259,6 +1284,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "build_table_record";
     case InstructionKind::kInsertTable:
       return "insert_table";
+    case InstructionKind::kDeleteTable:
+      return "delete_table";
     case InstructionKind::kCompare:
       return "compare";
     case InstructionKind::kCallScalar:
@@ -1672,11 +1699,13 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitNext(CursorId cursor, Labe
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor, RegisterId key,
-                                                                Label missing_target) {
+                                                                Label missing_target,
+                                                                RowIdSeekMode mode) {
   if (auto checked = CheckLabel(missing_target); !checked) {
     return std::unexpected(checked.error());
   }
-  return AppendPending(PendingSeekRowId{.cursor = cursor, .key = key, .target = missing_target});
+  return AppendPending(
+      PendingSeekRowId{.cursor = cursor, .key = key, .target = missing_target, .mode = mode});
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitJump(Label target) {
@@ -1750,6 +1779,7 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
                 .cursor = operation.cursor,
                 .key = operation.key,
                 .missing_target = target(operation.target),
+                .mode = operation.mode,
             };
           } else if constexpr (std::is_same_v<Operation, PendingJump>) {
             return JumpInstruction{.target = target(operation.target)};
