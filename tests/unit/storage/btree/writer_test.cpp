@@ -9,11 +9,13 @@
 #include <ranges>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -44,6 +46,205 @@ void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) {
       std::span<std::byte, sizeof(std::uint32_t)>{
           bytes.data() + static_cast<std::ptrdiff_t>(offset), sizeof(std::uint32_t)},
       value);
+}
+
+enum class CrashOperation : std::uint8_t {
+  kInsert,
+  kOverflowInsert,
+  kAppendSeven,
+  kDelete,
+  kClear,
+};
+
+struct CrashFixture {
+  ByteBuffer image;
+  PageNumber root_page;
+  struct Row {
+    std::int64_t rowid;
+    std::size_t payload_size;
+    std::byte fill;
+
+    bool operator==(const Row&) const = default;
+  };
+  std::vector<Row> rows;
+};
+
+struct RecoveredCrashState {
+  ByteBuffer image;
+  std::vector<CrashFixture::Row> rows;
+};
+
+[[nodiscard]] CrashFixture MakeCrashFixture(std::size_t row_count) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error("failed to open crash fixture pager");
+  }
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  PageNumber root_page;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    root_page = table.root_page();
+    for (std::size_t index = 0U; index < row_count; ++index) {
+      const auto rowid = static_cast<std::int64_t>(index) + 1;
+      ByteBuffer payload{ByteCount{380}};
+      std::ranges::fill(payload.mutable_view(),
+                        static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
+      RequireStatus(table.Insert(rowid, payload.view()));
+    }
+  }
+  RequireStatus(pager->Commit());
+  RequireStatus(pager->EndRead());
+  std::vector<CrashFixture::Row> rows;
+  for (std::size_t index = 0U; index < row_count; ++index) {
+    const auto rowid = static_cast<std::int64_t>(index) + 1;
+    rows.push_back(CrashFixture::Row{
+        .rowid = rowid,
+        .payload_size = 380U,
+        .fill = static_cast<std::byte>(static_cast<std::uint8_t>(rowid)),
+    });
+  }
+  return CrashFixture{
+      .image = ByteBuffer::CopyOf(vfs.database_bytes()),
+      .root_page = root_page,
+      .rows = std::move(rows),
+  };
+}
+
+[[nodiscard]] bool ApplyCrashOperation(test::WritePagerFixedVfs& vfs, PageNumber root_page,
+                                       CrashOperation operation) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  auto session = BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return false;
+  }
+  auto table = session->OpenTableBtree(root_page);
+  if (!table.has_value()) {
+    return false;
+  }
+  Status mutation;
+  switch (operation) {
+    case CrashOperation::kInsert: {
+      ByteBuffer payload{ByteCount{380}};
+      std::ranges::fill(payload.mutable_view(), std::byte{0x02});
+      mutation = table->Insert(2, payload.view());
+      break;
+    }
+    case CrashOperation::kOverflowInsert: {
+      ByteBuffer payload{ByteCount{2'000}};
+      std::ranges::fill(payload.mutable_view(), std::byte{0x02});
+      mutation = table->Insert(2, payload.view());
+      break;
+    }
+    case CrashOperation::kAppendSeven: {
+      ByteBuffer payload{ByteCount{380}};
+      std::ranges::fill(payload.mutable_view(), std::byte{0x07});
+      mutation = table->Insert(7, payload.view());
+      break;
+    }
+    case CrashOperation::kDelete: {
+      auto deleted = table->Delete(2);
+      mutation = deleted.has_value() && *deleted
+                     ? Status{}
+                     : Status{std::unexpected(
+                           deleted.has_value()
+                               ? Error::Create(ErrorCode::kNotFound, "crash delete row is absent")
+                               : std::move(deleted.error()))};
+      break;
+    }
+    case CrashOperation::kClear: {
+      auto cleared = table->Clear();
+      mutation =
+          cleared.has_value() ? Status{} : Status{std::unexpected(std::move(cleared.error()))};
+      break;
+    }
+  }
+  if (!mutation.has_value() || !pager->Commit().has_value()) {
+    return false;
+  }
+  return pager->EndRead().has_value();
+}
+
+[[nodiscard]] std::vector<CrashFixture::Row> ReadCrashRows(test::WritePagerFixedVfs& vfs,
+                                                           PageNumber root_page) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error("failed to reopen crashed pager");
+  }
+  RequireStatus(pager->BeginRead());
+  std::vector<CrashFixture::Row> rows;
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    if (TakeValue(cursor.First())) {
+      do {
+        const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+        const std::byte fill = payload.empty() ? std::byte{0} : payload.view()[0];
+        if (!std::ranges::all_of(payload.view(),
+                                 [fill](std::byte value) { return value == fill; })) {
+          throw std::runtime_error("crash recovery produced a corrupt payload");
+        }
+        rows.push_back(CrashFixture::Row{
+            .rowid = TakeValue(cursor.rowid()),
+            .payload_size = payload.size().value(),
+            .fill = fill,
+        });
+      } while (TakeValue(cursor.Next()));
+    }
+  }
+  RequireStatus(pager->EndRead());
+  return rows;
+}
+
+[[nodiscard]] RecoveredCrashState RecoverCrashState(test::WritePagerFixedVfs& vfs,
+                                                    PageNumber root_page) {
+  vfs.Crash();
+  const std::vector<CrashFixture::Row> first = ReadCrashRows(vfs, root_page);
+  vfs.Crash();
+  const std::vector<CrashFixture::Row> second = ReadCrashRows(vfs, root_page);
+  if (first != second) {
+    throw std::runtime_error("hot recovery was not durable across a second crash");
+  }
+  return RecoveredCrashState{
+      .image = ByteBuffer::CopyOf(vfs.database_bytes()),
+      .rows = second,
+  };
+}
+
+void VerifyCrashCuts(const CrashFixture& fixture, CrashOperation operation,
+                     const std::vector<CrashFixture::Row>& committed_rows) {
+  for (const bool writes_are_durable : {false, true}) {
+    SCOPED_TRACE(writes_are_durable ? "durable-writes" : "sync-only");
+    test::WritePagerFixedVfs baseline{false};
+    baseline.LoadDatabase(fixture.image.view());
+    baseline.SetDatabaseWritesDurable(writes_are_durable);
+    baseline.ArmCrashCut(std::nullopt);
+    ASSERT_TRUE(ApplyCrashOperation(baseline, fixture.root_page, operation));
+    const std::size_t mutation_count = baseline.mutation_count();
+    const ByteBuffer committed_image = ByteBuffer::CopyOf(baseline.database_bytes());
+    ASSERT_GT(mutation_count, 0U);
+
+    for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
+      SCOPED_TRACE(cut);
+      test::WritePagerFixedVfs vfs{false};
+      vfs.LoadDatabase(fixture.image.view());
+      vfs.SetDatabaseWritesDurable(writes_are_durable);
+      vfs.ArmCrashCut(cut);
+      static_cast<void>(ApplyCrashOperation(vfs, fixture.root_page, operation));
+      const RecoveredCrashState recovered = RecoverCrashState(vfs, fixture.root_page);
+      const bool old_state = recovered.rows == fixture.rows &&
+                             std::ranges::equal(recovered.image.view(), fixture.image.view());
+      const bool committed_state =
+          recovered.rows == committed_rows &&
+          std::ranges::equal(recovered.image.view(), committed_image.view());
+      EXPECT_TRUE(old_state || committed_state);
+    }
+  }
 }
 
 TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
@@ -274,6 +475,49 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     RequireStatus(pager->ClaimWriteCoordinator());
     RequireStatus(pager->Rollback());
   }
+}
+
+TEST(BtreeWriterCrash, EveryStructuralInsertCutRecoversOldOrCommittedRows) {
+  const CrashFixture fixture = MakeCrashFixture(1U);
+  auto committed = fixture.rows;
+  committed.push_back(CrashFixture::Row{
+      .rowid = 2,
+      .payload_size = 380U,
+      .fill = std::byte{0x02},
+  });
+  VerifyCrashCuts(fixture, CrashOperation::kInsert, committed);
+}
+
+TEST(BtreeWriterCrash, EveryOverflowInsertCutRecoversOldOrCommittedRows) {
+  const CrashFixture fixture = MakeCrashFixture(1U);
+  auto committed = fixture.rows;
+  committed.push_back(CrashFixture::Row{
+      .rowid = 2,
+      .payload_size = 2'000U,
+      .fill = std::byte{0x02},
+  });
+  VerifyCrashCuts(fixture, CrashOperation::kOverflowInsert, committed);
+}
+
+TEST(BtreeWriterCrash, EveryQuickBalanceCutRecoversOldOrCommittedRows) {
+  const CrashFixture fixture = MakeCrashFixture(6U);
+  auto committed = fixture.rows;
+  committed.push_back(CrashFixture::Row{
+      .rowid = 7,
+      .payload_size = 380U,
+      .fill = std::byte{0x07},
+  });
+  VerifyCrashCuts(fixture, CrashOperation::kAppendSeven, committed);
+}
+
+TEST(BtreeWriterCrash, EveryDeleteCutRecoversOldOrCommittedRows) {
+  const CrashFixture fixture = MakeCrashFixture(2U);
+  VerifyCrashCuts(fixture, CrashOperation::kDelete, {fixture.rows.front()});
+}
+
+TEST(BtreeWriterCrash, EveryClearCutRecoversOldOrCommittedRows) {
+  const CrashFixture fixture = MakeCrashFixture(3U);
+  VerifyCrashCuts(fixture, CrashOperation::kClear, {});
 }
 
 }  // namespace
