@@ -504,6 +504,32 @@ collection required to prevent a moved row from being revisited.
 UPDATE programs publish change-count metadata, never publish a
 last-insert-rowid event, and have no result columns.
 
+Stable rowid collection uses one VM-owned ordered `std::vector<int64_t>` and
+four typed instructions:
+
+- `ClearRowIdListInstruction`;
+- `AppendRowIdListInstruction`;
+- `RewindRowIdListInstruction`; and
+- `NextRowIdListInstruction`.
+
+The list is statement-local VM state, not a general temporary table, sorter,
+or public container. `Clear` establishes an empty list. `Append` losslessly
+converts one initialized register and preserves append order. `Rewind`
+publishes the first rowid or branches when empty. `Next` publishes the next
+rowid and branches back to the caller's loop while entries remain.
+
+The verifier tracks the list as one synthetic cursor-like lifecycle:
+closed before `Clear`, unpositioned while collecting, and positioned while
+iterating. It rejects append/rewind before initialization, append while
+iterating, next before positioning, incompatible control-flow joins, invalid
+registers, and invalid branch targets.
+
+The VM bounds `list.size() * sizeof(int64_t)` by
+`VmLimits::maximum_value_bytes`, returns `kTooLarge` before exceeding that
+limit, propagates allocation failure, preserves deterministic append order,
+and clears iteration state during halt, error cleanup, and reset. Reset also
+empties the list before repeated execution.
+
 VM construction remains preparation-scoped and storage-independent. The VM
 owns its immutable program, bindings, registers, cursor slots, and resolved
 function/collation registries across reset and repeated execution.

@@ -593,6 +593,88 @@ TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   EXPECT_EQ(OnlyRowValue(vm).type(), SqlValueType::kNull);
 }
 
+TEST_F(VmTest, CollectsAndIteratesBoundedRowidLists) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(3));
+  constants.push_back(SqlValue::Integer(1));
+  constants.push_back(SqlValue::Integer(2));
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 2, 0, std::move(constants), {}, {}, {ResultColumn("rowid")},
+                   {
+                       ClearRowIdListInstruction{},
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       RewindRowIdListInstruction{
+                           .output = Reg(1),
+                           .empty_target = Address(11),
+                       },
+                       ResultRowInstruction{.first = Reg(1), .count = 1},
+                       NextRowIdListInstruction{
+                           .output = Reg(1),
+                           .next_target = Address(8),
+                       },
+                       HaltInstruction{},
+                       HaltInstruction{},
+                   });
+
+  Vm vm = CreateCoreVm(program);
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(3, OnlyRowValue(vm).integer_value());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(1, OnlyRowValue(vm).integer_value());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(2, OnlyRowValue(vm).integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(3, OnlyRowValue(vm).integer_value());
+  RequireStatus(vm.Reset());
+
+  std::vector<SqlValue> overflow_constants;
+  overflow_constants.push_back(SqlValue::Integer(1));
+  overflow_constants.push_back(SqlValue::Integer(2));
+  overflow_constants.push_back(SqlValue::Integer(3));
+  const BytecodeProgram overflow =
+      BuildProgram(*pager_, 1, 0, std::move(overflow_constants), {}, {}, {},
+                   {
+                       ClearRowIdListInstruction{},
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       HaltInstruction{},
+                   });
+  Vm limited = CreateCoreVm(overflow, VmLimits{.maximum_value_bytes = 16});
+  const auto too_large = limited.Step();
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, too_large.error().code());
+  RequireStatus(limited.DetachExecutionContext());
+
+  std::vector<SqlValue> invalid_constants;
+  invalid_constants.push_back(SqlValue::Text("1.5"));
+  const BytecodeProgram invalid =
+      BuildProgram(*pager_, 1, 0, std::move(invalid_constants), {}, {}, {},
+                   {
+                       ClearRowIdListInstruction{},
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       AppendRowIdListInstruction{.input = Reg(0)},
+                       HaltInstruction{},
+                   });
+  Vm invalid_vm = CreateCoreVm(invalid);
+  const auto mismatch = invalid_vm.Step();
+  ASSERT_FALSE(mismatch.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, mismatch.error().code());
+  RequireStatus(invalid_vm.DetachExecutionContext());
+}
+
 TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(7));

@@ -452,6 +452,9 @@ struct Vm::Impl {
     executed_instruction_count_ = 0;
     change_count_ = 0;
     last_insert_rowid_event_.reset();
+    rowid_list_.clear();
+    rowid_list_index_ = 0;
+    rowid_list_positioned_ = false;
     state_ = VmState::kReady;
     pager_ = nullptr;
     catalog_generation_ = 0;
@@ -1218,6 +1221,61 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ClearRowIdListInstruction&) {
+    rowid_list_.clear();
+    rowid_list_index_ = 0;
+    rowid_list_positioned_ = false;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const AppendRowIdListInstruction& operation) {
+    if (rowid_list_positioned_) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "cannot append while iterating the rowid list"));
+    }
+    const std::optional<std::int64_t> rowid = LosslessRowId(Register(operation.input));
+    if (!rowid.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    if (rowid_list_.size() >= limits_.maximum_value_bytes / sizeof(std::int64_t)) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "rowid list exceeds the VM value limit"));
+    }
+    rowid_list_.push_back(*rowid);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindRowIdListInstruction& operation) {
+    if (rowid_list_positioned_) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "rowid list is already positioned"));
+    }
+    if (rowid_list_.empty()) {
+      program_counter_ = operation.empty_target.value();
+      return std::nullopt;
+    }
+    rowid_list_index_ = 0;
+    rowid_list_positioned_ = true;
+    return SetRegister(operation.output, SqlValue::Integer(rowid_list_.front()));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextRowIdListInstruction& operation) {
+    if (!rowid_list_positioned_ || rowid_list_index_ >= rowid_list_.size()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "rowid list is not positioned"));
+    }
+    ++rowid_list_index_;
+    if (rowid_list_index_ >= rowid_list_.size()) {
+      rowid_list_positioned_ = false;
+      return std::nullopt;
+    }
+    if (auto stored =
+            SetRegister(operation.output, SqlValue::Integer(rowid_list_[rowid_list_index_]));
+        !stored.has_value()) {
+      return stored;
+    }
+    program_counter_ = operation.next_target.value();
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const SeekRowIdInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
@@ -1435,6 +1493,8 @@ struct Vm::Impl {
     for (RuntimeWriteCursor& cursor : write_cursors_) {
       cursor.table.reset();
     }
+    rowid_list_index_ = 0;
+    rowid_list_positioned_ = false;
   }
 
   const BytecodeProgram* program_;
@@ -1459,6 +1519,9 @@ struct Vm::Impl {
   std::uint64_t change_count_ = 0;
   std::optional<std::int64_t> last_insert_rowid_event_;
   std::optional<std::uint64_t> execution_data_version_;
+  std::vector<std::int64_t> rowid_list_;
+  std::size_t rowid_list_index_ = 0;
+  bool rowid_list_positioned_ = false;
 };
 
 VmExecutionContext::VmExecutionContext(TransactionWriter& writer,

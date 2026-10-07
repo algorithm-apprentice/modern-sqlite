@@ -378,6 +378,50 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
   EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesRowidListLifecycleAndBranches) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.constants.push_back(SqlValue::Integer(7));
+  input.instructions = {
+      ClearRowIdListInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      AppendRowIdListInstruction{.input = Reg(0)},
+      RewindRowIdListInstruction{
+          .output = Reg(1),
+          .empty_target = Address(6),
+      },
+      NextRowIdListInstruction{
+          .output = Reg(1),
+          .next_target = Address(4),
+      },
+      HaltInstruction{},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("clear_rowid_list", InstructionKindName(InstructionKindOf(input.instructions[0])));
+  EXPECT_EQ("append_rowid_list", InstructionKindName(InstructionKindOf(input.instructions[2])));
+  EXPECT_EQ("rewind_rowid_list", InstructionKindName(InstructionKindOf(input.instructions[3])));
+  EXPECT_EQ("next_rowid_list", InstructionKindName(InstructionKindOf(input.instructions[4])));
+
+  input.instructions[0] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)};
+  EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
+
+  ProgramInput conflict;
+  conflict.register_count = 1;
+  conflict.constants.push_back(SqlValue::Integer(1));
+  conflict.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      JumpIfInstruction{
+          .condition = JumpCondition::kIfTrue,
+          .input = Reg(0),
+          .target = Address(3),
+      },
+      ClearRowIdListInstruction{},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, VerifyError(conflict));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
@@ -688,6 +732,33 @@ TEST(BytecodeProgramTest, BuilderResolvesSeekSuccessAndMissingPaths) {
   EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).missing_target, Address(5));
   EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).mode,
             RowIdSeekMode::kGreater);
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesRowidListIterationLabels) {
+  auto created = ProgramBuilder::Create({}, Resources(2));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  auto constant = builder.AddConstant(SqlValue::Integer(7));
+  auto empty = builder.CreateLabel();
+  auto loop = builder.CreateLabel();
+  ASSERT_TRUE(constant.has_value());
+  ASSERT_TRUE(empty.has_value());
+  ASSERT_TRUE(loop.has_value());
+  ASSERT_TRUE(builder.Append(ClearRowIdListInstruction{}));
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = *constant, .output = Reg(0)}));
+  ASSERT_TRUE(builder.Append(AppendRowIdListInstruction{.input = Reg(0)}));
+  ASSERT_TRUE(builder.EmitRewindRowIdList(Reg(1), *empty));
+  ASSERT_TRUE(builder.BindLabel(*loop).has_value());
+  ASSERT_TRUE(builder.EmitNextRowIdList(Reg(1), *loop));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+  ASSERT_TRUE(builder.BindLabel(*empty).has_value());
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(Address(6),
+            std::get<RewindRowIdListInstruction>(program->instructions()[3]).empty_target);
+  EXPECT_EQ(Address(4), std::get<NextRowIdListInstruction>(program->instructions()[4]).next_target);
 }
 
 TEST(BytecodeProgramTest, VerifiesPositionedCursorScanAcrossLoopEdges) {

@@ -260,6 +260,22 @@ struct NextInstruction {
   InstructionAddress next_target;
 };
 
+struct ClearRowIdListInstruction {};
+
+struct AppendRowIdListInstruction {
+  RegisterId input;
+};
+
+struct RewindRowIdListInstruction {
+  RegisterId output;
+  InstructionAddress empty_target;
+};
+
+struct NextRowIdListInstruction {
+  RegisterId output;
+  InstructionAddress next_target;
+};
+
 enum class RowIdSeekMode : std::uint8_t {
   kEqual,
   kGreater,
@@ -346,16 +362,16 @@ struct ResultRowInstruction {
   std::uint32_t count;
 };
 
-using Instruction =
-    std::variant<HaltInstruction, LoadConstantInstruction, LoadParameterInstruction,
-                 CopyInstruction, UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction,
-                 MustBeIntegerInstruction, RealAffinityInstruction, CastInstruction,
-                 OpenReadCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
-                 CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
-                 SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
-                 ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
-                 DeleteTableInstruction, UpdateTableInstruction, CompareInstruction,
-                 CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+using Instruction = std::variant<
+    HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
+    UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
+    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction, OpenWriteCursorInstruction,
+    CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
+    ClearRowIdListInstruction, AppendRowIdListInstruction, RewindRowIdListInstruction,
+    NextRowIdListInstruction, SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
+    ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
+    DeleteTableInstruction, UpdateTableInstruction, CompareInstruction, CallScalarInstruction,
+    JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -376,6 +392,10 @@ enum class InstructionKind : std::uint8_t {
   kCloseWrite,
   kRewind,
   kNext,
+  kClearRowIdList,
+  kAppendRowIdList,
+  kRewindRowIdList,
+  kNextRowIdList,
   kSeekRowId,
   kReadField,
   kReadRowId,
@@ -599,6 +619,10 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> Append(Instruction instruction);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitRewind(CursorId cursor, Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNext(CursorId cursor, Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindRowIdList(RegisterId output,
+                                                                      Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRowIdList(RegisterId output,
+                                                                    Label next_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
@@ -618,6 +642,14 @@ class ProgramBuilder final {
     CursorId cursor;
     Label target;
   };
+  struct PendingRewindRowIdList {
+    RegisterId output;
+    Label target;
+  };
+  struct PendingNextRowIdList {
+    RegisterId output;
+    Label target;
+  };
   struct PendingSeekRowId {
     CursorId cursor;
     RegisterId key;
@@ -633,8 +665,9 @@ class ProgramBuilder final {
     Label target;
   };
 
-  using PendingInstruction = std::variant<Instruction, PendingRewind, PendingNext, PendingSeekRowId,
-                                          PendingJump, PendingJumpIf>;
+  using PendingInstruction =
+      std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
+                   PendingNextRowIdList, PendingSeekRowId, PendingJump, PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;
