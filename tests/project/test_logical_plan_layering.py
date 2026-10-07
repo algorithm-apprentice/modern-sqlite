@@ -15,7 +15,7 @@ class LogicalPlanLayeringTest(unittest.TestCase):
         self.assertSetEqual(
             {
                 "modern_sqlite/base/result.hpp",
-                "modern_sqlite/binder/bound_select.hpp",
+                "modern_sqlite/binder/bound_statement.hpp",
             },
             includes,
         )

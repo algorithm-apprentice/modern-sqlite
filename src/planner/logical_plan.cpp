@@ -119,6 +119,14 @@ struct LogicalPlan::Impl {
   LogicalNodeId root{0};
 };
 
+struct LogicalMutationPlan::Impl {
+  Impl(BoundStatement statement, LogicalMutationPayload mutation) noexcept
+      : bound_statement(std::move(statement)), payload(mutation) {}
+
+  BoundStatement bound_statement;
+  LogicalMutationPayload payload;
+};
+
 namespace planner_detail {
 
 class LogicalPlanBuilder final {
@@ -196,10 +204,129 @@ class LogicalPlanBuilder final {
   }
 };
 
+class LogicalStatementPlanBuilder final {
+ public:
+  [[nodiscard]] static BuildLogicalStatementPlanResult Build(BoundStatement bound_statement) {
+    if (!BoundStatementIsValid(bound_statement)) {
+      return std::unexpected{
+          PlanError(LogicalPlanErrorCode::kInvalidInput, "bound statement is invalid")};
+    }
+    if (std::holds_alternative<BoundSelect>(bound_statement)) {
+      BuildLogicalPlanResult select =
+          BuildLogicalPlan(std::get<BoundSelect>(std::move(bound_statement)));
+      if (!select.has_value()) {
+        return std::unexpected{std::move(select.error())};
+      }
+      return LogicalStatementPlan{std::in_place_type<LogicalPlan>, std::move(*select)};
+    }
+    if (const auto* update = std::get_if<BoundUpdate>(&bound_statement); update != nullptr) {
+      const LogicalUpdateMutation mutation{
+          .predicate = update->where_expression(),
+          .changes_rowid = update->changes_rowid(),
+      };
+      return Mutation(std::move(bound_statement), mutation);
+    }
+    if (const auto* delete_statement = std::get_if<BoundDelete>(&bound_statement);
+        delete_statement != nullptr) {
+      const LogicalDeleteMutation mutation{
+          .predicate = delete_statement->where_expression(),
+      };
+      return Mutation(std::move(bound_statement), mutation);
+    }
+    if (const auto* create = std::get_if<BoundCreateTable>(&bound_statement); create != nullptr) {
+      const LogicalCreateTableMutation mutation{
+          .no_op = create->no_op(),
+      };
+      return Mutation(std::move(bound_statement), mutation);
+    }
+    if (std::holds_alternative<BoundInsert>(bound_statement)) {
+      return Mutation(std::move(bound_statement), LogicalInsertMutation{});
+    }
+    if (std::holds_alternative<BoundBeginTransaction>(bound_statement)) {
+      return LogicalStatementPlan{
+          std::in_place_type<BoundBeginTransaction>,
+          std::get<BoundBeginTransaction>(std::move(bound_statement)),
+      };
+    }
+    if (std::holds_alternative<BoundCommitTransaction>(bound_statement)) {
+      return LogicalStatementPlan{
+          std::in_place_type<BoundCommitTransaction>,
+          std::get<BoundCommitTransaction>(std::move(bound_statement)),
+      };
+    }
+    if (std::holds_alternative<BoundRollbackTransaction>(bound_statement)) {
+      return LogicalStatementPlan{
+          std::in_place_type<BoundRollbackTransaction>,
+          std::get<BoundRollbackTransaction>(std::move(bound_statement)),
+      };
+    }
+    if (std::holds_alternative<BoundSavepoint>(bound_statement)) {
+      return LogicalStatementPlan{
+          std::in_place_type<BoundSavepoint>,
+          std::get<BoundSavepoint>(std::move(bound_statement)),
+      };
+    }
+    if (std::holds_alternative<BoundReleaseSavepoint>(bound_statement)) {
+      return LogicalStatementPlan{
+          std::in_place_type<BoundReleaseSavepoint>,
+          std::get<BoundReleaseSavepoint>(std::move(bound_statement)),
+      };
+    }
+    return LogicalStatementPlan{
+        std::in_place_type<BoundRollbackToSavepoint>,
+        std::get<BoundRollbackToSavepoint>(std::move(bound_statement)),
+    };
+  }
+
+ private:
+  [[nodiscard]] static bool BoundStatementIsValid(const BoundStatement& statement) {
+    if (statement.valueless_by_exception()) {
+      return false;
+    }
+    return std::visit(
+        [](const auto& value) noexcept {
+          if constexpr (requires { value.valid(); }) {
+            return value.valid();
+          }
+          return true;
+        },
+        statement);
+  }
+
+  template <typename Payload>
+  [[nodiscard]] static BuildLogicalStatementPlanResult Mutation(BoundStatement statement,
+                                                                Payload payload) {
+    auto impl = std::make_unique<LogicalMutationPlan::Impl>(
+        std::move(statement), LogicalMutationPayload{std::move(payload)});
+    return LogicalStatementPlan{
+        std::in_place_type<LogicalMutationPlan>,
+        LogicalMutationPlan{std::move(impl)},
+    };
+  }
+};
+
 }  // namespace planner_detail
 
 LogicalNodeKind LogicalNodeKindOf(const LogicalNode& node) noexcept {
   return static_cast<LogicalNodeKind>(node.payload.index());
+}
+
+LogicalMutationKind LogicalMutationKindOf(const LogicalMutationPayload& payload) noexcept {
+  return static_cast<LogicalMutationKind>(payload.index());
+}
+
+std::string_view LogicalMutationKindName(LogicalMutationKind kind) noexcept {
+  switch (kind) {
+    case LogicalMutationKind::kInsert:
+      return "insert";
+    case LogicalMutationKind::kUpdate:
+      return "update";
+    case LogicalMutationKind::kDelete:
+      return "delete";
+    case LogicalMutationKind::kCreateTable:
+      return "create_table";
+  }
+  return "unknown";
 }
 
 std::string_view LogicalNodeKindName(LogicalNodeKind kind) noexcept {
@@ -263,6 +390,29 @@ LogicalNodeId LogicalPlan::root() const noexcept { return impl_->root; }
 
 BuildLogicalPlanResult BuildLogicalPlan(BoundSelect bound_select) {
   return planner_detail::LogicalPlanBuilder::Build(std::move(bound_select));
+}
+
+LogicalMutationPlan::LogicalMutationPlan(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+LogicalMutationPlan::LogicalMutationPlan(LogicalMutationPlan&&) noexcept = default;
+
+LogicalMutationPlan& LogicalMutationPlan::operator=(LogicalMutationPlan&&) noexcept = default;
+
+LogicalMutationPlan::~LogicalMutationPlan() = default;
+
+bool LogicalMutationPlan::valid() const noexcept { return impl_ != nullptr; }
+
+const BoundStatement& LogicalMutationPlan::bound_statement() const noexcept {
+  return impl_->bound_statement;
+}
+
+const LogicalMutationPayload& LogicalMutationPlan::payload() const noexcept {
+  return impl_->payload;
+}
+
+BuildLogicalStatementPlanResult BuildLogicalStatementPlan(BoundStatement bound_statement) {
+  return planner_detail::LogicalStatementPlanBuilder::Build(std::move(bound_statement));
 }
 
 }  // namespace modern_sqlite

@@ -21,6 +21,10 @@ static_assert(!std::is_copy_constructible_v<LogicalPlan>);
 static_assert(!std::is_copy_assignable_v<LogicalPlan>);
 static_assert(std::is_nothrow_move_constructible_v<LogicalPlan>);
 static_assert(std::is_nothrow_move_assignable_v<LogicalPlan>);
+static_assert(!std::is_copy_constructible_v<LogicalMutationPlan>);
+static_assert(std::is_nothrow_move_constructible_v<LogicalMutationPlan>);
+static_assert(!std::is_copy_constructible_v<LogicalStatementPlan>);
+static_assert(std::is_nothrow_move_constructible_v<LogicalStatementPlan>);
 static_assert(!std::is_convertible_v<LogicalNodeId, BoundExpressionId>);
 static_assert(!std::is_convertible_v<BoundExpressionId, LogicalNodeId>);
 
@@ -84,6 +88,19 @@ static_assert(!std::is_convertible_v<BoundExpressionId, LogicalNodeId>);
   return std::move(*plan);
 }
 
+[[nodiscard]] LogicalStatementPlan StatementPlanOrThrow(std::string_view sql,
+                                                        const CatalogSnapshotPtr& catalog) {
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{bound.error().detail};
+  }
+  BuildLogicalStatementPlanResult plan = BuildLogicalStatementPlan(std::move(*bound));
+  if (!plan.has_value()) {
+    throw std::runtime_error{plan.error().detail};
+  }
+  return std::move(*plan);
+}
+
 TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("single_row", LogicalNodeKindName(LogicalNodeKind::kSingleRow));
   EXPECT_EQ("scan", LogicalNodeKindName(LogicalNodeKind::kScan));
@@ -92,6 +109,10 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("projection", LogicalNodeKindName(LogicalNodeKind::kProjection));
   EXPECT_EQ("unknown",
             LogicalNodeKindName(static_cast<LogicalNodeKind>(255)));  // NOLINT
+  EXPECT_EQ("insert", LogicalMutationKindName(LogicalMutationKind::kInsert));
+  EXPECT_EQ("create_table", LogicalMutationKindName(LogicalMutationKind::kCreateTable));
+  EXPECT_EQ("unknown",
+            LogicalMutationKindName(static_cast<LogicalMutationKind>(255)));  // NOLINT
 
   EXPECT_EQ("invalid_input", LogicalPlanErrorCodeName(LogicalPlanErrorCode::kInvalidInput));
   EXPECT_EQ("internal_invariant",
@@ -103,6 +124,61 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalPlanError{.code = LogicalPlanErrorCode::kInvalidInput}.base_error_code());
   EXPECT_EQ(ErrorCode::kInternal,
             LogicalPlanError{.code = LogicalPlanErrorCode::kInternalInvariant}.base_error_code());
+}
+
+TEST(LogicalStatementPlan, BuildsTypedMutationAndTransactionPayloads) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  LogicalStatementPlan insert_statement =
+      StatementPlanOrThrow("INSERT INTO Items(Name,id) VALUES(?1,?2)", catalog);
+  const auto& insert_plan = std::get<LogicalMutationPlan>(insert_statement);
+  EXPECT_EQ(LogicalMutationKind::kInsert, LogicalMutationKindOf(insert_plan.payload()));
+  EXPECT_TRUE(std::holds_alternative<LogicalInsertMutation>(insert_plan.payload()));
+  EXPECT_TRUE(std::holds_alternative<BoundInsert>(insert_plan.bound_statement()));
+
+  LogicalStatementPlan update_statement =
+      StatementPlanOrThrow("UPDATE Items SET Name=?1, id=id+1 WHERE id=?2", catalog);
+  const auto& update_plan = std::get<LogicalMutationPlan>(update_statement);
+  const auto& update = std::get<LogicalUpdateMutation>(update_plan.payload());
+  const auto& bound_update = std::get<BoundUpdate>(update_plan.bound_statement());
+  EXPECT_EQ(bound_update.where_expression(), update.predicate);
+  EXPECT_TRUE(update.changes_rowid);
+
+  LogicalStatementPlan delete_statement =
+      StatementPlanOrThrow("DELETE FROM Items WHERE Name=?1", catalog);
+  const auto& delete_plan = std::get<LogicalMutationPlan>(delete_statement);
+  const auto& delete_mutation = std::get<LogicalDeleteMutation>(delete_plan.payload());
+  EXPECT_EQ(std::get<BoundDelete>(delete_plan.bound_statement()).where_expression(),
+            delete_mutation.predicate);
+
+  LogicalStatementPlan create_statement =
+      StatementPlanOrThrow("CREATE TABLE NewItems(id INTEGER PRIMARY KEY)", catalog);
+  const auto& create_plan = std::get<LogicalMutationPlan>(create_statement);
+  EXPECT_FALSE(std::get<LogicalCreateTableMutation>(create_plan.payload()).no_op);
+
+  EXPECT_TRUE(std::holds_alternative<BoundBeginTransaction>(
+      StatementPlanOrThrow("BEGIN IMMEDIATE", catalog)));
+  EXPECT_TRUE(
+      std::holds_alternative<BoundSavepoint>(StatementPlanOrThrow("SAVEPOINT name", catalog)));
+}
+
+TEST(LogicalStatementPlan, RetainsSelectAndRejectsMovedFromMutationInput) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  EXPECT_TRUE(
+      std::holds_alternative<LogicalPlan>(StatementPlanOrThrow("SELECT Name FROM Items", catalog)));
+
+  BindStatementResult bound = BindStatement(ParseTree("DELETE FROM Items WHERE id=?1"), catalog);
+  ASSERT_TRUE(bound.has_value());
+  BoundStatement retained = std::move(*bound);
+  BoundStatement moved = std::move(retained);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  BuildLogicalStatementPlanResult rejected = BuildLogicalStatementPlan(std::move(retained));
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(LogicalPlanErrorCode::kInvalidInput, rejected.error().code);
+
+  const BuildLogicalStatementPlanResult recovered = BuildLogicalStatementPlan(std::move(moved));
+  EXPECT_TRUE(recovered.has_value());
 }
 
 TEST(LogicalPlan, BuildsSingleRowProjectionAndRetainsBoundState) {

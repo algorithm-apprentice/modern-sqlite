@@ -122,6 +122,23 @@ bool inject_failure = false;
   return std::move(*logical);
 }
 
+[[nodiscard]] modern_sqlite::LogicalStatementPlan LogicalMutationFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound =
+      BindStatement(ParseTree("DELETE FROM Items "
+                              "WHERE stable_guard(?)=1 AND rowid=volatile_key() AND Name=?"),
+                    catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind optimizer mutation OOM fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to build optimizer mutation OOM fixture"};
+  }
+  return std::move(*logical);
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -176,7 +193,39 @@ int main() try {
 
   LogicalPlan recovered_logical = LogicalFixture(catalog);
   const OptimizeLogicalPlanResult recovered = OptimizeLogicalPlan(std::move(recovered_logical));
-  return recovered.has_value() ? 0 : 1;
+  if (!recovered.has_value()) {
+    return 1;
+  }
+
+  LogicalStatementPlan mutation_baseline = LogicalMutationFixture(catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const OptimizeLogicalStatementPlanResult mutation =
+      OptimizeLogicalStatementPlan(std::move(mutation_baseline));
+  if (!mutation.has_value()) {
+    return 1;
+  }
+  const std::size_t mutation_allocations = allocation_index.load(std::memory_order_relaxed);
+  if (mutation_allocations == 0U || mutation_allocations > 16U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < mutation_allocations; ++failure) {
+    LogicalStatementPlan logical = LogicalMutationFixture(catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const OptimizeLogicalStatementPlanResult unexpected =
+          OptimizeLogicalStatementPlan(std::move(logical));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  return OptimizeLogicalStatementPlan(LogicalMutationFixture(catalog)).has_value() ? 0 : 1;
 } catch (...) {
   inject_failure = false;
   return 1;

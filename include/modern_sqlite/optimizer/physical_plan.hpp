@@ -20,6 +20,7 @@ namespace modern_sqlite {
 
 namespace optimizer_detail {
 class PhysicalPlanBuilder;
+class PhysicalStatementPlanBuilder;
 }  // namespace optimizer_detail
 
 class PhysicalNodeId final {
@@ -164,6 +165,84 @@ using OptimizeLogicalPlanResult = std::expected<PhysicalPlan, OptimizerError>;
 
 [[nodiscard]] OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan);
 [[nodiscard]] std::string ExplainPhysicalPlan(const PhysicalPlan& plan);
+
+enum class MutationAccessKind : std::uint8_t {
+  kEmpty,
+  kTableScan,
+  kRowIdLookup,
+};
+
+[[nodiscard]] std::string_view MutationAccessKindName(MutationAccessKind kind) noexcept;
+
+enum class MutationAtomicity : std::uint8_t {
+  kTransaction,
+  kStatement,
+};
+
+[[nodiscard]] std::string_view MutationAtomicityName(MutationAtomicity atomicity) noexcept;
+
+struct PhysicalMutationAccess {
+  MutationAccessKind kind = MutationAccessKind::kTableScan;
+  RootPageId root_page{};
+  std::optional<BoundExpressionId> key{};
+  std::vector<BoundExpressionId> guards{};
+  std::vector<BoundExpressionId> residuals{};
+};
+
+struct PhysicalInsertMutation {
+  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+};
+
+struct PhysicalUpdateMutation {
+  PhysicalMutationAccess access{};
+  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+  bool collect_original_rowids = false;
+};
+
+struct PhysicalDeleteMutation {
+  PhysicalMutationAccess access{};
+  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+};
+
+struct PhysicalCreateTableMutation {
+  bool no_op = false;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
+};
+
+using PhysicalMutationPayload = std::variant<PhysicalInsertMutation, PhysicalUpdateMutation,
+                                             PhysicalDeleteMutation, PhysicalCreateTableMutation>;
+
+class PhysicalMutationPlan final {
+ public:
+  PhysicalMutationPlan(const PhysicalMutationPlan&) = delete;
+  PhysicalMutationPlan& operator=(const PhysicalMutationPlan&) = delete;
+  PhysicalMutationPlan(PhysicalMutationPlan&&) noexcept;
+  PhysicalMutationPlan& operator=(PhysicalMutationPlan&&) noexcept;
+  ~PhysicalMutationPlan();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] const LogicalMutationPlan& logical_plan() const noexcept;
+  [[nodiscard]] const PhysicalMutationPayload& payload() const noexcept;
+
+ private:
+  friend class optimizer_detail::PhysicalStatementPlanBuilder;
+
+  struct Impl;
+
+  explicit PhysicalMutationPlan(std::unique_ptr<Impl> impl) noexcept;
+
+  std::unique_ptr<Impl> impl_;
+};
+
+using PhysicalStatementPlan =
+    std::variant<PhysicalPlan, PhysicalMutationPlan, BoundBeginTransaction, BoundCommitTransaction,
+                 BoundRollbackTransaction, BoundSavepoint, BoundReleaseSavepoint,
+                 BoundRollbackToSavepoint>;
+
+using OptimizeLogicalStatementPlanResult = std::expected<PhysicalStatementPlan, OptimizerError>;
+
+[[nodiscard]] OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(
+    LogicalStatementPlan logical_plan);
 
 }  // namespace modern_sqlite
 
