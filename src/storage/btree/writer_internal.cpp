@@ -109,6 +109,21 @@ void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) noe
   return candidate <= maximum ? candidate : minimum;
 }
 
+[[nodiscard]] Result<std::size_t> IndexLeafUnpaddedCellSize(ByteView cell,
+                                                            BtreePageGeometry geometry) {
+  const auto payload = DecodeSqliteVarint(cell);
+  if (!payload.has_value() || payload->value > kMaximumPayloadSize) {
+    return std::unexpected(Corruption("index leaf payload header is invalid"));
+  }
+  const std::size_t local = LocalPayloadSize(geometry, BtreePageType::kLeafIndex, payload->value);
+  const std::size_t size = payload->bytes_consumed.value() + local +
+                           (local < payload->value ? sizeof(std::uint32_t) : 0U);
+  if (size > cell.size() || std::max<std::size_t>(4U, size) != cell.size()) {
+    return std::unexpected(Corruption("index leaf cell size is inconsistent"));
+  }
+  return size;
+}
+
 [[nodiscard]] bool IsValidPageReference(PageNumber page_number,
                                         BtreePageGeometry geometry) noexcept {
   return page_number.value() != 0U && page_number.value() <= kMaximumPageNumber &&
@@ -2374,21 +2389,6 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
     }
     return rowid->value;
   };
-  const auto index_unpadded_size = [&page](ByteView cell) -> Result<std::size_t> {
-    const auto payload = DecodeSqliteVarint(cell);
-    if (!payload.has_value() || payload->value > kMaximumPayloadSize) {
-      return std::unexpected(Corruption("non-root balance index payload header is invalid"));
-    }
-    const std::size_t local =
-        LocalPayloadSize(page.geometry_, BtreePageType::kLeafIndex, payload->value);
-    const std::size_t size = payload->bytes_consumed.value() + local +
-                             (local < payload->value ? sizeof(std::uint32_t) : 0U);
-    if (size > cell.size() || std::max<std::size_t>(4U, size) != cell.size()) {
-      return std::unexpected(Corruption("non-root balance index cell size is inconsistent"));
-    }
-    return size;
-  };
-
   // Rebuild parent dividers before editing siblings, while every CellArray
   // source is still intact.
   std::size_t output_offset = 0U;
@@ -2442,7 +2442,7 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
       if (!boundary_cell.has_value()) {
         return fail(std::move(boundary_cell.error()));
       }
-      auto unpadded_size = index_unpadded_size(*boundary_cell);
+      auto unpadded_size = IndexLeafUnpaddedCellSize(*boundary_cell, page.geometry_);
       if (!unpadded_size.has_value()) {
         return fail(std::move(unpadded_size.error()));
       }
@@ -4157,6 +4157,9 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   if (!record_view.has_value()) {
     return std::unexpected(std::move(record_view.error()));
   }
+  if (record_view->field_count() != key.size()) {
+    return std::unexpected(Misuse("index record field count does not match its complete key"));
+  }
   auto stored_comparison = CompareIndexRecord(*record_view, key, columns);
   if (!stored_comparison.has_value()) {
     return std::unexpected(std::move(stored_comparison.error()));
@@ -4270,6 +4273,207 @@ Status WritableCursor::DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& work
     return fail(std::move(dropped.error()));
   }
   return Balance(std::move(page), workspace);
+}
+
+Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
+                                   std::span<const IndexColumnOrder> columns,
+                                   RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
+                                   BtreeWriteWorkspace& workspace) {
+  if (table_) {
+    return std::unexpected(Misuse("index deletion requires an index B-tree cursor"));
+  }
+  if (key.empty() || key.size() != columns.size()) {
+    return std::unexpected(Misuse("index deletion requires a complete comparison key"));
+  }
+  auto seek = SeekIndex(key, columns, options, seek_scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (!seek->exact) {
+    return std::unexpected(NotFound("index key does not exist"));
+  }
+  auto matched_page = CurrentPage();
+  if (!matched_page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(matched_page.error()));
+  }
+  auto matched_cell = matched_page->cell(seek->insertion_index);
+  if (!matched_cell.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(matched_cell.error()));
+  }
+  auto matched_payload = ReadCellPayload(*matched_cell, seek_scratch);
+  if (!matched_payload.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(matched_payload.error()));
+  }
+  auto matched_record = RecordView::Parse(*matched_payload, options);
+  if (!matched_record.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(matched_record.error()));
+  }
+  if (matched_record->field_count() != key.size()) {
+    return std::unexpected(Misuse("index deletion key does not identify a complete record"));
+  }
+
+  const std::size_t original_depth = frame_count_;
+  const std::size_t original_index = seek->insertion_index;
+  const std::size_t original_slot = current_owner_slot();
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return promoted;
+  }
+  auto opened = MutableBtreePage::Open(*owner_, original_slot, geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage original_page = std::move(*opened);
+  std::optional<MutableBtreePage> leaf_page;
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &original_page, &leaf_page, original_slot,
+                     checkpoint](Error error) -> Status {
+    auto original_frame = owner_->Frame(original_slot);
+    if (original_frame.has_value() &&
+        original_frame->get().page_number() == original_page.page_number_) {
+      original_page.ClearStagedCells();
+    }
+    if (leaf_page.has_value()) {
+      leaf_page->ClearStagedCells();
+    }
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  auto original_view = CurrentPage();
+  if (!original_view.has_value()) {
+    return fail(std::move(original_view.error()));
+  }
+  auto original_cell = original_view->cell(original_index);
+  if (!original_cell.has_value()) {
+    return fail(std::move(original_cell.error()));
+  }
+  if (original_page.is_leaf()) {
+    auto cleared = ClearCellOverflow(*owner_, geometry_, *original_cell);
+    if (!cleared.has_value()) {
+      return fail(std::move(cleared.error()));
+    }
+    auto dropped = original_page.DropCell(original_index);
+    if (!dropped.has_value()) {
+      return fail(std::move(dropped.error()));
+    }
+    return Balance(std::move(original_page), workspace);
+  }
+
+  const std::optional<PageNumber> preserved_child = original_cell->left_child();
+  if (!preserved_child.has_value()) {
+    return fail(Corruption("interior index cell has no left child"));
+  }
+  auto descended = Descend(original_index, *original_view);
+  if (!descended.has_value()) {
+    return fail(std::move(descended.error()));
+  }
+  while (true) {
+    auto page = CurrentPage();
+    if (!page.has_value()) {
+      return fail(std::move(page.error()));
+    }
+    if (page->is_leaf()) {
+      break;
+    }
+    descended = Descend(page->cell_count(), *page);
+    if (!descended.has_value()) {
+      return fail(std::move(descended.error()));
+    }
+  }
+
+  auto leaf_view = CurrentPage();
+  if (!leaf_view.has_value()) {
+    return fail(std::move(leaf_view.error()));
+  }
+  if (leaf_view->cell_count() == 0U) {
+    return fail(Corruption("index predecessor leaf is empty"));
+  }
+  const std::size_t predecessor_index = leaf_view->cell_count() - 1U;
+  auto predecessor_offset = leaf_view->cell_offset(predecessor_index);
+  auto predecessor_cell = leaf_view->cell(predecessor_index);
+  if (!predecessor_offset.has_value()) {
+    return fail(std::move(predecessor_offset.error()));
+  }
+  if (!predecessor_cell.has_value()) {
+    return fail(std::move(predecessor_cell.error()));
+  }
+  auto predecessor_frame = owner_->Frame(current_owner_slot());
+  if (!predecessor_frame.has_value()) {
+    return fail(std::move(predecessor_frame.error()));
+  }
+  const ByteView predecessor_bytes = predecessor_frame->get().bytes().subspan(
+      predecessor_offset->value(), predecessor_cell->encoded_size().value());
+  auto predecessor_size = IndexLeafUnpaddedCellSize(predecessor_bytes, geometry_);
+  if (!predecessor_size.has_value()) {
+    return fail(std::move(predecessor_size.error()));
+  }
+  const MutableByteView replacement_scratch = workspace.cell_scratch_with_prefix();
+  const std::size_t replacement_size = sizeof(std::uint32_t) + *predecessor_size;
+  if (replacement_size > replacement_scratch.size()) {
+    return fail(Corruption("index predecessor cell exceeds retained scratch"));
+  }
+  Store32(replacement_scratch, 0U, preserved_child->value());
+  std::memmove(replacement_scratch.data() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)),
+               predecessor_bytes.data(), *predecessor_size);
+  const MutableByteView replacement = replacement_scratch.first(replacement_size);
+
+  auto cleared = ClearCellOverflow(*owner_, geometry_, *original_cell);
+  if (!cleared.has_value()) {
+    return fail(std::move(cleared.error()));
+  }
+  auto dropped = original_page.DropCell(original_index);
+  if (!dropped.has_value()) {
+    return fail(std::move(dropped.error()));
+  }
+  auto inserted = original_page.InsertCell(original_index, ByteView{replacement}, preserved_child,
+                                           replacement, workspace);
+  if (!inserted.has_value()) {
+    return fail(std::move(inserted.error()));
+  }
+
+  promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return fail(std::move(promoted.error()));
+  }
+  auto opened_leaf = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened_leaf.has_value()) {
+    return fail(std::move(opened_leaf.error()));
+  }
+  leaf_page.emplace(std::move(*opened_leaf));
+  auto leaf_dropped = leaf_page->DropCell(predecessor_index);
+  if (!leaf_dropped.has_value()) {
+    return fail(std::move(leaf_dropped.error()));
+  }
+  current_index_ = predecessor_index;
+  frames_[frame_count_ - 1U].child_index = predecessor_index;
+
+  auto balanced = Balance(std::move(*leaf_page), workspace);
+  if (!balanced.has_value()) {
+    return fail(std::move(balanced.error()));
+  }
+  if (frame_count_ > original_depth) {
+    while (frame_count_ > original_depth) {
+      auto moved = MoveToParent();
+      if (!moved.has_value()) {
+        return fail(std::move(moved.error()));
+      }
+    }
+    if (current_owner_slot() != original_slot) {
+      return fail(Corruption("index delete lost the original cursor level"));
+    }
+    balanced = Balance(std::move(original_page), workspace);
+    if (!balanced.has_value()) {
+      return fail(std::move(balanced.error()));
+    }
+  }
+  return {};
 }
 
 Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t insertion_index,

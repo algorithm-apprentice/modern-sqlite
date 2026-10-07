@@ -348,6 +348,10 @@ class WritableCursor final {
                                    std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status DeleteIndex(std::span<const SqlValue> key,
+                                   std::span<const IndexColumnOrder> columns,
+                                   RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
+                                   BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 

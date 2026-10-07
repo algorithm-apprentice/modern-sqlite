@@ -3682,18 +3682,8 @@ TEST(BtreeInsert, GrowingInteriorIndexReplacementStagesAndBalances) {
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
   };
-  const auto make_record = [options](std::int64_t marker, std::size_t blob_size) {
-    ByteBuffer blob{ByteCount{blob_size}};
-    std::ranges::fill(blob.mutable_view(), std::byte{0x5a});
-    std::array<SqlValue, 2> values{
-        SqlValue::Integer(marker),
-        SqlValue::Blob(std::move(blob)),
-    };
-    return TakeValue(EncodeRecord(values, options));
-  };
-
   PageNumber root_page;
-  constexpr std::size_t kCellCount = 33U;
+  constexpr std::size_t kCellCount = 50U;
   constexpr std::int64_t kFirstMarker = 10;
   constexpr std::int64_t kTargetMarker = 26;
   {
@@ -3703,25 +3693,29 @@ TEST(BtreeInsert, GrowingInteriorIndexReplacementStagesAndBalances) {
         owner, root_allocation.owner_slot, geometry, BtreePageType::kInteriorIndex));
     root_page = root.page_number();
     for (std::size_t index = 0U; index < kCellCount; ++index) {
-      const ByteBuffer record = make_record(kFirstMarker + static_cast<std::int64_t>(index), 4U);
+      const ByteBuffer record = TakeValue(EncodeRecord(
+          std::array{SqlValue::Integer(kFirstMarker + static_cast<std::int64_t>(index))}, options));
       const PageNumber child{static_cast<std::uint32_t>(100U + index)};
       const FormattedCell cell = TakeValue(FillIndexCell(owner, geometry, workspace, record.view(),
                                                          BtreePageType::kInteriorIndex, child));
-      ASSERT_EQ(13U, cell.bytes.size());
+      ASSERT_EQ(8U, cell.bytes.size());
       RequireStatus(root.InsertCell(index, cell.bytes, child, {}, workspace));
     }
     RequireStatus(root.SetRightmostChild(PageNumber{500}));
-    ASSERT_EQ(5U, root.free_bytes());
+    ASSERT_EQ(0U, root.free_bytes());
   }
 
-  const ByteBuffer replacement = make_record(kTargetMarker, 12U);
+  const std::array<std::byte, 10> replacement{
+      std::byte{0x02}, std::byte{0x06}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x1a},
+  };
   std::array<SqlValue, 1> key{SqlValue::Integer(kTargetMarker)};
   {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(replacement.view(), key, columns, options,
-                                     BtreeInsertMode::kReplace, scratch, workspace));
+    RequireStatus(cursor.InsertIndex(replacement, key, columns, options, BtreeInsertMode::kReplace,
+                                     scratch, workspace));
   }
 
   EXPECT_GT(pager->page_count(), root_page.value());
@@ -3732,7 +3726,7 @@ TEST(BtreeInsert, GrowingInteriorIndexReplacementStagesAndBalances) {
     ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
     const BtreeCellView cell =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
-    EXPECT_TRUE(std::ranges::equal(replacement.view(), cell.local_payload()));
+    EXPECT_TRUE(std::ranges::equal(replacement, cell.local_payload()));
   }
   RequireStatus(pager->Rollback());
 }
@@ -3903,6 +3897,313 @@ TEST(BtreeDelete, TableDeleteReleasesOverflowAndLeavesAnEmptyLeafRoot) {
   EXPECT_EQ(BtreePageType::kLeafTable, root.type());
   EXPECT_EQ(0U, root.cell_count());
   EXPECT_GT(Load32(root_image.view(), 36U), free_before);
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeDelete, DeletesIndexLeafRecordsAndRejectsMissingKeys) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage root = TakeValue(AllocateBtreePage(owner, geometry));
+    static_cast<void>(TakeValue(
+        MutableBtreePage::Initialize(owner, root.owner_slot, geometry, BtreePageType::kLeafIndex)));
+    root_page = root.page_number;
+  }
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  for (std::int64_t value = 1; value <= 3; ++value) {
+    std::array<SqlValue, 1> key{SqlValue::Integer(value)};
+    const ByteBuffer record = TakeValue(EncodeRecord(key, options));
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
+                                     BtreeInsertMode::kInsertOnly, scratch, workspace));
+  }
+
+  {
+    std::array<SqlValue, 1> key{SqlValue::Integer(9)};
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    const ByteBuffer before = SnapshotPage(*pager, root_page);
+    const auto missing = cursor.DeleteIndex(key, columns, options, scratch, workspace);
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(ErrorCode::kNotFound, missing.error().code());
+    EXPECT_TRUE(std::ranges::equal(before.view(), SnapshotPage(*pager, root_page).view()));
+  }
+  {
+    std::array<SqlValue, 1> key{SqlValue::Integer(2)};
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+  }
+  for (std::int64_t value = 1; value <= 3; ++value) {
+    std::array<SqlValue, 1> key{SqlValue::Integer(value)};
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeDelete, InteriorIndexDeleteMovesThePredecessorWithoutASecondSeek) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto make_record = [options](std::int64_t marker) {
+    ByteBuffer blob{ByteCount{90}};
+    std::ranges::fill(blob.mutable_view(), std::byte{0x5a});
+    std::array<SqlValue, 2> values{
+        SqlValue::Integer(marker),
+        SqlValue::Blob(std::move(blob)),
+    };
+    return TakeValue(EncodeRecord(values, options));
+  };
+
+  PageNumber root_page;
+  PageNumber left_page;
+  PageNumber right_page;
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage root_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage left_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage right_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Initialize(
+        owner, root_allocation.owner_slot, geometry, BtreePageType::kInteriorIndex));
+    MutableBtreePage left = TakeValue(MutableBtreePage::Initialize(
+        owner, left_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    MutableBtreePage right = TakeValue(MutableBtreePage::Initialize(
+        owner, right_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    root_page = root.page_number();
+    left_page = left.page_number();
+    right_page = right.page_number();
+    const std::array<std::int64_t, 4> left_markers{10, 20, 30, 40};
+    for (std::size_t index = 0U; index < left_markers.size(); ++index) {
+      const ByteBuffer record = make_record(left_markers[index]);
+      const FormattedCell cell = TakeValue(FillIndexCell(owner, geometry, workspace, record.view(),
+                                                         BtreePageType::kLeafIndex, std::nullopt));
+      RequireStatus(left.InsertCell(index, cell.bytes, std::nullopt, {}, workspace));
+    }
+    const ByteBuffer seventy = make_record(70);
+    const FormattedCell right_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, seventy.view(), BtreePageType::kLeafIndex, std::nullopt));
+    RequireStatus(right.InsertCell(0U, right_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer fifty = make_record(50);
+    const FormattedCell divider = TakeValue(FillIndexCell(
+        owner, geometry, workspace, fifty.view(), BtreePageType::kInteriorIndex, left_page));
+    RequireStatus(root.InsertCell(0U, divider.bytes, left_page, {}, workspace));
+    RequireStatus(root.SetRightmostChild(right_page));
+  }
+
+  ByteBuffer target_blob{ByteCount{90}};
+  std::ranges::fill(target_blob.mutable_view(), std::byte{0x5a});
+  std::array<SqlValue, 2> key{
+      SqlValue::Integer(50),
+      SqlValue::Blob(std::move(target_blob)),
+  };
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+  }
+
+  const ByteBuffer root_image = SnapshotPage(*pager, root_page);
+  const BtreePageView root =
+      TakeValue(BtreePageView::Parse(root_image.view(), root_page, geometry));
+  ASSERT_EQ(BtreePageType::kInteriorIndex, root.type());
+  ASSERT_EQ(1U, root.cell_count());
+  const BtreeCellView divider = TakeValue(root.cell(0U));
+  EXPECT_EQ(left_page, divider.left_child().value_or(PageNumber{}));
+  EXPECT_TRUE(std::ranges::equal(make_record(40).view(), divider.local_payload()));
+  EXPECT_EQ(right_page, root.rightmost_child().value_or(PageNumber{}));
+
+  const ByteBuffer left_image = SnapshotPage(*pager, left_page);
+  const BtreePageView left =
+      TakeValue(BtreePageView::Parse(left_image.view(), left_page, geometry));
+  ASSERT_EQ(3U, left.cell_count());
+  const std::array<std::int64_t, 3> remaining{10, 20, 30};
+  for (std::size_t index = 0U; index < remaining.size(); ++index) {
+    EXPECT_TRUE(std::ranges::equal(make_record(remaining[index]).view(),
+                                   TakeValue(left.cell(index)).local_payload()));
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeDelete, InteriorIndexDeleteStripsTinyLeafPaddingFromThePredecessor) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage root_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage left_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage right_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Initialize(
+        owner, root_allocation.owner_slot, geometry, BtreePageType::kInteriorIndex));
+    MutableBtreePage left = TakeValue(MutableBtreePage::Initialize(
+        owner, left_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    MutableBtreePage right = TakeValue(MutableBtreePage::Initialize(
+        owner, right_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    root_page = root.page_number();
+    const ByteBuffer one = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}, options));
+    const FormattedCell one_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, one.view(), BtreePageType::kLeafIndex, std::nullopt));
+    ASSERT_EQ(4U, one_cell.bytes.size());
+    RequireStatus(left.InsertCell(0U, one_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer three = TakeValue(EncodeRecord(std::array{SqlValue::Integer(3)}, options));
+    const FormattedCell three_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, three.view(), BtreePageType::kLeafIndex, std::nullopt));
+    RequireStatus(right.InsertCell(0U, three_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer two = TakeValue(EncodeRecord(std::array{SqlValue::Integer(2)}, options));
+    const FormattedCell divider = TakeValue(FillIndexCell(
+        owner, geometry, workspace, two.view(), BtreePageType::kInteriorIndex, left.page_number()));
+    ASSERT_EQ(8U, divider.bytes.size());
+    RequireStatus(root.InsertCell(0U, divider.bytes, left.page_number(), {}, workspace));
+    RequireStatus(root.SetRightmostChild(right.page_number()));
+  }
+
+  std::array<SqlValue, 1> key{SqlValue::Integer(2)};
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+  }
+  for (std::int64_t value = 1; value <= 3; ++value) {
+    std::array<SqlValue, 1> search{SqlValue::Integer(value)};
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(search, columns, options, scratch)).exact);
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeDelete, InteriorIndexDeleteTransfersPredecessorOverflowOwnership) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto make_record = [options](std::int64_t marker, std::size_t blob_size) {
+    ByteBuffer blob{ByteCount{blob_size}};
+    std::ranges::fill(blob.mutable_view(), std::byte{0x6b});
+    std::array<SqlValue, 2> values{
+        SqlValue::Integer(marker),
+        SqlValue::Blob(std::move(blob)),
+    };
+    return TakeValue(EncodeRecord(values, options));
+  };
+
+  PageNumber root_page;
+  PageNumber predecessor_overflow;
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage root_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage left_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage right_allocation = TakeValue(AllocateBtreePage(owner, geometry));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Initialize(
+        owner, root_allocation.owner_slot, geometry, BtreePageType::kInteriorIndex));
+    MutableBtreePage left = TakeValue(MutableBtreePage::Initialize(
+        owner, left_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    MutableBtreePage right = TakeValue(MutableBtreePage::Initialize(
+        owner, right_allocation.owner_slot, geometry, BtreePageType::kLeafIndex));
+    root_page = root.page_number();
+    const ByteBuffer ten = make_record(10, 4U);
+    const FormattedCell ten_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, ten.view(), BtreePageType::kLeafIndex, std::nullopt));
+    RequireStatus(left.InsertCell(0U, ten_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer forty = make_record(40, 700U);
+    const FormattedCell forty_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, forty.view(), BtreePageType::kLeafIndex, std::nullopt));
+    predecessor_overflow = forty_cell.first_overflow_page.value_or(PageNumber{});
+    ASSERT_NE(PageNumber{}, predecessor_overflow);
+    RequireStatus(left.InsertCell(1U, forty_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer seventy = make_record(70, 4U);
+    const FormattedCell seventy_cell = TakeValue(FillIndexCell(
+        owner, geometry, workspace, seventy.view(), BtreePageType::kLeafIndex, std::nullopt));
+    RequireStatus(right.InsertCell(0U, seventy_cell.bytes, std::nullopt, {}, workspace));
+    const ByteBuffer fifty = make_record(50, 4U);
+    const FormattedCell divider =
+        TakeValue(FillIndexCell(owner, geometry, workspace, fifty.view(),
+                                BtreePageType::kInteriorIndex, left.page_number()));
+    RequireStatus(root.InsertCell(0U, divider.bytes, left.page_number(), {}, workspace));
+    RequireStatus(root.SetRightmostChild(right.page_number()));
+  }
+
+  ByteBuffer target_blob{ByteCount{4}};
+  std::ranges::fill(target_blob.mutable_view(), std::byte{0x6b});
+  std::array<SqlValue, 2> key{
+      SqlValue::Integer(50),
+      SqlValue::Blob(std::move(target_blob)),
+  };
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+  }
+
+  ByteBuffer predecessor_blob{ByteCount{700}};
+  std::ranges::fill(predecessor_blob.mutable_view(), std::byte{0x6b});
+  std::array<SqlValue, 2> predecessor_key{
+      SqlValue::Integer(40),
+      SqlValue::Blob(std::move(predecessor_blob)),
+  };
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(owner, root_page, false));
+    ResizablePayloadScratch scratch;
+    ASSERT_TRUE(TakeValue(cursor.SeekIndex(predecessor_key, columns, options, scratch)).exact);
+    const BtreeCellView predecessor =
+        TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
+    EXPECT_EQ(predecessor_overflow, predecessor.first_overflow_page().value_or(PageNumber{}));
+  }
+  {
+    const auto overflow_pin = TakeValue(pager->ReadPage(predecessor_overflow));
+    const OverflowPageView overflow =
+        TakeValue(OverflowPageView::Parse(overflow_pin.frame().bytes(), geometry));
+    EXPECT_TRUE(std::ranges::all_of(overflow.payload(),
+                                    [](std::byte value) { return value == std::byte{0x6b}; }));
+  }
   RequireStatus(pager->Rollback());
 }
 
