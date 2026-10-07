@@ -51,3 +51,4 @@ their corresponding implementation begins.
 45. [ADR-0045: Existing-Module SQLite Reference Alignment](0045-existing-module-reference-alignment.md)
 46. [ADR-0046: Canonical Engineering and Reviewable Delivery](0046-canonical-engineering-and-reviewable-delivery.md)
 47. [ADR-0047: Reference-Faithful Single-Database Transaction Coordination](0047-single-database-transaction-coordinator.md)
+48. [ADR-0048: Writable SQL DML and CREATE TABLE Execution](0048-writable-sql-dml-ddl.md)
