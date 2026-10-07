@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <optional>
 #include <stdexcept>
@@ -47,6 +48,12 @@ static_assert(std::is_nothrow_move_assignable_v<SyntaxTree>);
       .span = span,
       .parts = std::vector<SourceSpan>{parts},
   };
+}
+
+template <typename Enum>
+[[nodiscard]] constexpr Enum InvalidEnumValue(std::uint8_t value) noexcept {
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+  return static_cast<Enum>(value);
 }
 
 [[nodiscard]] SelectStatement SingleResultSelect(SourceSpan statement_span, SourceSpan result_span,
@@ -1537,6 +1544,149 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     };
     ExpectMisuse(
         SyntaxTree::Create(std::move(source), std::move(expressions), std::move(statement)));
+  }
+}
+
+TEST(SyntaxTree, RejectsInvalidDmlAndTransactionStatementShapes) {
+  {
+    const std::string source = "INSERT INTO t VALUES()";
+    const SourceSpan table = FindSpan(source, "t");
+    Statement statement = InsertStatement{
+        .span = Span(0, source.size()),
+        .table = Name(table, {table}),
+        .columns = {},
+        .source =
+            InsertValuesSource{
+                .span = FindSpan(source, "VALUES()"),
+                .values = {},
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, {}, std::move(statement)));
+  }
+  {
+    const std::string source = "INSERT INTO t VALUES(1,2)";
+    const SourceSpan table = FindSpan(source, "t");
+    const SourceSpan first = FindSpan(source, "1");
+    const SourceSpan second = FindSpan(source, "2");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = first,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = first,
+                },
+        },
+        Expression{
+            .span = second,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = second,
+                },
+        },
+    };
+    Statement statement = InsertStatement{
+        .span = Span(0, source.size()),
+        .table = Name(table, {table}),
+        .columns = {},
+        .source =
+            InsertValuesSource{
+                .span = FindSpan(source, "VALUES(1,2)"),
+                .values = {ExpressionId{1}, ExpressionId{0}},
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    const std::string source = "UPDATE t SET";
+    const SourceSpan table = FindSpan(source, "t");
+    Statement statement = UpdateStatement{
+        .span = Span(0, source.size()),
+        .table = Name(table, {table}),
+        .assignments = {},
+    };
+    ExpectMisuse(SyntaxTree::Create(source, {}, std::move(statement)));
+  }
+  {
+    const std::string source = "UPDATE t WHERE 1 SET a=2";
+    const SourceSpan table = FindSpan(source, "t");
+    const SourceSpan predicate = FindSpan(source, "1");
+    const SourceSpan value = FindSpan(source, "2");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = predicate,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = predicate,
+                },
+        },
+        Expression{
+            .span = value,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = value,
+                },
+        },
+    };
+    Statement statement = UpdateStatement{
+        .span = Span(0, source.size()),
+        .table = Name(table, {table}),
+        .assignments =
+            {
+                UpdateAssignment{
+                    .span = FindSpan(source, "a=2"),
+                    .column = FindSpan(source, "a"),
+                    .expression = ExpressionId{1},
+                },
+            },
+        .where = ExpressionId{0},
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    const std::string source = "WHERE 1 DELETE FROM t";
+    const SourceSpan table = FindSpan(source, "t");
+    const SourceSpan predicate = FindSpan(source, "1");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = predicate,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = predicate,
+                },
+        },
+    };
+    Statement statement = DeleteStatement{
+        .span = Span(0, source.size()),
+        .table = Name(table, {table}),
+        .where = ExpressionId{0},
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    Statement statement = BeginTransactionStatement{
+        .span = Span(0, 5),
+        .mode = InvalidEnumValue<BeginTransactionMode>(255U),
+    };
+    ExpectMisuse(SyntaxTree::Create("BEGIN", {}, std::move(statement)));
+  }
+  {
+    Statement statement = CommitTransactionStatement{
+        .span = Span(0, 6),
+        .syntax = InvalidEnumValue<CommitTransactionSyntax>(255U),
+    };
+    ExpectMisuse(SyntaxTree::Create("COMMIT", {}, std::move(statement)));
+  }
+  {
+    Statement statement = SavepointStatement{
+        .span = Span(0, 11),
+        .name = Span(0, 1),
+    };
+    ExpectMisuse(SyntaxTree::Create("s SAVEPOINT", {}, std::move(statement)));
   }
 }
 

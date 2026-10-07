@@ -76,6 +76,18 @@ static_assert(kMaximumParserRecursionDepth == 512U);
   return std::get<CreateIndexStatement>(tree.statement());
 }
 
+[[nodiscard]] const InsertStatement& Insert(const SyntaxTree& tree) {
+  return std::get<InsertStatement>(tree.statement());
+}
+
+[[nodiscard]] const UpdateStatement& Update(const SyntaxTree& tree) {
+  return std::get<UpdateStatement>(tree.statement());
+}
+
+[[nodiscard]] const DeleteStatement& Delete(const SyntaxTree& tree) {
+  return std::get<DeleteStatement>(tree.statement());
+}
+
 [[nodiscard]] const Expression& ResultExpression(const SyntaxTree& tree,
                                                  std::size_t result_index = 0) {
   return tree.expression(Select(tree).result_columns.at(result_index).expression);
@@ -170,6 +182,211 @@ TEST(ParserApi, ProvidesStableNamesAndMessages) {
             ParseErrorMessage(ParseError{.code = ParseErrorCode::kInternalInvariant}));
 }
 
+TEST(ParserDml, ParsesSingleRowInsertAndDefaultValues) {
+  const ParseOutput values_output =
+      ParseOrThrow("INSERT INTO main.items(id, name) VALUES(?1, 'alpha')");
+  const SyntaxTree& values_tree = RequiredTree(values_output);
+  const InsertStatement& insert = Insert(values_tree);
+  ASSERT_EQ(2U, insert.table.parts.size());
+  EXPECT_EQ("main", SpanText(values_tree, insert.table.parts[0]));
+  EXPECT_EQ("items", SpanText(values_tree, insert.table.parts[1]));
+  ASSERT_EQ(2U, insert.columns.size());
+  EXPECT_EQ("id", SpanText(values_tree, insert.columns[0]));
+  EXPECT_EQ("name", SpanText(values_tree, insert.columns[1]));
+  const auto& values = std::get<InsertValuesSource>(insert.source);
+  ASSERT_EQ(2U, values.values.size());
+  EXPECT_EQ("?1", SpanText(values_tree, values_tree.expression(values.values[0]).span));
+  EXPECT_EQ("'alpha'", SpanText(values_tree, values_tree.expression(values.values[1]).span));
+
+  const ParseOutput default_output = ParseOrThrow("INSERT INTO items DEFAULT VALUES");
+  const InsertStatement& defaults = Insert(RequiredTree(default_output));
+  EXPECT_TRUE(defaults.columns.empty());
+  EXPECT_TRUE(std::holds_alternative<InsertDefaultValuesSource>(defaults.source));
+}
+
+TEST(ParserDml, ParsesUpdateAssignmentsAndDeletePredicate) {
+  const ParseOutput update_output = ParseOrThrow("UPDATE items SET name=?1, id=id+1 WHERE id=2");
+  const SyntaxTree& update_tree = RequiredTree(update_output);
+  const UpdateStatement& update = Update(update_tree);
+  EXPECT_EQ("items", SpanText(update_tree, update.table.parts.front()));
+  ASSERT_EQ(2U, update.assignments.size());
+  EXPECT_EQ("name", SpanText(update_tree, update.assignments[0].column));
+  EXPECT_EQ("?1",
+            SpanText(update_tree, update_tree.expression(update.assignments[0].expression).span));
+  EXPECT_EQ("id", SpanText(update_tree, update.assignments[1].column));
+  EXPECT_EQ("id+1",
+            SpanText(update_tree, update_tree.expression(update.assignments[1].expression).span));
+  ASSERT_TRUE(update.where.has_value());
+  EXPECT_EQ("id=2", SpanText(update_tree, update_tree.expression(*update.where).span));
+
+  const ParseOutput delete_output = ParseOrThrow("DELETE FROM main.items WHERE id<10");
+  const SyntaxTree& delete_tree = RequiredTree(delete_output);
+  const DeleteStatement& delete_statement = Delete(delete_tree);
+  ASSERT_EQ(2U, delete_statement.table.parts.size());
+  ASSERT_TRUE(delete_statement.where.has_value());
+  EXPECT_EQ("id<10", SpanText(delete_tree, delete_tree.expression(*delete_statement.where).span));
+}
+
+TEST(ParserTransactions, ParsesTransactionAndSavepointStatements) {
+  {
+    SCOPED_TRACE("begin");
+    const ParseOutput output = ParseOrThrow("BEGIN");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* begin = std::get_if<BeginTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, begin);
+    EXPECT_EQ(BeginTransactionMode::kDeferred, begin->mode);
+    EXPECT_FALSE(begin->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("begin immediate");
+    const ParseOutput output = ParseOrThrow("BEGIN IMMEDIATE TRANSACTION");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* begin = std::get_if<BeginTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, begin);
+    EXPECT_EQ(BeginTransactionMode::kImmediate, begin->mode);
+    EXPECT_TRUE(begin->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("begin deferred");
+    const ParseOutput output = ParseOrThrow("BEGIN DEFERRED TRANSACTION");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* begin = std::get_if<BeginTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, begin);
+    EXPECT_EQ(BeginTransactionMode::kDeferred, begin->mode);
+    EXPECT_TRUE(begin->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("commit");
+    const ParseOutput output = ParseOrThrow("COMMIT");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* commit = std::get_if<CommitTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, commit);
+    EXPECT_EQ(CommitTransactionSyntax::kCommit, commit->syntax);
+    EXPECT_FALSE(commit->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("end");
+    const ParseOutput output = ParseOrThrow("END TRANSACTION");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* commit = std::get_if<CommitTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, commit);
+    EXPECT_EQ(CommitTransactionSyntax::kEnd, commit->syntax);
+    EXPECT_TRUE(commit->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("rollback");
+    const ParseOutput output = ParseOrThrow("ROLLBACK TRANSACTION");
+    const Statement& statement = RequiredTree(output).statement();
+    const auto* rollback = std::get_if<RollbackTransactionStatement>(&statement);
+    ASSERT_NE(nullptr, rollback);
+    EXPECT_TRUE(rollback->transaction_keyword);
+  }
+  {
+    SCOPED_TRACE("savepoint");
+    const ParseOutput output = ParseOrThrow("SAVEPOINT \"CaseName\"");
+    const SyntaxTree& tree = RequiredTree(output);
+    const auto* savepoint = std::get_if<SavepointStatement>(&tree.statement());
+    ASSERT_NE(nullptr, savepoint);
+    EXPECT_EQ("\"CaseName\"", SpanText(tree, savepoint->name));
+  }
+  {
+    SCOPED_TRACE("release");
+    const ParseOutput output = ParseOrThrow("RELEASE SAVEPOINT s");
+    const SyntaxTree& tree = RequiredTree(output);
+    const auto* release = std::get_if<ReleaseSavepointStatement>(&tree.statement());
+    ASSERT_NE(nullptr, release);
+    EXPECT_TRUE(release->savepoint_keyword);
+    EXPECT_EQ("s", SpanText(tree, release->name));
+  }
+  {
+    SCOPED_TRACE("release without keyword");
+    const ParseOutput output = ParseOrThrow("RELEASE s");
+    const SyntaxTree& tree = RequiredTree(output);
+    const auto* release = std::get_if<ReleaseSavepointStatement>(&tree.statement());
+    ASSERT_NE(nullptr, release);
+    EXPECT_FALSE(release->savepoint_keyword);
+    EXPECT_EQ("s", SpanText(tree, release->name));
+  }
+  {
+    SCOPED_TRACE("rollback to");
+    const ParseOutput output = ParseOrThrow("ROLLBACK TRANSACTION TO SAVEPOINT s");
+    const SyntaxTree& tree = RequiredTree(output);
+    const auto* rollback_to = std::get_if<RollbackToSavepointStatement>(&tree.statement());
+    ASSERT_NE(nullptr, rollback_to);
+    EXPECT_TRUE(rollback_to->transaction_keyword);
+    EXPECT_TRUE(rollback_to->savepoint_keyword);
+    EXPECT_EQ("s", SpanText(tree, rollback_to->name));
+  }
+  {
+    SCOPED_TRACE("rollback to without optional keywords");
+    const ParseOutput output = ParseOrThrow("ROLLBACK TO s");
+    const SyntaxTree& tree = RequiredTree(output);
+    const auto* rollback_to = std::get_if<RollbackToSavepointStatement>(&tree.statement());
+    ASSERT_NE(nullptr, rollback_to);
+    EXPECT_FALSE(rollback_to->transaction_keyword);
+    EXPECT_FALSE(rollback_to->savepoint_keyword);
+    EXPECT_EQ("s", SpanText(tree, rollback_to->name));
+  }
+}
+
+TEST(ParserDml, RejectsDeferredWritableSqlExtensions) {
+  for (const std::string_view sql : {
+           "WITH source AS (SELECT 1) INSERT INTO t SELECT * FROM source",
+           "INSERT OR IGNORE INTO t VALUES(1)",
+           "INSERT INTO t AS target VALUES(1)",
+           "INSERT INTO t VALUES(1),(2)",
+           "INSERT INTO t SELECT 1",
+           "INSERT INTO t VALUES(1) UNION SELECT 2",
+           "INSERT INTO t VALUES(1) ON CONFLICT DO NOTHING",
+           "INSERT INTO t VALUES(1) RETURNING rowid",
+           "REPLACE INTO t VALUES(1)",
+           "UPDATE OR FAIL t SET a=1",
+           "UPDATE t AS target SET a=1",
+           "UPDATE t SET a=1 FROM other",
+           "UPDATE t INDEXED BY i SET a=1",
+           "UPDATE t NOT INDEXED SET a=1",
+           "UPDATE t SET (a, b)=(1, 2)",
+           "UPDATE t SET a=1 RETURNING a",
+           "DELETE FROM t AS target",
+           "DELETE FROM t INDEXED BY i",
+           "DELETE FROM t NOT INDEXED",
+           "DELETE FROM t LIMIT 1",
+           "DELETE FROM t RETURNING a",
+           "BEGIN EXCLUSIVE",
+           "BEGIN TRANSACTION tx",
+           "BEGIN IMMEDIATE TRANSACTION tx",
+           "COMMIT TRANSACTION tx",
+           "END TRANSACTION tx",
+           "ROLLBACK TRANSACTION tx",
+           "ROLLBACK TRANSACTION tx TO SAVEPOINT s",
+           "SAVEPOINT parent.child",
+           "RELEASE parent.child",
+           "ROLLBACK TO parent.child",
+       }) {
+    const ParseResult parsed = ParseOne(Utf8View{sql});
+    ASSERT_FALSE(parsed.has_value()) << sql;
+    EXPECT_EQ(ParseErrorCode::kUnsupportedSyntax, parsed.error().code) << sql;
+  }
+}
+
+TEST(ParserDml, RejectsMalformedWritableStatementsAsSyntaxErrors) {
+  for (const std::string_view sql : {
+           "INSERT INTO t() VALUES(1)",
+           "INSERT INTO t VALUES()",
+           "UPDATE t SET",
+           "UPDATE t SET a=",
+           "DELETE t",
+           "BEGIN IMMEDIATE DEFERRED",
+           "ROLLBACK TO",
+           "SAVEPOINT",
+           "RELEASE SAVEPOINT",
+       }) {
+    const ParseResult parsed = ParseOne(Utf8View{sql});
+    ASSERT_FALSE(parsed.has_value()) << sql;
+    EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code) << sql;
+  }
+}
+
 TEST(ParserApi, EnforcesConfigurableSourceAndListLimits) {
   ParseResult oversized_source =
       ParseOne(Utf8View{"SELECT 1"}, ParseOptions{.maximum_source_bytes = 7});
@@ -181,6 +398,9 @@ TEST(ParserApi, EnforcesConfigurableSourceAndListLimits) {
            "CREATE TABLE t(a, b)",
            "CREATE TABLE t(a, UNIQUE(a, a))",
            "CREATE INDEX i ON t(a, b)",
+           "INSERT INTO t(a, b) VALUES(1, 2)",
+           "INSERT INTO t VALUES(1, 2)",
+           "UPDATE t SET a=1, b=2",
        }) {
     const ParseResult oversized_list = ParseOne(Utf8View{sql}, ParseOptions{.maximum_columns = 1});
     ASSERT_FALSE(oversized_list.has_value()) << sql;
@@ -200,7 +420,7 @@ TEST(Parser, PreservesGeneratedAlwaysFallbackWordsInDeclaredTypes) {
 
 TEST(Parser, MatchesPinnedSqliteDifferentialCorpusPolicy) {
   const std::vector<ParserCorpusCase> cases = ReadParserCorpus();
-  ASSERT_EQ(57U, cases.size());
+  ASSERT_EQ(77U, cases.size());
 
   for (const ParserCorpusCase& test_case : cases) {
     SCOPED_TRACE(test_case.name);

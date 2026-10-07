@@ -327,6 +327,26 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   EXPECT_EQ(ErrorCode::kGeneric, syntax.error().code());
 }
 
+TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+
+  for (const std::string_view sql : {
+           "INSERT INTO items(id, name) VALUES(99, 'write')",
+           "UPDATE items SET name='write' WHERE id=1",
+           "DELETE FROM items WHERE id=1",
+           "CREATE TABLE write_attempt(id)",
+           "BEGIN",
+           "SAVEPOINT write_attempt",
+       }) {
+    const auto prepared = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(prepared.has_value()) << sql;
+    EXPECT_EQ(ErrorCode::kGeneric, prepared.error().code()) << sql;
+    EXPECT_NE(std::string_view::npos,
+              prepared.error().message().find("only supports SELECT statements"))
+        << sql;
+  }
+}
+
 TEST(ReadSession, ExecutesConstantsAfterThePublicSessionHandleIsDestroyed) {
   ReadStatement statement = [] {
     ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
