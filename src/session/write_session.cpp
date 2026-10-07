@@ -202,7 +202,7 @@ struct WriteSession::State final {
       : vfs(std::move(owned_vfs)), pager(&owned_pager), coordinator(std::move(owned_coordinator)) {}
 
   ~State() {
-    if (coordinator.valid() && !coordinator.autocommit() && !coordinator.statement_active()) {
+    if (coordinator.valid() && (!coordinator.autocommit() || coordinator.statement_active())) {
       try {
         [[maybe_unused]] const Status rolled_back = coordinator.Rollback();
       } catch (const std::bad_alloc&) {
@@ -416,11 +416,14 @@ struct WriteStatement::Impl final {
       return {};
     }
     Status rolled_back = active_statement->Rollback();
+    if (!rolled_back.has_value()) {
+      return rolled_back;
+    }
     active_statement.reset();
     success_pending = false;
     pending_candidate.reset();
     pending_changes.reset();
-    return rolled_back;
+    return {};
   }
 
   [[nodiscard]] Result<WriteStep> FailAndRollback(Error error) {
@@ -433,6 +436,9 @@ struct WriteStatement::Impl final {
     auto rolled_back = RollbackActiveStatement();
     if (!rolled_back.has_value()) {
       error = CombineErrors(error, rolled_back.error(), "statement rollback");
+    }
+    if (execution != nullptr && execution->program->mutation_result().publishes_changes) {
+      state->changes = 0;
     }
     return Fail(std::move(error));
   }
@@ -493,21 +499,30 @@ struct WriteStatement::Impl final {
     if (!valid()) {
       return std::unexpected(Misuse("cannot step a finalized writable statement"));
     }
+    bool retrying_transaction_cleanup = false;
     if (lifecycle != StatementState::kRow &&
         (lifecycle == StatementState::kDone || lifecycle == StatementState::kError)) {
-      auto reset = ResetForReexecution(false);
-      if (!reset.has_value()) {
-        return Fail(std::move(reset.error()));
+      if (lifecycle == StatementState::kError && transaction.has_value()) {
+        last_error.reset();
+        lifecycle = StatementState::kReady;
+        retrying_transaction_cleanup = true;
+      } else {
+        auto reset = ResetForReexecution(false);
+        if (!reset.has_value()) {
+          return Fail(std::move(reset.error()));
+        }
       }
     }
     if (lifecycle == StatementState::kReady) {
-      auto refreshed = state->RefreshCatalog();
-      if (!refreshed.has_value()) {
-        return Fail(std::move(refreshed.error()));
-      }
-      auto current = EnsureCurrentProgram();
-      if (!current.has_value()) {
-        return Fail(std::move(current.error()));
+      if (!retrying_transaction_cleanup) {
+        auto refreshed = state->RefreshCatalog();
+        if (!refreshed.has_value()) {
+          return Fail(std::move(refreshed.error()));
+        }
+        auto current = EnsureCurrentProgram();
+        if (!current.has_value()) {
+          return Fail(std::move(current.error()));
+        }
       }
       if (transaction.has_value()) {
         auto executed = ExecuteTransactionCommand();
@@ -639,15 +654,27 @@ struct WriteStatement::Impl final {
       return {};
     }
     std::optional<Error> error;
+    if (lifecycle == StatementState::kError && last_error.has_value()) {
+      error = std::move(last_error);
+      last_error.reset();
+    }
     if (execution != nullptr) {
       auto reset = execution->vm.Reset();
       if (!reset.has_value()) {
-        error = std::move(reset.error());
+        error = error.has_value()
+                    ? std::optional<Error>{CombineErrors(*error, reset.error(), "VM reset")}
+                    : std::optional<Error>{std::move(reset.error())};
       }
     }
-    if (active_statement.has_value()) {
-      auto rolled_back = active_statement->Rollback();
-      active_statement.reset();
+    if (success_pending) {
+      auto completed = CompletePendingSuccess();
+      if (!completed.has_value()) {
+        error = error.has_value() ? std::optional<Error>{CombineErrors(
+                                        *error, completed.error(), "statement completion retry")}
+                                  : std::optional<Error>{std::move(completed.error())};
+      }
+    } else {
+      auto rolled_back = RollbackActiveStatement();
       if (!rolled_back.has_value()) {
         error = error.has_value() ? std::optional<Error>{CombineErrors(*error, rolled_back.error(),
                                                                        "finalize rollback")}

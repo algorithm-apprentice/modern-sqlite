@@ -225,6 +225,10 @@ TEST(BytecodeProgramTest, VerifiesTypedTableInsertInstructions) {
   ProgramInput input;
   input.statement_kind = ProgramStatementKind::kInsert;
   input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
   input.register_count = 4;
   input.write_cursors.push_back(WriteCursorDescriptor{
       .root_page = RootPageNumber(2),
@@ -521,6 +525,117 @@ TEST(BytecodeProgramTest, PublishesExecutionAndWriteMetadata) {
   input.write_cursors.front().columns[1].default_value = Constant(0);
   input.transaction_access = static_cast<ProgramTransactionAccess>(255);  // NOLINT
   EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+}
+
+TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatementKind) {
+  const auto input_for = [](ProgramStatementKind kind, MutationResultMetadata mutation_result) {
+    ProgramInput input;
+    input.statement_kind = kind;
+    input.transaction_access = kind == ProgramStatementKind::kSelect
+                                   ? ProgramTransactionAccess::kRead
+                                   : ProgramTransactionAccess::kWrite;
+    input.mutation_result = mutation_result;
+    input.instructions.emplace_back(HaltInstruction{});
+    return input;
+  };
+
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kSelect, {})).has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kInsert,
+                                      MutationResultMetadata{
+                                          .publishes_changes = true,
+                                          .publishes_last_insert_rowid = true,
+                                      }))
+                  .has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kUpdate,
+                                      MutationResultMetadata{
+                                          .publishes_changes = true,
+                                          .publishes_last_insert_rowid = false,
+                                      }))
+                  .has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kDelete,
+                                      MutationResultMetadata{
+                                          .publishes_changes = true,
+                                          .publishes_last_insert_rowid = false,
+                                      }))
+                  .has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kCreateTable, {})).has_value());
+
+  EXPECT_EQ(
+      ProgramErrorCode::kInvalidExecutionMetadata,
+      VerifyError(input_for(ProgramStatementKind::kSelect, MutationResultMetadata{
+                                                               .publishes_changes = true,
+                                                               .publishes_last_insert_rowid = false,
+                                                           })));
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
+            VerifyError(input_for(ProgramStatementKind::kInsert, {})));
+  EXPECT_EQ(
+      ProgramErrorCode::kInvalidExecutionMetadata,
+      VerifyError(input_for(ProgramStatementKind::kUpdate, MutationResultMetadata{
+                                                               .publishes_changes = true,
+                                                               .publishes_last_insert_rowid = true,
+                                                           })));
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
+            VerifyError(input_for(ProgramStatementKind::kDelete, {})));
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
+            VerifyError(input_for(ProgramStatementKind::kCreateTable,
+                                  MutationResultMetadata{
+                                      .publishes_changes = true,
+                                      .publishes_last_insert_rowid = false,
+                                  })));
+}
+
+TEST(BytecodeProgramTest, RejectsInstructionsOutsideTheirStatementFamily) {
+  const auto expect_rejected = [](ProgramStatementKind kind, MutationResultMetadata mutation_result,
+                                  Instruction instruction) {
+    ProgramInput input;
+    input.statement_kind = kind;
+    input.transaction_access = kind == ProgramStatementKind::kSelect
+                                   ? ProgramTransactionAccess::kRead
+                                   : ProgramTransactionAccess::kWrite;
+    input.mutation_result = mutation_result;
+    input.register_count = 4;
+    input.instructions.push_back(instruction);
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+  };
+  constexpr MutationResultMetadata kInsertResults{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
+  constexpr MutationResultMetadata kMutationResults{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = false,
+  };
+
+  expect_rejected(ProgramStatementKind::kDelete, kMutationResults,
+                  ResolveInsertRowIdInstruction{
+                      .cursor = WriteCursor(0),
+                      .input = Reg(0),
+                      .output = Reg(1),
+                  });
+  expect_rejected(ProgramStatementKind::kSelect, {},
+                  BuildTableRecordInstruction{
+                      .cursor = WriteCursor(0),
+                      .first_value = Reg(0),
+                      .value_count = 1,
+                      .output = Reg(1),
+                  });
+  expect_rejected(ProgramStatementKind::kUpdate, kMutationResults,
+                  InsertTableInstruction{
+                      .cursor = WriteCursor(0),
+                      .rowid = Reg(0),
+                      .record = Reg(1),
+                  });
+  expect_rejected(ProgramStatementKind::kInsert, kInsertResults,
+                  DeleteTableInstruction{.cursor = WriteCursor(0), .rowid = Reg(0)});
+  expect_rejected(ProgramStatementKind::kDelete, kMutationResults,
+                  UpdateTableInstruction{
+                      .cursor = WriteCursor(0),
+                      .old_rowid = Reg(0),
+                      .new_rowid = Reg(1),
+                      .record = Reg(2),
+                  });
+  expect_rejected(ProgramStatementKind::kUpdate, kMutationResults,
+                  ResultRowInstruction{.first = Reg(0), .count = 1});
 }
 
 TEST(BytecodeProgramTest, CanonicalizesCallerStorageBeforePublication) {

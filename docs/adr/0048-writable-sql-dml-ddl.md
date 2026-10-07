@@ -264,11 +264,11 @@ the predicate ID, whether UPDATE may change rowid, and whether CREATE is an
   mutation; and
 - transaction-atomic versus anonymous-statement atomicity.
 
-INSERT is one-row transaction-atomic work. CREATE TABLE always uses
-anonymous-statement atomicity when it mutates. Scan UPDATE/DELETE use
-anonymous-statement atomicity; exact-rowid DELETE and same-rowid UPDATE use
-transaction atomicity; and any UPDATE that can change rowid uses
-anonymous-statement atomicity.
+Every mutating INSERT, UPDATE, and DELETE uses anonymous-statement atomicity
+so ordinary ABORT-class SQL errors preserve earlier work in an explicit
+transaction. Proven-empty mutation plans remain transaction-atomic no-ops.
+CREATE TABLE uses anonymous-statement atomicity when it mutates and
+transaction atomicity for `IF NOT EXISTS` no-ops.
 
 There is no cost-based write optimizer in this node. The optimizer validates
 the supported shape and chooses:
@@ -651,9 +651,9 @@ the existing B-tree replacement path.
 
 DELETE reports one change for every removed row.
 
-All multi-row UPDATE/DELETE statements request anonymous statement rollback.
-Any expression, allocation, constraint, Pager, or B-tree error restores the
-entire statement while retaining an explicit outer transaction when safe.
+All DML statements request anonymous statement rollback. Any expression,
+allocation, constraint, Pager, or B-tree error restores the entire statement
+while retaining an explicit outer transaction when safe.
 
 ### 8. Perform CREATE TABLE as one catalog mutation statement
 

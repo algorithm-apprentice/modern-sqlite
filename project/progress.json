@@ -37,8 +37,9 @@
     "implement-rollback-journal",
     "implement-write-pager",
     "implement-btree-write",
-    "implement-transaction-coordinator"
+    "implement-transaction-coordinator",
+    "implement-dml-ddl"
   ],
-  "activeNode": "implement-dml-ddl",
-  "activeNodeState": "in_progress"
+  "activeNode": "build-writable-mvp-harness",
+  "activeNodeState": "review_pending"
 }

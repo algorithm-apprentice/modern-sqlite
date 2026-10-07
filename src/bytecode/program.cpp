@@ -431,18 +431,24 @@ template <typename T>
     return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidEnumValue));
   }
   const bool is_select = input.statement_kind == ProgramStatementKind::kSelect;
+  const bool is_insert = input.statement_kind == ProgramStatementKind::kInsert;
+  const bool is_update = input.statement_kind == ProgramStatementKind::kUpdate;
+  const bool is_delete = input.statement_kind == ProgramStatementKind::kDelete;
+  const bool is_create = input.statement_kind == ProgramStatementKind::kCreateTable;
+  const bool mutation_results_valid =
+      (is_select && !input.mutation_result.publishes_changes &&
+       !input.mutation_result.publishes_last_insert_rowid) ||
+      (is_insert && input.mutation_result.publishes_changes &&
+       input.mutation_result.publishes_last_insert_rowid) ||
+      ((is_update || is_delete) && input.mutation_result.publishes_changes &&
+       !input.mutation_result.publishes_last_insert_rowid) ||
+      (is_create && !input.mutation_result.publishes_changes &&
+       !input.mutation_result.publishes_last_insert_rowid);
   if ((is_select && input.transaction_access != ProgramTransactionAccess::kRead) ||
       (!is_select && input.transaction_access != ProgramTransactionAccess::kWrite) ||
       (is_select && input.rollback_mode != ProgramRollbackMode::kTransaction) ||
-      (is_select && (!input.write_cursors.empty() || input.mutation_result.publishes_changes ||
-                     input.mutation_result.publishes_last_insert_rowid)) ||
-      (!is_select && !input.result_columns.empty()) ||
-      (input.mutation_result.publishes_last_insert_rowid &&
-       input.statement_kind != ProgramStatementKind::kInsert) ||
-      (input.mutation_result.publishes_changes &&
-       input.statement_kind != ProgramStatementKind::kInsert &&
-       input.statement_kind != ProgramStatementKind::kUpdate &&
-       input.statement_kind != ProgramStatementKind::kDelete)) {
+      (is_select && !input.write_cursors.empty()) ||
+      (!is_select && !input.result_columns.empty()) || !mutation_results_valid) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidExecutionMetadata));
   }
   return {};
@@ -735,6 +741,10 @@ template <typename T>
             }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, ResolveInsertRowIdInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kInsert &&
+                input.statement_kind != ProgramStatementKind::kCreateTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;
             }
@@ -743,6 +753,11 @@ template <typename T>
             }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kInsert &&
+                input.statement_kind != ProgramStatementKind::kUpdate &&
+                input.statement_kind != ProgramStatementKind::kCreateTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;
             }
@@ -758,6 +773,10 @@ template <typename T>
             }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, InsertTableInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kInsert &&
+                input.statement_kind != ProgramStatementKind::kCreateTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;
             }
@@ -766,11 +785,17 @@ template <typename T>
             }
             return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, DeleteTableInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kDelete) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;
             }
             return check_register(operation.rowid, index);
           } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kUpdate) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;
             }
@@ -833,6 +858,9 @@ template <typename T>
             return check_target(operation.target, index);
           } else {
             static_assert(std::is_same_v<Operation, ResultRowInstruction>);
+            if (input.statement_kind != ProgramStatementKind::kSelect) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
             if (operation.count != input.result_columns.size()) {
               return std::unexpected(
                   ErrorAt(ProgramErrorCode::kResultShapeMismatch, index, operation.count));

@@ -261,7 +261,7 @@ TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {
   EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_update.access.kind);
   EXPECT_TRUE(exact_update.access.key.has_value());
   EXPECT_TRUE(exact_update.access.residuals.empty());
-  EXPECT_EQ(MutationAtomicity::kTransaction, exact_update.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, exact_update.atomicity);
   EXPECT_FALSE(exact_update.collect_original_rowids);
 
   PhysicalStatementPlan exact_moving_update_statement =
@@ -293,7 +293,7 @@ TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {
   const auto& exact_delete = std::get<PhysicalDeleteMutation>(
       std::get<PhysicalMutationPlan>(exact_delete_statement).payload());
   EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_delete.access.kind);
-  EXPECT_EQ(MutationAtomicity::kTransaction, exact_delete.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, exact_delete.atomicity);
 
   PhysicalStatementPlan scan_delete_statement =
       OptimizeStatementOrThrow("DELETE FROM Items WHERE Name=?1", catalog);
@@ -329,7 +329,7 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
       OptimizeStatementOrThrow("INSERT INTO Items(Name,id,Value) VALUES(?1,?2,?3)", catalog);
   const auto& insert =
       std::get<PhysicalInsertMutation>(std::get<PhysicalMutationPlan>(insert_statement).payload());
-  EXPECT_EQ(MutationAtomicity::kTransaction, insert.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, insert.atomicity);
 
   PhysicalStatementPlan create_statement =
       OptimizeStatementOrThrow("CREATE TABLE NewItems(id INTEGER PRIMARY KEY)", catalog);

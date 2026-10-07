@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-dml-ddl",
+  "currentNode": "build-writable-mvp-harness",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

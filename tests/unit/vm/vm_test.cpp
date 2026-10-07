@@ -735,6 +735,7 @@ TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
   write_input.schema_version = CurrentSchema(*pager_);
   write_input.statement_kind = ProgramStatementKind::kUpdate;
   write_input.transaction_access = ProgramTransactionAccess::kWrite;
+  write_input.mutation_result.publishes_changes = true;
   write_input.instructions.emplace_back(HaltInstruction{});
   const BytecodeProgram write_program = TakeProgramValue(BytecodeProgram::Create(write_input));
   Vm write_vm = TakeValue(Vm::Create(write_program, VmEnvironment::Core()));

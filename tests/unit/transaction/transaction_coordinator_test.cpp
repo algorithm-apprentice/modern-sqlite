@@ -283,6 +283,7 @@ TEST(TransactionCoordinator, SuppliesStatementScopedVmExecutionContext) {
   input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 5};
   input.statement_kind = ProgramStatementKind::kUpdate;
   input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.mutation_result.publishes_changes = true;
   input.requires_database_snapshot = true;
   input.instructions.emplace_back(HaltInstruction{});
   auto program = BytecodeProgram::Create(input);

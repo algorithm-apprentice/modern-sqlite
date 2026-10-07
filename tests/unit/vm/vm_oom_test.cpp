@@ -344,6 +344,10 @@ int main() try {
   insert_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
   insert_input.statement_kind = ProgramStatementKind::kInsert;
   insert_input.transaction_access = ProgramTransactionAccess::kWrite;
+  insert_input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
   insert_input.register_count = 4;
   insert_input.constants.emplace_back();
   insert_input.constants.push_back(SqlValue::Text("value"));
