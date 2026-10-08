@@ -58,7 +58,7 @@ python3 tools/write_performance.py validate-baseline \
 
 Two independent full-generation probes produced the same schedules, work,
 provenance, logical results, database fingerprints, diagnostic counter
-families, and single failing guard case.
+families, and stable primary guard blocker.
 
 `matched-durable/delete-scan-implicit` measured approximately 10.41--10.49x
 SQLite wall time and 8.96--9.08x process CPU. All three paired wall rounds
@@ -72,6 +72,20 @@ exceeded the 10x guard. The diagnostic replay recorded:
 The baseline therefore records a validated guard failure instead of widening
 the threshold or replacing samples. ADR-0008's optimization-admission process
 must address this case in a separate reviewed node.
+
+## Canonical baseline result
+
+The committed `benchmarks/write-baseline-v1` run records:
+
+- `delete-scan-implicit`: 10.44x aggregate wall and 9.02x CPU, with all
+  paired wall rounds between 10.24x and 10.87x;
+- `update-scan-implicit`: 9.54x aggregate wall and 8.64x CPU, with round 0
+  wall at 10.07x; and
+- every other matched aggregate and paired-round wall/CPU ratio below 10x.
+
+`engine-default` remains informational. ADR-0051 admits a separate
+SQLite-aligned one-pass scan-mutation optimization node; the canonical
+baseline and guard remain unchanged until that node is remeasured.
 
 ## Fixed profile replay
 

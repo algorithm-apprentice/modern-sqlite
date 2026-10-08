@@ -39,8 +39,9 @@
     "implement-btree-write",
     "implement-transaction-coordinator",
     "implement-dml-ddl",
-    "build-writable-mvp-harness"
+    "build-writable-mvp-harness",
+    "establish-write-performance-baseline"
   ],
-  "activeNode": "establish-write-performance-baseline",
+  "activeNode": "optimize-one-pass-mutations",
   "activeNodeState": "in_progress"
 }
