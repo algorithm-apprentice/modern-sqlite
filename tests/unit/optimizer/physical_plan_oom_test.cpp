@@ -60,7 +60,8 @@ bool inject_failure = false;
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
-  input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Payload BLOB)"));
   if (indexed) {
     input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
   }
@@ -78,6 +79,10 @@ bool inject_failure = false;
               CatalogColumnInput{
                   .name = "Name",
                   .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Payload",
+                  .declared_type = "BLOB",
               },
           },
       .rowid_alias = ColumnId{0},
@@ -149,10 +154,10 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::LogicalPlan LogicalIndexFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql = "SELECT id, Name FROM Items WHERE Name=?1") {
   using namespace modern_sqlite;
-  BindSelectResult bound =
-      BindSelectStatement(ParseTree("SELECT id, Name FROM Items WHERE Name=?1"), catalog);
+  BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind optimizer index OOM fixture"};
   }
@@ -253,6 +258,39 @@ int main() try {
   }
   for (std::size_t failure = 0; failure < index_allocation_count; ++failure) {
     LogicalPlan logical = LogicalIndexFixture(indexed_catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+          OptimizeLogicalPlan(std::move(logical));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+
+  LogicalPlan noncovering_baseline_logical =
+      LogicalIndexFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1");
+  allocation_index.store(0, std::memory_order_relaxed);
+  const OptimizeLogicalPlanResult noncovering_baseline =
+      OptimizeLogicalPlan(std::move(noncovering_baseline_logical));
+  if (!noncovering_baseline.has_value() ||
+      noncovering_baseline->selected_candidate().kind != PhysicalAccessKind::kIndexScan ||
+      noncovering_baseline->selected_candidate().covering) {
+    return 1;
+  }
+  const std::size_t noncovering_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (noncovering_allocation_count == 0U || noncovering_allocation_count > 64U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < noncovering_allocation_count; ++failure) {
+    LogicalPlan logical =
+        LogicalIndexFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1");
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = failure;
     inject_failure = true;

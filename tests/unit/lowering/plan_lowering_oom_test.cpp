@@ -62,7 +62,9 @@ bool inject_failure = false;
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
-  input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  input.definitions.push_back(
+      ParseTree(indexed ? "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Payload BLOB)"
+                        : "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
   if (indexed) {
     input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
   }
@@ -84,6 +86,12 @@ bool inject_failure = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.tables.back().columns.push_back(CatalogColumnInput{
+        .name = "Payload",
+        .declared_type = "BLOB",
+    });
+  }
   if (indexed) {
     input.indexes.push_back(CatalogIndexInput{
         .definition = SchemaDefinitionId{1},
@@ -154,10 +162,10 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::PhysicalPlan PhysicalIndexFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql = "SELECT id, Name FROM Items WHERE Name=?1") {
   using namespace modern_sqlite;
-  BindSelectResult bound =
-      BindSelectStatement(ParseTree("SELECT id, Name FROM Items WHERE Name=?1"), catalog);
+  BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind covering index lowering OOM fixture"};
   }
@@ -299,6 +307,8 @@ int main() try {
   const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
   const PhysicalPlan physical = PhysicalFixture(catalog);
   const PhysicalPlan index = PhysicalIndexFixture(indexed_catalog);
+  const PhysicalPlan noncovering_index =
+      PhysicalIndexFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1");
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   const PhysicalMutationPlan update = UpdateFixture(catalog);
@@ -335,9 +345,9 @@ int main() try {
     return LowerPlan(plan).has_value();
   };
 
-  return verify_oom(physical) && verify_oom(index) && verify_oom(mutation) &&
-                 verify_oom(deletion) && verify_oom(update) && verify_oom(stable_update) &&
-                 verify_oom(create)
+  return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
+                 verify_oom(mutation) && verify_oom(deletion) && verify_oom(update) &&
+                 verify_oom(stable_update) && verify_oom(create)
              ? 0
              : 1;
 } catch (...) {

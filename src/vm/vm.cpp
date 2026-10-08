@@ -1427,6 +1427,30 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const SeekTableRowIdInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+    if (cursor == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "exact table rowid seek used a non-table cursor"));
+    }
+    const std::optional<std::int64_t> rowid = Register(operation.key).integer_value();
+    if (!rowid.has_value()) {
+      return std::unexpected(
+          VmError(ErrorCode::kCorruption, "index record contains a non-integer table rowid"));
+    }
+    auto found = cursor->Seek(*rowid, BtreeSeekMode::kEqual);
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (!*found) {
+      return std::unexpected(
+          VmError(ErrorCode::kCorruption, "index rowid does not resolve to a table record"));
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const SeekIndexInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();

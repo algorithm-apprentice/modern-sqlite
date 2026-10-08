@@ -508,6 +508,39 @@ TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
   EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesIndexRowidTableLookupInstructions) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  auto index = IndexCursorDescriptor();
+  index.fields.push_back(CursorFieldSource{
+      .kind = CursorFieldSourceKind::kRecordField,
+      .record_field = 1,
+  });
+  input.cursors.push_back(std::move(index));
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.result_columns.push_back(IntegerResultColumn());
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{
+          .cursor = Cursor(0),
+          .empty_target = Address(8),
+      },
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(1)},
+      SeekTableRowIdInstruction{.cursor = Cursor(1), .key = Reg(0)},
+      ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      HaltInstruction{},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("seek_table_rowid", InstructionKindName(InstructionKindOf(input.instructions[4])));
+
+  std::get<SeekTableRowIdInstruction>(input.instructions[4]).cursor = Cursor(0);
+  EXPECT_EQ(ProgramErrorCode::kRowIdOperationRequiresRowIdTable, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, VerifiesRowidListLifecycleAndBranches) {
   ProgramInput input;
   input.register_count = 2;

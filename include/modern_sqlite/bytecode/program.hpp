@@ -292,6 +292,11 @@ struct SeekRowIdInstruction {
   RowIdSeekMode mode = RowIdSeekMode::kEqual;
 };
 
+struct SeekTableRowIdInstruction {
+  CursorId cursor;
+  RegisterId key;
+};
+
 enum class IndexSeekMode : std::uint8_t {
   kEqual,
   kGreaterOrEqual,
@@ -422,12 +427,13 @@ using Instruction = std::variant<
     OpenMutationCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
     CloseWriteCursorInstruction, RewindInstruction, NextInstruction, ClearRowIdListInstruction,
     AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
-    SeekRowIdInstruction, SeekIndexInstruction, CheckIndexRangeInstruction, ReadFieldInstruction,
-    ReadRowIdInstruction, ResolveInsertRowIdInstruction, BuildTableRecordInstruction,
-    InsertTableInstruction, DeleteTableInstruction, DeleteCurrentTableInstruction,
-    UpdateCurrentTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
-    CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
-    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+    SeekRowIdInstruction, SeekTableRowIdInstruction, SeekIndexInstruction,
+    CheckIndexRangeInstruction, ReadFieldInstruction, ReadRowIdInstruction,
+    ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
+    DeleteTableInstruction, DeleteCurrentTableInstruction, UpdateCurrentTableInstruction,
+    UpdateTableInstruction, EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
+    IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
+    JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -454,6 +460,7 @@ enum class InstructionKind : std::uint8_t {
   kRewindRowIdList,
   kNextRowIdList,
   kSeekRowId,
+  kSeekTableRowId,
   kSeekIndex,
   kCheckIndexRange,
   kReadField,

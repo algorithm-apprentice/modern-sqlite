@@ -255,6 +255,7 @@ SCAN "<table>" USING COVERING INDEX "<index>"
 SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>"=?)
 SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>" IS ?)
 SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>"=? AND "<column>">=? AND "<column>"<?)
+SEARCH "<table>" USING INDEX "<index>" ("<column>"=?)
 ```
 
 A full covering-index scan uses `SCAN`. Any constrained index access uses
@@ -275,6 +276,8 @@ The bytecode layer gains typed equivalents of the pinned seek/range protocol:
 - compare the current index record with a prefix end key and branch when the
   cursor has crossed the inclusive or exclusive end;
 - read the implicit rowid field for a noncovering rowid-table lookup; and
+- perform an exact rowid-table seek that returns corruption when an index
+  suffix is not an integer rowid or does not resolve to a table record; and
 - advance the index cursor exactly once per candidate.
 
 `IndexBtreeCursor` gains a current-record prefix comparison primitive that

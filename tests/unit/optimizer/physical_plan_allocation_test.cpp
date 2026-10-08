@@ -67,7 +67,8 @@ bool fail_allocations = false;
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
-  input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Payload BLOB)"));
   if (indexed) {
     input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
   }
@@ -85,6 +86,10 @@ bool fail_allocations = false;
               CatalogColumnInput{
                   .name = "Name",
                   .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Payload",
+                  .declared_type = "BLOB",
               },
           },
       .rowid_alias = ColumnId{0},
@@ -228,6 +233,11 @@ int main() try {
   const std::size_t index_allocations =
       OptimizeAllocationCount("SELECT id, Name FROM Items WHERE Name=?1", indexed_catalog);
   if (index_allocations != 14U) {
+    return 1;
+  }
+  const std::size_t noncovering_allocations =
+      OptimizeAllocationCount("SELECT Payload FROM Items WHERE Name=?1", indexed_catalog);
+  if (noncovering_allocations != 14U) {
     return 1;
   }
 

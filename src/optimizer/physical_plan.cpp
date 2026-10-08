@@ -1099,7 +1099,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   }
   candidate.node.covering =
       IsCoveringIndex(bound_select, table, index, predicates, candidate.selected_terms);
-  if (!candidate.node.covering) {
+  if (!constrained && !candidate.node.covering) {
     return std::nullopt;
   }
   return candidate;
@@ -1119,7 +1119,13 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
       constrained
           ? static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(index_rows, 1U)))
           : 0U;
-  const std::uint64_t scan_work = SaturatingMultiply(output_rows, row_size);
+  std::uint64_t scan_work = SaturatingMultiply(output_rows, row_size);
+  if (!plan.node.covering) {
+    const std::uint64_t table_seek = static_cast<std::uint64_t>(
+        std::bit_width(std::max<std::uint64_t>(source.estimated_rows, 1U)));
+    const std::uint64_t table_lookup = SaturatingAdd(table_seek, source.estimated_row_size);
+    scan_work = SaturatingAdd(scan_work, SaturatingMultiply(output_rows, table_lookup));
+  }
   return AccessPathCandidate{
       .kind = PhysicalAccessKind::kIndexScan,
       .cost =
@@ -1236,8 +1242,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                                                      : std::span<const IndexId>{};
   for (; candidate_index < candidates.size(); ++candidate_index) {
     const AccessPathCandidate& candidate = candidates[candidate_index];
-    if (candidate.kind != PhysicalAccessKind::kIndexScan || !candidate.index.has_value() ||
-        !candidate.covering) {
+    if (candidate.kind != PhysicalAccessKind::kIndexScan || !candidate.index.has_value()) {
       return std::unexpected{InvariantFailure("index access candidate is invalid")};
     }
     while (table_index_position < table_indexes.size() &&
@@ -1423,7 +1428,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
              index_scan != nullptr) {
     if (source.source_kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
         index_scan->table != source.table || index_scan->table_root_page != source.root_page ||
-        !index_scan->covering || bound_select.catalog() == nullptr ||
+        bound_select.catalog() == nullptr ||
         index_scan->index.value >= bound_select.catalog()->indexes().size()) {
       return std::unexpected{InvariantFailure("physical index scan source is invalid")};
     }
@@ -1482,8 +1487,9 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
           (range.upper.has_value() && !validate_bound(*range.upper, IndexConstraintKind::kUpper))) {
         return std::unexpected{InvariantFailure("physical index range bound is invalid")};
       }
-    } else if (index_scan->equalities.empty() && index.statistics.unordered) {
-      return std::unexpected{InvariantFailure("unordered index cannot provide a full scan")};
+    } else if (index_scan->equalities.empty() &&
+               (index.statistics.unordered || !index_scan->covering)) {
+      return std::unexpected{InvariantFailure("index cannot provide the selected full scan")};
     }
   } else if (std::holds_alternative<PhysicalSingleRowNode>(leaf.payload)) {
     if (!source.single_row) {
