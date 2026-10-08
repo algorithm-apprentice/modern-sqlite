@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+import hashlib
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -397,6 +398,51 @@ def sqlite_identity() -> dict[str, object]:
     }
 
 
+def initial_database(case_id: str) -> dict[str, object]:
+    if case_id == "create-table-implicit":
+        return {
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "size_bytes": 0,
+            "page_count": 0,
+            "freelist_count": 0,
+            "schema_cookie": 0,
+        }
+    size_bytes = (
+        8192
+        if case_id.startswith("insert-")
+        else 17_952_768
+    )
+    return {
+        "sha256": "a" * 64,
+        "size_bytes": size_bytes,
+        "page_count": size_bytes // 4096,
+        "freelist_count": 0,
+        "schema_cookie": 1,
+    }
+
+
+def report_work(case_id: str, run_kind: str) -> dict[str, object]:
+    work = deepcopy(EXPECTED_WORK[case_id][run_kind])
+    initial = initial_database(case_id)
+    if case_id == "mixed-batch-rollback":
+        final_database = deepcopy(initial)
+    else:
+        page_count = 2
+        final_database = {
+            "sha256": "c" * 64,
+            "size_bytes": page_count * 4096,
+            "page_count": page_count,
+            "freelist_count": 0,
+            "schema_cookie": (
+                work["dml_operations"]
+                if case_id == "create-table-implicit"
+                else initial["schema_cookie"]
+            ),
+        }
+    work["final_database"] = final_database
+    return work
+
+
 def valid_manifest() -> dict[str, object]:
     digest = "1" * 16
     sha256 = "a" * 64
@@ -462,6 +508,8 @@ def valid_manifest() -> dict[str, object]:
                 "row_count": 0,
                 "value_size": 256,
                 "content_digest": digest,
+                "freelist_count": 0,
+                "schema_cookie": 1,
             },
             {
                 "id": "populated",
@@ -475,6 +523,8 @@ def valid_manifest() -> dict[str, object]:
                 "row_count": 65_536,
                 "value_size": 256,
                 "content_digest": digest,
+                "freelist_count": 0,
+                "schema_cookie": 1,
             },
         ],
         "cases": [
@@ -519,7 +569,7 @@ def valid_timing_report(
     case_id: str = "insert-point-implicit",
     run_kind: str = "smoke",
 ) -> dict[str, object]:
-    work = deepcopy(EXPECTED_WORK[case_id][run_kind])
+    work = report_work(case_id, run_kind)
     repetition_count = 1 if run_kind == "smoke" else 3
     matched_configuration = {
         "page_size": 4096,
@@ -561,6 +611,7 @@ def valid_timing_report(
         },
         "effective_configuration": configuration,
         "engine": engine,
+        "initial_database": initial_database(case_id),
         "mode": "timing",
         "profile": profile,
         "repetitions": repetitions,
@@ -638,12 +689,13 @@ def valid_diagnostic_report(
         "diagnostic_schema_version": 1,
         "effective_configuration": configuration,
         "engine": engine,
+        "initial_database": initial_database(case_id),
         "mode": "diagnostic",
         "profile": profile,
         "schema_version": 1,
         "source": source_identity(),
         "sqlite": sqlite_identity(),
-        "work": deepcopy(EXPECTED_WORK[case_id]["baseline"]),
+        "work": report_work(case_id, "baseline"),
         "workload_semantics_version": 1,
     }
 
@@ -920,6 +972,48 @@ class WritePerformanceToolTest(unittest.TestCase):
                         expected_profile="matched-durable",
                         expected_case="insert-point-implicit",
                         expected_run_kind="baseline",
+                    )
+
+    def test_rejects_invalid_database_fingerprints(self) -> None:
+        manifest = valid_manifest()
+        mutations = (
+            (
+                "insert-point-implicit",
+                lambda report: report["initial_database"].__setitem__(
+                    "sha256", "0" * 64
+                ),
+                "initial database does not match the fixture",
+            ),
+            (
+                "insert-point-implicit",
+                lambda report: report["warmup"]["final_database"].__setitem__(
+                    "page_count", True
+                ),
+                "page_count must be an integer",
+            ),
+            (
+                "mixed-batch-rollback",
+                lambda report: report["warmup"]["final_database"].__setitem__(
+                    "sha256", "0" * 64
+                ),
+                "rollback database is not byte-identical",
+            ),
+        )
+        for case_id, mutate, expected in mutations:
+            with self.subTest(case=case_id, expected=expected):
+                report = valid_timing_report(case_id=case_id)
+                mutate(report)
+                with self.assertRaisesRegex(
+                    write_performance.HarnessError,
+                    expected,
+                ):
+                    write_performance.validate_raw_timing_report(
+                        report,
+                        workload_manifest=manifest,
+                        expected_engine="modern",
+                        expected_profile="matched-durable",
+                        expected_case=case_id,
+                        expected_run_kind="smoke",
                     )
 
     def test_strict_json_bytes_reject_duplicate_and_nonfinite_values(self) -> None:

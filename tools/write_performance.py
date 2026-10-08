@@ -81,6 +81,8 @@ _FIXTURE_KEYS = {
     "row_count",
     "value_size",
     "content_digest",
+    "freelist_count",
+    "schema_cookie",
 }
 _CASE_KEYS = {
     "id",
@@ -111,12 +113,21 @@ _WORK_KEYS = {
     "schema_objects",
     "digest",
 }
+_DATABASE_FINGERPRINT_KEYS = {
+    "sha256",
+    "size_bytes",
+    "page_count",
+    "freelist_count",
+    "schema_cookie",
+}
+_REPORT_WORK_KEYS = _WORK_KEYS | {"final_database"}
 _RAW_TIMING_KEYS = {
     "build",
     "case",
     "completion",
     "effective_configuration",
     "engine",
+    "initial_database",
     "mode",
     "profile",
     "repetitions",
@@ -138,7 +149,7 @@ _EFFECTIVE_CONFIGURATION_KEYS = {
     "locking_mode",
     "thread_mode",
 }
-_REPETITION_KEYS = _WORK_KEYS | {"index", "wall_ns", "cpu_ns"}
+_REPETITION_KEYS = _REPORT_WORK_KEYS | {"index", "wall_ns", "cpu_ns"}
 _COMPLETION_KEYS = {
     "fresh_databases",
     "measured_repetitions",
@@ -156,6 +167,7 @@ _RAW_DIAGNOSTIC_KEYS = {
     "diagnostic_schema_version",
     "effective_configuration",
     "engine",
+    "initial_database",
     "mode",
     "profile",
     "schema_version",
@@ -679,6 +691,12 @@ def _validate_fixture(value: Any, index: int) -> str:
     _require_type(value["value_size"], int, f"{label}.value_size")
     if value["value_size"] != 256:
         raise HarnessError(f"{label}.value_size must be 256")
+    _require_type(value["freelist_count"], int, f"{label}.freelist_count")
+    if value["freelist_count"] != 0:
+        raise HarnessError(f"{label}.freelist_count must be zero")
+    _require_type(value["schema_cookie"], int, f"{label}.schema_cookie")
+    if value["schema_cookie"] != 1:
+        raise HarnessError(f"{label}.schema_cookie must be one")
     return fixture_id
 
 
@@ -771,6 +789,110 @@ def _validate_work_object(value: Any, label: str) -> dict[str, Any]:
     if _DIGEST.fullmatch(value["digest"]) is None:
         raise HarnessError(f"{label}.digest is invalid")
     return value
+
+
+def _validate_database_fingerprint(
+    value: Any,
+    label: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, label)
+    _require_keys(value, _DATABASE_FINGERPRINT_KEYS, label)
+    _require_type(value["sha256"], str, f"{label}.sha256")
+    if _SHA256.fullmatch(value["sha256"]) is None:
+        raise HarnessError(f"{label}.sha256 is invalid")
+    for key in (
+        "size_bytes",
+        "page_count",
+        "freelist_count",
+        "schema_cookie",
+    ):
+        _require_type(value[key], int, f"{label}.{key}")
+        if value[key] < 0:
+            raise HarnessError(f"{label}.{key} must be nonnegative")
+    if value["size_bytes"] == 0:
+        if any(
+            value[key] != 0
+            for key in ("page_count", "freelist_count", "schema_cookie")
+        ):
+            raise HarnessError(f"{label} zero-byte metadata is inconsistent")
+    else:
+        if (
+            value["size_bytes"] % 4096 != 0
+            or value["page_count"] != value["size_bytes"] // 4096
+            or value["freelist_count"] > value["page_count"]
+        ):
+            raise HarnessError(f"{label} page metadata is inconsistent")
+    return value
+
+
+def _fixture_by_id(
+    workload_manifest: dict[str, Any],
+    fixture_id: str,
+) -> dict[str, Any]:
+    for fixture in workload_manifest["fixtures"]:
+        if fixture["id"] == fixture_id:
+            return fixture
+    raise HarnessError(f"unknown write performance fixture: {fixture_id}")
+
+
+def _expected_initial_database(
+    workload_manifest: dict[str, Any],
+    case: dict[str, Any],
+) -> dict[str, Any]:
+    if case["fixture"] == "zero":
+        return {
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "size_bytes": 0,
+            "page_count": 0,
+            "freelist_count": 0,
+            "schema_cookie": 0,
+        }
+    fixture = _fixture_by_id(workload_manifest, case["fixture"])
+    return {
+        "sha256": fixture["sha256"],
+        "size_bytes": fixture["size_bytes"],
+        "page_count": fixture["page_count"],
+        "freelist_count": fixture["freelist_count"],
+        "schema_cookie": fixture["schema_cookie"],
+    }
+
+
+def _validate_report_work(
+    value: Any,
+    *,
+    expected: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, label)
+    _require_keys(value, _REPORT_WORK_KEYS, label)
+    semantic = {key: value[key] for key in _WORK_KEYS}
+    _validate_work_object(semantic, f"{label} semantic work")
+    if semantic != expected:
+        raise HarnessError(f"{label} does not match the workload manifest")
+    _validate_database_fingerprint(
+        value["final_database"],
+        f"{label}.final_database",
+    )
+    return value
+
+
+def _validate_final_database_state(
+    *,
+    case: dict[str, Any],
+    work: dict[str, Any],
+    initial: dict[str, Any],
+    label: str,
+) -> None:
+    final = work["final_database"]
+    expected_cookie = (
+        work["dml_operations"]
+        if case["kind"] == "create"
+        else initial["schema_cookie"]
+    )
+    if final["schema_cookie"] != expected_cookie:
+        raise HarnessError(f"{label} schema cookie is invalid")
+    if case["kind"] == "mixed_rollback" and final != initial:
+        raise HarnessError(f"{label} rollback database is not byte-identical")
 
 
 def _validate_expected_work(value: Any, case_id: str) -> None:
@@ -1130,6 +1252,17 @@ def validate_raw_timing_report(
 
     case = _case_by_id(workload_manifest, expected_case)
     expected_work = case["expected"][expected_run_kind]
+    initial_database = _validate_database_fingerprint(
+        value["initial_database"],
+        "timing report.initial_database",
+    )
+    if initial_database != _expected_initial_database(
+        workload_manifest,
+        case,
+    ):
+        raise HarnessError(
+            "timing report initial database does not match the fixture"
+        )
     _validate_effective_configuration(
         value["effective_configuration"],
         engine=expected_engine,
@@ -1144,11 +1277,17 @@ def validate_raw_timing_report(
     }:
         raise HarnessError("timing report timer identities are invalid")
 
-    warmup = _validate_work_object(value["warmup"], "timing report.warmup")
-    if warmup != expected_work:
-        raise HarnessError(
-            "timing report warmup does not match the workload manifest"
-        )
+    warmup = _validate_report_work(
+        value["warmup"],
+        expected=expected_work,
+        label="timing report warmup",
+    )
+    _validate_final_database_state(
+        case=case,
+        work=warmup,
+        initial=initial_database,
+        label="timing report warmup",
+    )
 
     repetition_count = 1 if expected_run_kind == "smoke" else 3
     repetitions = value["repetitions"]
@@ -1182,12 +1321,18 @@ def validate_raw_timing_report(
                 f"{label} is below the "
                 f"{workload_manifest['minimum_wall_ns']} minimum wall time"
             )
-        work = {key: repetition[key] for key in _WORK_KEYS}
-        _validate_work_object(work, f"{label} work")
-        if work != expected_work:
-            raise HarnessError(
-                f"{label} does not match the workload manifest"
-            )
+        work = {key: repetition[key] for key in _REPORT_WORK_KEYS}
+        _validate_report_work(
+            work,
+            expected=expected_work,
+            label=label,
+        )
+        _validate_final_database_state(
+            case=case,
+            work=work,
+            initial=initial_database,
+            label=label,
+        )
         indexes.append(index)
     if indexes != list(range(repetition_count)):
         raise HarnessError(
@@ -1337,11 +1482,28 @@ def validate_raw_diagnostic_report(
 
     case = _case_by_id(workload_manifest, expected_case)
     expected_work = case["expected"][workload_manifest["diagnostic_work"]]
-    work = _validate_work_object(value["work"], "diagnostic report.work")
-    if work != expected_work:
+    initial_database = _validate_database_fingerprint(
+        value["initial_database"],
+        "diagnostic report.initial_database",
+    )
+    if initial_database != _expected_initial_database(
+        workload_manifest,
+        case,
+    ):
         raise HarnessError(
-            "diagnostic report work does not match the workload manifest"
+            "diagnostic report initial database does not match the fixture"
         )
+    work = _validate_report_work(
+        value["work"],
+        expected=expected_work,
+        label="diagnostic report work",
+    )
+    _validate_final_database_state(
+        case=case,
+        work=work,
+        initial=initial_database,
+        label="diagnostic report work",
+    )
     _validate_effective_configuration(
         value["effective_configuration"],
         engine=expected_engine,
@@ -1884,6 +2046,20 @@ def create_fixture(
             database,
             expected_rows,
         )
+        freelist_count = common._sqlite_single_integer(
+            oracle,
+            database,
+            "PRAGMA freelist_count",
+        )
+        schema_cookie = common._sqlite_single_integer(
+            oracle,
+            database,
+            "PRAGMA schema_version",
+        )
+        if freelist_count != 0 or schema_cookie != 1:
+            raise HarnessError(
+                "generated write fixture header state is not canonical"
+            )
     finally:
         oracle._close(database)
 
@@ -1903,6 +2079,8 @@ def create_fixture(
         "row_count": row_count,
         "value_size": 256,
         "content_digest": content_digest,
+        "freelist_count": freelist_count,
+        "schema_cookie": schema_cookie,
     }
 
 

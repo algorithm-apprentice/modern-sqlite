@@ -331,11 +331,13 @@
   "fixtures": [
     {
       "content_digest": "cbf29ce484222325",
+      "freelist_count": 0,
       "id": "schema",
       "page_count": 2,
       "page_size": 4096,
       "path": "tests/fixtures/write_performance/schema.db",
       "row_count": 0,
+      "schema_cookie": 1,
       "sha256": "26c59e7c83f4ee09a8a341a54abefb88f381e7fc110e8e63c8df661643eee3fa",
       "size_bytes": 8192,
       "sql_path": "tests/fixtures/write_performance/schema.sql",
@@ -344,11 +346,13 @@
     },
     {
       "content_digest": "32312236c967f3ff",
+      "freelist_count": 0,
       "id": "populated",
       "page_count": 4383,
       "page_size": 4096,
       "path": "tests/fixtures/write_performance/populated.db",
       "row_count": 65536,
+      "schema_cookie": 1,
       "sha256": "81fa90c6ac9c3ab20f24f3d08823c564d6203e09f316a397290cdcd546eb0091",
       "size_bytes": 17952768,
       "sql_path": "tests/fixtures/write_performance/populated.sql",
