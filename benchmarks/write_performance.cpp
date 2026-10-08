@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -51,7 +53,11 @@ constexpr int kSqliteOpenFlags = static_cast<int>(static_cast<unsigned int>(SQLI
                                                   static_cast<unsigned int>(SQLITE_OPEN_NOMUTEX));
 constexpr std::uint64_t kFnvOffset = 0xCBF29CE484222325ULL;
 constexpr std::uint64_t kFnvPrime = 0x100000001B3ULL;
+constexpr std::uint64_t kSplitMixIncrement = 0x9E3779B97F4A7C15ULL;
+constexpr std::uint64_t kKeyOrderSeed = 0xD1B54A32D192ED03ULL;
 constexpr std::size_t kValueSize = 256;
+constexpr std::size_t kTimingRepetitions = 3;
+constexpr std::uint64_t kMinimumWallNanoseconds = 20'000'000ULL;
 constexpr std::int64_t kPopulatedRows = 65'536;
 constexpr std::string_view kInsertSql = "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)";
 constexpr std::string_view kUpdatePointSql = "UPDATE kv SET v=?1,version=version+1 WHERE k=?2";
@@ -99,9 +105,34 @@ enum class CaseKind : std::uint8_t {
   kMixedRollback,
 };
 
+enum class RunKind : std::uint8_t {
+  kSmoke,
+  kBaseline,
+};
+
 struct WorkResult {
   std::uint64_t changed_rows = 0;
   std::int64_t last_insert_rowid = 0;
+};
+
+struct WorkloadScale {
+  std::size_t operations = 0;
+  std::uint64_t transactions = 0;
+  std::uint64_t dml_operations = 0;
+  std::uint64_t row_mutations = 0;
+};
+
+struct EffectiveConfiguration {
+  std::int64_t page_size = 0;
+  std::int64_t cache_size = 0;
+  std::int64_t mmap_bytes = 0;
+  std::string temp_store;
+  std::string journal_mode;
+  std::string synchronous;
+  std::string locking_mode;
+  std::string thread_mode;
+
+  bool operator==(const EffectiveConfiguration&) const = default;
 };
 
 struct ExpectedRecord {
@@ -183,6 +214,19 @@ class SqliteStatement final {
 
   SqliteStatement(const SqliteStatement&) = delete;
   SqliteStatement& operator=(const SqliteStatement&) = delete;
+
+  SqliteStatement(SqliteStatement&& other) noexcept
+      : statement_(std::exchange(other.statement_, nullptr)) {}
+
+  SqliteStatement& operator=(SqliteStatement&& other) noexcept {
+    if (this != &other) {
+      if (statement_ != nullptr) {
+        static_cast<void>(sqlite3_finalize(statement_));
+      }
+      statement_ = std::exchange(other.statement_, nullptr);
+    }
+    return *this;
+  }
 
   ~SqliteStatement() noexcept {
     if (statement_ != nullptr) {
@@ -322,26 +366,86 @@ void VerifySqliteIdentity() {
   }
 }
 
-void ConfigureSqlite(sqlite3* database, ProfileKind profile) {
-  VerifySqliteIdentity();
-  if (profile == ProfileKind::kEngineDefault) {
-    return;
+[[nodiscard]] std::string_view SqliteSynchronousName(std::int64_t value) {
+  switch (value) {
+    case 0:
+      return "off";
+    case 1:
+      return "normal";
+    case 2:
+      return "full";
+    case 3:
+      return "extra";
+    default:
+      throw HarnessFailure{"SQLite synchronous mode is invalid"};
   }
-  ExecuteSqlite(database, "PRAGMA cache_size=512");
-  ExecuteSqlite(database, "PRAGMA mmap_size=0");
-  ExecuteSqlite(database, "PRAGMA temp_store=MEMORY");
-  ExecuteSqlite(database, "PRAGMA journal_mode=DELETE");
-  ExecuteSqlite(database, "PRAGMA synchronous=FULL");
-  ExecuteSqlite(database, "PRAGMA locking_mode=NORMAL");
-  if (SqliteSingleInteger(database, "PRAGMA page_size") != 4096 ||
-      SqliteSingleInteger(database, "PRAGMA cache_size") != 512 ||
-      SqliteSingleInteger(database, "PRAGMA mmap_size") != 0 ||
-      SqliteSingleInteger(database, "PRAGMA temp_store") != 2 ||
-      SqliteSingleText(database, "PRAGMA journal_mode") != "delete" ||
-      SqliteSingleInteger(database, "PRAGMA synchronous") != 2 ||
-      SqliteSingleText(database, "PRAGMA locking_mode") != "normal") {
+}
+
+[[nodiscard]] std::string_view SqliteTempStoreName(std::int64_t value) {
+  switch (value) {
+    case 0:
+      return "default";
+    case 1:
+      return "file";
+    case 2:
+      return "memory";
+    default:
+      throw HarnessFailure{"SQLite temp-store mode is invalid"};
+  }
+}
+
+[[nodiscard]] EffectiveConfiguration ReadSqliteConfiguration(sqlite3* database) {
+  return EffectiveConfiguration{
+      .page_size = SqliteSingleInteger(database, "PRAGMA page_size"),
+      .cache_size = SqliteSingleInteger(database, "PRAGMA cache_size"),
+      .mmap_bytes = SqliteSingleInteger(database, "PRAGMA mmap_size"),
+      .temp_store =
+          std::string{SqliteTempStoreName(SqliteSingleInteger(database, "PRAGMA temp_store"))},
+      .journal_mode = SqliteSingleText(database, "PRAGMA journal_mode"),
+      .synchronous =
+          std::string{SqliteSynchronousName(SqliteSingleInteger(database, "PRAGMA synchronous"))},
+      .locking_mode = SqliteSingleText(database, "PRAGMA locking_mode"),
+      .thread_mode = "single",
+  };
+}
+
+[[nodiscard]] EffectiveConfiguration ConfigureSqlite(sqlite3* database, ProfileKind profile) {
+  VerifySqliteIdentity();
+  if (profile == ProfileKind::kMatchedDurable) {
+    ExecuteSqlite(database, "PRAGMA cache_size=512");
+    ExecuteSqlite(database, "PRAGMA mmap_size=0");
+    ExecuteSqlite(database, "PRAGMA temp_store=MEMORY");
+    ExecuteSqlite(database, "PRAGMA journal_mode=DELETE");
+    ExecuteSqlite(database, "PRAGMA synchronous=FULL");
+    ExecuteSqlite(database, "PRAGMA locking_mode=NORMAL");
+  }
+  EffectiveConfiguration configuration = ReadSqliteConfiguration(database);
+  if (profile == ProfileKind::kMatchedDurable && configuration != EffectiveConfiguration{
+                                                                      .page_size = 4096,
+                                                                      .cache_size = 512,
+                                                                      .mmap_bytes = 0,
+                                                                      .temp_store = "memory",
+                                                                      .journal_mode = "delete",
+                                                                      .synchronous = "full",
+                                                                      .locking_mode = "normal",
+                                                                      .thread_mode = "single",
+                                                                  }) {
     throw HarnessFailure{"write benchmark SQLite matched configuration differs"};
   }
+  return configuration;
+}
+
+[[nodiscard]] EffectiveConfiguration ModernConfiguration() {
+  return EffectiveConfiguration{
+      .page_size = 4096,
+      .cache_size = 512,
+      .mmap_bytes = 0,
+      .temp_store = "memory",
+      .journal_mode = "delete",
+      .synchronous = "full",
+      .locking_mode = "normal",
+      .thread_mode = "single",
+  };
 }
 
 [[nodiscard]] modern_sqlite::WriteStatement PrepareModern(modern_sqlite::WriteSession& session,
@@ -354,12 +458,16 @@ void ConfigureSqlite(sqlite3* database, ProfileKind profile) {
   return std::move(*prepared.statement);
 }
 
-void ExecuteModern(modern_sqlite::WriteSession& session, std::string_view sql) {
-  modern_sqlite::WriteStatement statement = PrepareModern(session, sql);
+void StepModernCommand(modern_sqlite::WriteStatement& statement) {
   if (TakeValue(statement.Step()) != modern_sqlite::WriteStep::kDone) {
     throw BenchmarkMismatch{"Modern transaction command produced a row"};
   }
-  RequireStatus(statement.Finalize());
+}
+
+void StepSqliteCommand(const SqliteStatement& statement) {
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw BenchmarkMismatch{"SQLite transaction command completion differs"};
+  }
 }
 
 void VerifyModernLastInsertRowid(const modern_sqlite::WriteSession& session,
@@ -418,49 +526,53 @@ void BindSqliteBlob(const SqliteStatement& statement, BlobBinding binding) {
   }
 }
 
-[[nodiscard]] std::uint64_t RunCreateModern(const std::filesystem::path& path,
-                                            std::size_t operations) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+[[nodiscard]] std::uint64_t RunCreateModern(modern_sqlite::WriteSession& session,
+                                            std::size_t operations,
+                                            std::vector<modern_sqlite::WriteStatement>& completed) {
   for (std::size_t index = 0; index < operations; ++index) {
     const std::string sql =
         "CREATE TABLE " + TableName(index) + "(id INTEGER PRIMARY KEY,v BLOB NOT NULL DEFAULT x'')";
-    ExecuteModern(session, sql);
+    modern_sqlite::WriteStatement statement = PrepareModern(session, sql);
+    StepModernCommand(statement);
     if (session.changes() != 0U) {
       throw BenchmarkMismatch{"Modern CREATE change count differs"};
     }
     VerifyModernLastInsertRowid(session, 0);
+    completed.push_back(std::move(statement));
   }
   return 0;
 }
 
-[[nodiscard]] std::uint64_t RunCreateSqlite(const std::filesystem::path& path, ProfileKind profile,
-                                            std::size_t operations) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
+[[nodiscard]] std::uint64_t RunCreateSqlite(sqlite3* database, std::size_t operations,
+                                            std::vector<SqliteStatement>& completed) {
   for (std::size_t index = 0; index < operations; ++index) {
     const std::string sql =
         "CREATE TABLE " + TableName(index) + "(id INTEGER PRIMARY KEY,v BLOB NOT NULL DEFAULT x'')";
-    SqliteStatement statement{database.get(), sql};
+    SqliteStatement statement{database, sql};
     if (sqlite3_step(statement.get()) != SQLITE_DONE) {
       throw BenchmarkMismatch{"SQLite CREATE completion differs"};
     }
-    if (sqlite3_changes64(database.get()) != 0) {
+    if (sqlite3_changes64(database) != 0) {
       throw BenchmarkMismatch{"SQLite CREATE change count differs"};
     }
-    VerifySqliteLastInsertRowid(database.get(), 0);
-    statement.Finalize();
+    VerifySqliteLastInsertRowid(database, 0);
+    completed.push_back(std::move(statement));
   }
-  database.Close();
   return 0;
 }
 
-[[nodiscard]] std::uint64_t RunInsertModern(const std::filesystem::path& path,
-                                            std::size_t operations, bool explicit_transaction) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+[[nodiscard]] std::uint64_t RunInsertModern(const modern_sqlite::WriteSession& session,
+                                            modern_sqlite::WriteStatement& statement,
+                                            modern_sqlite::WriteStatement* begin,
+                                            modern_sqlite::WriteStatement* commit,
+                                            std::size_t operations) {
+  const bool explicit_transaction = begin != nullptr;
   if (explicit_transaction) {
-    ExecuteModern(session, "BEGIN");
+    if (commit == nullptr) {
+      throw HarnessFailure{"Modern explicit INSERT has no COMMIT statement"};
+    }
+    StepModernCommand(*begin);
   }
-  modern_sqlite::WriteStatement statement = PrepareModern(session, kInsertSql);
   std::uint64_t changed_rows = 0;
   for (std::size_t index = 0; index < operations; ++index) {
     const auto rowid = static_cast<std::int64_t>(index) + 1;
@@ -469,22 +581,23 @@ void BindSqliteBlob(const SqliteStatement& statement, BlobBinding binding) {
     changed_rows += StepModern(statement, session, 1);
     VerifyModernLastInsertRowid(session, rowid);
   }
-  RequireStatus(statement.Finalize());
   if (explicit_transaction) {
-    ExecuteModern(session, "COMMIT");
+    StepModernCommand(*commit);
   }
   VerifyModernLastInsertRowid(session, static_cast<std::int64_t>(operations));
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunInsertSqlite(const std::filesystem::path& path, ProfileKind profile,
-                                            std::size_t operations, bool explicit_transaction) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
+[[nodiscard]] std::uint64_t RunInsertSqlite(sqlite3* database, const SqliteStatement& statement,
+                                            const SqliteStatement* begin,
+                                            const SqliteStatement* commit, std::size_t operations) {
+  const bool explicit_transaction = begin != nullptr;
   if (explicit_transaction) {
-    ExecuteSqlite(database.get(), "BEGIN");
+    if (commit == nullptr) {
+      throw HarnessFailure{"SQLite explicit INSERT has no COMMIT statement"};
+    }
+    StepSqliteCommand(*begin);
   }
-  SqliteStatement statement{database.get(), kInsertSql};
   std::uint64_t changed_rows = 0;
   for (std::size_t index = 0; index < operations; ++index) {
     const auto rowid = static_cast<sqlite3_int64>(index) + 1;
@@ -492,142 +605,117 @@ void BindSqliteBlob(const SqliteStatement& statement, BlobBinding binding) {
       throw HarnessFailure{"SQLite rowid binding failed"};
     }
     BindSqliteBlob(statement, {.index = 2, .seed = rowid});
-    changed_rows += StepSqlite(statement, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), rowid);
+    changed_rows += StepSqlite(statement, database, 1);
+    VerifySqliteLastInsertRowid(database, rowid);
   }
-  statement.Finalize();
   if (explicit_transaction) {
-    ExecuteSqlite(database.get(), "COMMIT");
+    StepSqliteCommand(*commit);
   }
-  VerifySqliteLastInsertRowid(database.get(), static_cast<sqlite3_int64>(operations));
-  database.Close();
+  VerifySqliteLastInsertRowid(database, static_cast<sqlite3_int64>(operations));
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunUpdatePointModern(const std::filesystem::path& path,
-                                                 std::size_t operations) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-  modern_sqlite::WriteStatement statement = PrepareModern(session, kUpdatePointSql);
+[[nodiscard]] std::uint64_t RunUpdatePointModern(const modern_sqlite::WriteSession& session,
+                                                 modern_sqlite::WriteStatement& statement,
+                                                 std::span<const std::int64_t> rowids) {
   std::uint64_t changed_rows = 0;
-  for (std::size_t index = 0; index < operations; ++index) {
-    const auto rowid = static_cast<std::int64_t>(index) + 1;
+  for (const std::int64_t rowid : rowids) {
     BindModernBlob(statement, {.index = 1, .seed = rowid + 1'000'000});
     RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Integer(rowid)));
     changed_rows += StepModern(statement, session, 1);
     VerifyModernLastInsertRowid(session, 0);
   }
-  RequireStatus(statement.Finalize());
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunUpdatePointSqlite(const std::filesystem::path& path,
-                                                 ProfileKind profile, std::size_t operations) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
-  SqliteStatement statement{database.get(), kUpdatePointSql};
+[[nodiscard]] std::uint64_t RunUpdatePointSqlite(sqlite3* database,
+                                                 const SqliteStatement& statement,
+                                                 std::span<const std::int64_t> rowids) {
   std::uint64_t changed_rows = 0;
-  for (std::size_t index = 0; index < operations; ++index) {
-    const auto rowid = static_cast<sqlite3_int64>(index) + 1;
+  for (const std::int64_t rowid : rowids) {
     BindSqliteBlob(statement, {.index = 1, .seed = rowid + 1'000'000});
     if (sqlite3_bind_int64(statement.get(), 2, rowid) != SQLITE_OK) {
       throw HarnessFailure{"SQLite rowid binding failed"};
     }
-    changed_rows += StepSqlite(statement, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), 0);
+    changed_rows += StepSqlite(statement, database, 1);
+    VerifySqliteLastInsertRowid(database, 0);
   }
-  statement.Finalize();
-  database.Close();
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunUpdateScanModern(const std::filesystem::path& path,
-                                                std::size_t operations) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-  modern_sqlite::WriteStatement statement =
-      PrepareModern(session, "UPDATE kv SET v=?1,version=version+1 WHERE k<=?2");
+[[nodiscard]] std::uint64_t RunUpdateScanModern(const modern_sqlite::WriteSession& session,
+                                                modern_sqlite::WriteStatement& statement,
+                                                std::optional<std::int64_t> maximum_rowid,
+                                                std::uint64_t expected_changes) {
   BindModernBlob(statement, {.index = 1, .seed = 9'000'000});
-  RequireStatus(
-      statement.Bind(2, modern_sqlite::SqlValue::Integer(static_cast<std::int64_t>(operations))));
-  const std::uint64_t changed_rows = StepModern(statement, session, operations);
+  if (maximum_rowid.has_value()) {
+    RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Integer(*maximum_rowid)));
+  }
+  const std::uint64_t changed_rows = StepModern(statement, session, expected_changes);
   VerifyModernLastInsertRowid(session, 0);
-  RequireStatus(statement.Finalize());
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunUpdateScanSqlite(const std::filesystem::path& path,
-                                                ProfileKind profile, std::size_t operations) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
-  SqliteStatement statement{database.get(), "UPDATE kv SET v=?1,version=version+1 WHERE k<=?2"};
+[[nodiscard]] std::uint64_t RunUpdateScanSqlite(sqlite3* database, const SqliteStatement& statement,
+                                                std::optional<std::int64_t> maximum_rowid,
+                                                std::uint64_t expected_changes) {
   BindSqliteBlob(statement, {.index = 1, .seed = 9'000'000});
-  if (sqlite3_bind_int64(statement.get(), 2, static_cast<sqlite3_int64>(operations)) != SQLITE_OK) {
+  if (maximum_rowid.has_value() &&
+      sqlite3_bind_int64(statement.get(), 2, *maximum_rowid) != SQLITE_OK) {
     throw HarnessFailure{"SQLite scan bound failed"};
   }
-  const std::uint64_t changed_rows = StepSqlite(statement, database.get(), operations);
-  VerifySqliteLastInsertRowid(database.get(), 0);
-  statement.Finalize();
-  database.Close();
+  const std::uint64_t changed_rows = StepSqlite(statement, database, expected_changes);
+  VerifySqliteLastInsertRowid(database, 0);
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunDeletePointModern(const std::filesystem::path& path,
-                                                 std::size_t operations) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-  modern_sqlite::WriteStatement statement = PrepareModern(session, kDeletePointSql);
+[[nodiscard]] std::uint64_t RunDeletePointModern(const modern_sqlite::WriteSession& session,
+                                                 modern_sqlite::WriteStatement& statement,
+                                                 std::span<const std::int64_t> rowids) {
   std::uint64_t changed_rows = 0;
-  for (std::size_t index = 0; index < operations; ++index) {
-    const auto rowid = static_cast<std::int64_t>(index) + 1;
+  for (const std::int64_t rowid : rowids) {
     RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
     changed_rows += StepModern(statement, session, 1);
     VerifyModernLastInsertRowid(session, 0);
   }
-  RequireStatus(statement.Finalize());
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunDeletePointSqlite(const std::filesystem::path& path,
-                                                 ProfileKind profile, std::size_t operations) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
-  SqliteStatement statement{database.get(), kDeletePointSql};
+[[nodiscard]] std::uint64_t RunDeletePointSqlite(sqlite3* database,
+                                                 const SqliteStatement& statement,
+                                                 std::span<const std::int64_t> rowids) {
   std::uint64_t changed_rows = 0;
-  for (std::size_t index = 0; index < operations; ++index) {
-    const auto rowid = static_cast<sqlite3_int64>(index) + 1;
+  for (const std::int64_t rowid : rowids) {
     if (sqlite3_bind_int64(statement.get(), 1, rowid) != SQLITE_OK) {
       throw HarnessFailure{"SQLite rowid binding failed"};
     }
-    changed_rows += StepSqlite(statement, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), 0);
+    changed_rows += StepSqlite(statement, database, 1);
+    VerifySqliteLastInsertRowid(database, 0);
   }
-  statement.Finalize();
-  database.Close();
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunDeleteScanModern(const std::filesystem::path& path,
-                                                std::size_t operations) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-  modern_sqlite::WriteStatement statement = PrepareModern(session, "DELETE FROM kv WHERE k<=?1");
-  RequireStatus(
-      statement.Bind(1, modern_sqlite::SqlValue::Integer(static_cast<std::int64_t>(operations))));
-  const std::uint64_t changed_rows = StepModern(statement, session, operations);
+[[nodiscard]] std::uint64_t RunDeleteScanModern(const modern_sqlite::WriteSession& session,
+                                                modern_sqlite::WriteStatement& statement,
+                                                std::optional<std::int64_t> maximum_rowid,
+                                                std::uint64_t expected_changes) {
+  if (maximum_rowid.has_value()) {
+    RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Integer(*maximum_rowid)));
+  }
+  const std::uint64_t changed_rows = StepModern(statement, session, expected_changes);
   VerifyModernLastInsertRowid(session, 0);
-  RequireStatus(statement.Finalize());
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunDeleteScanSqlite(const std::filesystem::path& path,
-                                                ProfileKind profile, std::size_t operations) {
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
-  SqliteStatement statement{database.get(), "DELETE FROM kv WHERE k<=?1"};
-  if (sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(operations)) != SQLITE_OK) {
+[[nodiscard]] std::uint64_t RunDeleteScanSqlite(sqlite3* database, const SqliteStatement& statement,
+                                                std::optional<std::int64_t> maximum_rowid,
+                                                std::uint64_t expected_changes) {
+  if (maximum_rowid.has_value() &&
+      sqlite3_bind_int64(statement.get(), 1, *maximum_rowid) != SQLITE_OK) {
     throw HarnessFailure{"SQLite scan bound failed"};
   }
-  const std::uint64_t changed_rows = StepSqlite(statement, database.get(), operations);
-  VerifySqliteLastInsertRowid(database.get(), 0);
-  statement.Finalize();
-  database.Close();
+  const std::uint64_t changed_rows = StepSqlite(statement, database, expected_changes);
+  VerifySqliteLastInsertRowid(database, 0);
   return changed_rows;
 }
 
@@ -647,89 +735,92 @@ struct MixedCounts {
   };
 }
 
-[[nodiscard]] std::uint64_t RunMixedModern(const std::filesystem::path& path,
-                                           std::size_t operations, bool rollback) {
+struct ModernMixedStatements {
+  modern_sqlite::WriteStatement& begin;
+  modern_sqlite::WriteStatement& update;
+  modern_sqlite::WriteStatement& remove;
+  modern_sqlite::WriteStatement& insert;
+  modern_sqlite::WriteStatement& terminal;
+};
+
+[[nodiscard]] std::uint64_t RunMixedModern(const modern_sqlite::WriteSession& session,
+                                           ModernMixedStatements statements,
+                                           std::span<const std::int64_t> permutation,
+                                           std::size_t operations) {
   const MixedCounts counts = SplitMixed(operations);
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-  ExecuteModern(session, "BEGIN");
-  modern_sqlite::WriteStatement update = PrepareModern(session, kUpdatePointSql);
-  modern_sqlite::WriteStatement remove = PrepareModern(session, kDeletePointSql);
-  modern_sqlite::WriteStatement insert = PrepareModern(session, kInsertSql);
+  StepModernCommand(statements.begin);
   std::uint64_t changed_rows = 0;
   for (std::size_t index = 0; index < counts.updates; ++index) {
-    const auto rowid = static_cast<std::int64_t>(index) + 1;
-    BindModernBlob(update, {.index = 1, .seed = rowid + 2'000'000});
-    RequireStatus(update.Bind(2, modern_sqlite::SqlValue::Integer(rowid)));
-    changed_rows += StepModern(update, session, 1);
+    const std::int64_t rowid = permutation[index];
+    BindModernBlob(statements.update, {.index = 1, .seed = rowid + 2'000'000});
+    RequireStatus(statements.update.Bind(2, modern_sqlite::SqlValue::Integer(rowid)));
+    changed_rows += StepModern(statements.update, session, 1);
     VerifyModernLastInsertRowid(session, 0);
   }
   for (std::size_t index = 0; index < counts.deletes; ++index) {
-    const auto rowid = static_cast<std::int64_t>(counts.updates + index) + 1;
-    RequireStatus(remove.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
-    changed_rows += StepModern(remove, session, 1);
+    const std::int64_t rowid = permutation[counts.updates + index];
+    RequireStatus(statements.remove.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
+    changed_rows += StepModern(statements.remove, session, 1);
     VerifyModernLastInsertRowid(session, 0);
   }
   for (std::size_t index = 0; index < counts.inserts; ++index) {
     const auto rowid = kPopulatedRows + static_cast<std::int64_t>(index) + 1;
-    RequireStatus(insert.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
-    BindModernBlob(insert, {.index = 2, .seed = rowid});
-    changed_rows += StepModern(insert, session, 1);
+    RequireStatus(statements.insert.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
+    BindModernBlob(statements.insert, {.index = 2, .seed = rowid});
+    changed_rows += StepModern(statements.insert, session, 1);
     VerifyModernLastInsertRowid(session, rowid);
   }
-  RequireStatus(update.Finalize());
-  RequireStatus(remove.Finalize());
-  RequireStatus(insert.Finalize());
-  ExecuteModern(session, rollback ? "ROLLBACK" : "COMMIT");
+  StepModernCommand(statements.terminal);
   const std::int64_t expected_last_insert_rowid =
       kPopulatedRows + static_cast<std::int64_t>(counts.inserts);
   VerifyModernLastInsertRowid(session, expected_last_insert_rowid);
   return changed_rows;
 }
 
-[[nodiscard]] std::uint64_t RunMixedSqlite(const std::filesystem::path& path, ProfileKind profile,
-                                           std::size_t operations, bool rollback) {
+struct SqliteMixedStatements {
+  const SqliteStatement& begin;
+  const SqliteStatement& update;
+  const SqliteStatement& remove;
+  const SqliteStatement& insert;
+  const SqliteStatement& terminal;
+};
+
+[[nodiscard]] std::uint64_t RunMixedSqlite(sqlite3* database, SqliteMixedStatements statements,
+                                           std::span<const std::int64_t> permutation,
+                                           std::size_t operations) {
   const MixedCounts counts = SplitMixed(operations);
-  SqliteDatabase database{path};
-  ConfigureSqlite(database.get(), profile);
-  ExecuteSqlite(database.get(), "BEGIN");
-  SqliteStatement update{database.get(), kUpdatePointSql};
-  SqliteStatement remove{database.get(), kDeletePointSql};
-  SqliteStatement insert{database.get(), kInsertSql};
+  StepSqliteCommand(statements.begin);
   std::uint64_t changed_rows = 0;
   for (std::size_t index = 0; index < counts.updates; ++index) {
-    const auto rowid = static_cast<sqlite3_int64>(index) + 1;
-    BindSqliteBlob(update, {.index = 1, .seed = rowid + 2'000'000});
-    if (sqlite3_bind_int64(update.get(), 2, rowid) != SQLITE_OK) {
+    const std::int64_t rowid = permutation[index];
+    BindSqliteBlob(statements.update, {.index = 1, .seed = rowid + 2'000'000});
+    if (sqlite3_bind_int64(statements.update.get(), 2, rowid) != SQLITE_OK) {
       throw HarnessFailure{"SQLite mixed update binding failed"};
     }
-    changed_rows += StepSqlite(update, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), 0);
+    changed_rows += StepSqlite(statements.update, database, 1);
+    VerifySqliteLastInsertRowid(database, 0);
   }
   for (std::size_t index = 0; index < counts.deletes; ++index) {
-    const auto rowid = static_cast<sqlite3_int64>(counts.updates + index) + 1;
-    if (sqlite3_bind_int64(remove.get(), 1, rowid) != SQLITE_OK) {
+    const std::int64_t rowid = permutation[counts.updates + index];
+    if (sqlite3_bind_int64(statements.remove.get(), 1, rowid) != SQLITE_OK) {
       throw HarnessFailure{"SQLite mixed delete binding failed"};
     }
-    changed_rows += StepSqlite(remove, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), 0);
+    changed_rows += StepSqlite(statements.remove, database, 1);
+    VerifySqliteLastInsertRowid(database, 0);
   }
   for (std::size_t index = 0; index < counts.inserts; ++index) {
     const auto rowid = kPopulatedRows + static_cast<sqlite3_int64>(index) + 1;
-    if (sqlite3_bind_int64(insert.get(), 1, rowid) != SQLITE_OK) {
+    if (sqlite3_bind_int64(statements.insert.get(), 1, rowid) != SQLITE_OK) {
       throw HarnessFailure{"SQLite mixed insert binding failed"};
     }
-    BindSqliteBlob(insert, {.index = 2, .seed = rowid});
-    changed_rows += StepSqlite(insert, database.get(), 1);
-    VerifySqliteLastInsertRowid(database.get(), rowid);
+    BindSqliteBlob(statements.insert, {.index = 2, .seed = rowid});
+    changed_rows += StepSqlite(statements.insert, database, 1);
+    VerifySqliteLastInsertRowid(database, rowid);
   }
-  update.Finalize();
-  remove.Finalize();
-  insert.Finalize();
-  ExecuteSqlite(database.get(), rollback ? "ROLLBACK" : "COMMIT");
+  StepSqliteCommand(statements.terminal);
   const sqlite3_int64 expected_last_insert_rowid =
       kPopulatedRows + static_cast<sqlite3_int64>(counts.inserts);
-  VerifySqliteLastInsertRowid(database.get(), expected_last_insert_rowid);
-  database.Close();
+  VerifySqliteLastInsertRowid(database, expected_last_insert_rowid);
   return changed_rows;
 }
 
@@ -788,79 +879,446 @@ struct MixedCounts {
   return profile == ProfileKind::kEngineDefault ? "engine-default" : "matched-durable";
 }
 
-[[nodiscard]] WorkResult RunModern(CaseKind kind, const std::filesystem::path& path,
-                                   std::size_t operations) {
-  switch (kind) {
-    case CaseKind::kCreate:
-      return WorkResult{.changed_rows = RunCreateModern(path, operations), .last_insert_rowid = 0};
-    case CaseKind::kInsertPoint:
-      return WorkResult{.changed_rows = RunInsertModern(path, operations, false),
-                        .last_insert_rowid = static_cast<std::int64_t>(operations)};
-    case CaseKind::kInsertBatch:
-      return WorkResult{.changed_rows = RunInsertModern(path, operations, true),
-                        .last_insert_rowid = static_cast<std::int64_t>(operations)};
-    case CaseKind::kUpdatePoint:
-      return WorkResult{.changed_rows = RunUpdatePointModern(path, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kUpdateScan:
-      return WorkResult{.changed_rows = RunUpdateScanModern(path, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kDeletePoint:
-      return WorkResult{.changed_rows = RunDeletePointModern(path, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kDeleteScan:
-      return WorkResult{.changed_rows = RunDeleteScanModern(path, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kMixedCommit:
-    case CaseKind::kMixedRollback: {
-      const MixedCounts counts = SplitMixed(operations);
-      return WorkResult{
-          .changed_rows = RunMixedModern(path, operations, kind == CaseKind::kMixedRollback),
-          .last_insert_rowid = kPopulatedRows + static_cast<std::int64_t>(counts.inserts),
-      };
-    }
+[[nodiscard]] RunKind ParseRunKind(std::string_view value) {
+  if (value == "smoke") {
+    return RunKind::kSmoke;
   }
-  throw HarnessFailure{"invalid Modern benchmark case"};
+  if (value == "baseline") {
+    return RunKind::kBaseline;
+  }
+  throw HarnessFailure{"run kind must be smoke or baseline"};
 }
 
-[[nodiscard]] WorkResult RunSqlite(CaseKind kind, ProfileKind profile,
-                                   const std::filesystem::path& path, std::size_t operations) {
-  switch (kind) {
-    case CaseKind::kCreate:
-      return WorkResult{.changed_rows = RunCreateSqlite(path, profile, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kInsertPoint:
-      return WorkResult{.changed_rows = RunInsertSqlite(path, profile, operations, false),
-                        .last_insert_rowid = static_cast<std::int64_t>(operations)};
-    case CaseKind::kInsertBatch:
-      return WorkResult{.changed_rows = RunInsertSqlite(path, profile, operations, true),
-                        .last_insert_rowid = static_cast<std::int64_t>(operations)};
-    case CaseKind::kUpdatePoint:
-      return WorkResult{.changed_rows = RunUpdatePointSqlite(path, profile, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kUpdateScan:
-      return WorkResult{.changed_rows = RunUpdateScanSqlite(path, profile, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kDeletePoint:
-      return WorkResult{.changed_rows = RunDeletePointSqlite(path, profile, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kDeleteScan:
-      return WorkResult{.changed_rows = RunDeleteScanSqlite(path, profile, operations),
-                        .last_insert_rowid = 0};
-    case CaseKind::kMixedCommit:
-    case CaseKind::kMixedRollback: {
-      const MixedCounts counts = SplitMixed(operations);
-      return WorkResult{
-          .changed_rows =
-              RunMixedSqlite(path, profile, operations, kind == CaseKind::kMixedRollback),
-          .last_insert_rowid = kPopulatedRows + static_cast<std::int64_t>(counts.inserts),
-      };
-    }
-  }
-  throw HarnessFailure{"invalid SQLite benchmark case"};
+[[nodiscard]] std::string_view RunKindName(RunKind kind) noexcept {
+  return kind == RunKind::kSmoke ? "smoke" : "baseline";
 }
 
-[[nodiscard]] std::vector<ExpectedRecord> ExpectedRecords(CaseKind kind, std::size_t operations) {
+[[nodiscard]] WorkloadScale ScaleFor(CaseKind kind, RunKind run_kind) {
+  const bool smoke = run_kind == RunKind::kSmoke;
+  switch (kind) {
+    case CaseKind::kCreate:
+      return WorkloadScale{
+          .operations = smoke ? 1U : 256U,
+          .transactions = smoke ? 1U : 256U,
+          .dml_operations = smoke ? 1U : 256U,
+          .row_mutations = 0,
+      };
+    case CaseKind::kInsertPoint:
+      return WorkloadScale{
+          .operations = smoke ? 1U : 512U,
+          .transactions = smoke ? 1U : 512U,
+          .dml_operations = smoke ? 1U : 512U,
+          .row_mutations = smoke ? 1U : 512U,
+      };
+    case CaseKind::kInsertBatch:
+      return WorkloadScale{
+          .operations = smoke ? 8U : 65'536U,
+          .transactions = 1,
+          .dml_operations = smoke ? 8U : 65'536U,
+          .row_mutations = smoke ? 8U : 65'536U,
+      };
+    case CaseKind::kUpdatePoint:
+      return WorkloadScale{
+          .operations = smoke ? 1U : 512U,
+          .transactions = smoke ? 1U : 512U,
+          .dml_operations = smoke ? 1U : 512U,
+          .row_mutations = smoke ? 1U : 512U,
+      };
+    case CaseKind::kUpdateScan:
+      return WorkloadScale{
+          .operations = smoke ? 8U : 65'536U,
+          .transactions = 1,
+          .dml_operations = 1,
+          .row_mutations = smoke ? 8U : 65'536U,
+      };
+    case CaseKind::kDeletePoint:
+      return WorkloadScale{
+          .operations = smoke ? 1U : 512U,
+          .transactions = smoke ? 1U : 512U,
+          .dml_operations = smoke ? 1U : 512U,
+          .row_mutations = smoke ? 1U : 512U,
+      };
+    case CaseKind::kDeleteScan:
+      return WorkloadScale{
+          .operations = smoke ? 8U : 65'536U,
+          .transactions = 1,
+          .dml_operations = 1,
+          .row_mutations = smoke ? 8U : 65'536U,
+      };
+    case CaseKind::kMixedCommit:
+    case CaseKind::kMixedRollback:
+      return WorkloadScale{
+          .operations = smoke ? 8U : 12'288U,
+          .transactions = 1,
+          .dml_operations = smoke ? 8U : 12'288U,
+          .row_mutations = smoke ? 8U : 12'288U,
+      };
+  }
+  throw HarnessFailure{"invalid write benchmark case"};
+}
+
+[[nodiscard]] std::vector<std::int64_t> GenerateKeyOrder() {
+  std::vector<std::int64_t> result(static_cast<std::size_t>(kPopulatedRows));
+  for (std::size_t index = 0; index < result.size(); ++index) {
+    result[index] = static_cast<std::int64_t>(index) + 1;
+  }
+  std::uint64_t state = kKeyOrderSeed;
+  const auto next = [&state] {
+    state += kSplitMixIncrement;
+    std::uint64_t value = state;
+    value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31U);
+  };
+  for (std::size_t index = result.size() - 1U; index > 0; --index) {
+    const std::uint64_t bound = static_cast<std::uint64_t>(index) + 1U;
+    const std::uint64_t threshold = (0U - bound) % bound;
+    std::uint64_t random = 0;
+    do {
+      random = next();
+    } while (random < threshold);
+    const auto selected = static_cast<std::size_t>(random % bound);
+    std::swap(result[index], result[selected]);
+  }
+  return result;
+}
+
+[[nodiscard]] std::uint64_t ProcessCpuNanoseconds() {
+  timespec value{};
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &value) != 0 || value.tv_sec < 0 ||
+      value.tv_nsec < 0) {
+    throw HarnessFailure{"cannot read CLOCK_PROCESS_CPUTIME_ID"};
+  }
+  const auto seconds = static_cast<std::uint64_t>(value.tv_sec);
+  const auto nanoseconds = static_cast<std::uint64_t>(value.tv_nsec);
+  if (seconds > (std::numeric_limits<std::uint64_t>::max() - nanoseconds) / 1'000'000'000ULL) {
+    throw HarnessFailure{"process CPU clock overflow"};
+  }
+  return seconds * 1'000'000'000ULL + nanoseconds;
+}
+
+struct TimedWork {
+  std::size_t index = 0;
+  std::uint64_t wall_ns = 0;
+  std::uint64_t cpu_ns = 0;
+  WorkResult work;
+};
+
+template <typename Callable>
+[[nodiscard]] TimedWork RunMeasured(std::size_t index, bool measured, Callable&& callable) {
+  if (!measured) {
+    return TimedWork{.index = index, .work = std::forward<Callable>(callable)()};
+  }
+  const std::uint64_t cpu_started = ProcessCpuNanoseconds();
+  const auto wall_started = std::chrono::steady_clock::now();
+  const WorkResult work = std::forward<Callable>(callable)();
+  const auto wall_finished = std::chrono::steady_clock::now();
+  const std::uint64_t cpu_finished = ProcessCpuNanoseconds();
+  if (cpu_finished < cpu_started) {
+    throw HarnessFailure{"process CPU clock moved backward"};
+  }
+  const auto wall_duration =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wall_finished - wall_started).count();
+  if (wall_duration <= 0) {
+    throw HarnessFailure{"steady clock produced a nonpositive duration"};
+  }
+  return TimedWork{
+      .index = index,
+      .wall_ns = static_cast<std::uint64_t>(wall_duration),
+      .cpu_ns = cpu_finished - cpu_started,
+      .work = work,
+  };
+}
+
+struct Execution {
+  TimedWork timed;
+  EffectiveConfiguration configuration;
+};
+
+[[nodiscard]] std::optional<std::int64_t> ScanMaximum(const WorkloadScale& scale) {
+  if (scale.operations == static_cast<std::size_t>(kPopulatedRows)) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(scale.operations);
+}
+
+[[nodiscard]] std::string_view UpdateScanSql(const WorkloadScale& scale) {
+  return ScanMaximum(scale).has_value() ? "UPDATE kv SET v=?1,version=version+1 WHERE k<=?2"
+                                        : "UPDATE kv SET v=?1,version=version+1 WHERE k>=1";
+}
+
+[[nodiscard]] std::string_view DeleteScanSql(const WorkloadScale& scale) {
+  return ScanMaximum(scale).has_value() ? "DELETE FROM kv WHERE k<=?1"
+                                        : "DELETE FROM kv WHERE k>=1";
+}
+
+void FinalizeModern(modern_sqlite::WriteStatement& statement) {
+  RequireStatus(statement.Finalize());
+}
+
+[[nodiscard]] Execution ExecuteModernWork(CaseKind kind, const std::filesystem::path& path,
+                                          const WorkloadScale& scale,
+                                          std::span<const std::int64_t> key_order, bool measured,
+                                          std::size_t index) {
+  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+  const EffectiveConfiguration configuration = ModernConfiguration();
+  TimedWork timed;
+  switch (kind) {
+    case CaseKind::kCreate: {
+      std::vector<modern_sqlite::WriteStatement> completed;
+      completed.reserve(scale.operations);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunCreateModern(session, scale.operations, completed),
+            .last_insert_rowid = 0,
+        };
+      });
+      for (modern_sqlite::WriteStatement& statement : completed) {
+        FinalizeModern(statement);
+      }
+      break;
+    }
+    case CaseKind::kInsertPoint:
+    case CaseKind::kInsertBatch: {
+      const bool explicit_transaction = kind == CaseKind::kInsertBatch;
+      std::optional<modern_sqlite::WriteStatement> begin;
+      std::optional<modern_sqlite::WriteStatement> commit;
+      if (explicit_transaction) {
+        begin.emplace(PrepareModern(session, "BEGIN"));
+        commit.emplace(PrepareModern(session, "COMMIT"));
+      }
+      modern_sqlite::WriteStatement statement = PrepareModern(session, kInsertSql);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunInsertModern(session, statement, begin.has_value() ? &*begin : nullptr,
+                                commit.has_value() ? &*commit : nullptr, scale.operations),
+            .last_insert_rowid = static_cast<std::int64_t>(scale.operations),
+        };
+      });
+      FinalizeModern(statement);
+      if (begin.has_value() && commit.has_value()) {
+        FinalizeModern(*begin);
+        FinalizeModern(*commit);
+      }
+      break;
+    }
+    case CaseKind::kUpdatePoint: {
+      modern_sqlite::WriteStatement statement = PrepareModern(session, kUpdatePointSql);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunUpdatePointModern(session, statement, key_order.first(scale.operations)),
+            .last_insert_rowid = 0,
+        };
+      });
+      FinalizeModern(statement);
+      break;
+    }
+    case CaseKind::kUpdateScan: {
+      modern_sqlite::WriteStatement statement = PrepareModern(session, UpdateScanSql(scale));
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunUpdateScanModern(session, statement, ScanMaximum(scale), scale.row_mutations),
+            .last_insert_rowid = 0,
+        };
+      });
+      FinalizeModern(statement);
+      break;
+    }
+    case CaseKind::kDeletePoint: {
+      modern_sqlite::WriteStatement statement = PrepareModern(session, kDeletePointSql);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunDeletePointModern(session, statement, key_order.first(scale.operations)),
+            .last_insert_rowid = 0,
+        };
+      });
+      FinalizeModern(statement);
+      break;
+    }
+    case CaseKind::kDeleteScan: {
+      modern_sqlite::WriteStatement statement = PrepareModern(session, DeleteScanSql(scale));
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunDeleteScanModern(session, statement, ScanMaximum(scale), scale.row_mutations),
+            .last_insert_rowid = 0,
+        };
+      });
+      FinalizeModern(statement);
+      break;
+    }
+    case CaseKind::kMixedCommit:
+    case CaseKind::kMixedRollback: {
+      const bool rollback = kind == CaseKind::kMixedRollback;
+      modern_sqlite::WriteStatement begin = PrepareModern(session, "BEGIN");
+      modern_sqlite::WriteStatement update = PrepareModern(session, kUpdatePointSql);
+      modern_sqlite::WriteStatement remove = PrepareModern(session, kDeletePointSql);
+      modern_sqlite::WriteStatement insert = PrepareModern(session, kInsertSql);
+      modern_sqlite::WriteStatement terminal =
+          PrepareModern(session, rollback ? "ROLLBACK" : "COMMIT");
+      const MixedCounts counts = SplitMixed(scale.operations);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunMixedModern(session,
+                                           ModernMixedStatements{
+                                               .begin = begin,
+                                               .update = update,
+                                               .remove = remove,
+                                               .insert = insert,
+                                               .terminal = terminal,
+                                           },
+                                           key_order, scale.operations),
+            .last_insert_rowid = kPopulatedRows + static_cast<std::int64_t>(counts.inserts),
+        };
+      });
+      FinalizeModern(update);
+      FinalizeModern(remove);
+      FinalizeModern(insert);
+      FinalizeModern(begin);
+      FinalizeModern(terminal);
+      break;
+    }
+  }
+  return Execution{.timed = timed, .configuration = configuration};
+}
+
+[[nodiscard]] Execution ExecuteSqliteWork(CaseKind kind, ProfileKind profile,
+                                          const std::filesystem::path& path,
+                                          const WorkloadScale& scale,
+                                          std::span<const std::int64_t> key_order, bool measured,
+                                          std::size_t index) {
+  SqliteDatabase database{path};
+  const EffectiveConfiguration configuration = ConfigureSqlite(database.get(), profile);
+  TimedWork timed;
+  switch (kind) {
+    case CaseKind::kCreate: {
+      std::vector<SqliteStatement> completed;
+      completed.reserve(scale.operations);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunCreateSqlite(database.get(), scale.operations, completed),
+            .last_insert_rowid = 0,
+        };
+      });
+      for (SqliteStatement& statement : completed) {
+        statement.Finalize();
+      }
+      break;
+    }
+    case CaseKind::kInsertPoint:
+    case CaseKind::kInsertBatch: {
+      const bool explicit_transaction = kind == CaseKind::kInsertBatch;
+      std::optional<SqliteStatement> begin;
+      std::optional<SqliteStatement> commit;
+      if (explicit_transaction) {
+        begin.emplace(database.get(), "BEGIN");
+        commit.emplace(database.get(), "COMMIT");
+      }
+      SqliteStatement statement{database.get(), kInsertSql};
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunInsertSqlite(database.get(), statement, begin.has_value() ? &*begin : nullptr,
+                                commit.has_value() ? &*commit : nullptr, scale.operations),
+            .last_insert_rowid = static_cast<std::int64_t>(scale.operations),
+        };
+      });
+      statement.Finalize();
+      if (begin.has_value() && commit.has_value()) {
+        begin->Finalize();
+        commit->Finalize();
+      }
+      break;
+    }
+    case CaseKind::kUpdatePoint: {
+      SqliteStatement statement{database.get(), kUpdatePointSql};
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunUpdatePointSqlite(database.get(), statement, key_order.first(scale.operations)),
+            .last_insert_rowid = 0,
+        };
+      });
+      statement.Finalize();
+      break;
+    }
+    case CaseKind::kUpdateScan: {
+      SqliteStatement statement{database.get(), UpdateScanSql(scale)};
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunUpdateScanSqlite(database.get(), statement, ScanMaximum(scale),
+                                                scale.row_mutations),
+            .last_insert_rowid = 0,
+        };
+      });
+      statement.Finalize();
+      break;
+    }
+    case CaseKind::kDeletePoint: {
+      SqliteStatement statement{database.get(), kDeletePointSql};
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows =
+                RunDeletePointSqlite(database.get(), statement, key_order.first(scale.operations)),
+            .last_insert_rowid = 0,
+        };
+      });
+      statement.Finalize();
+      break;
+    }
+    case CaseKind::kDeleteScan: {
+      SqliteStatement statement{database.get(), DeleteScanSql(scale)};
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunDeleteScanSqlite(database.get(), statement, ScanMaximum(scale),
+                                                scale.row_mutations),
+            .last_insert_rowid = 0,
+        };
+      });
+      statement.Finalize();
+      break;
+    }
+    case CaseKind::kMixedCommit:
+    case CaseKind::kMixedRollback: {
+      const bool rollback = kind == CaseKind::kMixedRollback;
+      SqliteStatement begin{database.get(), "BEGIN"};
+      SqliteStatement update{database.get(), kUpdatePointSql};
+      SqliteStatement remove{database.get(), kDeletePointSql};
+      SqliteStatement insert{database.get(), kInsertSql};
+      SqliteStatement terminal{database.get(), rollback ? "ROLLBACK" : "COMMIT"};
+      const MixedCounts counts = SplitMixed(scale.operations);
+      timed = RunMeasured(index, measured, [&] {
+        return WorkResult{
+            .changed_rows = RunMixedSqlite(database.get(),
+                                           SqliteMixedStatements{
+                                               .begin = begin,
+                                               .update = update,
+                                               .remove = remove,
+                                               .insert = insert,
+                                               .terminal = terminal,
+                                           },
+                                           key_order, scale.operations),
+            .last_insert_rowid = kPopulatedRows + static_cast<std::int64_t>(counts.inserts),
+        };
+      });
+      update.Finalize();
+      remove.Finalize();
+      insert.Finalize();
+      begin.Finalize();
+      terminal.Finalize();
+      break;
+    }
+  }
+  database.Close();
+  return Execution{.timed = timed, .configuration = configuration};
+}
+
+[[nodiscard]] std::vector<ExpectedRecord> ExpectedRecords(CaseKind kind, std::size_t operations,
+                                                          std::span<const std::int64_t> key_order) {
   std::vector<ExpectedRecord> records;
   if (kind == CaseKind::kCreate) {
     return records;
@@ -876,27 +1334,37 @@ struct MixedCounts {
 
   const bool rollback = kind == CaseKind::kMixedRollback;
   const MixedCounts mixed = SplitMixed(operations);
+  std::vector<std::uint8_t> mutations(static_cast<std::size_t>(kPopulatedRows) + 1U, 0);
+  if (!rollback && (kind == CaseKind::kUpdatePoint || kind == CaseKind::kDeletePoint)) {
+    const std::uint8_t mutation = kind == CaseKind::kUpdatePoint ? 1U : 2U;
+    for (const std::int64_t rowid : key_order.first(operations)) {
+      mutations[static_cast<std::size_t>(rowid)] = mutation;
+    }
+  } else if (!rollback && kind == CaseKind::kMixedCommit) {
+    for (std::size_t index = 0; index < mixed.updates; ++index) {
+      mutations[static_cast<std::size_t>(key_order[index])] = 3U;
+    }
+    for (std::size_t index = 0; index < mixed.deletes; ++index) {
+      mutations[static_cast<std::size_t>(key_order[mixed.updates + index])] = 2U;
+    }
+  }
   records.reserve(static_cast<std::size_t>(kPopulatedRows) + mixed.inserts);
   for (std::int64_t rowid = 1; rowid <= kPopulatedRows; ++rowid) {
-    if (!rollback && (kind == CaseKind::kDeletePoint || kind == CaseKind::kDeleteScan) &&
-        std::cmp_less_equal(rowid, operations)) {
-      continue;
-    }
-    if (!rollback && kind == CaseKind::kMixedCommit && std::cmp_greater(rowid, mixed.updates) &&
-        std::cmp_less_equal(rowid, mixed.updates + mixed.deletes)) {
+    const std::uint8_t mutation = mutations[static_cast<std::size_t>(rowid)];
+    if ((!rollback && kind == CaseKind::kDeleteScan && std::cmp_less_equal(rowid, operations)) ||
+        mutation == 2U) {
       continue;
     }
     std::int64_t seed = rowid;
     std::int64_t version = 0;
-    if (!rollback && kind == CaseKind::kUpdatePoint && std::cmp_less_equal(rowid, operations)) {
+    if (mutation == 1U) {
       seed = rowid + 1'000'000;
       version = 1;
     } else if (!rollback && kind == CaseKind::kUpdateScan &&
                std::cmp_less_equal(rowid, operations)) {
       seed = 9'000'000;
       version = 1;
-    } else if (!rollback && kind == CaseKind::kMixedCommit &&
-               std::cmp_less_equal(rowid, mixed.updates)) {
+    } else if (mutation == 3U) {
       seed = rowid + 2'000'000;
       version = 1;
     }
@@ -1080,63 +1548,299 @@ void EnsureNoSidecars(const std::filesystem::path& path) {
   }
 }
 
-[[nodiscard]] std::size_t ParseOperations(std::string_view text) {
-  std::size_t value = 0;
-  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-  if (error != std::errc{} || end != text.data() + text.size() || value == 0U || value > 65'536U) {
-    throw HarnessFailure{"operation count must be between 1 and 65536"};
+[[nodiscard]] std::vector<ExpectedRecord> OriginalRecords() {
+  std::vector<ExpectedRecord> records;
+  records.reserve(static_cast<std::size_t>(kPopulatedRows));
+  for (std::int64_t rowid = 1; rowid <= kPopulatedRows; ++rowid) {
+    records.push_back(ExpectedRecord{.rowid = rowid, .value_seed = rowid, .version = 0});
   }
-  return value;
+  return records;
 }
 
-void PrintReport(std::string_view engine, std::string_view profile, std::string_view case_id,
-                 std::size_t operations, const WorkResult& work, const Verification& verification) {
-  std::cout << R"({"case":")" << case_id << R"(","changed_rows":)" << work.changed_rows
-            << R"(,"digest":")" << verification.digest << R"(","engine":")" << engine
-            << R"(","final_rows":)" << verification.rows << R"(,"last_insert_rowid":)"
-            << work.last_insert_rowid << R"(,"mode":"smoke","operations":)" << operations
-            << R"(,"profile":")" << profile << R"(","schema_objects":)"
-            << verification.schema_objects << R"(,"schema_version":1,"status":"complete"})" << '\n';
+void VerifyInitialInput(EngineKind engine, CaseKind kind, const std::filesystem::path& path) {
+  EnsureNoSidecars(path);
+  if (kind == CaseKind::kCreate) {
+    if (!ReadFile(path).empty()) {
+      throw BenchmarkMismatch{"CREATE input is not a zero-byte database"};
+    }
+    return;
+  }
+  const std::vector<ExpectedRecord> expected =
+      kind == CaseKind::kInsertPoint || kind == CaseKind::kInsertBatch
+          ? std::vector<ExpectedRecord>{}
+          : OriginalRecords();
+  const Verification verification = engine == EngineKind::kModern
+                                        ? VerifyKvWithModern(path, expected)
+                                        : VerifyKvWithSqlite(path, expected);
+  if (verification.rows != expected.size() || verification.schema_objects != 1U) {
+    throw BenchmarkMismatch{"write benchmark input verification differs"};
+  }
+}
+
+struct FreshDatabaseRequest {
+  const std::filesystem::path& input;
+  const std::filesystem::path& scratch;
+  std::string_view name;
+};
+
+[[nodiscard]] std::filesystem::path FreshDatabasePath(FreshDatabaseRequest request) {
+  const std::filesystem::path output = request.scratch / std::string{request.name};
+  if (std::filesystem::exists(output)) {
+    throw HarnessFailure{"scratch database already exists"};
+  }
+  for (const std::string_view suffix : {"-journal", "-wal", "-shm"}) {
+    if (std::filesystem::exists(output.string() + std::string{suffix})) {
+      throw HarnessFailure{"scratch database sidecar already exists"};
+    }
+  }
+  std::error_code error;
+  if (!std::filesystem::copy_file(request.input, output, std::filesystem::copy_options::none,
+                                  error)) {
+    throw HarnessFailure{"cannot copy write benchmark input: " + error.message()};
+  }
+  return output;
+}
+
+void RemoveFreshDatabase(const std::filesystem::path& path) {
+  EnsureNoSidecars(path);
+  std::error_code error;
+  if (!std::filesystem::remove(path, error) || error) {
+    throw HarnessFailure{"cannot remove write benchmark scratch database"};
+  }
+}
+
+struct VerifiedWork {
+  WorkResult work;
+  Verification verification;
+};
+
+struct VerifiedRepetition {
+  TimedWork timed;
+  Verification verification;
+};
+
+struct TimingRun {
+  WorkloadScale scale;
+  EffectiveConfiguration configuration;
+  VerifiedWork warmup;
+  std::vector<VerifiedRepetition> repetitions;
+};
+
+[[nodiscard]] Execution ExecuteWork(EngineKind engine, ProfileKind profile, CaseKind kind,
+                                    const std::filesystem::path& path, const WorkloadScale& scale,
+                                    std::span<const std::int64_t> key_order, bool measured,
+                                    std::size_t index) {
+  return engine == EngineKind::kModern
+             ? ExecuteModernWork(kind, path, scale, key_order, measured, index)
+             : ExecuteSqliteWork(kind, profile, path, scale, key_order, measured, index);
+}
+
+[[nodiscard]] std::int64_t ExpectedLastInsertRowid(CaseKind kind, const WorkloadScale& scale) {
+  if (kind == CaseKind::kInsertPoint || kind == CaseKind::kInsertBatch) {
+    return static_cast<std::int64_t>(scale.operations);
+  }
+  if (kind == CaseKind::kMixedCommit || kind == CaseKind::kMixedRollback) {
+    return kPopulatedRows + static_cast<std::int64_t>(SplitMixed(scale.operations).inserts);
+  }
+  return 0;
+}
+
+[[nodiscard]] Verification VerifyFinalOutput(CaseKind kind, const WorkloadScale& scale,
+                                             const std::filesystem::path& path,
+                                             std::span<const std::int64_t> key_order) {
+  const std::vector<ExpectedRecord> expected = ExpectedRecords(kind, scale.operations, key_order);
+  const Verification sqlite_verification = kind == CaseKind::kCreate
+                                               ? VerifyCreateWithSqlite(path, scale.operations)
+                                               : VerifyKvWithSqlite(path, expected);
+  const Verification modern_verification = kind == CaseKind::kCreate
+                                               ? VerifyCreateWithModern(path, scale.operations)
+                                               : VerifyKvWithModern(path, expected);
+  if (sqlite_verification != modern_verification) {
+    throw BenchmarkMismatch{"write benchmark final verification differs"};
+  }
+  return sqlite_verification;
+}
+
+void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkResult& work) {
+  const std::uint64_t expected_changes = kind == CaseKind::kCreate ? 0U : scale.row_mutations;
+  if (work.changed_rows != expected_changes ||
+      work.last_insert_rowid != ExpectedLastInsertRowid(kind, scale)) {
+    throw BenchmarkMismatch{"write benchmark completion counts differ"};
+  }
+}
+
+[[nodiscard]] TimingRun RunTiming(EngineKind engine, ProfileKind profile, CaseKind kind,
+                                  RunKind run_kind, const std::filesystem::path& input,
+                                  const std::filesystem::path& scratch) {
+  VerifyInitialInput(engine, kind, input);
+  const WorkloadScale scale = ScaleFor(kind, run_kind);
+  const std::vector<std::int64_t> key_order = GenerateKeyOrder();
+  const std::vector<std::byte> rollback_input =
+      kind == CaseKind::kMixedRollback ? ReadFile(input) : std::vector<std::byte>{};
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(1U + kTimingRepetitions);
+
+  const std::filesystem::path warmup_path = FreshDatabasePath(
+      FreshDatabaseRequest{.input = input, .scratch = scratch, .name = "warmup.db"});
+  paths.push_back(warmup_path);
+  Execution warmup = ExecuteWork(engine, profile, kind, warmup_path, scale, key_order, false, 0);
+
+  const std::size_t repetition_count = run_kind == RunKind::kSmoke ? 1U : kTimingRepetitions;
+  std::vector<Execution> executions;
+  executions.reserve(repetition_count);
+  for (std::size_t index = 0; index < repetition_count; ++index) {
+    const std::string name = "repetition-" + std::to_string(index) + ".db";
+    const std::filesystem::path path =
+        FreshDatabasePath(FreshDatabaseRequest{.input = input, .scratch = scratch, .name = name});
+    paths.push_back(path);
+    Execution execution = ExecuteWork(engine, profile, kind, path, scale, key_order, true, index);
+    if (run_kind == RunKind::kBaseline && execution.timed.wall_ns < kMinimumWallNanoseconds) {
+      throw HarnessFailure{"baseline repetition did not reach the minimum wall time: " +
+                           std::to_string(execution.timed.wall_ns) + " ns"};
+    }
+    if (execution.configuration != warmup.configuration) {
+      throw HarnessFailure{"effective write configuration changed between repetitions"};
+    }
+    executions.push_back(std::move(execution));
+  }
+
+  ValidateExecutedWork(kind, scale, warmup.timed.work);
+  const Verification warmup_verification = VerifyFinalOutput(kind, scale, warmup_path, key_order);
+  if (kind == CaseKind::kMixedRollback && rollback_input != ReadFile(warmup_path)) {
+    throw BenchmarkMismatch{"write benchmark rollback changed warmup database bytes"};
+  }
+
+  std::vector<VerifiedRepetition> repetitions;
+  repetitions.reserve(repetition_count);
+  for (std::size_t index = 0; index < executions.size(); ++index) {
+    const Execution& execution = executions[index];
+    ValidateExecutedWork(kind, scale, execution.timed.work);
+    const Verification verification = VerifyFinalOutput(kind, scale, paths[index + 1U], key_order);
+    if (verification != warmup_verification) {
+      throw BenchmarkMismatch{"write benchmark repetition result differs from warmup"};
+    }
+    if (kind == CaseKind::kMixedRollback && rollback_input != ReadFile(paths[index + 1U])) {
+      throw BenchmarkMismatch{"write benchmark rollback changed repetition database bytes"};
+    }
+    repetitions.push_back(
+        VerifiedRepetition{.timed = execution.timed, .verification = verification});
+  }
+
+  for (const std::filesystem::path& path : paths) {
+    RemoveFreshDatabase(path);
+  }
+  return TimingRun{
+      .scale = scale,
+      .configuration = std::move(warmup.configuration),
+      .warmup = VerifiedWork{.work = warmup.timed.work, .verification = warmup_verification},
+      .repetitions = std::move(repetitions),
+  };
+}
+
+void PrintJsonString(std::ostream& output, std::string_view value) {
+  output << '"';
+  for (const char character : value) {
+    switch (character) {
+      case '"':
+        output << "\\\"";
+        break;
+      case '\\':
+        output << "\\\\";
+        break;
+      case '\n':
+        output << "\\n";
+        break;
+      case '\r':
+        output << "\\r";
+        break;
+      case '\t':
+        output << "\\t";
+        break;
+      default:
+        output << character;
+        break;
+    }
+  }
+  output << '"';
+}
+
+void PrintConfiguration(std::ostream& output, const EffectiveConfiguration& configuration) {
+  output << R"({"cache_size":)" << configuration.cache_size << R"(,"journal_mode":)";
+  PrintJsonString(output, configuration.journal_mode);
+  output << R"(,"locking_mode":)";
+  PrintJsonString(output, configuration.locking_mode);
+  output << R"(,"mmap_bytes":)" << configuration.mmap_bytes << R"(,"page_size":)"
+         << configuration.page_size << R"(,"synchronous":)";
+  PrintJsonString(output, configuration.synchronous);
+  output << R"(,"temp_store":)";
+  PrintJsonString(output, configuration.temp_store);
+  output << R"(,"thread_mode":)";
+  PrintJsonString(output, configuration.thread_mode);
+  output << '}';
+}
+
+void PrintWork(std::ostream& output, const WorkloadScale& scale, const WorkResult& work,
+               const Verification& verification) {
+  output << R"("changed_rows":)" << work.changed_rows << R"(,"digest":)";
+  PrintJsonString(output, verification.digest);
+  output << R"(,"dml_operations":)" << scale.dml_operations << R"(,"final_rows":)"
+         << verification.rows << R"(,"last_insert_rowid":)" << work.last_insert_rowid
+         << R"(,"row_mutations":)" << scale.row_mutations << R"(,"schema_objects":)"
+         << verification.schema_objects << R"(,"transactions":)" << scale.transactions;
+}
+
+void PrintReport(std::string_view engine, ProfileKind profile, std::string_view case_id,
+                 RunKind run_kind, const TimingRun& run) {
+  std::cout << R"({"case":)";
+  PrintJsonString(std::cout, case_id);
+  std::cout << R"(,"completion":{"fresh_databases":)" << run.repetitions.size() + 1U
+            << R"(,"measured_repetitions":)" << run.repetitions.size()
+            << R"(,"post_verifications":)" << run.repetitions.size() + 1U
+            << R"(,"pre_verifications":1,"status":"complete","warmups":1},)"
+               R"("effective_configuration":)";
+  PrintConfiguration(std::cout, run.configuration);
+  std::cout << R"(,"engine":)";
+  PrintJsonString(std::cout, engine);
+  std::cout << R"(,"mode":"timing","profile":)";
+  PrintJsonString(std::cout, ProfileName(profile));
+  std::cout << R"(,"repetitions":[)";
+  for (std::size_t index = 0; index < run.repetitions.size(); ++index) {
+    if (index != 0U) {
+      std::cout << ',';
+    }
+    const VerifiedRepetition& repetition = run.repetitions[index];
+    std::cout << '{';
+    PrintWork(std::cout, run.scale, repetition.timed.work, repetition.verification);
+    std::cout << R"(,"cpu_ns":)" << repetition.timed.cpu_ns << R"(,"index":)"
+              << repetition.timed.index << R"(,"wall_ns":)" << repetition.timed.wall_ns << '}';
+  }
+  std::cout << R"(],"run_kind":)";
+  PrintJsonString(std::cout, RunKindName(run_kind));
+  std::cout << R"(,"schema_version":1,"timer":{"cpu":"CLOCK_PROCESS_CPUTIME_ID",)"
+               R"("wall":"steady_clock"},"warmup":{)";
+  PrintWork(std::cout, run.scale, run.warmup.work, run.warmup.verification);
+  std::cout << R"(},"workload_semantics_version":1})" << '\n';
 }
 
 int Run(int argument_count, char* const* arguments) {
-  if (argument_count != 7) {
-    throw HarnessFailure{"usage: write benchmark smoke ENGINE PROFILE CASE DATABASE OPERATIONS"};
-  }
-  if (std::string_view{arguments[1]} != "smoke") {
-    throw HarnessFailure{"unsupported write benchmark mode"};
+  if (argument_count != 8 || std::string_view{arguments[1]} != "run") {
+    throw HarnessFailure{
+        "usage: write benchmark run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline>"};
   }
   const EngineKind engine = ParseEngine(arguments[2]);
   const ProfileKind profile = ParseProfile(arguments[3]);
   const CaseKind benchmark_case = ParseCase(arguments[4]);
-  const std::filesystem::path path = arguments[5];
-  const std::size_t operations = ParseOperations(arguments[6]);
-  if (!std::filesystem::is_regular_file(path)) {
-    throw HarnessFailure{"write benchmark database is not a file"};
+  const std::filesystem::path input = arguments[5];
+  const std::filesystem::path scratch = arguments[6];
+  const RunKind run_kind = ParseRunKind(arguments[7]);
+  if (!std::filesystem::is_regular_file(input)) {
+    throw HarnessFailure{"write benchmark input is not a file"};
   }
-  const std::vector<std::byte> initial_bytes =
-      benchmark_case == CaseKind::kMixedRollback ? ReadFile(path) : std::vector<std::byte>{};
-
-  const WorkResult work = engine == EngineKind::kModern
-                              ? RunModern(benchmark_case, path, operations)
-                              : RunSqlite(benchmark_case, profile, path, operations);
-  const std::vector<ExpectedRecord> expected = ExpectedRecords(benchmark_case, operations);
-  const Verification sqlite_verification = benchmark_case == CaseKind::kCreate
-                                               ? VerifyCreateWithSqlite(path, operations)
-                                               : VerifyKvWithSqlite(path, expected);
-  const Verification modern_verification = benchmark_case == CaseKind::kCreate
-                                               ? VerifyCreateWithModern(path, operations)
-                                               : VerifyKvWithModern(path, expected);
-  const std::uint64_t expected_changes = benchmark_case == CaseKind::kCreate ? 0U : operations;
-  if (sqlite_verification != modern_verification || work.changed_rows != expected_changes) {
-    throw BenchmarkMismatch{"write benchmark final verification differs"};
+  if (!std::filesystem::is_directory(scratch)) {
+    throw HarnessFailure{"write benchmark scratch path is not a directory"};
   }
-  if (benchmark_case == CaseKind::kMixedRollback && initial_bytes != ReadFile(path)) {
-    throw BenchmarkMismatch{"write benchmark rollback changed main database bytes"};
-  }
-  EnsureNoSidecars(path);
-  PrintReport(arguments[2], ProfileName(profile), arguments[4], operations, work,
-              sqlite_verification);
+  const TimingRun run = RunTiming(engine, profile, benchmark_case, run_kind, input, scratch);
+  PrintReport(arguments[2], profile, arguments[4], run_kind, run);
   return 0;
 }
 

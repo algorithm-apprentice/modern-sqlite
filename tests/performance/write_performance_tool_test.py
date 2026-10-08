@@ -167,7 +167,7 @@ def valid_manifest() -> dict[str, object]:
             },
         ],
         "timing_repetitions": 3,
-        "minimum_wall_ns": 200_000_000,
+        "minimum_wall_ns": 20_000_000,
         "fixtures": [
             {
                 "id": "schema",
@@ -222,6 +222,10 @@ def valid_manifest() -> dict[str, object]:
             "profile": "matched-durable",
             "maximum_wall_ratio": {"numerator": 10, "denominator": 1},
             "maximum_cpu_ratio": {"numerator": 10, "denominator": 1},
+        },
+        "key_order": {
+            "algorithm": "splitmix64-rejection-fisher-yates-v1",
+            "seed": "d1b54a32d192ed03",
         },
     }
 
@@ -339,6 +343,13 @@ class WritePerformanceToolTest(unittest.TestCase):
         completed = self.run_tool(json.dumps(manifest))
         self.assertEqual(1, completed.returncode)
         self.assertIn("case create-table-implicit.sql is not canonical", completed.stderr)
+
+    def test_requires_the_pinned_key_order(self) -> None:
+        manifest = valid_manifest()
+        manifest["key_order"]["seed"] = "0000000000000000"
+        completed = self.run_tool(json.dumps(manifest))
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("key_order is not canonical", completed.stderr)
 
     def test_usage_and_missing_file_are_harness_failures(self) -> None:
         completed = subprocess.run(
