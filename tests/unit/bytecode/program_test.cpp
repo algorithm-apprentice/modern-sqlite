@@ -104,6 +104,29 @@ namespace {
   };
 }
 
+[[nodiscard]] WriteCursorDescriptor IndexWriteCursorDescriptor() {
+  return WriteCursorDescriptor{
+      .root_page = RootPageNumber(3),
+      .columns = {},
+      .rowid_alias = std::nullopt,
+      .index_columns =
+          {
+              IndexColumnMetadata{
+                  .collation = Symbol(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+              IndexColumnMetadata{
+                  .collation = Symbol(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+          },
+      .key_term_count = 1,
+      .unique = true,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kIndex,
+  };
+}
+
 [[nodiscard]] ProgramErrorCode VerifyError(const ProgramInput& input, ProgramLimits limits = {}) {
   const auto verified = VerifyProgram(input, limits);
   EXPECT_FALSE(verified.has_value());
@@ -248,6 +271,11 @@ TEST(BytecodeProgramTest, VerifiesTypedTableInsertInstructions) {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.constants.emplace_back();
   input.constants.push_back(SqlValue::Text("value"));
@@ -298,6 +326,11 @@ TEST(BytecodeProgramTest, VerifiesTypedTableDeleteAndRowidSeekModes) {
               },
           },
       .rowid_alias = std::nullopt,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
@@ -388,6 +421,11 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
@@ -440,6 +478,74 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
 
   scan.instructions.erase(scan.instructions.begin() + 2);
   EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(scan));
+}
+
+TEST(BytecodeProgramTest, VerifiesTypedIndexWriteInstructions) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kInsert;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
+  input.register_count = 2;
+  input.constants.push_back(SqlValue::Text("key"));
+  input.constants.push_back(SqlValue::Integer(7));
+  input.symbols.emplace_back("BINARY");
+  input.write_cursors.push_back(IndexWriteCursorDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      CheckUniqueIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .ignored_rowid = std::nullopt,
+      },
+      InsertIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("check_unique_index", InstructionKindName(InstructionKindOf(input.instructions[3])));
+  EXPECT_EQ("insert_index", InstructionKindName(InstructionKindOf(input.instructions[4])));
+
+  std::get<CheckUniqueIndexInstruction>(input.instructions[3]).key_count = 2;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+  std::get<CheckUniqueIndexInstruction>(input.instructions[3]).key_count = 1;
+  std::get<InsertIndexInstruction>(input.instructions[4]).value_count = 1;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+
+  ProgramInput deletion;
+  deletion.statement_kind = ProgramStatementKind::kDelete;
+  deletion.transaction_access = ProgramTransactionAccess::kWrite;
+  deletion.rollback_mode = ProgramRollbackMode::kStatement;
+  deletion.mutation_result.publishes_changes = true;
+  deletion.register_count = 2;
+  deletion.constants.push_back(SqlValue::Text("key"));
+  deletion.constants.push_back(SqlValue::Integer(7));
+  deletion.symbols.emplace_back("BINARY");
+  deletion.write_cursors.push_back(IndexWriteCursorDescriptor());
+  deletion.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      DeleteIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(deletion).has_value());
+  EXPECT_EQ("delete_index", InstructionKindName(InstructionKindOf(deletion.instructions[3])));
 }
 
 TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
@@ -660,6 +766,11 @@ TEST(BytecodeProgramTest, PublishesExecutionAndWriteMetadata) {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {HaltInstruction{}};
 
@@ -903,6 +1014,11 @@ TEST(BytecodeProgramTest, BuilderPublishesWriteExecutionMetadata) {
               },
           },
       .rowid_alias = std::nullopt,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   ASSERT_TRUE(cursor.has_value());
   ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());

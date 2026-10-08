@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -9,6 +10,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
@@ -490,6 +492,11 @@ int main() try {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   insert_input.instructions = {
       LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
@@ -591,6 +598,11 @@ int main() try {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   delete_input.instructions = {
       LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
@@ -658,6 +670,11 @@ int main() try {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   update_input.instructions = {
       LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
@@ -744,6 +761,110 @@ int main() try {
   }
   if (!create_vm->DetachExecutionContext().has_value() ||
       !create_statement->Rollback().has_value() || !create_vfs.database_bytes().empty()) {
+    return 1;
+  }
+
+  test::WritePagerFixedVfs index_vfs{false};
+  std::unique_ptr<Pager> index_pager = test::OpenWritePager(index_vfs, 64U);
+  if (index_pager == nullptr) {
+    return 1;
+  }
+  auto index_coordinator = TransactionCoordinator::Open(std::move(index_pager));
+  if (!index_coordinator.has_value()) {
+    return 1;
+  }
+  auto index_initialization = index_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!index_initialization.has_value() || index_initialization->writer() == nullptr ||
+      !index_initialization->writer()->InitializeDatabase().has_value()) {
+    return 1;
+  }
+  const std::array<IndexColumnOrder, 2> index_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto index_writer = index_initialization->writer()->CreateIndexBtree(index_columns);
+  if (!index_writer.has_value()) {
+    return 1;
+  }
+  const PageNumber index_root = index_writer->root_page();
+  if (!index_initialization->Succeed().has_value()) {
+    return 1;
+  }
+
+  ProgramInput index_input;
+  index_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  index_input.statement_kind = ProgramStatementKind::kInsert;
+  index_input.transaction_access = ProgramTransactionAccess::kWrite;
+  index_input.rollback_mode = ProgramRollbackMode::kStatement;
+  index_input.mutation_result = MutationResultMetadata{
+      .publishes_changes = true,
+      .publishes_last_insert_rowid = true,
+  };
+  index_input.register_count = 2;
+  index_input.constants.push_back(SqlValue::Text("key"));
+  index_input.constants.push_back(SqlValue::Integer(1));
+  index_input.symbols.emplace_back("BINARY");
+  index_input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(index_root.value()),
+      .columns = {},
+      .rowid_alias = std::nullopt,
+      .index_columns =
+          {
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+          },
+      .key_term_count = 1,
+      .unique = true,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kIndex,
+  });
+  index_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      OpenWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      CheckUniqueIndexInstruction{
+          .cursor = WriteCursorId(0),
+          .first_key = RegisterId(0),
+          .key_count = 1,
+          .ignored_rowid = std::nullopt,
+      },
+      InsertIndexInstruction{
+          .cursor = WriteCursorId(0),
+          .first_value = RegisterId(0),
+          .value_count = 2,
+      },
+      HaltInstruction{},
+  };
+  auto index_program = BytecodeProgram::Create(index_input);
+  auto index_statement = index_coordinator->BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite,
+      .rollback = StatementRollbackMode::kStatement,
+  });
+  if (!index_program.has_value() || !index_statement.has_value() ||
+      index_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto index_vm = Vm::Create(*index_program, VmEnvironment::Core());
+  if (!index_vm.has_value() ||
+      !index_vm->AttachExecutionContext(VmExecutionContext{*index_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto index_failure = index_vm->Step();
+  fail_allocations = false;
+  if (index_failure.has_value() || index_failure.error().code() != ErrorCode::kOutOfMemory ||
+      index_vm->state() != VmState::kError) {
+    return 1;
+  }
+  if (!index_vm->DetachExecutionContext().has_value() || !index_statement->Rollback().has_value()) {
     return 1;
   }
   return 0;

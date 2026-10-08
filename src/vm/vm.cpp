@@ -237,6 +237,7 @@ struct RuntimeCursor {
 
 struct RuntimeWriteCursor {
   std::optional<TableBtreeWriter> table;
+  std::optional<IndexBtreeWriter> index;
 };
 
 }  // namespace
@@ -272,6 +273,17 @@ struct Vm::Impl {
 
     for (const ReadCursorDescriptor& descriptor : program_->cursors()) {
       if (descriptor.storage != CursorStorageKind::kIndex) {
+        continue;
+      }
+      for (const IndexColumnMetadata& column : descriptor.index_columns) {
+        auto collation = ResolveCollation(column.collation);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+      }
+    }
+    for (const WriteCursorDescriptor& descriptor : program_->write_cursors()) {
+      if (descriptor.storage != WriteCursorStorageKind::kIndex) {
         continue;
       }
       for (const IndexColumnMetadata& column : descriptor.index_columns) {
@@ -1006,17 +1018,37 @@ struct Vm::Impl {
           VmError(ErrorCode::kMisuse, "write cursor requires a transaction writer"));
     }
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
-    auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
-    if (!table.has_value()) {
-      return std::unexpected(std::move(table.error()));
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (descriptor.storage == WriteCursorStorageKind::kRowIdTable) {
+      auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
+      if (!table.has_value()) {
+        return std::unexpected(std::move(table.error()));
+      }
+      runtime.table = std::move(*table);
+    } else {
+      std::vector<IndexColumnOrder> columns;
+      columns.reserve(descriptor.index_columns.size());
+      for (const IndexColumnMetadata& column : descriptor.index_columns) {
+        const bool descending = column.order == BytecodeSortOrder::kDescending;
+        columns.emplace_back(
+            CollationFor(column.collation),
+            descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
+            descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+      }
+      auto index = writer_->OpenIndexBtree(PageNumber(descriptor.root_page.value()), columns);
+      if (!index.has_value()) {
+        return std::unexpected(std::move(index.error()));
+      }
+      runtime.index = std::move(*index);
     }
-    WriteCursor(operation.cursor).table = std::move(*table);
     return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
                                        const CloseWriteCursorInstruction& operation) {
-    WriteCursor(operation.cursor).table.reset();
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    runtime.table.reset();
+    runtime.index.reset();
     return std::nullopt;
   }
 
@@ -1095,6 +1127,87 @@ struct Vm::Impl {
       return std::unexpected(std::move(encoded.error()));
     }
     return SetRegister(operation.output, SqlValue::Blob(std::move(*encoded)));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const CheckUniqueIndexInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.index.has_value()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "unique check used a closed index write cursor"));
+    }
+    const std::span<const SqlValue> key = std::span<const SqlValue>{registers_}.subspan(
+        operation.first_key.value(), operation.key_count);
+    if (std::ranges::any_of(
+            key, [](const SqlValue& value) { return value.type() == SqlValueType::kNull; })) {
+      return std::nullopt;
+    }
+    auto matched = runtime.index->FindPrefixRowId(key);
+    if (!matched.has_value()) {
+      return std::unexpected(std::move(matched.error()));
+    }
+    if (!matched->has_value()) {
+      return std::nullopt;
+    }
+    if (operation.ignored_rowid.has_value()) {
+      const std::optional<std::int64_t> ignored =
+          Register(*operation.ignored_rowid).integer_value();
+      if (!ignored.has_value()) {
+        return std::unexpected(
+            VmError(ErrorCode::kInternal, "unique check ignored rowid is not an integer"));
+      }
+      if (**matched == *ignored) {
+        return std::nullopt;
+      }
+    }
+    return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertIndexInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.index.has_value()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "insert used a closed index write cursor"));
+    }
+    const std::span<const SqlValue> values = std::span<const SqlValue>{registers_}.subspan(
+        operation.first_value.value(), operation.value_count);
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    if (descriptor.unique) {
+      const std::span<const SqlValue> key = values.first(descriptor.key_term_count);
+      if (!std::ranges::any_of(
+              key, [](const SqlValue& value) { return value.type() == SqlValueType::kNull; })) {
+        auto matched = runtime.index->FindPrefixRowId(key);
+        if (!matched.has_value()) {
+          return std::unexpected(std::move(matched.error()));
+        }
+        if (matched->has_value()) {
+          return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+        }
+      }
+    }
+    Status inserted = runtime.index->Insert(values);
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const DeleteIndexInstruction& operation) {
+    RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    if (!runtime.index.has_value()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "delete used a closed index write cursor"));
+    }
+    const std::span<const SqlValue> values = std::span<const SqlValue>{registers_}.subspan(
+        operation.first_value.value(), operation.value_count);
+    auto deleted = runtime.index->Delete(values);
+    if (!deleted.has_value()) {
+      return std::unexpected(std::move(deleted.error()));
+    }
+    if (!*deleted) {
+      return std::unexpected(VmError(ErrorCode::kCorruption, "old index key does not exist"));
+    }
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertTableInstruction& operation) {
@@ -1740,6 +1853,7 @@ struct Vm::Impl {
     }
     for (RuntimeWriteCursor& cursor : write_cursors_) {
       cursor.table.reset();
+      cursor.index.reset();
     }
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;

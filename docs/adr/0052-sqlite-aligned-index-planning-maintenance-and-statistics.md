@@ -338,6 +338,19 @@ Default and ABORT failures return `kConstraint`, publish zero changes for the
 failed statement, and use the existing statement rollback boundary. No
 partially maintained table/index image is observable.
 
+The bytecode write-cursor descriptor is storage-discriminated. Index
+descriptors carry complete collation/sort metadata, key-term count,
+uniqueness, and `unique_not_null`. Typed VM operations:
+
+- preflight a non-NULL unique prefix, optionally ignoring one old rowid;
+- insert one complete physical index key; and
+- delete one complete physical index key, treating a missing old key as
+  corruption.
+
+The storage writer exposes the first physical rowid matching a nonempty index
+prefix. It returns no match for absence and corruption when the matched
+record has no integer rowid suffix.
+
 An indexed scan UPDATE or DELETE does not hold the persistent table mutation
 cursor while mutating secondary roots. It first collects qualifying original
 rowids, then reopens each row and applies table plus index changes. Exact

@@ -340,6 +340,40 @@ TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeWriter, FindsIndexPrefixRowidsAndRejectsMalformedSuffixes) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 512U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  RequireStatus(session.InitializeDatabase());
+
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  std::array<SqlValue, 2> first{SqlValue::Text("key"), SqlValue::Integer(7)};
+  std::array<SqlValue, 2> second{SqlValue::Text("key"), SqlValue::Integer(9)};
+  std::array<SqlValue, 2> other{SqlValue::Text("other"), SqlValue::Integer(5)};
+  std::array<SqlValue, 2> malformed{SqlValue::Text("bad"), SqlValue::Text("rowid")};
+  RequireStatus(index.Insert(first));
+  RequireStatus(index.Insert(second));
+  RequireStatus(index.Insert(other));
+  RequireStatus(index.Insert(malformed));
+
+  std::array<SqlValue, 1> key{SqlValue::Text("key")};
+  EXPECT_EQ(std::optional<std::int64_t>{7}, TakeValue(index.FindPrefixRowId(key)));
+  std::array<SqlValue, 1> missing{SqlValue::Text("missing")};
+  EXPECT_FALSE(TakeValue(index.FindPrefixRowId(missing)).has_value());
+
+  std::array<SqlValue, 1> bad{SqlValue::Text("bad")};
+  const auto invalid = index.FindPrefixRowId(bad);
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid.error().code());
+}
+
 TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
