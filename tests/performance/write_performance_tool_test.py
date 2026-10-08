@@ -370,6 +370,33 @@ VFS_FILE_COUNTER_NAMES = (
 )
 
 
+def build_identity(instrumentation: bool) -> dict[str, object]:
+    return {
+        "architecture": "arm64",
+        "build_type": "Release",
+        "compiler": {"id": "clang", "version": "test"},
+        "cplusplus": 202302,
+        "coverage": False,
+        "instrumentation": instrumentation,
+        "sanitizers": False,
+        "standard_library": {"id": "libc++", "version": "test"},
+    }
+
+
+def source_identity() -> dict[str, str]:
+    return {"revision": "a" * 40, "tree": "b" * 40}
+
+
+def sqlite_identity() -> dict[str, object]:
+    return {
+        "compile_options": list(
+            write_performance._SQLITE_SEMANTIC_COMPILE_OPTIONS
+        ),
+        "source_id": write_performance.SQLITE_SOURCE_ID,
+        "version": write_performance.SQLITE_VERSION,
+    }
+
+
 def valid_manifest() -> dict[str, object]:
     digest = "1" * 16
     sha256 = "a" * 64
@@ -377,6 +404,9 @@ def valid_manifest() -> dict[str, object]:
         "schema_version": 1,
         "workload_semantics_version": 1,
         "sqlite_profile": "sqlite-oracle-profile-v1",
+        "sqlite_semantic_compile_options": list(
+            write_performance._SQLITE_SEMANTIC_COMPILE_OPTIONS
+        ),
         "configuration": {
             "page_size": 4096,
             "cache_pages": 512,
@@ -519,6 +549,7 @@ def valid_timing_report(
         )
         repetitions.append(repetition)
     return {
+        "build": build_identity(False),
         "case": case_id,
         "completion": {
             "fresh_databases": repetition_count + 1,
@@ -535,6 +566,8 @@ def valid_timing_report(
         "repetitions": repetitions,
         "run_kind": run_kind,
         "schema_version": 1,
+        "source": source_identity(),
+        "sqlite": sqlite_identity(),
         "timer": {
             "cpu": "CLOCK_PROCESS_CPUTIME_ID",
             "wall": "steady_clock",
@@ -587,6 +620,7 @@ def valid_diagnostic_report(
         )["effective_configuration"]
     )
     return {
+        "build": build_identity(True),
         "case": case_id,
         "completion": {
             "diagnostic_runs": 1,
@@ -607,6 +641,8 @@ def valid_diagnostic_report(
         "mode": "diagnostic",
         "profile": profile,
         "schema_version": 1,
+        "source": source_identity(),
+        "sqlite": sqlite_identity(),
         "work": deepcopy(EXPECTED_WORK[case_id]["baseline"]),
         "workload_semantics_version": 1,
     }
@@ -646,6 +682,24 @@ class WritePerformanceToolTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertEqual("", completed.stderr)
+
+    def test_accepts_timing_and_diagnostic_binary_identities(self) -> None:
+        for instrumentation in (False, True):
+            with self.subTest(instrumentation=instrumentation):
+                identity = {
+                    "build": build_identity(instrumentation),
+                    "mode": "identity",
+                    "schema_version": 1,
+                    "source": source_identity(),
+                    "sqlite": sqlite_identity(),
+                }
+                self.assertIs(
+                    identity,
+                    write_performance.validate_binary_identity(
+                        identity,
+                        instrumentation=instrumentation,
+                    ),
+                )
 
     def test_rejects_duplicate_json_keys(self) -> None:
         manifest = json.dumps(valid_manifest(), sort_keys=True)

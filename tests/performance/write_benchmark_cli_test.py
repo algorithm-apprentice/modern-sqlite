@@ -47,6 +47,27 @@ class WriteBenchmarkCliTest(unittest.TestCase):
             return self.arguments.schema_fixture
         return self.arguments.populated_fixture
 
+    def test_binary_identity_pins_source_toolchain_and_sqlite(self) -> None:
+        identities = []
+        for binary, instrumentation in (
+            (self.arguments.binary, False),
+            (self.arguments.diagnostic_binary, True),
+        ):
+            with self.subTest(binary=binary.name):
+                identity = write_performance.read_binary_identity(
+                    binary_path=binary.resolve(),
+                    repository_root=REPOSITORY_ROOT,
+                    instrumentation=instrumentation,
+                )
+                identities.append(identity)
+        self.assertEqual(identities[0]["source"], identities[1]["source"])
+        self.assertEqual(identities[0]["sqlite"], identities[1]["sqlite"])
+        timing_build = dict(identities[0]["build"])
+        diagnostic_build = dict(identities[1]["build"])
+        timing_build.pop("instrumentation")
+        diagnostic_build.pop("instrumentation")
+        self.assertEqual(timing_build, diagnostic_build)
+
     def run_case(
         self,
         engine: str,
@@ -185,6 +206,7 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                             report = completed.report
                             self.assertEqual(
                                 {
+                                    "build",
                                     "case",
                                     "completion",
                                     "effective_configuration",
@@ -194,6 +216,8 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                                     "repetitions",
                                     "run_kind",
                                     "schema_version",
+                                    "source",
+                                    "sqlite",
                                     "timer",
                                     "warmup",
                                     "workload_semantics_version",

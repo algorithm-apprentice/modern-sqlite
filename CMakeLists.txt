@@ -323,6 +323,11 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     "${_modern_sqlite_benchmark_generated_dir}/read_performance_build_config.hpp"
     @ONLY
   )
+  configure_file(
+    benchmarks/write_performance_build_config.hpp.in
+    "${_modern_sqlite_benchmark_generated_dir}/write_performance_build_config.hpp"
+    @ONLY
+  )
 
   enable_language(C)
   add_library(
@@ -402,6 +407,11 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     modern_sqlite_write_benchmark
     benchmarks/write_performance.cpp
   )
+  target_include_directories(
+    modern_sqlite_write_benchmark
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
+  )
   target_link_libraries(
     modern_sqlite_write_benchmark
     PRIVATE
@@ -472,6 +482,11 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   add_executable(
     modern_sqlite_write_diagnostics
     benchmarks/write_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_write_diagnostics
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
   )
   target_compile_definitions(
     modern_sqlite_write_diagnostics
