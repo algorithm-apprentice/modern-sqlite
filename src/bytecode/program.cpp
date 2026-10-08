@@ -183,6 +183,27 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(IndexSeekMode mode) noexcept {
+  switch (mode) {
+    case IndexSeekMode::kEqual:
+    case IndexSeekMode::kGreaterOrEqual:
+    case IndexSeekMode::kGreater:
+    case IndexSeekMode::kLessOrEqual:
+    case IndexSeekMode::kLess:
+      return true;
+  }
+  return false;
+}
+
+[[nodiscard]] bool IsValid(IndexRangeEndMode mode) noexcept {
+  switch (mode) {
+    case IndexRangeEndMode::kInclusive:
+    case IndexRangeEndMode::kExclusive:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(UnaryOperation operation) noexcept {
   switch (operation) {
     case UnaryOperation::kNegate:
@@ -738,6 +759,33 @@ template <typename T>
               return result;
             }
             return check_target(operation.missing_target, index);
+          } else if constexpr (std::is_same_v<Operation, SeekIndexInstruction> ||
+                               std::is_same_v<Operation, CheckIndexRangeInstruction>) {
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (!IsValid(operation.mode)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+            }
+            if (input.cursors[operation.cursor.value()].storage != CursorStorageKind::kIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kIndexOperationRequiresIndex, index,
+                                             operation.cursor.value()));
+            }
+            const ReadCursorDescriptor& cursor = input.cursors[operation.cursor.value()];
+            if (operation.key_count == 0U || operation.key_count > cursor.index_columns.size()) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.key_count));
+            }
+            if (auto result = check_range(operation.first_key, operation.key_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            if constexpr (std::is_same_v<Operation, SeekIndexInstruction>) {
+              return check_target(operation.missing_target, index);
+            } else {
+              return check_target(operation.end_target, index);
+            }
           } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
@@ -1290,6 +1338,30 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return merge_state(operation.missing_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, SeekIndexInstruction>) {
+            if (auto result = require_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kPositioned);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return merge_state(operation.missing_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, CheckIndexRangeInstruction>) {
+            if (auto result = require_positioned(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            if (auto result = merge_state(operation.end_target.value(), state); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction> ||
                                std::is_same_v<Operation, ReadRowIdInstruction>) {
             if (auto result = require_positioned(operation.cursor); !result) {
@@ -1507,6 +1579,10 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "next_rowid_list";
     case InstructionKind::kSeekRowId:
       return "seek_rowid";
+    case InstructionKind::kSeekIndex:
+      return "seek_index";
+    case InstructionKind::kCheckIndexRange:
+      return "check_index_range";
     case InstructionKind::kReadField:
       return "read_field";
     case InstructionKind::kReadRowId:
@@ -1588,6 +1664,7 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kCursorNotPositioned:
     case ProgramErrorCode::kCursorStateConflict:
     case ProgramErrorCode::kRowIdOperationRequiresRowIdTable:
+    case ProgramErrorCode::kIndexOperationRequiresIndex:
     case ProgramErrorCode::kFallthroughPastEnd:
     case ProgramErrorCode::kUnreachableInstruction:
       return ErrorCode::kMisuse;
@@ -1924,6 +2001,8 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<RewindRowIdListInstruction>(instruction) ||
       std::holds_alternative<NextRowIdListInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
+      std::holds_alternative<SeekIndexInstruction>(instruction) ||
+      std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
       std::holds_alternative<DeleteCurrentTableInstruction>(instruction) ||
       std::holds_alternative<JumpInstruction>(instruction) ||
       std::holds_alternative<JumpIfInstruction>(instruction)) {
@@ -1970,6 +2049,40 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor,
   }
   return AppendPending(
       PendingSeekRowId{.cursor = cursor, .key = key, .target = missing_target, .mode = mode});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekIndex(CursorId cursor,
+                                                                RegisterId first_key,
+                                                                std::uint32_t key_count,
+                                                                Label missing_target,
+                                                                IndexSeekMode mode) {
+  if (auto checked = CheckLabel(missing_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingSeekIndex{
+      .cursor = cursor,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = missing_target,
+      .mode = mode,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitCheckIndexRange(CursorId cursor,
+                                                                      RegisterId first_key,
+                                                                      std::uint32_t key_count,
+                                                                      Label end_target,
+                                                                      IndexRangeEndMode mode) {
+  if (auto checked = CheckLabel(end_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingCheckIndexRange{
+      .cursor = cursor,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = end_target,
+      .mode = mode,
+  });
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitDeleteCurrentTable(CursorId cursor,
@@ -2061,6 +2174,22 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
                 .cursor = operation.cursor,
                 .key = operation.key,
                 .missing_target = target(operation.target),
+                .mode = operation.mode,
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingSeekIndex>) {
+            return SeekIndexInstruction{
+                .cursor = operation.cursor,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
+                .missing_target = target(operation.target),
+                .mode = operation.mode,
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingCheckIndexRange>) {
+            return CheckIndexRangeInstruction{
+                .cursor = operation.cursor,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
+                .end_target = target(operation.target),
                 .mode = operation.mode,
             };
           } else if constexpr (std::is_same_v<Operation, PendingDeleteCurrentTable>) {

@@ -292,6 +292,35 @@ struct SeekRowIdInstruction {
   RowIdSeekMode mode = RowIdSeekMode::kEqual;
 };
 
+enum class IndexSeekMode : std::uint8_t {
+  kEqual,
+  kGreaterOrEqual,
+  kGreater,
+  kLessOrEqual,
+  kLess,
+};
+
+struct SeekIndexInstruction {
+  CursorId cursor;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress missing_target;
+  IndexSeekMode mode = IndexSeekMode::kEqual;
+};
+
+enum class IndexRangeEndMode : std::uint8_t {
+  kInclusive,
+  kExclusive,
+};
+
+struct CheckIndexRangeInstruction {
+  CursorId cursor;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress end_target;
+  IndexRangeEndMode mode = IndexRangeEndMode::kInclusive;
+};
+
 struct ReadFieldInstruction {
   CursorId cursor;
   CursorFieldId field;
@@ -393,12 +422,12 @@ using Instruction = std::variant<
     OpenMutationCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
     CloseWriteCursorInstruction, RewindInstruction, NextInstruction, ClearRowIdListInstruction,
     AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
-    SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
-    BuildTableRecordInstruction, InsertTableInstruction, DeleteTableInstruction,
-    DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
-    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
-    IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
-    JumpIfInstruction, ResultRowInstruction>;
+    SeekRowIdInstruction, SeekIndexInstruction, CheckIndexRangeInstruction, ReadFieldInstruction,
+    ReadRowIdInstruction, ResolveInsertRowIdInstruction, BuildTableRecordInstruction,
+    InsertTableInstruction, DeleteTableInstruction, DeleteCurrentTableInstruction,
+    UpdateCurrentTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
+    CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
+    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -425,6 +454,8 @@ enum class InstructionKind : std::uint8_t {
   kRewindRowIdList,
   kNextRowIdList,
   kSeekRowId,
+  kSeekIndex,
+  kCheckIndexRange,
   kReadField,
   kReadRowId,
   kResolveInsertRowId,
@@ -519,6 +550,7 @@ enum class ProgramErrorCode : std::uint8_t {
   kCursorNotPositioned,
   kCursorStateConflict,
   kRowIdOperationRequiresRowIdTable,
+  kIndexOperationRequiresIndex,
   kFallthroughPastEnd,
   kUnreachableInstruction,
 };
@@ -659,6 +691,12 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekIndex(
+      CursorId cursor, RegisterId first_key, std::uint32_t key_count, Label missing_target,
+      IndexSeekMode mode = IndexSeekMode::kEqual);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitCheckIndexRange(
+      CursorId cursor, RegisterId first_key, std::uint32_t key_count, Label end_target,
+      IndexRangeEndMode mode = IndexRangeEndMode::kInclusive);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitDeleteCurrentTable(CursorId cursor,
                                                                          Label exhausted_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJump(Label target);
@@ -691,6 +729,20 @@ class ProgramBuilder final {
     Label target;
     RowIdSeekMode mode;
   };
+  struct PendingSeekIndex {
+    CursorId cursor;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+    IndexSeekMode mode;
+  };
+  struct PendingCheckIndexRange {
+    CursorId cursor;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+    IndexRangeEndMode mode;
+  };
   struct PendingDeleteCurrentTable {
     CursorId cursor;
     Label target;
@@ -706,8 +758,8 @@ class ProgramBuilder final {
 
   using PendingInstruction =
       std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
-                   PendingNextRowIdList, PendingSeekRowId, PendingDeleteCurrentTable, PendingJump,
-                   PendingJumpIf>;
+                   PendingNextRowIdList, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
+                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

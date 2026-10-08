@@ -652,6 +652,76 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
   }
 }
 
+TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositioning) {
+  const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  std::array<SqlValue, 1> seek_key{SqlValue::Text("bin-05")};
+  ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
+  EXPECT_EQ(5, CurrentIndexRowid(cursor));
+
+  std::array<SqlValue, 1> lower{SqlValue::Text("bin-04")};
+  std::array<SqlValue, 1> equal{SqlValue::Text("bin-05")};
+  std::array<SqlValue, 1> upper{SqlValue::Text("bin-06")};
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(lower)) == std::weak_ordering::greater);
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(equal)) == std::weak_ordering::equivalent);
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(upper)) == std::weak_ordering::less);
+  EXPECT_EQ(5, CurrentIndexRowid(cursor));
+
+  std::array<SqlValue, 2> full_key{
+      SqlValue::Text("bin-05"),
+      SqlValue::Integer(5),
+  };
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(full_key)) == std::weak_ordering::equivalent);
+
+  const auto empty = cursor.CompareCurrent(std::span<const SqlValue>{});
+  ASSERT_FALSE(empty.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, empty.error().code());
+  EXPECT_TRUE(cursor.valid());
+
+  std::array<SqlValue, 3> excessive{
+      SqlValue::Text("bin-05"),
+      SqlValue::Integer(5),
+      SqlValue::Integer(0),
+  };
+  const auto too_long = cursor.CompareCurrent(excessive);
+  ASSERT_FALSE(too_long.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, too_long.error().code());
+  EXPECT_TRUE(cursor.valid());
+
+  IndexBtreeCursor unpositioned =
+      TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  const auto no_position = unpositioned.CompareCurrent(equal);
+  ASSERT_FALSE(no_position.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, no_position.error().code());
+}
+
+TEST_F(BtreeCursorCompatibilityTest, ComparesOverflowBackedCurrentIndexPrefixes) {
+  const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{102}, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_EQ(42, CurrentIndexRowid(cursor));
+
+  std::array<SqlValue, 1> key{SqlValue::Text(std::string(3000, 'm'))};
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+  EXPECT_EQ(42, CurrentIndexRowid(cursor));
+}
+
+TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescendingOrder) {
+  const std::vector<IndexColumnOrder> columns = NoCaseDescendingIndexColumns();
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{82}, columns));
+  std::array<SqlValue, 1> seek_key{SqlValue::Text("case-03")};
+  ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
+  EXPECT_EQ(3, CurrentIndexRowid(cursor));
+
+  std::array<SqlValue, 1> physical_lower{SqlValue::Text("case-02")};
+  std::array<SqlValue, 1> equal{SqlValue::Text("cAsE-03")};
+  std::array<SqlValue, 1> physical_upper{SqlValue::Text("case-04")};
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(physical_lower)) == std::weak_ordering::less);
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(equal)) == std::weak_ordering::equivalent);
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(physical_upper)) == std::weak_ordering::greater);
+  EXPECT_EQ(3, CurrentIndexRowid(cursor));
+}
+
 TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexKeys) {
   {
     const std::vector<IndexColumnOrder> columns = MixedIndexColumns();

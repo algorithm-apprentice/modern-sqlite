@@ -442,6 +442,72 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
   EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(scan));
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
+  ProgramInput input;
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Text("bin-05"));
+  input.symbols.emplace_back("BINARY");
+  auto descriptor = IndexCursorDescriptor();
+  descriptor.fields.push_back(CursorFieldSource{
+      .kind = CursorFieldSourceKind::kRecordField,
+      .record_field = 1,
+  });
+  input.cursors.push_back(std::move(descriptor));
+  input.result_columns = {
+      IntegerResultColumn("key"),
+      IntegerResultColumn("rowid"),
+  };
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      SeekIndexInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .missing_target = Address(8),
+          .mode = IndexSeekMode::kGreaterOrEqual,
+      },
+      CheckIndexRangeInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .end_target = Address(10),
+          .mode = IndexRangeEndMode::kInclusive,
+      },
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(2)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      NextInstruction{.cursor = Cursor(0), .next_target = Address(3)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("seek_index", InstructionKindName(InstructionKindOf(input.instructions[2])));
+  EXPECT_EQ("check_index_range", InstructionKindName(InstructionKindOf(input.instructions[3])));
+
+  std::get<SeekIndexInstruction>(input.instructions[2]).key_count = 0;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+  std::get<SeekIndexInstruction>(input.instructions[2]).key_count = 3;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+  std::get<SeekIndexInstruction>(input.instructions[2]).key_count = 1;
+  std::get<SeekIndexInstruction>(input.instructions[2]).mode =
+      static_cast<IndexSeekMode>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+  std::get<SeekIndexInstruction>(input.instructions[2]).mode = IndexSeekMode::kGreaterOrEqual;
+  std::get<CheckIndexRangeInstruction>(input.instructions[3]).key_count = 3;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
+  std::get<CheckIndexRangeInstruction>(input.instructions[3]).key_count = 1;
+  std::get<CheckIndexRangeInstruction>(input.instructions[3]).mode =
+      static_cast<IndexRangeEndMode>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+  std::get<CheckIndexRangeInstruction>(input.instructions[3]).mode = IndexRangeEndMode::kInclusive;
+
+  input.instructions.erase(input.instructions.begin() + 2);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, VerifiesRowidListLifecycleAndBranches) {
   ProgramInput input;
   input.register_count = 2;
@@ -828,6 +894,23 @@ TEST(BytecodeProgramTest, BuilderRejectsDirectNumericBranchesAndForeignLabels) {
   auto direct = first->Append(JumpInstruction{.target = Address(0)});
   ASSERT_FALSE(direct.has_value());
   EXPECT_EQ(direct.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  auto direct_index = first->Append(SeekIndexInstruction{
+      .cursor = Cursor(0),
+      .first_key = Reg(0),
+      .key_count = 1,
+      .missing_target = Address(0),
+      .mode = IndexSeekMode::kEqual,
+  });
+  ASSERT_FALSE(direct_index.has_value());
+  EXPECT_EQ(direct_index.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  auto direct_index_range = first->Append(CheckIndexRangeInstruction{
+      .cursor = Cursor(0),
+      .first_key = Reg(0),
+      .key_count = 1,
+      .end_target = Address(0),
+  });
+  ASSERT_FALSE(direct_index_range.has_value());
+  EXPECT_EQ(direct_index_range.error().code, ProgramErrorCode::kBranchRequiresLabel);
 
   auto foreign = second->EmitJump(*label);
   ASSERT_FALSE(foreign.has_value());
@@ -932,6 +1015,50 @@ TEST(BytecodeProgramTest, BuilderResolvesSeekSuccessAndMissingPaths) {
   EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).missing_target, Address(5));
   EXPECT_EQ(std::get<SeekRowIdInstruction>(program->instructions()[2]).mode,
             RowIdSeekMode::kGreater);
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesIndexRangeControlFlow) {
+  auto created = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+
+  auto key = builder.AddConstant(SqlValue::Text("bin-05"));
+  const auto binary = builder.AddSymbol("BINARY");
+  ASSERT_TRUE(key.has_value());
+  ASSERT_TRUE(binary.has_value());
+  auto cursor = builder.AddCursor(IndexCursorDescriptor());
+  auto loop = builder.CreateLabel();
+  auto positioned_done = builder.CreateLabel();
+  auto unpositioned_done = builder.CreateLabel();
+  ASSERT_TRUE(cursor.has_value());
+  ASSERT_TRUE(loop.has_value());
+  ASSERT_TRUE(positioned_done.has_value());
+  ASSERT_TRUE(unpositioned_done.has_value());
+
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = *key, .output = Reg(0)}));
+  ASSERT_TRUE(builder.Append(OpenReadCursorInstruction{.cursor = *cursor}));
+  ASSERT_TRUE(builder.EmitSeekIndex(*cursor, Reg(0), 1, *unpositioned_done,
+                                    IndexSeekMode::kGreaterOrEqual));
+  ASSERT_TRUE(builder.BindLabel(*loop));
+  ASSERT_TRUE(builder.EmitCheckIndexRange(*cursor, Reg(0), 1, *positioned_done,
+                                          IndexRangeEndMode::kInclusive));
+  ASSERT_TRUE(builder.EmitNext(*cursor, *loop));
+  ASSERT_TRUE(builder.BindLabel(*unpositioned_done));
+  ASSERT_TRUE(builder.Append(CloseCursorInstruction{.cursor = *cursor}));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+  ASSERT_TRUE(builder.BindLabel(*positioned_done));
+  ASSERT_TRUE(builder.Append(CloseCursorInstruction{.cursor = *cursor}));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  ASSERT_EQ(9U, program->instructions().size());
+  const auto& seek = std::get<SeekIndexInstruction>(program->instructions()[2]);
+  EXPECT_EQ(Address(5), seek.missing_target);
+  EXPECT_EQ(IndexSeekMode::kGreaterOrEqual, seek.mode);
+  const auto& range = std::get<CheckIndexRangeInstruction>(program->instructions()[3]);
+  EXPECT_EQ(Address(7), range.end_target);
+  EXPECT_EQ(IndexRangeEndMode::kInclusive, range.mode);
 }
 
 TEST(BytecodeProgramTest, BuilderResolvesRowidListIterationLabels) {
@@ -1076,6 +1203,32 @@ TEST(BytecodeProgramTest, RejectsInvalidDescriptorAndStorageSpecificOperations) 
       HaltInstruction{},
   };
   EXPECT_EQ(VerifyError(bad_seek), ProgramErrorCode::kRowIdOperationRequiresRowIdTable);
+
+  ProgramInput bad_index_seek;
+  bad_index_seek.register_count = 1;
+  bad_index_seek.constants.push_back(SqlValue::Integer(1));
+  bad_index_seek.cursors.push_back(RowIdCursorDescriptor());
+  bad_index_seek.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      SeekIndexInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .missing_target = Address(4),
+      },
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(bad_index_seek), ProgramErrorCode::kIndexOperationRequiresIndex);
+
+  bad_index_seek.instructions[2] = CheckIndexRangeInstruction{
+      .cursor = Cursor(0),
+      .first_key = Reg(0),
+      .key_count = 1,
+      .end_target = Address(4),
+  };
+  EXPECT_EQ(VerifyError(bad_index_seek), ProgramErrorCode::kIndexOperationRequiresIndex);
 }
 
 TEST(BytecodeProgramTest, RejectsInvalidOperandsResultShapeAndText) {

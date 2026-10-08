@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -1422,6 +1423,74 @@ struct Vm::Impl {
     }
     if (!*found) {
       program_counter_ = operation.missing_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const SeekIndexInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    IndexBtreeCursor* cursor = std::get_if<IndexBtreeCursor>(&runtime.storage);
+    if (cursor == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "index seek used a non-index cursor"));
+    }
+    BtreeSeekMode mode = BtreeSeekMode::kEqual;
+    switch (operation.mode) {
+      case IndexSeekMode::kEqual:
+        break;
+      case IndexSeekMode::kGreaterOrEqual:
+        mode = BtreeSeekMode::kGreaterOrEqual;
+        break;
+      case IndexSeekMode::kGreater:
+        mode = BtreeSeekMode::kGreater;
+        break;
+      case IndexSeekMode::kLessOrEqual:
+        mode = BtreeSeekMode::kLessOrEqual;
+        break;
+      case IndexSeekMode::kLess:
+        mode = BtreeSeekMode::kLess;
+        break;
+      default:
+        return std::unexpected(VmError(ErrorCode::kInternal, "unknown index seek mode"));
+    }
+    const std::span<const SqlValue> key = std::span<const SqlValue>{registers_}.subspan(
+        operation.first_key.value(), operation.key_count);
+    auto found = cursor->Seek(key, mode);
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (!*found) {
+      program_counter_ = operation.missing_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CheckIndexRangeInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    IndexBtreeCursor* cursor = std::get_if<IndexBtreeCursor>(&runtime.storage);
+    if (cursor == nullptr || !cursor->valid()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "index range check used an invalid index cursor"));
+    }
+    const std::span<const SqlValue> key = std::span<const SqlValue>{registers_}.subspan(
+        operation.first_key.value(), operation.key_count);
+    auto comparison = cursor->CompareCurrent(key);
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    bool ended = false;
+    switch (operation.mode) {
+      case IndexRangeEndMode::kInclusive:
+        ended = *comparison == std::weak_ordering::greater;
+        break;
+      case IndexRangeEndMode::kExclusive:
+        ended = *comparison != std::weak_ordering::less;
+        break;
+      default:
+        return std::unexpected(VmError(ErrorCode::kInternal, "unknown index range end mode"));
+    }
+    if (ended) {
+      program_counter_ = operation.end_target.value();
     }
     return std::nullopt;
   }
