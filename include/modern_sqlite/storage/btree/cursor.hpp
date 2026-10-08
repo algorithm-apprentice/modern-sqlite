@@ -1,6 +1,7 @@
 #ifndef MODERN_SQLITE_STORAGE_BTREE_CURSOR_HPP_
 #define MODERN_SQLITE_STORAGE_BTREE_CURSOR_HPP_
 
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -97,6 +98,7 @@ class IndexBtreeCursor final {
   [[nodiscard]] Result<bool> Next();
   [[nodiscard]] Result<bool> Previous();
   [[nodiscard]] Result<bool> Seek(std::span<const SqlValue> key, BtreeSeekMode mode);
+  [[nodiscard]] Result<std::weak_ordering> CompareCurrent(std::span<const SqlValue> key);
 
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);

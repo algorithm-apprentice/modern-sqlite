@@ -321,6 +321,127 @@ int main() try {
     return 1;
   }
 
+  const auto overflow_index_descriptor = [] {
+    return ReadCursorDescriptor{
+        .root_page = RootPageNumber(102),
+        .storage = CursorStorageKind::kIndex,
+        .record_field_count = 2,
+        .fields = {},
+        .index_columns =
+            {
+                IndexColumnMetadata{
+                    .collation = SymbolId(0),
+                    .order = BytecodeSortOrder::kAscending,
+                },
+                IndexColumnMetadata{
+                    .collation = SymbolId(0),
+                    .order = BytecodeSortOrder::kAscending,
+                },
+            },
+    };
+  };
+  const auto overflow_result_column = [] {
+    return ResultColumnMetadata{
+        .name = "key",
+        .declared_type = std::nullopt,
+        .affinity = TypeAffinity::kText,
+    };
+  };
+
+  ProgramInput index_seek_input;
+  index_seek_input.schema_version = input.schema_version;
+  index_seek_input.register_count = 1;
+  index_seek_input.constants.push_back(SqlValue::Text(std::string(3000, 'm')));
+  index_seek_input.symbols.emplace_back("BINARY");
+  index_seek_input.cursors.push_back(overflow_index_descriptor());
+  index_seek_input.result_columns.push_back(overflow_result_column());
+  index_seek_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      SeekIndexInstruction{
+          .cursor = CursorId(0),
+          .first_key = RegisterId(0),
+          .key_count = 1,
+          .missing_target = InstructionAddress(6),
+          .mode = IndexSeekMode::kGreaterOrEqual,
+      },
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+  };
+  auto index_seek_program = BytecodeProgram::Create(index_seek_input);
+  if (!index_seek_program.has_value()) {
+    return 1;
+  }
+  auto index_seek_vm = Vm::Create(*index_seek_program, VmEnvironment::Core());
+  if (!index_seek_vm.has_value() ||
+      !index_seek_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto index_seek_setup = index_seek_vm->Step();
+  if (!index_seek_setup.has_value() || *index_seek_setup != VmStep::kRow) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto index_seek_failure = index_seek_vm->Step();
+  fail_allocations = false;
+  if (index_seek_failure.has_value() ||
+      index_seek_failure.error().code() != ErrorCode::kOutOfMemory ||
+      index_seek_vm->state() != VmState::kError) {
+    return 1;
+  }
+
+  ProgramInput index_range_input;
+  index_range_input.schema_version = input.schema_version;
+  index_range_input.register_count = 1;
+  index_range_input.constants.push_back(SqlValue::Text(std::string(3000, 'm')));
+  index_range_input.symbols.emplace_back("BINARY");
+  index_range_input.cursors.push_back(overflow_index_descriptor());
+  index_range_input.result_columns.push_back(overflow_result_column());
+  index_range_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      RewindInstruction{
+          .cursor = CursorId(0),
+          .empty_target = InstructionAddress(7),
+      },
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      CheckIndexRangeInstruction{
+          .cursor = CursorId(0),
+          .first_key = RegisterId(0),
+          .key_count = 1,
+          .end_target = InstructionAddress(5),
+          .mode = IndexRangeEndMode::kInclusive,
+      },
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+  };
+  auto index_range_program = BytecodeProgram::Create(index_range_input);
+  if (!index_range_program.has_value()) {
+    return 1;
+  }
+  auto index_range_vm = Vm::Create(*index_range_program, VmEnvironment::Core());
+  if (!index_range_vm.has_value() ||
+      !index_range_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto index_range_setup = index_range_vm->Step();
+  if (!index_range_setup.has_value() || *index_range_setup != VmStep::kRow) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto index_range_failure = index_range_vm->Step();
+  fail_allocations = false;
+  if (index_range_failure.has_value() ||
+      index_range_failure.error().code() != ErrorCode::kOutOfMemory ||
+      index_range_vm->state() != VmState::kError) {
+    return 1;
+  }
+
   if (!(*opened)->EndRead().has_value()) {
     return 1;
   }

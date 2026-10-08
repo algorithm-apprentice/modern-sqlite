@@ -10,8 +10,10 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -915,7 +917,13 @@ struct IndexBtreeCursor::Impl {
       if (!possible.has_value()) {
         return std::unexpected(std::move(possible.error()));
       }
-      scratch.resize(cell.payload_size().value());
+      try {
+        scratch.resize(cell.payload_size().value());
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
       auto read = core.ReadCellPayload(cell, ByteOffset{0}, MutableByteView{scratch});
       if (!read.has_value()) {
         return std::unexpected(std::move(read.error()));
@@ -1142,6 +1150,23 @@ Result<bool> IndexBtreeCursor::Seek(std::span<const SqlValue> key, BtreeSeekMode
   return impl_->core.SeekIndex(mode, [this, key, prefix_result](const BtreeCellView& cell) {
     return impl_->CompareCell(cell, key, prefix_result);
   });
+}
+
+Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlValue> key) {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  if (key.empty()) {
+    return std::unexpected(Misuse("index comparison key must not be empty"));
+  }
+  if (key.size() > impl_->columns.size()) {
+    return std::unexpected(Misuse("index comparison key is longer than the comparison metadata"));
+  }
+  auto cell = impl_->core.CurrentCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  return impl_->CompareCell(*cell, key, EqualPrefixResult::kEquivalent);
 }
 
 Result<BtreePayloadView> IndexBtreeCursor::payload() const {
