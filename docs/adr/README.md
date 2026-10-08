@@ -56,3 +56,4 @@ their corresponding implementation begins.
 50. [ADR-0050: Pinned Write Performance Baseline](0050-pinned-write-performance-baseline.md)
 51. [ADR-0051: SQLite-Aligned One-Pass Scan Mutation](0051-one-pass-scan-mutation-optimization.md)
 52. [ADR-0052: SQLite-Aligned Index Planning, Maintenance, and Statistics](0052-sqlite-aligned-index-planning-maintenance-and-statistics.md)
+53. [ADR-0053: SQLite-Aligned Advanced SQL Architecture and Ordered Delivery](0053-sqlite-aligned-advanced-sql-architecture.md)

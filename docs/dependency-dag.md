@@ -125,6 +125,17 @@ Nodes 42 through 47 add index-aware planning, broader SQL semantics,
 multi-connection locking, WAL, C API compatibility, and extensions. Each is a
 separate reviewed scope, not part of the initial writable MVP.
 
+`implement-advanced-sql` is delivered as ordered vertical slices under
+ADR-0053. The shared spill-capable sorter arrives with ORDER BY. The keyed
+ephemeral relation arrives with DISTINCT and compounds, then both are reused
+by grouping, automatic join indexes, recursive CTEs, and windows.
+Multi-source and joined-output scopes precede joins; verified subroutines and
+coroutines precede subqueries, views, CTEs, and triggers. Persistent
+constraints, generated values, foreign keys, views, schema operations, and
+trigger programs retain conflict-specific statement/transaction outcomes and
+add their own crash evidence. No later compatibility-expansion node begins
+until every advanced-SQL slice and its integrated review are complete.
+
 ### Hardening
 
 Node 48 integrates:

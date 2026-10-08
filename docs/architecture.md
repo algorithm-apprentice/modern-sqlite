@@ -199,6 +199,7 @@ flowchart TD
   PAGER[pager]
   BTREE_PAGE[btree_page]
   BTREE[btree]
+  TEMP[temporary_storage]
   SYNTAX[syntax]
   CATALOG[catalog]
   BYTECODE[bytecode]
@@ -232,6 +233,11 @@ flowchart TD
   RECORD --> BTREE_PAGE
   PAGER --> BTREE
   BTREE_PAGE --> BTREE
+  RECORD --> TEMP
+  COLLATION --> TEMP
+  PLATFORM --> TEMP
+  PAGER --> TEMP
+  BTREE --> TEMP
   TEXT --> SYNTAX
   SYNTAX --> CATALOG
   BTREE --> CATALOG
@@ -252,6 +258,7 @@ flowchart TD
   RECORD --> VM
   FUNCTIONS --> VM
   TRANSACTION --> VM
+  TEMP --> VM
   CATALOG --> SESSION
   BINDER --> SESSION
   LOWERING --> SESSION
@@ -281,6 +288,7 @@ flowchart TD
 | `pager` | Page reads/writes, transaction page state, recovery ordering; the read-only subset has no journal dependency | SQL AST and query plans |
 | `btree_page` | B-tree cells, overflow, freelist, page validation | Files and transactions |
 | `btree` | Table/index cursors, balancing, root management | VM registers and AST |
+| `temporary_storage` | Statement-owned sorter runs, ephemeral keyed relations, spill/merge, and cleanup over VFS/pager/B-tree capabilities | SQL syntax, plans, session objects |
 | `syntax` | Tokens, immutable AST, parser diagnostics | Catalog mutation and bytecode |
 | `catalog` | Schema model, `sqlite_schema` loading, statistics | Session and VM state |
 | `bytecode` | Typed instructions and immutable executable programs | Parser implementation |
