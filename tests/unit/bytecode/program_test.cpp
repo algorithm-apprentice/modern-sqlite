@@ -312,6 +312,34 @@ TEST(BytecodeProgramTest, VerifiesTypedTableDeleteAndRowidSeekModes) {
   input.instructions.erase(input.instructions.begin() + 1);
   EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
 
+  ProgramInput scan;
+  scan.statement_kind = ProgramStatementKind::kDelete;
+  scan.transaction_access = ProgramTransactionAccess::kWrite;
+  scan.rollback_mode = ProgramRollbackMode::kStatement;
+  scan.mutation_result.publishes_changes = true;
+  scan.cursors.push_back(RowIdCursorDescriptor());
+  scan.instructions = {
+      OpenMutationCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{
+          .cursor = Cursor(0),
+          .empty_target = Address(4),
+      },
+      DeleteCurrentTableInstruction{
+          .cursor = Cursor(0),
+          .exhausted_target = Address(4),
+      },
+      JumpInstruction{.target = Address(2)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(scan).has_value());
+  EXPECT_EQ("open_mutation", InstructionKindName(InstructionKindOf(scan.instructions[0])));
+  EXPECT_EQ("delete_current_table", InstructionKindName(InstructionKindOf(scan.instructions[2])));
+
+  scan.instructions.erase(scan.instructions.begin() + 1);
+  std::get<DeleteCurrentTableInstruction>(scan.instructions[1]).exhausted_target = Address(3);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(scan));
+
   ProgramInput seek;
   seek.register_count = 1;
   seek.constants.push_back(SqlValue::Integer(7));

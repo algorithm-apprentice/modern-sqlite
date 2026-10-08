@@ -334,6 +334,37 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram TableDeleteScanProgram() {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kDelete;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns = {},
+  });
+  input.instructions = {
+      OpenMutationCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{
+          .cursor = Cursor(0),
+          .empty_target = Address(4),
+      },
+      DeleteCurrentTableInstruction{
+          .cursor = Cursor(0),
+          .exhausted_target = Address(4),
+      },
+      JumpInstruction{.target = Address(2)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] BytecodeProgram TableUpdateProgram(SqlValue old_rowid, SqlValue new_rowid,
                                                  SqlValue value) {
   ProgramInput input;
@@ -966,6 +997,47 @@ TEST(VmWriteTest, DeletesRowsAndSeeksStrictlyGreaterRowids) {
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(3, rows[0].first);
   ExpectText(rows[0].second[1], "third");
+}
+
+TEST(VmWriteTest, DeletesAllRowsThroughOnePassMutationCursor) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, -3, "negative");
+  InsertDirectWriteRow(vfs, 1, "first");
+  InsertDirectWriteRow(vfs, 3, "third");
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+        }));
+    const BytecodeProgram program = TableDeleteScanProgram();
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(3U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  EXPECT_TRUE(ReadWriteTableRows(vfs).empty());
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+        }));
+    const BytecodeProgram program = TableDeleteScanProgram();
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
 }
 
 TEST(VmWriteTest, ReplacesAndMovesUpdatedRowsAtomically) {

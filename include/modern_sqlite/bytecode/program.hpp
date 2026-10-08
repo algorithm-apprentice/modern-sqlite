@@ -238,6 +238,10 @@ struct OpenReadCursorInstruction {
   CursorId cursor;
 };
 
+struct OpenMutationCursorInstruction {
+  CursorId cursor;
+};
+
 struct OpenWriteCursorInstruction {
   WriteCursorId cursor;
 };
@@ -323,6 +327,11 @@ struct DeleteTableInstruction {
   RegisterId rowid;
 };
 
+struct DeleteCurrentTableInstruction {
+  CursorId cursor;
+  InstructionAddress exhausted_target;
+};
+
 struct UpdateTableInstruction {
   WriteCursorId cursor;
   RegisterId old_rowid;
@@ -375,12 +384,13 @@ struct ResultRowInstruction {
 using Instruction = std::variant<
     HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
     UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
-    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction, OpenWriteCursorInstruction,
-    CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
-    ClearRowIdListInstruction, AppendRowIdListInstruction, RewindRowIdListInstruction,
-    NextRowIdListInstruction, SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction,
-    ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
-    DeleteTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
+    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction,
+    OpenMutationCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
+    CloseWriteCursorInstruction, RewindInstruction, NextInstruction, ClearRowIdListInstruction,
+    AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
+    SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
+    BuildTableRecordInstruction, InsertTableInstruction, DeleteTableInstruction,
+    DeleteCurrentTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
     CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
     CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
 
@@ -398,6 +408,7 @@ enum class InstructionKind : std::uint8_t {
   kRealAffinity,
   kCast,
   kOpenRead,
+  kOpenMutation,
   kOpenWrite,
   kClose,
   kCloseWrite,
@@ -414,6 +425,7 @@ enum class InstructionKind : std::uint8_t {
   kBuildTableRecord,
   kInsertTable,
   kDeleteTable,
+  kDeleteCurrentTable,
   kUpdateTable,
   kEnsureDatabaseInitialized,
   kCreateTableRoot,
@@ -640,6 +652,8 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitDeleteCurrentTable(CursorId cursor,
+                                                                         Label exhausted_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJump(Label target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJumpIf(RegisterId input,
                                                              JumpCondition condition, Label target);
@@ -670,6 +684,10 @@ class ProgramBuilder final {
     Label target;
     RowIdSeekMode mode;
   };
+  struct PendingDeleteCurrentTable {
+    CursorId cursor;
+    Label target;
+  };
   struct PendingJump {
     Label target;
   };
@@ -681,7 +699,8 @@ class ProgramBuilder final {
 
   using PendingInstruction =
       std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
-                   PendingNextRowIdList, PendingSeekRowId, PendingJump, PendingJumpIf>;
+                   PendingNextRowIdList, PendingSeekRowId, PendingDeleteCurrentTable, PendingJump,
+                   PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

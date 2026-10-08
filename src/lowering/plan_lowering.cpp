@@ -335,9 +335,11 @@ class PlanLowerer final {
           !read_cursor.has_value()) {
         return std::unexpected(std::move(read_cursor.error()));
       }
-      if (auto write_cursor = AddMutationWriteCursorDescriptor(bound_delete_->target(), nullptr);
-          !write_cursor.has_value()) {
-        return std::unexpected(std::move(write_cursor.error()));
+      if (delete_plan.access.kind == MutationAccessKind::kRowIdLookup) {
+        if (auto write_cursor = AddMutationWriteCursorDescriptor(bound_delete_->target(), nullptr);
+            !write_cursor.has_value()) {
+          return std::unexpected(std::move(write_cursor.error()));
+        }
       }
     }
     if (auto emitted = EmitDelete(delete_plan); !emitted.has_value()) {
@@ -2060,7 +2062,7 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> SnapshotMutationRow() {
+  [[nodiscard]] LoweringResult<void> SnapshotMutationRow(bool close_cursor = true) {
     if (!cursor_.has_value() || !source_rowid_register_.has_value() ||
         source_snapshot_registers_.size() != source_columns_.size() ||
         source_field_real_affinity_.size() != source_snapshot_registers_.size()) {
@@ -2093,7 +2095,10 @@ class PlanLowerer final {
         }
       }
     }
-    return Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (close_cursor) {
+      return Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+    }
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> EmitDeletePoint() {
@@ -2406,6 +2411,99 @@ class PlanLowerer final {
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitDeleteScan(const PhysicalMutationAccess& access) {
+    if (!cursor_.has_value() || !source_rowid_register_.has_value()) {
+      return std::unexpected(InternalFailure("one-pass DELETE scan resources are incomplete"));
+    }
+    const CursorId cursor = AssumeValue(cursor_);
+
+    std::optional<Label> guard_completion;
+    if (!access.guards.empty()) {
+      auto completion = CreateLabel();
+      if (!completion.has_value()) {
+        return std::unexpected(std::move(completion.error()));
+      }
+      guard_completion = *completion;
+      if (auto guards = EmitMutationPredicates(access.guards, *guard_completion);
+          !guards.has_value()) {
+        return guards;
+      }
+    }
+
+    if (auto opened = Append(OpenMutationCursorInstruction{.cursor = cursor});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto exhausted = CreateLabel();
+    auto candidate = CreateLabel();
+    std::optional<Label> advance;
+    if (!access.residuals.empty()) {
+      auto created = CreateLabel();
+      if (!created.has_value()) {
+        return std::unexpected(std::move(created.error()));
+      }
+      advance = *created;
+    }
+    if (!exhausted.has_value()) {
+      return std::unexpected(std::move(exhausted.error()));
+    }
+    if (!candidate.has_value()) {
+      return std::unexpected(std::move(candidate.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *exhausted),
+                                        "unable to emit one-pass DELETE rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*candidate); !bound.has_value()) {
+      return bound;
+    }
+    if (auto snapshot = SnapshotMutationRow(false); !snapshot.has_value()) {
+      return snapshot;
+    }
+    if (advance.has_value()) {
+      if (auto residuals = EmitMutationPredicates(access.residuals, *advance);
+          !residuals.has_value()) {
+        return residuals;
+      }
+    }
+    auto deleted =
+        ConvertProgramResult(AssumeValue(builder_).EmitDeleteCurrentTable(cursor, *exhausted),
+                             "unable to emit one-pass DELETE mutation");
+    if (!deleted.has_value()) {
+      return std::unexpected(std::move(deleted.error()));
+    }
+    if (auto jumped = EmitJump(*candidate); !jumped.has_value()) {
+      return jumped;
+    }
+    if (advance.has_value()) {
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *candidate),
+                                       "unable to emit one-pass DELETE advance");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+    }
+    if (auto bound = BindLabel(*exhausted); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (guard_completion.has_value()) {
+      if (auto bound = BindLabel(*guard_completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> EmitDelete(const PhysicalDeleteMutation& delete_plan) {
     switch (delete_plan.access.kind) {
       case MutationAccessKind::kEmpty:
@@ -2413,7 +2511,7 @@ class PlanLowerer final {
       case MutationAccessKind::kRowIdLookup:
         return EmitMutationExact(delete_plan.access, PointMutationKind::kDelete);
       case MutationAccessKind::kTableScan:
-        return EmitMutationScan(delete_plan.access, PointMutationKind::kDelete);
+        return EmitDeleteScan(delete_plan.access);
     }
     return std::unexpected(InternalFailure("physical DELETE access kind is invalid"));
   }

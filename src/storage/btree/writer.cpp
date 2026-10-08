@@ -720,6 +720,17 @@ Result<bool> TableBtreeMutationCursor::First() {
   return impl_->cursor_->FirstTable();
 }
 
+Result<bool> TableBtreeMutationCursor::Next() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return impl_->cursor_->NextTable();
+}
+
 Result<TableBtreeMutationRow> TableBtreeMutationCursor::row() {
   if (impl_ == nullptr || !impl_->cursor_.has_value()) {
     return std::unexpected(Misuse("table mutation cursor is moved from"));

@@ -215,7 +215,8 @@ struct ResolvedCall {
 };
 
 struct RuntimeCursor {
-  using Storage = std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor>;
+  using Storage =
+      std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor, TableBtreeMutationCursor>;
 
   void ClearRecordCache() noexcept {
     for (RecordFieldView& field : decoded_fields) {
@@ -965,6 +966,32 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const OpenMutationCursorInstruction& operation) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "mutation cursor requires a transaction writer"));
+    }
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
+    if (descriptor.storage != CursorStorageKind::kRowIdTable) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "mutation cursor requires a rowid table"));
+    }
+    runtime.ClearRecordCache();
+    auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
+    if (!table.has_value()) {
+      return std::unexpected(std::move(table.error()));
+    }
+    auto cursor = table->OpenMutationCursor();
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    runtime.storage = std::move(*cursor);
+    runtime.decoded_fields.resize(descriptor.record_field_count);
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseCursorInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
@@ -1115,6 +1142,29 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
     }
     ++change_count_;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const DeleteCurrentTableInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    TableBtreeMutationCursor* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
+    if (cursor == nullptr || !cursor->valid()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "current delete used an invalid mutation cursor"));
+    }
+    auto has_next = cursor->DeleteAndNext();
+    if (!has_next.has_value()) {
+      return std::unexpected(std::move(has_next.error()));
+    }
+    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    }
+    ++change_count_;
+    if (!*has_next) {
+      program_counter_ = operation.exhausted_target.value();
+    }
     return std::nullopt;
   }
 
@@ -1358,16 +1408,24 @@ struct Vm::Impl {
     const CursorFieldSource& source = descriptor.fields[operation.field.value()];
     SqlValue value;
     if (source.kind == CursorFieldSourceKind::kRowId) {
-      const TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
-      if (cursor == nullptr || !cursor->valid()) {
+      if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+          read_cursor != nullptr && read_cursor->valid()) {
+        auto rowid = read_cursor->rowid();
+        if (!rowid.has_value()) {
+          return std::unexpected(std::move(rowid.error()));
+        }
+        value = SqlValue::Integer(*rowid);
+      } else if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
+                 mutation_cursor != nullptr && mutation_cursor->valid()) {
+        auto row = mutation_cursor->row();
+        if (!row.has_value()) {
+          return std::unexpected(std::move(row.error()));
+        }
+        value = SqlValue::Integer(row->rowid);
+      } else {
         return std::unexpected(
             VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
       }
-      auto rowid = cursor->rowid();
-      if (!rowid.has_value()) {
-        return std::unexpected(std::move(rowid.error()));
-      }
-      value = SqlValue::Integer(*rowid);
     } else {
       auto field = ReadRecordField(runtime, source.record_field);
       if (!field.has_value()) {
@@ -1399,16 +1457,24 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadRowIdInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    const TableBtreeCursor* cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
-    if (cursor == nullptr || !cursor->valid()) {
-      return std::unexpected(
-          VmError(ErrorCode::kInternal, "rowid read used an invalid table cursor"));
+    if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
+        read_cursor != nullptr && read_cursor->valid()) {
+      auto rowid = read_cursor->rowid();
+      if (!rowid.has_value()) {
+        return std::unexpected(std::move(rowid.error()));
+      }
+      return SetRegister(operation.output, SqlValue::Integer(*rowid));
     }
-    auto rowid = cursor->rowid();
-    if (!rowid.has_value()) {
-      return std::unexpected(std::move(rowid.error()));
+    if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
+        mutation_cursor != nullptr && mutation_cursor->valid()) {
+      auto row = mutation_cursor->row();
+      if (!row.has_value()) {
+        return std::unexpected(std::move(row.error()));
+      }
+      return SetRegister(operation.output, SqlValue::Integer(row->rowid));
     }
-    return SetRegister(operation.output, SqlValue::Integer(*rowid));
+    return std::unexpected(
+        VmError(ErrorCode::kInternal, "rowid read used an invalid table cursor"));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResultRowInstruction& operation) {
@@ -1483,12 +1549,30 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] Result<RecordView> CompleteRecord(RuntimeCursor& runtime) {
+    if (auto* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage); cursor != nullptr) {
+      if (!cursor->valid()) {
+        return std::unexpected(
+            VmError(ErrorCode::kInternal, "record read used an invalid mutation cursor"));
+      }
+      auto row = cursor->row();
+      if (!row.has_value()) {
+        return std::unexpected(std::move(row.error()));
+      }
+      if (row->payload.size() > limits_.maximum_value_bytes) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "mutation record exceeds the VM value limit"));
+      }
+      return RecordView::Parse(row->payload, record_options_);
+    }
     auto payload = std::visit(
         [](auto& cursor) -> Result<BtreePayloadView> {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, std::monostate>) {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "record read used a closed cursor"));
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated reader"));
           } else {
             return cursor.payload();
           }
@@ -1510,6 +1594,9 @@ struct Vm::Impl {
             if constexpr (std::is_same_v<T, std::monostate>) {
               return std::unexpected(
                   VmError(ErrorCode::kInternal, "record copy used a closed cursor"));
+            } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+              return std::unexpected(
+                  VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated copier"));
             } else {
               return cursor.CopyPayload();
             }

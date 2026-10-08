@@ -251,7 +251,7 @@ int main() try {
   }
 
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
-  constexpr std::size_t kExpectedDeleteAllocations = 32U;
+  constexpr std::size_t kExpectedDeleteAllocations = 27U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
     allocation_count.store(0, std::memory_order_relaxed);
     count_allocations = true;

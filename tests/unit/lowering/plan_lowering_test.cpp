@@ -725,37 +725,44 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
 
   const BytecodeProgram scan = LowerMutationOrThrow("DELETE FROM Items WHERE Score>=?1", catalog);
   EXPECT_EQ(ProgramRollbackMode::kStatement, scan.rollback_mode());
+  ASSERT_EQ(1U, scan.cursors().size());
+  EXPECT_TRUE(scan.write_cursors().empty());
   EXPECT_TRUE(std::ranges::any_of(scan.instructions(), [](const Instruction& instruction) {
     return std::holds_alternative<RewindInstruction>(instruction);
   }));
-  bool greater_seek = false;
+  bool mutation_open = false;
   bool scan_delete = false;
   std::optional<std::size_t> scan_close;
   std::optional<std::size_t> scan_delete_index;
   for (std::size_t index = 0; index < scan.instructions().size(); ++index) {
     const Instruction& instruction = scan.instructions()[index];
-    if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
-      greater_seek = greater_seek || seek->mode == RowIdSeekMode::kGreater;
+    if (std::holds_alternative<OpenMutationCursorInstruction>(instruction)) {
+      mutation_open = true;
     }
     if (!scan_close.has_value() && std::holds_alternative<CloseCursorInstruction>(instruction)) {
       scan_close = index;
     }
-    if (std::holds_alternative<DeleteTableInstruction>(instruction)) {
+    if (std::holds_alternative<DeleteCurrentTableInstruction>(instruction)) {
       scan_delete = true;
       scan_delete_index = index;
     }
+    EXPECT_FALSE(std::holds_alternative<OpenWriteCursorInstruction>(instruction));
+    EXPECT_FALSE(std::holds_alternative<DeleteTableInstruction>(instruction));
+    if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
+      EXPECT_NE(RowIdSeekMode::kGreater, seek->mode);
+    }
   }
-  EXPECT_TRUE(greater_seek);
+  EXPECT_TRUE(mutation_open);
   EXPECT_TRUE(scan_delete);
   ASSERT_TRUE(scan_close.has_value());
   ASSERT_TRUE(scan_delete_index.has_value());
-  EXPECT_LT(TakeOptional(scan_close, "missing scan read close"),
-            TakeOptional(scan_delete_index, "missing scan delete"));
+  EXPECT_LT(TakeOptional(scan_delete_index, "missing scan delete"),
+            TakeOptional(scan_close, "missing scan cursor close"));
 
   const PhysicalMutationPlan limited_plan =
       OptimizeMutationOrThrow("DELETE FROM Items WHERE Score>=?1", catalog);
   ProgramLimits limits;
-  limits.maximum_cursors = 1;
+  limits.maximum_cursors = 0;
   LowerPlanResult limited = LowerPlan(limited_plan, limits);
   ASSERT_FALSE(limited.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
@@ -778,14 +785,14 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
       function_call = index;
     }
     if (!function_delete.has_value() &&
-        std::holds_alternative<DeleteTableInstruction>(instruction)) {
+        std::holds_alternative<DeleteCurrentTableInstruction>(instruction)) {
       function_delete = index;
     }
   }
-  EXPECT_LT(TakeOptional(function_close, "missing function scan read close"),
-            TakeOptional(function_call, "missing function scan call"));
   EXPECT_LT(TakeOptional(function_call, "missing function scan call"),
             TakeOptional(function_delete, "missing function scan delete"));
+  EXPECT_LT(TakeOptional(function_delete, "missing function scan delete"),
+            TakeOptional(function_close, "missing function scan cursor close"));
 }
 
 TEST(DeleteLowering, ExecutesExactAndScanDeletesWithStatementRollback) {
