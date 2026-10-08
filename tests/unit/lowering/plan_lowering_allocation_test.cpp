@@ -322,6 +322,32 @@ int main() try {
     }
   }
 
+  const auto verify_mutation_allocations = [](const PhysicalMutationPlan& plan,
+                                              std::size_t expected) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      const LowerPlanResult lowered = LowerPlan(plan);
+      count_allocations = false;
+      if (!lowered.has_value() || allocation_count.load(std::memory_order_relaxed) != expected) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const PhysicalMutationPlan indexed_deletion = DeleteFixture(indexed_catalog);
+  const PhysicalMutationPlan indexed_update = UpdateFixture(indexed_catalog);
+  const PhysicalMutationPlan indexed_stable_update = StableUpdateFixture(indexed_catalog);
+  constexpr std::size_t kExpectedIndexedDeleteAllocations = 38U;
+  constexpr std::size_t kExpectedIndexedUpdateAllocations = 40U;
+  constexpr std::size_t kExpectedIndexedStableUpdateAllocations = 38U;
+  if (!verify_mutation_allocations(indexed_deletion, kExpectedIndexedDeleteAllocations) ||
+      !verify_mutation_allocations(indexed_update, kExpectedIndexedUpdateAllocations) ||
+      !verify_mutation_allocations(indexed_stable_update,
+                                   kExpectedIndexedStableUpdateAllocations)) {
+    return 1;
+  }
+
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   constexpr std::size_t kExpectedDeleteAllocations = 27U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {

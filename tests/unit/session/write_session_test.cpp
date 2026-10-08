@@ -251,7 +251,7 @@ TEST(WriteSession, EnforcesStatementLifecycleResetAndBusyRules) {
   EXPECT_EQ(4, rows[2][0].integer_value());
 }
 
-TEST(WriteSession, MaintainsIndexesForInsertStatements) {
+TEST(WriteSession, MaintainsIndexesForDmlStatements) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();
   std::filesystem::copy_file(IndexFixturePath(), path);
@@ -285,6 +285,26 @@ TEST(WriteSession, MaintainsIndexesForInsertStatements) {
   EXPECT_EQ(ErrorCode::kConstraint, duplicate_step.error().code());
   EXPECT_EQ(0U, session.changes());
   EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE category='category-other'").empty());
+
+  ExecuteDone(session,
+              "UPDATE items "
+              "SET id=5001,category='category-updated',score=43,flag=7 "
+              "WHERE id=5000");
+  EXPECT_EQ(1U, session.changes());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE category='category-new'").empty());
+  const auto updated_category =
+      QueryRows(session, "SELECT id,score FROM items WHERE category='category-updated'");
+  ASSERT_EQ(1U, updated_category.size());
+  EXPECT_EQ(5001, updated_category[0][0].integer_value());
+  EXPECT_EQ(43, updated_category[0][1].integer_value());
+  ASSERT_EQ(1U, QueryRows(session, "SELECT id FROM items WHERE score=43 AND id=5001").size());
+  ASSERT_EQ(1U, QueryRows(session, "SELECT id FROM items WHERE flag=7 AND id=5001").size());
+
+  ExecuteDone(session, "DELETE FROM items WHERE category='category-updated'");
+  EXPECT_EQ(1U, session.changes());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE category='category-updated'").empty());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE score=43 AND id=5001").empty());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE flag=7 AND id=5001").empty());
 }
 
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {

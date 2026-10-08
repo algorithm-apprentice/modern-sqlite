@@ -342,6 +342,7 @@ The bytecode write-cursor descriptor is storage-discriminated. Index
 descriptors carry complete collation/sort metadata, key-term count,
 uniqueness, and `unique_not_null`. Typed VM operations:
 
+- preflight a new UPDATE rowid while allowing the current row's old rowid;
 - preflight a non-NULL unique prefix, optionally ignoring one old rowid;
 - insert one complete physical index key; and
 - delete one complete physical index key, treating a missing old key as

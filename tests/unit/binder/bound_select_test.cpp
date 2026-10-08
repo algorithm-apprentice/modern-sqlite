@@ -574,6 +574,18 @@ TEST(StatementBinder, BindsInsertUpdateAndDeleteAgainstOneCatalogSnapshot) {
   EXPECT_FALSE(maintenance.terms[0].rowid);
   EXPECT_FALSE(maintenance.terms[1].column.has_value());
   EXPECT_TRUE(maintenance.terms[1].rowid);
+
+  BoundStatement indexed_update_statement =
+      BindStatementOrThrow("UPDATE IndexedItems SET Value=?1 WHERE id=?2", catalog);
+  const auto& indexed_update = std::get<BoundUpdate>(indexed_update_statement);
+  ASSERT_EQ(1U, indexed_update.target().indexes.size());
+  EXPECT_EQ(IndexId{0}, indexed_update.target().indexes[0].index);
+
+  BoundStatement indexed_delete_statement =
+      BindStatementOrThrow("DELETE FROM IndexedItems WHERE id=?1", catalog);
+  const auto& indexed_delete = std::get<BoundDelete>(indexed_delete_statement);
+  ASSERT_EQ(1U, indexed_delete.target().indexes.size());
+  EXPECT_EQ(IndexId{0}, indexed_delete.target().indexes[0].index);
 }
 
 TEST(StatementBinder, RejectsInvalidOrUnsafeMutationTargetsBeforePlanning) {
@@ -591,8 +603,7 @@ TEST(StatementBinder, RejectsInvalidOrUnsafeMutationTargetsBeforePlanning) {
   ExpectStatementBindError("INSERT INTO Items(Name) VALUES(Name)", catalog,
                            BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "no such column");
   ExpectStatementBindError("UPDATE IndexedItems SET Value=no_such_function()", catalog,
-                           BindErrorCode::kIndexedTableUnsupported, ErrorCode::kProtocol,
-                           "indexes");
+                           BindErrorCode::kNoSuchFunction, ErrorCode::kGeneric, "no such function");
   ExpectStatementBindError("DELETE FROM wr", catalog, BindErrorCode::kUnsupportedFeature,
                            ErrorCode::kGeneric, "table shape");
   ExpectStatementBindError("INSERT INTO DynamicDefault DEFAULT VALUES", catalog,

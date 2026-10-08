@@ -1155,6 +1155,31 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const CheckUpdateRowIdInstruction& operation) {
+    const std::optional<std::int64_t> old_rowid = LosslessRowId(Register(operation.old_rowid));
+    const std::optional<std::int64_t> new_rowid = LosslessRowId(Register(operation.new_rowid));
+    if (!old_rowid.has_value() || !new_rowid.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    if (*old_rowid == *new_rowid) {
+      return std::nullopt;
+    }
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    auto found = cursor->Seek(*new_rowid, BtreeSeekMode::kEqual);
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (*found) {
+      return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
                                        const CheckUniqueIndexInstruction& operation) {
     RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
     if (!runtime.index.has_value()) {

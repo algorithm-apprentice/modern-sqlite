@@ -245,6 +245,7 @@ struct PhysicalUpdateMutation {
 struct PhysicalDeleteMutation {
   PhysicalMutationAccess access{};
   MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+  bool collect_original_rowids = false;
 };
 
 struct PhysicalCreateTableMutation {

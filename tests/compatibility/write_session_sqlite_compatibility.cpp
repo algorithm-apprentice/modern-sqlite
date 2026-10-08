@@ -904,15 +904,12 @@ void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
     modern_sqlite::WriteSession session =
         TakeValue(modern_sqlite::WriteSession::Open(path.string()));
     ExecuteModern(session, "INSERT INTO Indexed VALUES(2,'two')");
-    for (const auto& [sql, expected_code] : std::array{
-             std::pair{"UPDATE Indexed SET value='changed' WHERE id=1",
-                       modern_sqlite::ErrorCode::kProtocol},
-             std::pair{"DELETE FROM Wr WHERE key='key'", modern_sqlite::ErrorCode::kGeneric},
-         }) {
-      const auto prepared = session.Prepare(modern_sqlite::Utf8View{sql});
-      if (prepared.has_value() || prepared.error().code() != expected_code) {
-        throw std::runtime_error{"Modern accepted an unsupported mutation"};
-      }
+    ExecuteModern(session, "UPDATE Indexed SET id=3,value='changed' WHERE id=1");
+    ExecuteModern(session, "DELETE FROM Indexed WHERE id=2");
+    const auto prepared =
+        session.Prepare(modern_sqlite::Utf8View{"DELETE FROM Wr WHERE key='key'"});
+    if (prepared.has_value() || prepared.error().code() != modern_sqlite::ErrorCode::kGeneric) {
+      throw std::runtime_error{"Modern accepted an unsupported WITHOUT ROWID mutation"};
     }
   }
   const Database sqlite{path, kReadOnlyFlags};
@@ -920,9 +917,9 @@ void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
   if (QueryText(sqlite.get(),
                 "SELECT group_concat(id||':'||value,',') "
                 "FROM (SELECT id,value FROM Indexed INDEXED BY sqlite_autoindex_Indexed_1 "
-                "ORDER BY value)") != "1:one,2:two" ||
+                "ORDER BY value)") != "3:changed" ||
       QueryText(sqlite.get(), "SELECT value FROM Wr WHERE key='key'") != "value") {
-    throw std::runtime_error{"indexed INSERT or unsupported mutation produced the wrong contents"};
+    throw std::runtime_error{"indexed DML or unsupported mutation produced the wrong contents"};
   }
 }
 

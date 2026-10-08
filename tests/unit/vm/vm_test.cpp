@@ -416,6 +416,11 @@ class TemporaryDatabase final {
       LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
       LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
       OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      CheckUpdateRowIdInstruction{
+          .cursor = WriteCursor(0),
+          .old_rowid = Reg(0),
+          .new_rowid = Reg(1),
+      },
       BuildTableRecordInstruction{
           .cursor = WriteCursor(0),
           .first_value = Reg(1),

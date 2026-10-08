@@ -358,6 +358,12 @@ struct CheckInsertRowIdInstruction {
   RegisterId rowid;
 };
 
+struct CheckUpdateRowIdInstruction {
+  WriteCursorId cursor;
+  RegisterId old_rowid;
+  RegisterId new_rowid;
+};
+
 struct BuildTableRecordInstruction {
   WriteCursorId cursor;
   RegisterId first_value;
@@ -463,12 +469,13 @@ using Instruction = std::variant<
     AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
     SeekRowIdInstruction, SeekTableRowIdInstruction, SeekIndexInstruction,
     CheckIndexRangeInstruction, ReadFieldInstruction, ReadRowIdInstruction,
-    ResolveInsertRowIdInstruction, CheckInsertRowIdInstruction, BuildTableRecordInstruction,
-    CheckUniqueIndexInstruction, InsertIndexInstruction, DeleteIndexInstruction,
-    InsertTableInstruction, DeleteTableInstruction, DeleteCurrentTableInstruction,
-    UpdateCurrentTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
-    CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
-    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+    ResolveInsertRowIdInstruction, CheckInsertRowIdInstruction, CheckUpdateRowIdInstruction,
+    BuildTableRecordInstruction, CheckUniqueIndexInstruction, InsertIndexInstruction,
+    DeleteIndexInstruction, InsertTableInstruction, DeleteTableInstruction,
+    DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
+    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
+    IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
+    JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -502,6 +509,7 @@ enum class InstructionKind : std::uint8_t {
   kReadRowId,
   kResolveInsertRowId,
   kCheckInsertRowId,
+  kCheckUpdateRowId,
   kBuildTableRecord,
   kCheckUniqueIndex,
   kInsertIndex,

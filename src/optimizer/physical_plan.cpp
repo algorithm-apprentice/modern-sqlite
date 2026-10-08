@@ -1934,16 +1934,19 @@ class PhysicalStatementPlanBuilder final {
       payload = PhysicalUpdateMutation{
           .access = std::move(access),
           .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
-          .collect_original_rowids = scan && update->changes_rowid(),
+          .collect_original_rowids =
+              scan && (update->changes_rowid() || !update->target().indexes.empty()),
       };
     } else if (const auto* delete_statement = std::get_if<BoundDelete>(&statement);
                delete_statement != nullptr) {
       PhysicalMutationAccess access = ChooseAccess(*delete_statement, delete_statement->target(),
                                                    delete_statement->where_expression());
       const bool empty = access.kind == MutationAccessKind::kEmpty;
+      const bool scan = access.kind == MutationAccessKind::kTableScan;
       payload = PhysicalDeleteMutation{
           .access = std::move(access),
           .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+          .collect_original_rowids = scan && !delete_statement->target().indexes.empty(),
       };
     } else {
       const auto& create = std::get<BoundCreateTable>(statement);
