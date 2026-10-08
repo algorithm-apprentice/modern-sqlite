@@ -274,6 +274,8 @@ jobs:
             --target \
               modern_sqlite_read_benchmark \
               modern_sqlite_read_diagnostics \
+              modern_sqlite_index_benchmark \
+              modern_sqlite_index_diagnostics \
               modern_sqlite_write_benchmark \
               modern_sqlite_write_diagnostics \
               modern_sqlite_benchmark_sqlite_shared \
