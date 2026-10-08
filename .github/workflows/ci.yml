@@ -193,6 +193,21 @@ jobs:
             --repository-root . \
             --workloads tests/performance/read-workloads-v1.json \
             --baseline benchmarks/read-baseline-v1
+      - name: Validate committed index workloads
+        if: github.event_name == 'push' || matrix.run_on_pr
+        run: >
+          python3 tools/index_performance.py validate-workloads
+          --repository-root .
+          --workloads tests/performance/index-workloads-v1.json
+      - name: Validate committed index baseline
+        if: github.event_name == 'push' || matrix.run_on_pr
+        run: |
+          if test -d benchmarks/index-baseline-v1; then
+            python3 tools/index_performance.py validate-baseline \
+              --repository-root . \
+              --workloads tests/performance/index-workloads-v1.json \
+              --baseline benchmarks/index-baseline-v1
+          fi
       - name: Validate committed write workloads
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >
@@ -272,7 +287,7 @@ jobs:
         run: |
           ctest --test-dir build/benchmark \
             --output-on-failure \
-            -R '^(performance\.(read_(benchmark_cli|fixture_regeneration)|write_(benchmark_cli|fixture_regeneration))|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|transaction_sqlite|write_pager_sqlite|write_session_sqlite(_(page_case|crash_case|invalid_case))?))$'
+            -R '^(performance\.((read|index|write)_(benchmark_cli|fixture_regeneration))|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|transaction_sqlite|write_pager_sqlite|write_session_sqlite(_(page_case|crash_case|invalid_case))?))$'
       - name: Report compiler cache
         if: github.event_name == 'push' || matrix.run_on_pr
         run: ccache --show-stats

@@ -1,0 +1,578 @@
+{
+  "cases": [
+    {
+      "diagnostic_iterations": 128,
+      "expected": {
+        "diagnostic": {
+          "bytes": 2048,
+          "digest": "ab52cc9d2c671100",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 65536,
+          "digest": "361a0560faae23fa",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 4096,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "smoke": {
+          "bytes": 16,
+          "digest": "9ffef6e3243d783e",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 2048,
+          "digest": "ab52cc9d2c671100",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-equality-covering-hit",
+      "items_per_iteration": 1,
+      "kind": "index",
+      "measured_iterations": 4096,
+      "primary_unit": "lookup",
+      "sql": "SELECT id,score FROM items WHERE category=?1",
+      "warmup_iterations": 128
+    },
+    {
+      "diagnostic_iterations": 128,
+      "expected": {
+        "diagnostic": {
+          "bytes": 0,
+          "digest": "5133ec9cb399baad",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 0,
+          "result_misses": 128,
+          "rows": 0
+        },
+        "measured": {
+          "bytes": 0,
+          "digest": "80e144abbbc5b0e0",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 0,
+          "result_misses": 4096,
+          "rows": 0
+        },
+        "smoke": {
+          "bytes": 0,
+          "digest": "4a8be64d5309cff3",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 0,
+          "result_misses": 1,
+          "rows": 0
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 0,
+          "digest": "5133ec9cb399baad",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 0,
+          "result_misses": 128,
+          "rows": 0
+        }
+      },
+      "fixture": "fit",
+      "id": "index-equality-covering-miss",
+      "items_per_iteration": 1,
+      "kind": "index",
+      "measured_iterations": 4096,
+      "primary_unit": "lookup",
+      "sql": "SELECT id,score FROM items WHERE category=?1",
+      "warmup_iterations": 128
+    },
+    {
+      "diagnostic_iterations": 128,
+      "expected": {
+        "diagnostic": {
+          "bytes": 16384,
+          "digest": "7d2466f408e2807b",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 524288,
+          "digest": "fa336362f74eb93f",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 4096,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "smoke": {
+          "bytes": 128,
+          "digest": "50df843383db7694",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 16384,
+          "digest": "7d2466f408e2807b",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-equality-noncovering-hit",
+      "items_per_iteration": 1,
+      "kind": "index",
+      "measured_iterations": 4096,
+      "primary_unit": "lookup",
+      "sql": "SELECT payload FROM items WHERE category=?1",
+      "warmup_iterations": 128
+    },
+    {
+      "diagnostic_iterations": 128,
+      "expected": {
+        "diagnostic": {
+          "bytes": 1024,
+          "digest": "6be770e13c4c5a3e",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 32768,
+          "digest": "1e9753dc95ee454a",
+          "items": 4096,
+          "operations": 4096,
+          "result_hits": 4096,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "smoke": {
+          "bytes": 8,
+          "digest": "85e2a2550e2e0b0d",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 1024,
+          "digest": "6be770e13c4c5a3e",
+          "items": 128,
+          "operations": 128,
+          "result_hits": 128,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-multi-equality-covering",
+      "items_per_iteration": 1,
+      "kind": "index",
+      "measured_iterations": 4096,
+      "primary_unit": "lookup",
+      "sql": "SELECT id FROM items WHERE category=?1 AND score=?2",
+      "warmup_iterations": 128
+    },
+    {
+      "diagnostic_iterations": 2,
+      "expected": {
+        "diagnostic": {
+          "bytes": 2048,
+          "digest": "7afffc22bf2789a8",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 2097152,
+          "digest": "ed6cbc89154321a9",
+          "items": 131072,
+          "operations": 2048,
+          "result_hits": 2048,
+          "result_misses": 0,
+          "rows": 131072
+        },
+        "smoke": {
+          "bytes": 1024,
+          "digest": "93049f748b0d35a5",
+          "items": 64,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 64
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 2048,
+          "digest": "7afffc22bf2789a8",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-range-covering",
+      "items_per_iteration": 64,
+      "kind": "index",
+      "measured_iterations": 2048,
+      "primary_unit": "range",
+      "sql": "SELECT id,score FROM items WHERE category>=?1 AND category<?2",
+      "warmup_iterations": 2
+    },
+    {
+      "diagnostic_iterations": 2,
+      "expected": {
+        "diagnostic": {
+          "bytes": 16384,
+          "digest": "e5c3214557991cc2",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 16777216,
+          "digest": "936fbe83f4c7c437",
+          "items": 131072,
+          "operations": 2048,
+          "result_hits": 2048,
+          "result_misses": 0,
+          "rows": 131072
+        },
+        "smoke": {
+          "bytes": 8192,
+          "digest": "e955cfbed36e5f4e",
+          "items": 64,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 64
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 16384,
+          "digest": "e5c3214557991cc2",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-range-noncovering",
+      "items_per_iteration": 64,
+      "kind": "index",
+      "measured_iterations": 2048,
+      "primary_unit": "range",
+      "sql": "SELECT payload FROM items WHERE category>=?1 AND category<?2",
+      "warmup_iterations": 2
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 262144,
+          "digest": "9156e0a13a7f27da",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        },
+        "measured": {
+          "bytes": 8388608,
+          "digest": "4c5c08a7d63ea9b5",
+          "items": 65536,
+          "operations": 32,
+          "result_hits": 32,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "smoke": {
+          "bytes": 262144,
+          "digest": "9156e0a13a7f27da",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 262144,
+          "digest": "9156e0a13a7f27da",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        }
+      },
+      "fixture": "fit",
+      "id": "index-unselective-noncovering",
+      "items_per_iteration": 2048,
+      "kind": "scan",
+      "measured_iterations": 32,
+      "primary_unit": "traversal",
+      "sql": "SELECT payload FROM items WHERE flag=?1",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 16384,
+          "digest": "a8ccc1a94d5c8252",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        },
+        "measured": {
+          "bytes": 4194304,
+          "digest": "76d9f609f97f9a14",
+          "items": 524288,
+          "operations": 256,
+          "result_hits": 256,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 16384,
+          "digest": "a8ccc1a94d5c8252",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 16384,
+          "digest": "a8ccc1a94d5c8252",
+          "items": 2048,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 2048
+        }
+      },
+      "fixture": "fit",
+      "id": "index-unselective-covering",
+      "items_per_iteration": 2048,
+      "kind": "index",
+      "measured_iterations": 256,
+      "primary_unit": "traversal",
+      "sql": "SELECT id FROM items WHERE flag=?1",
+      "warmup_iterations": 1
+    }
+  ],
+  "configuration": {
+    "cache_pages": 512,
+    "journal_mode": "delete",
+    "mmap_bytes": 0,
+    "page_size": 4096,
+    "query_only": true,
+    "synchronous": "full",
+    "temp_store": "memory",
+    "thread_mode": "single"
+  },
+  "fixtures": [
+    {
+      "id": "fit",
+      "page_count": 206,
+      "page_size": 4096,
+      "path": "tests/fixtures/index_performance/indexed.db",
+      "payload_size": 128,
+      "row_count": 4096,
+      "sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+      "size_bytes": 843776,
+      "sql_path": "tests/fixtures/index_performance/indexed.sql",
+      "sql_sha256": "adbf161f16fab86c672296818ea38178ca1b2a0afe873dc5f2c40d1dcabe7570"
+    }
+  ],
+  "guard": {
+    "maximum_cpu_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "maximum_wall_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    }
+  },
+  "minimum_wall_ns": 5000000,
+  "permutation": {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "fingerprint": "fnv1a64-v1",
+    "fit_seed": "9e3779b97f4a7c15",
+    "pressure_seed": "d1b54a32d192ed03"
+  },
+  "rounds": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "sqlite_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "sqlite_semantic_compile_options": [
+    "ATOMIC_INTRINSICS=1",
+    "DEFAULT_AUTOVACUUM",
+    "DEFAULT_CACHE_SIZE=-2000",
+    "DEFAULT_FILE_FORMAT=4",
+    "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+    "DEFAULT_MMAP_SIZE=0",
+    "DEFAULT_PAGE_SIZE=4096",
+    "DEFAULT_PCACHE_INITSZ=20",
+    "DEFAULT_RECURSIVE_TRIGGERS",
+    "DEFAULT_SECTOR_SIZE=4096",
+    "DEFAULT_SYNCHRONOUS=2",
+    "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+    "DEFAULT_WAL_SYNCHRONOUS=2",
+    "DEFAULT_WORKER_THREADS=0",
+    "DIRECT_OVERFLOW_READ",
+    "DQS=3",
+    "MALLOC_SOFT_LIMIT=1024",
+    "MAX_ATTACHED=10",
+    "MAX_COLUMN=2000",
+    "MAX_COMPOUND_SELECT=500",
+    "MAX_DEFAULT_PAGE_SIZE=8192",
+    "MAX_EXPR_DEPTH=1000",
+    "MAX_FUNCTION_ARG=1000",
+    "MAX_LENGTH=1000000000",
+    "MAX_LIKE_PATTERN_LENGTH=50000",
+    "MAX_MMAP_SIZE=0x7fff0000",
+    "MAX_PAGE_COUNT=0xfffffffe",
+    "MAX_PAGE_SIZE=65536",
+    "MAX_SCHEMA=10000000",
+    "MAX_SQL_LENGTH=1000000000",
+    "MAX_TRIGGER_DEPTH=1000",
+    "MAX_VARIABLE_NUMBER=32766",
+    "MAX_VDBE_OP=250000000",
+    "MAX_WORKER_THREADS=0",
+    "MUTEX_OMIT",
+    "SYSTEM_MALLOC",
+    "TEMP_STORE=1",
+    "THREADSAFE=0"
+  ],
+  "workload_semantics_version": 1
+}

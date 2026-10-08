@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "index-planning-design",
+    "status": "index-planning-implementation",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
