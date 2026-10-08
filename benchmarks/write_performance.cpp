@@ -31,6 +31,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "write_performance_build_config.hpp"
 
 #if !defined(NDEBUG)
 #error "The write performance benchmark requires NDEBUG"
@@ -2294,6 +2295,110 @@ void PrintJsonString(std::ostream& output, std::string_view value) {
   output << '"';
 }
 
+[[nodiscard]] std::vector<std::string> SqliteCompileOptions() {
+  std::vector<std::string> options;
+  for (int index = 0;; ++index) {
+    const char* option = sqlite3_compileoption_get(index);
+    if (option == nullptr) {
+      break;
+    }
+    const std::string_view value{option};
+    if (!value.starts_with("COMPILER=")) {
+      options.emplace_back(value);
+    }
+  }
+  std::ranges::sort(options);
+  return options;
+}
+
+void PrintCompilerIdentity(std::ostream& output) {
+#if defined(__clang__)
+  output << R"({"id":"clang","version":)";
+  PrintJsonString(output, __clang_version__);
+#elif defined(__GNUC__)
+  output << R"({"id":"gcc","version":)";
+  PrintJsonString(output, __VERSION__);
+#elif defined(_MSC_VER)
+  output << R"({"id":"msvc","version":)";
+  PrintJsonString(output, std::to_string(_MSC_FULL_VER));
+#else
+#error "The write performance benchmark requires a recognized compiler"
+#endif
+  output << '}';
+}
+
+void PrintStandardLibraryIdentity(std::ostream& output) {
+#if defined(_LIBCPP_VERSION)
+  output << R"({"id":"libc++","version":)";
+  PrintJsonString(output, std::to_string(_LIBCPP_VERSION));
+#elif defined(__GLIBCXX__)
+  output << R"({"id":"libstdc++","version":)";
+  PrintJsonString(output, std::to_string(__GLIBCXX__));
+#elif defined(_MSVC_STL_VERSION)
+  output << R"({"id":"msvc-stl","version":)";
+  PrintJsonString(output, std::to_string(_MSVC_STL_VERSION));
+#else
+#error "The write performance benchmark requires a recognized standard library"
+#endif
+  output << '}';
+}
+
+[[nodiscard]] constexpr std::string_view TargetArchitecture() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+  return "x86_64";
+#else
+#error "The write performance benchmark requires a recognized target architecture"
+#endif
+}
+
+void PrintBuildIdentity(std::ostream& output) {
+  output << R"({"architecture":)";
+  PrintJsonString(output, TargetArchitecture());
+  output << R"(,"build_type":"Release","compiler":)";
+  PrintCompilerIdentity(output);
+  output << R"(,"cplusplus":)" << __cplusplus << R"(,"coverage":false,"instrumentation":)"
+         << (MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS ? "true" : "false")
+         << R"(,"sanitizers":false,"standard_library":)";
+  PrintStandardLibraryIdentity(output);
+  output << '}';
+}
+
+void PrintSourceIdentity(std::ostream& output) {
+  output << R"({"revision":)";
+  PrintJsonString(output, modern_sqlite::write_performance_build_config::kGitRevision);
+  output << R"(,"tree":)";
+  PrintJsonString(output, modern_sqlite::write_performance_build_config::kGitTree);
+  output << '}';
+}
+
+void PrintSqliteIdentity(std::ostream& output) {
+  const std::vector<std::string> options = SqliteCompileOptions();
+  output << R"({"compile_options":[)";
+  for (std::size_t index = 0; index < options.size(); ++index) {
+    if (index != 0U) {
+      output << ',';
+    }
+    PrintJsonString(output, options[index]);
+  }
+  output << R"(],"source_id":)";
+  PrintJsonString(output, sqlite3_sourceid());
+  output << R"(,"version":)";
+  PrintJsonString(output, sqlite3_libversion());
+  output << '}';
+}
+
+void PrintIdentityReport() {
+  std::cout << R"({"build":)";
+  PrintBuildIdentity(std::cout);
+  std::cout << R"(,"mode":"identity","schema_version":1,"source":)";
+  PrintSourceIdentity(std::cout);
+  std::cout << R"(,"sqlite":)";
+  PrintSqliteIdentity(std::cout);
+  std::cout << "}\n";
+}
+
 void PrintConfiguration(std::ostream& output, const EffectiveConfiguration& configuration) {
   output << R"({"cache_size":)" << configuration.cache_size << R"(,"journal_mode":)";
   PrintJsonString(output, configuration.journal_mode);
@@ -2376,7 +2481,9 @@ void PrintVfsCounters(std::ostream& output, const VfsDiagnosticCounters& counter
 
 void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::string_view case_id,
                            const DiagnosticRun& run) {
-  std::cout << R"({"case":)";
+  std::cout << R"({"build":)";
+  PrintBuildIdentity(std::cout);
+  std::cout << R"(,"case":)";
   PrintJsonString(std::cout, case_id);
   std::cout << R"(,"completion":{"diagnostic_runs":1,"fresh_databases":2,)"
                R"("post_verifications":2,"pre_verifications":1,"status":"complete",)"
@@ -2404,7 +2511,11 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   PrintJsonString(std::cout, engine);
   std::cout << R"(,"mode":"diagnostic","profile":)";
   PrintJsonString(std::cout, ProfileName(profile));
-  std::cout << R"(,"schema_version":1,"work":{)";
+  std::cout << R"(,"schema_version":1,"source":)";
+  PrintSourceIdentity(std::cout);
+  std::cout << R"(,"sqlite":)";
+  PrintSqliteIdentity(std::cout);
+  std::cout << R"(,"work":{)";
   PrintWork(std::cout, run.scale, run.work.work, run.work.verification);
   std::cout << R"(},"workload_semantics_version":1})" << '\n';
 }
@@ -2413,7 +2524,9 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
 [[maybe_unused]] void PrintReport(std::string_view engine, ProfileKind profile,
                                   std::string_view case_id, RunKind run_kind,
                                   const TimingRun& run) {
-  std::cout << R"({"case":)";
+  std::cout << R"({"build":)";
+  PrintBuildIdentity(std::cout);
+  std::cout << R"(,"case":)";
   PrintJsonString(std::cout, case_id);
   std::cout << R"(,"completion":{"fresh_databases":)" << run.repetitions.size() + 1U
             << R"(,"measured_repetitions":)" << run.repetitions.size()
@@ -2438,20 +2551,31 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   }
   std::cout << R"(],"run_kind":)";
   PrintJsonString(std::cout, RunKindName(run_kind));
-  std::cout << R"(,"schema_version":1,"timer":{"cpu":"CLOCK_PROCESS_CPUTIME_ID",)"
+  std::cout << R"(,"schema_version":1,"source":)";
+  PrintSourceIdentity(std::cout);
+  std::cout << R"(,"sqlite":)";
+  PrintSqliteIdentity(std::cout);
+  std::cout << R"(,"timer":{"cpu":"CLOCK_PROCESS_CPUTIME_ID",)"
                R"("wall":"steady_clock"},"warmup":{)";
   PrintWork(std::cout, run.scale, run.warmup.work, run.warmup.verification);
   std::cout << R"(},"workload_semantics_version":1})" << '\n';
 }
 
 int Run(int argument_count, char* const* arguments) {
+  if (argument_count == 2 && std::string_view{arguments[1]} == "identity") {
+    VerifySqliteIdentity();
+    PrintIdentityReport();
+    return 0;
+  }
   if (argument_count != 8 || std::string_view{arguments[1]} != "run") {
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
     throw HarnessFailure{
-        "usage: write diagnostics run ENGINE PROFILE CASE INPUT SCRATCH diagnostic"};
+        "usage: write diagnostics identity | "
+        "run ENGINE PROFILE CASE INPUT SCRATCH diagnostic"};
 #else
     throw HarnessFailure{
-        "usage: write benchmark run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline>"};
+        "usage: write benchmark identity | "
+        "run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline>"};
 #endif
   }
   const EngineKind engine = ParseEngine(arguments[2]);

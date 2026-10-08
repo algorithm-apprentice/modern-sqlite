@@ -30,6 +30,11 @@ class _ArgumentParser(argparse.ArgumentParser):
 SCHEMA_VERSION = 1
 WORKLOAD_SEMANTICS_VERSION = 1
 SQLITE_PROFILE = "sqlite-oracle-profile-v1"
+SQLITE_VERSION = "3.54.0"
+SQLITE_SOURCE_ID = (
+    "2026-10-02 20:18:07 "
+    "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2"
+)
 MINIMUM_WALL_NS = 20_000_000
 TIMING_REPETITIONS = 3
 
@@ -40,6 +45,7 @@ _TOP_KEYS = {
     "schema_version",
     "workload_semantics_version",
     "sqlite_profile",
+    "sqlite_semantic_compile_options",
     "configuration",
     "diagnostic_work",
     "profiles",
@@ -106,6 +112,7 @@ _WORK_KEYS = {
     "digest",
 }
 _RAW_TIMING_KEYS = {
+    "build",
     "case",
     "completion",
     "effective_configuration",
@@ -115,6 +122,8 @@ _RAW_TIMING_KEYS = {
     "repetitions",
     "run_kind",
     "schema_version",
+    "source",
+    "sqlite",
     "timer",
     "warmup",
     "workload_semantics_version",
@@ -140,6 +149,7 @@ _COMPLETION_KEYS = {
 }
 _TIMER_KEYS = {"wall", "cpu"}
 _RAW_DIAGNOSTIC_KEYS = {
+    "build",
     "case",
     "completion",
     "counters",
@@ -149,6 +159,8 @@ _RAW_DIAGNOSTIC_KEYS = {
     "mode",
     "profile",
     "schema_version",
+    "source",
+    "sqlite",
     "work",
     "workload_semantics_version",
 }
@@ -212,6 +224,21 @@ _VFS_GROUP_KEYS = {
     "write_ahead_log",
 }
 _VFS_GLOBAL_KEYS = {"random_byte_calls"}
+_BUILD_KEYS = {
+    "architecture",
+    "build_type",
+    "compiler",
+    "cplusplus",
+    "coverage",
+    "instrumentation",
+    "sanitizers",
+    "standard_library",
+}
+_TOOLCHAIN_KEYS = {"id", "version"}
+_SOURCE_KEYS = {"revision", "tree"}
+_SQLITE_IDENTITY_KEYS = {"compile_options", "source_id", "version"}
+_IDENTITY_KEYS = {"build", "mode", "schema_version", "source", "sqlite"}
+_GIT_OBJECT = re.compile(r"[0-9a-f]{40,64}\Z")
 
 _EXPECTED_CONFIGURATION = {
     "page_size": 4096,
@@ -309,6 +336,46 @@ _SQLITE_DEFAULT_CONFIGURATION = {
     "cache_size": -2000,
     "temp_store": "default",
 }
+_SQLITE_SEMANTIC_COMPILE_OPTIONS = [
+    "ATOMIC_INTRINSICS=1",
+    "DEFAULT_AUTOVACUUM",
+    "DEFAULT_CACHE_SIZE=-2000",
+    "DEFAULT_FILE_FORMAT=4",
+    "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+    "DEFAULT_MMAP_SIZE=0",
+    "DEFAULT_PAGE_SIZE=4096",
+    "DEFAULT_PCACHE_INITSZ=20",
+    "DEFAULT_RECURSIVE_TRIGGERS",
+    "DEFAULT_SECTOR_SIZE=4096",
+    "DEFAULT_SYNCHRONOUS=2",
+    "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+    "DEFAULT_WAL_SYNCHRONOUS=2",
+    "DEFAULT_WORKER_THREADS=0",
+    "DIRECT_OVERFLOW_READ",
+    "DQS=3",
+    "MALLOC_SOFT_LIMIT=1024",
+    "MAX_ATTACHED=10",
+    "MAX_COLUMN=2000",
+    "MAX_COMPOUND_SELECT=500",
+    "MAX_DEFAULT_PAGE_SIZE=8192",
+    "MAX_EXPR_DEPTH=1000",
+    "MAX_FUNCTION_ARG=1000",
+    "MAX_LENGTH=1000000000",
+    "MAX_LIKE_PATTERN_LENGTH=50000",
+    "MAX_MMAP_SIZE=0x7fff0000",
+    "MAX_PAGE_COUNT=0xfffffffe",
+    "MAX_PAGE_SIZE=65536",
+    "MAX_SCHEMA=10000000",
+    "MAX_SQL_LENGTH=1000000000",
+    "MAX_TRIGGER_DEPTH=1000",
+    "MAX_VARIABLE_NUMBER=32766",
+    "MAX_VDBE_OP=250000000",
+    "MAX_WORKER_THREADS=0",
+    "MUTEX_OMIT",
+    "SYSTEM_MALLOC",
+    "TEMP_STORE=1",
+    "THREADSAFE=0",
+]
 _EXPECTED_FIXTURES = {
     "schema": {
         "path": "tests/fixtures/write_performance/schema.db",
@@ -799,6 +866,15 @@ def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
     _require_type(value["sqlite_profile"], str, "sqlite_profile")
     if value["sqlite_profile"] != SQLITE_PROFILE:
         raise HarnessError("sqlite_profile is invalid")
+    _require_type(
+        value["sqlite_semantic_compile_options"],
+        list,
+        "sqlite_semantic_compile_options",
+    )
+    if value["sqlite_semantic_compile_options"] != (
+        _SQLITE_SEMANTIC_COMPILE_OPTIONS
+    ):
+        raise HarnessError("sqlite_semantic_compile_options are invalid")
     _validate_configuration(value["configuration"])
     _require_type(value["diagnostic_work"], str, "diagnostic_work")
     if value["diagnostic_work"] != "baseline":
@@ -831,6 +907,129 @@ def _case_by_id(
         if case["id"] == case_id:
             return case
     raise HarnessError(f"unknown write performance case: {case_id}")
+
+
+def _validate_build_identity(
+    value: Any,
+    *,
+    instrumentation: bool,
+    label: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, label)
+    _require_keys(value, _BUILD_KEYS, label)
+    if value["architecture"] not in {"arm64", "x86_64"}:
+        raise HarnessError(f"{label}.architecture is invalid")
+    if value["build_type"] != "Release":
+        raise HarnessError(f"{label}.build_type must be Release")
+    _require_type(value["cplusplus"], int, f"{label}.cplusplus")
+    if value["cplusplus"] < 202100:
+        raise HarnessError(f"{label}.cplusplus must be C++23")
+    for key in ("coverage", "instrumentation", "sanitizers"):
+        _require_type(value[key], bool, f"{label}.{key}")
+    if (
+        value["coverage"]
+        or value["sanitizers"]
+        or value["instrumentation"] is not instrumentation
+    ):
+        raise HarnessError(f"{label} instrumentation flags are invalid")
+    for key, valid_ids in (
+        ("compiler", {"clang", "gcc", "msvc"}),
+        ("standard_library", {"libc++", "libstdc++", "msvc-stl"}),
+    ):
+        toolchain = value[key]
+        toolchain_label = f"{label}.{key}"
+        _require_type(toolchain, dict, toolchain_label)
+        _require_keys(toolchain, _TOOLCHAIN_KEYS, toolchain_label)
+        if toolchain["id"] not in valid_ids:
+            raise HarnessError(f"{toolchain_label}.id is invalid")
+        _require_type(
+            toolchain["version"],
+            str,
+            f"{toolchain_label}.version",
+        )
+        if not toolchain["version"]:
+            raise HarnessError(f"{toolchain_label}.version must be nonempty")
+    return value
+
+
+def _validate_source_identity(value: Any, label: str) -> dict[str, str]:
+    _require_type(value, dict, label)
+    _require_keys(value, _SOURCE_KEYS, label)
+    for key in _SOURCE_KEYS:
+        _require_type(value[key], str, f"{label}.{key}")
+        if _GIT_OBJECT.fullmatch(value[key]) is None:
+            raise HarnessError(f"{label}.{key} is not a Git object ID")
+    return value
+
+
+def _validate_sqlite_identity(value: Any, label: str) -> dict[str, Any]:
+    _require_type(value, dict, label)
+    _require_keys(value, _SQLITE_IDENTITY_KEYS, label)
+    if value["version"] != SQLITE_VERSION:
+        raise HarnessError(f"{label}.version is not pinned")
+    if value["source_id"] != SQLITE_SOURCE_ID:
+        raise HarnessError(f"{label}.source_id is not pinned")
+    if value["compile_options"] != _SQLITE_SEMANTIC_COMPILE_OPTIONS:
+        raise HarnessError(f"{label}.compile_options are not pinned")
+    return value
+
+
+def validate_binary_identity(
+    value: Any,
+    *,
+    instrumentation: bool,
+) -> dict[str, Any]:
+    _require_type(value, dict, "binary identity")
+    _require_keys(value, _IDENTITY_KEYS, "binary identity")
+    _require_type(
+        value["schema_version"],
+        int,
+        "binary identity.schema_version",
+    )
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise HarnessError("binary identity schema_version must be 1")
+    if value["mode"] != "identity":
+        raise HarnessError("binary identity mode must be identity")
+    _validate_build_identity(
+        value["build"],
+        instrumentation=instrumentation,
+        label="binary identity.build",
+    )
+    _validate_source_identity(value["source"], "binary identity.source")
+    _validate_sqlite_identity(value["sqlite"], "binary identity.sqlite")
+    return value
+
+
+def read_binary_identity(
+    *,
+    binary_path: pathlib.Path,
+    repository_root: pathlib.Path,
+    instrumentation: bool,
+) -> dict[str, Any]:
+    if not binary_path.is_file():
+        raise HarnessError(f"benchmark binary does not exist: {binary_path}")
+    common = _read_performance_module()
+    try:
+        result = common.run_bounded(
+            [str(binary_path), "identity"],
+            cwd=repository_root,
+            timeout_seconds=30.0,
+            stdout_limit=1024 * 1024,
+            stderr_limit=1024 * 1024,
+        )
+    except (common.HarnessError, common.ChildExecutionError) as error:
+        raise HarnessError(str(error)) from error
+    if result.returncode != 0:
+        raise HarnessError(
+            f"benchmark identity failed with exit {result.returncode}"
+        )
+    if result.stderr:
+        raise HarnessError("benchmark identity wrote stderr")
+    identity = load_json_bytes_strict(result.stdout, "benchmark identity")
+    return validate_binary_identity(
+        identity,
+        instrumentation=instrumentation,
+    )
 
 
 def _validate_effective_configuration(
@@ -921,6 +1120,13 @@ def validate_raw_timing_report(
             raise HarnessError(
                 f"timing report {key} does not match the invocation"
             )
+    _validate_build_identity(
+        value["build"],
+        instrumentation=False,
+        label="timing report.build",
+    )
+    _validate_source_identity(value["source"], "timing report.source")
+    _validate_sqlite_identity(value["sqlite"], "timing report.sqlite")
 
     case = _case_by_id(workload_manifest, expected_case)
     expected_work = case["expected"][expected_run_kind]
@@ -1121,6 +1327,13 @@ def validate_raw_diagnostic_report(
             raise HarnessError(
                 f"diagnostic report {key} does not match the invocation"
             )
+    _validate_build_identity(
+        value["build"],
+        instrumentation=True,
+        label="diagnostic report.build",
+    )
+    _validate_source_identity(value["source"], "diagnostic report.source")
+    _validate_sqlite_identity(value["sqlite"], "diagnostic report.sqlite")
 
     case = _case_by_id(workload_manifest, expected_case)
     expected_work = case["expected"][workload_manifest["diagnostic_work"]]
