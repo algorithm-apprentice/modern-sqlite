@@ -3994,6 +3994,123 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
   }
 }
 
+Result<bool> WritableCursor::FirstTable() {
+  if (!table_) {
+    return std::unexpected(Misuse("table first requires a table B-tree cursor"));
+  }
+  auto reset = ResetToRoot();
+  if (!reset.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(reset.error()));
+  }
+  if (state_ == WritableCursorState::kInvalid) {
+    return false;
+  }
+  auto descended = DescendLeftmost();
+  if (!descended.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(descended.error()));
+  }
+  return true;
+}
+
+Result<bool> WritableCursor::NextTable() {
+  if (!table_) {
+    return std::unexpected(Misuse("table next requires a table B-tree cursor"));
+  }
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return std::unexpected(std::move(active.error()));
+  }
+  if (state_ != WritableCursorState::kValid) {
+    return std::unexpected(Misuse("table next requires a valid writable cursor"));
+  }
+  auto page = CurrentPage();
+  if (!page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(page.error()));
+  }
+  if (!page->is_leaf()) {
+    EnterFault();
+    return std::unexpected(Corruption("positioned table cursor is not on a leaf page"));
+  }
+  if (current_index_ + 1U < page->cell_count()) {
+    ++current_index_;
+    frames_[frame_count_ - 1U].child_index = current_index_;
+    return true;
+  }
+
+  while (frame_count_ > 1U) {
+    auto moved = MoveToParent();
+    if (!moved.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(moved.error()));
+    }
+    auto parent = CurrentPage();
+    if (!parent.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(parent.error()));
+    }
+    const std::size_t child_slot = current_index_;
+    if (child_slot >= parent->cell_count()) {
+      continue;
+    }
+    auto descended = Descend(child_slot + 1U, *parent);
+    if (!descended.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(descended.error()));
+    }
+    auto leftmost = DescendLeftmost();
+    if (!leftmost.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(leftmost.error()));
+    }
+    return true;
+  }
+  InvalidatePosition();
+  return false;
+}
+
+Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>& scratch) {
+  if (!table_) {
+    return std::unexpected(Misuse("current table row requires a table B-tree cursor"));
+  }
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return std::unexpected(std::move(active.error()));
+  }
+  if (state_ != WritableCursorState::kValid) {
+    return std::unexpected(Misuse("current table row requires a valid writable cursor"));
+  }
+  auto page = CurrentPage();
+  if (!page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(page.error()));
+  }
+  if (!page->is_leaf() || current_index_ >= page->cell_count()) {
+    EnterFault();
+    return std::unexpected(Corruption("current table row position is invalid"));
+  }
+  auto cell = page->cell(current_index_);
+  if (!cell.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(cell.error()));
+  }
+  if (!cell->rowid().has_value()) {
+    EnterFault();
+    return std::unexpected(Corruption("current table row has no rowid"));
+  }
+  auto payload = ReadCellPayload(*cell, scratch);
+  if (!payload.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(payload.error()));
+  }
+  return WritableTableRow{
+      .rowid = *cell->rowid(),
+      .payload = *payload,
+  };
+}
+
 Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
                                                   std::span<const IndexColumnOrder> columns,
                                                   RecordCodecOptions options,
@@ -4446,6 +4563,86 @@ Status WritableCursor::DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& work
     return fail(std::move(dropped.error()));
   }
   return Balance(std::move(page), workspace);
+}
+
+Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& workspace) {
+  if (!table_) {
+    return std::unexpected(Misuse("current table deletion requires a table B-tree cursor"));
+  }
+  auto current_page = CurrentPage();
+  if (!current_page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(current_page.error()));
+  }
+  if (state_ != WritableCursorState::kValid || !current_page->is_leaf() ||
+      current_index_ >= current_page->cell_count()) {
+    return std::unexpected(Misuse("current table deletion requires a valid row"));
+  }
+  auto current_cell = current_page->cell(current_index_);
+  if (!current_cell.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(current_cell.error()));
+  }
+  if (!current_cell->rowid().has_value()) {
+    EnterFault();
+    return std::unexpected(Corruption("current table deletion row has no rowid"));
+  }
+  const std::int64_t deleted_rowid = *current_cell->rowid();
+
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return std::unexpected(std::move(promoted.error()));
+  }
+  auto opened = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage page = std::move(*opened);
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Result<bool> {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  auto view = CurrentPage();
+  if (!view.has_value()) {
+    return fail(std::move(view.error()));
+  }
+  auto cell = view->cell(current_index_);
+  if (!cell.has_value()) {
+    return fail(std::move(cell.error()));
+  }
+  auto cleared = ClearCellOverflow(*owner_, geometry_, *cell);
+  if (!cleared.has_value()) {
+    return fail(std::move(cleared.error()));
+  }
+  auto dropped = page.DropCell(current_index_);
+  if (!dropped.has_value()) {
+    return fail(std::move(dropped.error()));
+  }
+  auto balanced = Balance(std::move(page), workspace);
+  if (!balanced.has_value()) {
+    return std::unexpected(std::move(balanced.error()));
+  }
+
+  auto sought = SeekTable(deleted_rowid);
+  if (!sought.has_value()) {
+    return std::unexpected(std::move(sought.error()));
+  }
+  if (sought->exact) {
+    EnterFault();
+    return std::unexpected(Corruption("deleted table rowid remains present"));
+  }
+  if (state_ == WritableCursorState::kInvalid) {
+    return false;
+  }
+  if (sought->comparison > 0) {
+    return true;
+  }
+  return NextTable();
 }
 
 Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
@@ -4904,6 +5101,34 @@ Status WritableCursor::Descend(std::size_t child_index, const BtreePageView& par
   current_index_ = 0U;
   state_ = WritableCursorState::kValid;
   return {};
+}
+
+Status WritableCursor::DescendLeftmost() {
+  while (true) {
+    auto page = CurrentPage();
+    if (!page.has_value()) {
+      return std::unexpected(std::move(page.error()));
+    }
+    if (page->is_leaf()) {
+      if (page->cell_count() == 0U) {
+        return std::unexpected(Corruption("nonempty table cursor reached an empty leaf"));
+      }
+      current_index_ = 0U;
+      frames_[frame_count_ - 1U].child_index = 0U;
+      state_ = WritableCursorState::kValid;
+      return {};
+    }
+    auto descended = Descend(0U, *page);
+    if (!descended.has_value()) {
+      return descended;
+    }
+  }
+}
+
+void WritableCursor::InvalidatePosition() noexcept {
+  ReleaseDescendants();
+  current_index_ = 0U;
+  state_ = WritableCursorState::kInvalid;
 }
 
 void WritableCursor::ReleaseDescendants() noexcept {

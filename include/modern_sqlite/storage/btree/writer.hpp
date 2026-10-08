@@ -17,6 +17,7 @@ namespace modern_sqlite {
 
 class Pager;
 class TableBtreeWriter;
+class TableBtreeMutationCursor;
 class IndexBtreeWriter;
 
 namespace transaction_detail {
@@ -36,6 +37,11 @@ struct BtreeDatabaseOptions {
   ByteCount reserved_bytes{0};
   DatabaseSchemaFormat schema_format = DatabaseSchemaFormat::kFour;
   DatabaseTextEncoding text_encoding = DatabaseTextEncoding::kUtf8;
+};
+
+struct TableBtreeMutationRow {
+  std::int64_t rowid;
+  ByteView payload;
 };
 
 class BtreeWriteSession final {
@@ -85,11 +91,13 @@ class TableBtreeWriter final {
   [[nodiscard]] Status Insert(std::int64_t rowid, ByteView payload,
                               BtreeInsertMode mode = BtreeInsertMode::kInsertOnly);
   [[nodiscard]] Result<bool> Delete(std::int64_t rowid);
+  [[nodiscard]] Result<TableBtreeMutationCursor> OpenMutationCursor();
   [[nodiscard]] Result<std::uint64_t> Clear();
   [[nodiscard]] Status Drop();
 
  private:
   friend class BtreeWriteSession;
+  friend class TableBtreeMutationCursor;
 
   TableBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
                    std::uint64_t incarnation, std::uint64_t statement_epoch) noexcept
@@ -102,6 +110,30 @@ class TableBtreeWriter final {
   PageNumber root_page_;
   std::uint64_t incarnation_ = 0;
   std::uint64_t statement_epoch_ = 0;
+};
+
+class TableBtreeMutationCursor final {
+ public:
+  TableBtreeMutationCursor(const TableBtreeMutationCursor&) = delete;
+  TableBtreeMutationCursor& operator=(const TableBtreeMutationCursor&) = delete;
+  TableBtreeMutationCursor(TableBtreeMutationCursor&&) noexcept;
+  TableBtreeMutationCursor& operator=(TableBtreeMutationCursor&&) noexcept;
+  ~TableBtreeMutationCursor();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] Result<bool> First();
+  // The payload view remains valid until the cursor moves or is destroyed.
+  [[nodiscard]] Result<TableBtreeMutationRow> row();
+  [[nodiscard]] Result<bool> DeleteAndNext();
+
+ private:
+  friend class TableBtreeWriter;
+
+  class Impl;
+
+  explicit TableBtreeMutationCursor(std::unique_ptr<Impl> impl) noexcept;
+
+  std::unique_ptr<Impl> impl_;
 };
 
 class IndexBtreeWriter final {

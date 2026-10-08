@@ -637,6 +637,118 @@ Result<bool> TableBtreeWriter::Delete(std::int64_t rowid) {
   return true;
 }
 
+class TableBtreeMutationCursor::Impl final {
+ public:
+  [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
+      std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
+      btree_internal::BtreeWriterCore::RootValidation validation) {
+    std::unique_ptr<Impl> impl;
+    try {
+      impl = std::make_unique<Impl>(std::move(core), root_page, validation);
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+    auto cursor = impl->core_->OpenCursor(impl->owner_, root_page, true);
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    impl->cursor_.emplace(std::move(*cursor));
+    return impl;
+  }
+
+  Impl(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
+       btree_internal::BtreeWriterCore::RootValidation validation) noexcept
+      : core_(std::move(core)),
+        root_page_(root_page),
+        validation_(validation),
+        owner_(core_->pager()) {}
+
+  [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
+
+  std::shared_ptr<btree_internal::BtreeWriterCore> core_;
+  PageNumber root_page_;
+  btree_internal::BtreeWriterCore::RootValidation validation_;
+  btree_internal::MutationPageOwner owner_;
+  std::optional<btree_internal::WritableCursor> cursor_;
+  std::vector<std::byte> scratch_;
+};
+
+Result<TableBtreeMutationCursor> TableBtreeWriter::OpenMutationCursor() {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("table B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(root_page_, {
+                                                   .incarnation = incarnation_,
+                                                   .statement_epoch = statement_epoch_,
+                                               });
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto impl = TableBtreeMutationCursor::Impl::Create(core_, root_page_,
+                                                     {
+                                                         .incarnation = incarnation_,
+                                                         .statement_epoch = statement_epoch_,
+                                                     });
+  if (!impl.has_value()) {
+    return std::unexpected(std::move(impl.error()));
+  }
+  return TableBtreeMutationCursor{std::move(*impl)};
+}
+
+TableBtreeMutationCursor::TableBtreeMutationCursor(TableBtreeMutationCursor&&) noexcept = default;
+TableBtreeMutationCursor::TableBtreeMutationCursor(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+TableBtreeMutationCursor& TableBtreeMutationCursor::operator=(TableBtreeMutationCursor&&) noexcept =
+    default;
+TableBtreeMutationCursor::~TableBtreeMutationCursor() = default;
+
+bool TableBtreeMutationCursor::valid() const noexcept {
+  return impl_ != nullptr && impl_->cursor_.has_value() &&
+         impl_->cursor_->state() == btree_internal::WritableCursorState::kValid;
+}
+
+Result<bool> TableBtreeMutationCursor::First() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return impl_->cursor_->FirstTable();
+}
+
+Result<TableBtreeMutationRow> TableBtreeMutationCursor::row() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto row = impl_->cursor_->CurrentTableRow(impl_->scratch_);
+  if (!row.has_value()) {
+    return std::unexpected(std::move(row.error()));
+  }
+  return TableBtreeMutationRow{
+      .rowid = row->rowid,
+      .payload = row->payload,
+  };
+}
+
+Result<bool> TableBtreeMutationCursor::DeleteAndNext() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return impl_->cursor_->DeleteCurrentTableAndNext(impl_->core_->workspace());
+}
+
 Result<std::uint64_t> TableBtreeWriter::Clear() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("table B-tree writer is moved from"));
