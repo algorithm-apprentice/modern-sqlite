@@ -2665,6 +2665,12 @@ def generate_baseline(
         )
         zero_path.unlink()
         scratch_root.rmdir()
+        validate_baseline_directory(
+            baseline_path=output_path,
+            repository_root=repository_root,
+            workload_path=workload_path,
+            verify_current_source=True,
+        )
         return aggregate
     except (HarnessError, OSError) as error:
         failure_path = output_path / "failure.json"
@@ -3405,7 +3411,7 @@ def main() -> int:
                 baseline_path=arguments.baseline,
                 repository_root=arguments.repository_root,
                 workload_path=arguments.workloads,
-                verify_current_source=True,
+                verify_current_source=False,
             )
             print(
                 "validated write baseline with "

@@ -54,6 +54,25 @@ python3 tools/write_performance.py validate-baseline \
   --baseline benchmarks/write-baseline-v1
 ```
 
+## Pre-commit baseline finding
+
+Two independent full-generation probes produced the same schedules, work,
+provenance, logical results, database fingerprints, diagnostic counter
+families, and single failing guard case.
+
+`matched-durable/delete-scan-implicit` measured approximately 10.41--10.49x
+SQLite wall time and 8.96--9.08x process CPU. All three paired wall rounds
+exceeded the 10x guard. The diagnostic replay recorded:
+
+- 4,380 Modern database-page writes versus 73 SQLite cache writes;
+- 7,738 Modern main-journal sync calls;
+- 1,168,839 Modern B-tree comparisons; and
+- 917,509 Modern VM instructions versus 196,616 SQLite VM steps.
+
+The baseline therefore records a validated guard failure instead of widening
+the threshold or replacing samples. ADR-0008's optimization-admission process
+must address this case in a separate reviewed node.
+
 ## Fixed profile replay
 
 Profile replay is diagnostic evidence, not baseline timing. It performs one
