@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <exception>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -31,6 +32,7 @@ struct SourceInfo {
   std::optional<TableId> table{};
   RootPageId root_page{};
   std::uint64_t estimated_rows = 0;
+  std::uint64_t estimated_row_size = 1;
   bool rowid_eligible = false;
 };
 
@@ -40,6 +42,37 @@ struct PredicateAnalysis {
   std::vector<BoundExpressionId> guards{};
   std::vector<BoundExpressionId> residuals{};
 };
+
+struct ReadPredicateTerm {
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+};
+
+struct ReadPredicateAnalysis {
+  bool empty = false;
+  std::vector<BoundExpressionId> guards{};
+  std::vector<ReadPredicateTerm> terms{};
+};
+
+struct RowIdCandidatePlan {
+  BoundExpressionId key{0};
+  std::size_t selected_term = 0;
+};
+
+struct IndexCandidatePlan {
+  PhysicalIndexScanNode node{};
+  std::vector<bool> selected_terms{};
+};
+
+using ReadAccessPayload = std::variant<std::monostate, RowIdCandidatePlan, IndexCandidatePlan>;
+
+struct ReadAccessCandidate {
+  AccessPathCandidate published{};
+  ReadAccessPayload payload{};
+};
+
+[[nodiscard]] std::uint64_t DerivedTableRowSize(const CatalogTable& table) noexcept;
+[[nodiscard]] bool IsNullLiteral(const BoundSelect& bound_select, BoundExpressionId id) noexcept;
 
 [[nodiscard]] OptimizerError OptimizerFailure(OptimizerErrorCode code, std::string_view detail) {
   return OptimizerError{.code = code, .detail = std::string{detail}};
@@ -379,6 +412,7 @@ template <typename Bound>
         .table = std::nullopt,
         .root_page = RootPageId{},
         .estimated_rows = 1,
+        .estimated_row_size = 1,
         .rowid_eligible = false,
     };
   }
@@ -391,6 +425,7 @@ template <typename Bound>
         .table = std::nullopt,
         .root_page = RootPageId{1},
         .estimated_rows = kDefaultEstimatedRows,
+        .estimated_row_size = 1,
         .rowid_eligible = true,
     };
   }
@@ -404,6 +439,7 @@ template <typename Bound>
       .table = table_id,
       .root_page = table.root_page,
       .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
+      .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
       .rowid_eligible = !table.without_rowid,
   };
 }
@@ -518,11 +554,412 @@ template <typename Bound>
   return analysis;
 }
 
-[[nodiscard]] AccessPathCost ScanCost(std::uint64_t rows) noexcept {
+[[nodiscard]] ReadPredicateAnalysis AnalyzeReadPredicate(const BoundSelect& bound_select,
+                                                         const SourceInfo& source,
+                                                         std::optional<BoundExpressionId> where) {
+  ReadPredicateAnalysis analysis;
+  if (!where.has_value()) {
+    return analysis;
+  }
+
+  std::vector<BoundExpressionId> terms;
+  terms.reserve(CountConjuncts(bound_select, *where));
+  CollectConjuncts(bound_select, *where, &terms);
+
+  if (source.single_row) {
+    analysis.guards.reserve(terms.size());
+    for (const BoundExpressionId term : terms) {
+      const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, term);
+      if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
+        continue;
+      }
+      if (truth.has_value()) {
+        analysis.empty = true;
+        break;
+      }
+      analysis.guards.push_back(term);
+    }
+    return analysis;
+  }
+
+  analysis.guards.reserve(terms.size());
+  analysis.terms.reserve(terms.size());
+  for (std::size_t index = 0; index < terms.size(); ++index) {
+    const BoundExpressionId term = terms[index];
+    const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, term);
+    if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
+      continue;
+    }
+    if (truth.has_value()) {
+      analysis.empty = true;
+      analysis.terms.clear();
+      break;
+    }
+    if (IsStatementGuard(bound_select, term)) {
+      analysis.guards.push_back(term);
+    } else {
+      analysis.terms.push_back(ReadPredicateTerm{
+          .predicate = term,
+          .conjunct_position = index,
+      });
+    }
+  }
+  return analysis;
+}
+
+[[nodiscard]] std::uint64_t SaturatingAdd(std::uint64_t left, std::uint64_t right) noexcept {
+  if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  return left + right;
+}
+
+[[nodiscard]] std::uint64_t SaturatingMultiply(std::uint64_t left, std::uint64_t right) noexcept {
+  if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  return left * right;
+}
+
+[[nodiscard]] std::uint64_t AffinityWidthUnits(TypeAffinity affinity) noexcept {
+  switch (affinity) {
+    case TypeAffinity::kNone:
+    case TypeAffinity::kText:
+    case TypeAffinity::kBlob:
+      return 5;
+    case TypeAffinity::kInteger:
+    case TypeAffinity::kReal:
+    case TypeAffinity::kNumeric:
+      return 1;
+  }
+  return 5;
+}
+
+[[nodiscard]] std::uint64_t DerivedTableRowSize(const CatalogTable& table) noexcept {
+  std::uint64_t units = 0;
+  for (const CatalogColumn& column : table.columns) {
+    units = SaturatingAdd(units, AffinityWidthUnits(column.affinity));
+  }
+  if (!table.rowid_alias.has_value()) {
+    units = SaturatingAdd(units, 1);
+  }
+  return SaturatingMultiply(units, 4);
+}
+
+[[nodiscard]] std::uint64_t DerivedIndexRowSize(const CatalogSnapshot& catalog,
+                                                const CatalogIndex& index) noexcept {
+  const CatalogTable& table = catalog.table(index.table);
+  std::uint64_t units = 0;
+  for (const CatalogIndexTerm& term : index.terms) {
+    if (const auto* column = std::get_if<ColumnId>(&term.target);
+        column != nullptr && column->value < table.columns.size()) {
+      units = SaturatingAdd(units, AffinityWidthUnits(table.columns[column->value].affinity));
+    } else if (std::holds_alternative<RowIdIndexTerm>(term.target)) {
+      units = SaturatingAdd(units, 1);
+    } else {
+      units = SaturatingAdd(units, 5);
+    }
+  }
+  return SaturatingMultiply(units, 4);
+}
+
+[[nodiscard]] bool IsRegisteredCollation(const BoundSelect& bound_select,
+                                         std::string_view name) noexcept {
+  return std::ranges::any_of(
+      bound_select.registered_collations(),
+      [name](const std::string& registered) { return CatalogNamesEqual(registered, name); });
+}
+
+[[nodiscard]] bool IsSupportedIndexShape(const BoundSelect& bound_select, const CatalogTable& table,
+                                         const CatalogIndex& index) noexcept {
+  if (table.without_rowid || index.partial_predicate.has_value() || index.key_term_count == 0U ||
+      index.key_term_count > std::numeric_limits<std::uint32_t>::max() ||
+      index.key_term_count >= index.terms.size() ||
+      index.terms.size() != index.key_term_count + 1U ||
+      !std::holds_alternative<RowIdIndexTerm>(index.terms.back().target)) {
+    return false;
+  }
+  for (std::size_t term_index = 0; term_index < index.terms.size(); ++term_index) {
+    const CatalogIndexTerm& term = index.terms[term_index];
+    if (!IsRegisteredCollation(bound_select, term.collation_name)) {
+      return false;
+    }
+    if (term_index < index.key_term_count) {
+      const auto* column = std::get_if<ColumnId>(&term.target);
+      if (column == nullptr || column->value >= table.columns.size()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool IsIndexedColumnReference(const BoundSelect& bound_select, TableId table_id,
+                                            ColumnId column_id,
+                                            BoundExpressionId expression_id) noexcept {
+  expression_id = TransparentRowIdOperandId(bound_select, expression_id);
+  if (!IsValidExpressionId(bound_select, expression_id)) {
+    return false;
+  }
+  const auto* column =
+      std::get_if<BoundColumnExpression>(&bound_select.expression(expression_id).payload);
+  if (column == nullptr || column->column.value() >= bound_select.source_columns().size()) {
+    return false;
+  }
+  const BoundSourceColumn& source = bound_select.source_columns()[column->column.value()];
+  return source.catalog_column == column_id && bound_select.table_source() != nullptr &&
+         bound_select.table_source()->table == table_id;
+}
+
+[[nodiscard]] SqlComparison ReverseComparison(SqlComparison comparison) noexcept {
+  switch (comparison) {
+    case SqlComparison::kLess:
+      return SqlComparison::kGreater;
+    case SqlComparison::kLessEqual:
+      return SqlComparison::kGreaterEqual;
+    case SqlComparison::kGreater:
+      return SqlComparison::kLess;
+    case SqlComparison::kGreaterEqual:
+      return SqlComparison::kLessEqual;
+    case SqlComparison::kEqual:
+    case SqlComparison::kNotEqual:
+    case SqlComparison::kIs:
+    case SqlComparison::kIsNot:
+      return comparison;
+  }
+  return comparison;
+}
+
+enum class IndexConstraintKind : std::uint8_t {
+  kEquality,
+  kLower,
+  kUpper,
+};
+
+struct IndexConstraintMatch {
+  IndexConstraintKind kind = IndexConstraintKind::kEquality;
+  BoundExpressionId key{0};
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  bool inclusive = false;
+  bool reject_null = true;
+};
+
+[[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
+    const BoundSelect& bound_select, TableId table_id, const CatalogIndexTerm& term,
+    const ReadPredicateTerm& predicate) {
+  const auto* indexed_column = std::get_if<ColumnId>(&term.target);
+  if (indexed_column == nullptr) {
+    return std::nullopt;
+  }
+  const BoundExpressionId transparent = TransparentPredicateId(bound_select, predicate.predicate);
+  if (!IsValidExpressionId(bound_select, transparent)) {
+    return std::nullopt;
+  }
+  const auto* comparison =
+      std::get_if<BoundComparisonExpression>(&bound_select.expression(transparent).payload);
+  if (comparison == nullptr || comparison->collation.value() >= bound_select.collations().size()) {
+    return std::nullopt;
+  }
+
+  const bool left_column =
+      IsIndexedColumnReference(bound_select, table_id, *indexed_column, comparison->left);
+  const bool right_column =
+      IsIndexedColumnReference(bound_select, table_id, *indexed_column, comparison->right);
+  if (left_column == right_column) {
+    return std::nullopt;
+  }
+  const BoundExpressionId key = left_column ? comparison->right : comparison->left;
+  if (ExpressionDependsOnSource(bound_select, key)) {
+    return std::nullopt;
+  }
+  const SqlComparison normalized =
+      left_column ? comparison->comparison : ReverseComparison(comparison->comparison);
+  const bool is_null_test = normalized == SqlComparison::kIs && IsNullLiteral(bound_select, key);
+  if (!is_null_test &&
+      !CatalogNamesEqual(bound_select.collations()[comparison->collation.value()].name,
+                         term.collation_name)) {
+    return std::nullopt;
+  }
+  IndexConstraintMatch match{
+      .key = key,
+      .predicate = predicate.predicate,
+      .conjunct_position = predicate.conjunct_position,
+  };
+  switch (normalized) {
+    case SqlComparison::kEqual:
+      match.kind = IndexConstraintKind::kEquality;
+      match.reject_null = true;
+      return match;
+    case SqlComparison::kIs:
+      match.kind = IndexConstraintKind::kEquality;
+      match.reject_null = false;
+      return match;
+    case SqlComparison::kGreater:
+      match.kind = IndexConstraintKind::kLower;
+      match.inclusive = false;
+      return match;
+    case SqlComparison::kGreaterEqual:
+      match.kind = IndexConstraintKind::kLower;
+      match.inclusive = true;
+      return match;
+    case SqlComparison::kLess:
+      match.kind = IndexConstraintKind::kUpper;
+      match.inclusive = false;
+      return match;
+    case SqlComparison::kLessEqual:
+      match.kind = IndexConstraintKind::kUpper;
+      match.inclusive = true;
+      return match;
+    case SqlComparison::kNotEqual:
+    case SqlComparison::kIsNot:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId id,
+                              std::vector<bool>* columns, bool* rowid) {
+  if (!IsValidExpressionId(bound_select, id)) {
+    return;
+  }
+  const BoundExpression& expression = bound_select.expression(id);
+  std::visit(
+      [&](const auto& payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, BoundColumnExpression>) {
+          if (payload.column.value() < bound_select.source_columns().size()) {
+            const std::optional<ColumnId> column =
+                bound_select.source_columns()[payload.column.value()].catalog_column;
+            if (column.has_value() && column->value < columns->size()) {
+              (*columns)[column->value] = true;
+            }
+          }
+        } else if constexpr (std::is_same_v<Payload, BoundRowIdExpression>) {
+          *rowid = true;
+        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
+                             std::is_same_v<Payload, BoundTruthTestExpression> ||
+                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                             std::is_same_v<Payload, BoundCollateExpression>) {
+          MarkRequiredSourceValues(bound_select, payload.operand, columns, rowid);
+        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
+                             std::is_same_v<Payload, BoundComparisonExpression>) {
+          MarkRequiredSourceValues(bound_select, payload.left, columns, rowid);
+          MarkRequiredSourceValues(bound_select, payload.right, columns, rowid);
+        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+          MarkRequiredSourceValues(bound_select, payload.target, columns, rowid);
+        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
+                             std::is_same_v<Payload, BoundCoalesceExpression> ||
+                             std::is_same_v<Payload, BoundConditionalExpression>) {
+          for (const BoundExpressionId argument : payload.arguments) {
+            MarkRequiredSourceValues(bound_select, argument, columns, rowid);
+          }
+        }
+      },
+      expression.payload);
+}
+
+[[nodiscard]] bool IsCoveringIndex(const BoundSelect& bound_select, const CatalogTable& table,
+                                   const CatalogIndex& index,
+                                   std::span<const ReadPredicateTerm> predicates,
+                                   const std::vector<bool>& selected_terms) {
+  std::vector<bool> required_columns(table.columns.size(), false);
+  bool required_rowid = false;
+  for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
+    if (index_value >= selected_terms.size() || !selected_terms[index_value]) {
+      MarkRequiredSourceValues(bound_select, predicates[index_value].predicate, &required_columns,
+                               &required_rowid);
+    }
+  }
+  for (const BoundResultColumn& result : bound_select.result_columns()) {
+    MarkRequiredSourceValues(bound_select, result.expression, &required_columns, &required_rowid);
+  }
+
+  std::vector<bool> covered_columns(table.columns.size(), false);
+  bool covered_rowid = false;
+  for (const CatalogIndexTerm& term : index.terms) {
+    if (const auto* column = std::get_if<ColumnId>(&term.target);
+        column != nullptr && column->value < covered_columns.size()) {
+      covered_columns[column->value] = true;
+    } else if (std::holds_alternative<RowIdIndexTerm>(term.target)) {
+      covered_rowid = true;
+    }
+  }
+  if (table.rowid_alias.has_value() && covered_rowid) {
+    covered_columns[table.rowid_alias->value] = true;
+  }
+  for (std::size_t column = 0; column < required_columns.size(); ++column) {
+    if (required_columns[column] && !covered_columns[column]) {
+      return false;
+    }
+  }
+  return !required_rowid || covered_rowid;
+}
+
+[[nodiscard]] bool IsNullLiteral(const BoundSelect& bound_select, BoundExpressionId id) noexcept {
+  id = TransparentPredicateId(bound_select, id);
+  if (!IsValidExpressionId(bound_select, id)) {
+    return false;
+  }
+  const auto* literal = std::get_if<BoundLiteralExpression>(&bound_select.expression(id).payload);
+  return literal != nullptr && literal->value.type() == SqlValueType::kNull;
+}
+
+[[nodiscard]] std::uint64_t DefaultPrefixRows(std::size_t equality_count) noexcept {
+  constexpr std::array<std::uint64_t, 6> kDefaults{10, 9, 8, 7, 6, 5};
+  return kDefaults[std::min(equality_count, kDefaults.size()) - 1U];
+}
+
+[[nodiscard]] std::uint64_t IndexCardinality(const CatalogIndex& index,
+                                             std::uint64_t table_rows) noexcept {
+  if (index.statistics.has_stat1 && !index.statistics.rows_per_prefix.empty()) {
+    return index.statistics.rows_per_prefix.front();
+  }
+  return table_rows;
+}
+
+[[nodiscard]] std::uint64_t EstimateIndexOutput(const BoundSelect& bound_select,
+                                                const CatalogIndex& index,
+                                                const PhysicalIndexScanNode& node,
+                                                std::uint64_t index_rows) noexcept {
+  std::uint64_t estimate = index_rows;
+  for (std::size_t equality = 0; equality < node.equalities.size(); ++equality) {
+    const std::size_t prefix = equality + 1U;
+    const std::uint64_t incoming = estimate;
+    const bool supplied =
+        index.statistics.has_stat1 && prefix < index.statistics.rows_per_prefix.size();
+    estimate = supplied ? index.statistics.rows_per_prefix[prefix]
+                        : std::min(DefaultPrefixRows(prefix), estimate);
+    if (!supplied && !node.equalities[equality].reject_null &&
+        IsNullLiteral(bound_select, node.equalities[equality].key)) {
+      estimate = std::min(SaturatingMultiply(estimate, 2), incoming);
+    }
+  }
+
+  if (node.equalities.size() == index.key_term_count && index.unique) {
+    const bool only_ordinary_equalities = std::ranges::all_of(
+        node.equalities,
+        [](const PhysicalIndexEquality& equality) { return equality.reject_null; });
+    if (only_ordinary_equalities || index.unique_not_null) {
+      estimate = std::min<std::uint64_t>(index_rows, 1);
+    }
+  }
+
+  if (node.range.has_value()) {
+    const std::uint64_t divisor =
+        node.range->lower.has_value() && node.range->upper.has_value() ? 64U : 4U;
+    if (estimate != 0U) {
+      estimate = std::max<std::uint64_t>(estimate / divisor, 1U);
+    }
+  }
+  return estimate;
+}
+
+[[nodiscard]] AccessPathCost ScanCost(std::uint64_t rows, std::uint64_t row_size) noexcept {
   return AccessPathCost{
       .estimated_input_rows = rows,
       .estimated_output_rows = rows,
-      .work_units = std::max<std::uint64_t>(rows, 1U),
+      .work_units = SaturatingMultiply(rows, row_size),
   };
 }
 
@@ -534,6 +971,178 @@ template <typename Bound>
   };
 }
 
+[[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
+    const BoundSelect& bound_select, TableId table_id, IndexId index_id,
+    std::span<const ReadPredicateTerm> predicates) {
+  const CatalogSnapshot& catalog = *bound_select.catalog();
+  const CatalogTable& table = catalog.table(table_id);
+  const CatalogIndex& index = catalog.index(index_id);
+  if (!IsSupportedIndexShape(bound_select, table, index)) {
+    return std::nullopt;
+  }
+
+  IndexCandidatePlan candidate{
+      .node =
+          PhysicalIndexScanNode{
+              .table = table_id,
+              .table_root_page = table.root_page,
+              .index = index_id,
+              .index_root_page = index.root_page,
+              .equalities = {},
+              .range = std::nullopt,
+              .covering = false,
+          },
+      .selected_terms = std::vector<bool>(predicates.size(), false),
+  };
+  candidate.node.equalities.reserve(index.key_term_count);
+  std::size_t equality_count = 0;
+  for (; equality_count < index.key_term_count; ++equality_count) {
+    const CatalogIndexTerm& term = index.terms[equality_count];
+    std::optional<std::size_t> selected;
+    std::optional<IndexConstraintMatch> selected_match;
+    for (std::size_t predicate_index = 0; predicate_index < predicates.size(); ++predicate_index) {
+      if (candidate.selected_terms[predicate_index]) {
+        continue;
+      }
+      const std::optional<IndexConstraintMatch> match =
+          MatchIndexConstraint(bound_select, table_id, term, predicates[predicate_index]);
+      if (match.has_value() && match->kind == IndexConstraintKind::kEquality) {
+        selected = predicate_index;
+        selected_match = match;
+        break;
+      }
+    }
+    if (!selected.has_value() || !selected_match.has_value()) {
+      break;
+    }
+    const auto* column = std::get_if<ColumnId>(&term.target);
+    if (column == nullptr || column->value >= table.columns.size()) {
+      return std::nullopt;
+    }
+    candidate.selected_terms[*selected] = true;
+    candidate.node.equalities.push_back(PhysicalIndexEquality{
+        .column = *column,
+        .key = selected_match->key,
+        .predicate = selected_match->predicate,
+        .conjunct_position = selected_match->conjunct_position,
+        .affinity = table.columns[column->value].affinity,
+        .collation_name = term.collation_name,
+        .order = term.order,
+        .reject_null = selected_match->reject_null,
+    });
+  }
+
+  if (equality_count < index.key_term_count && !index.statistics.unordered) {
+    const CatalogIndexTerm& term = index.terms[equality_count];
+    std::optional<std::size_t> lower_index;
+    std::optional<std::size_t> upper_index;
+    std::optional<IndexConstraintMatch> lower;
+    std::optional<IndexConstraintMatch> upper;
+    for (std::size_t predicate_index = 0; predicate_index < predicates.size(); ++predicate_index) {
+      if (candidate.selected_terms[predicate_index]) {
+        continue;
+      }
+      const std::optional<IndexConstraintMatch> match =
+          MatchIndexConstraint(bound_select, table_id, term, predicates[predicate_index]);
+      if (!match.has_value()) {
+        continue;
+      }
+      if (match->kind == IndexConstraintKind::kLower && !lower.has_value()) {
+        lower_index = predicate_index;
+        lower = match;
+      } else if (match->kind == IndexConstraintKind::kUpper && !upper.has_value()) {
+        upper_index = predicate_index;
+        upper = match;
+      }
+      if (lower.has_value() && upper.has_value()) {
+        break;
+      }
+    }
+    if (lower.has_value() || upper.has_value()) {
+      const auto* column = std::get_if<ColumnId>(&term.target);
+      if (column == nullptr || column->value >= table.columns.size() ||
+          (lower.has_value() && !lower_index.has_value()) ||
+          (upper.has_value() && !upper_index.has_value())) {
+        return std::nullopt;
+      }
+      PhysicalIndexRange range{
+          .column = *column,
+          .affinity = table.columns[column->value].affinity,
+          .collation_name = term.collation_name,
+          .order = term.order,
+      };
+      if (lower.has_value()) {
+        candidate.selected_terms[*lower_index] = true;
+        range.lower = PhysicalIndexBound{
+            .key = lower->key,
+            .predicate = lower->predicate,
+            .conjunct_position = lower->conjunct_position,
+            .inclusive = lower->inclusive,
+        };
+      }
+      if (upper.has_value()) {
+        candidate.selected_terms[*upper_index] = true;
+        range.upper = PhysicalIndexBound{
+            .key = upper->key,
+            .predicate = upper->predicate,
+            .conjunct_position = upper->conjunct_position,
+            .inclusive = upper->inclusive,
+        };
+      }
+      candidate.node.range = range;
+    }
+  }
+
+  const bool constrained = !candidate.node.equalities.empty() || candidate.node.range.has_value();
+  if (!constrained && index.statistics.unordered) {
+    return std::nullopt;
+  }
+  candidate.node.covering =
+      IsCoveringIndex(bound_select, table, index, predicates, candidate.selected_terms);
+  if (!candidate.node.covering) {
+    return std::nullopt;
+  }
+  return candidate;
+}
+
+[[nodiscard]] AccessPathCandidate PublishIndexCandidate(const BoundSelect& bound_select,
+                                                        const SourceInfo& source,
+                                                        const IndexCandidatePlan& plan) noexcept {
+  const CatalogSnapshot& catalog = *bound_select.catalog();
+  const CatalogIndex& index = catalog.index(plan.node.index);
+  const std::uint64_t index_rows = IndexCardinality(index, source.estimated_rows);
+  const std::uint64_t row_size =
+      index.statistics.average_row_size.value_or(DerivedIndexRowSize(catalog, index));
+  const std::uint64_t output_rows = EstimateIndexOutput(bound_select, index, plan.node, index_rows);
+  const bool constrained = !plan.node.equalities.empty() || plan.node.range.has_value();
+  const std::uint64_t seek_work =
+      constrained
+          ? static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(index_rows, 1U)))
+          : 0U;
+  const std::uint64_t scan_work = SaturatingMultiply(output_rows, row_size);
+  return AccessPathCandidate{
+      .kind = PhysicalAccessKind::kIndexScan,
+      .cost =
+          AccessPathCost{
+              .estimated_input_rows = index_rows,
+              .estimated_output_rows = output_rows,
+              .work_units = SaturatingAdd(seek_work, scan_work),
+          },
+      .index = plan.node.index,
+      .covering = plan.node.covering,
+      .equality_term_count = static_cast<std::uint32_t>(plan.node.equalities.size()),
+      .range_bound_count = static_cast<std::uint32_t>(
+          plan.node.range.has_value()
+              ? static_cast<std::size_t>(plan.node.range->lower.has_value()) +
+                    static_cast<std::size_t>(plan.node.range->upper.has_value())
+              : 0U),
+  };
+}
+
+[[nodiscard]] bool CandidateCoversRows(const AccessPathCandidate& candidate) noexcept {
+  return candidate.kind != PhysicalAccessKind::kIndexScan || candidate.covering;
+}
+
 [[nodiscard]] bool PreferCandidate(const AccessPathCandidate& candidate,
                                    const AccessPathCandidate& selected) noexcept {
   if (candidate.cost.work_units != selected.cost.work_units) {
@@ -541,6 +1150,16 @@ template <typename Bound>
   }
   if (candidate.cost.estimated_output_rows != selected.cost.estimated_output_rows) {
     return candidate.cost.estimated_output_rows < selected.cost.estimated_output_rows;
+  }
+  if (CandidateCoversRows(candidate) != CandidateCoversRows(selected)) {
+    return CandidateCoversRows(candidate);
+  }
+  const std::uint32_t candidate_prefix =
+      candidate.equality_term_count + static_cast<std::uint32_t>(candidate.range_bound_count > 0U);
+  const std::uint32_t selected_prefix =
+      selected.equality_term_count + static_cast<std::uint32_t>(selected.range_bound_count > 0U);
+  if (candidate_prefix != selected_prefix) {
+    return candidate_prefix > selected_prefix;
   }
   return candidate.kind == PhysicalAccessKind::kRowIdLookup &&
          selected.kind != PhysicalAccessKind::kRowIdLookup;
@@ -556,6 +1175,8 @@ template <typename Bound>
       return PhysicalAccessKind::kTableScan;
     case PhysicalNodeKind::kRowIdLookup:
       return PhysicalAccessKind::kRowIdLookup;
+    case PhysicalNodeKind::kIndexScan:
+      return PhysicalAccessKind::kIndexScan;
     case PhysicalNodeKind::kGuard:
     case PhysicalNodeKind::kFilter:
     case PhysicalNodeKind::kLimit:
@@ -566,7 +1187,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidateCandidates(
-    const SourceInfo& source, const PhysicalNode& leaf,
+    const BoundSelect& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
   const auto matches = [&](std::size_t index, PhysicalAccessKind kind, AccessPathCost cost) {
     return index < candidates.size() && candidates[index].kind == kind &&
@@ -592,18 +1213,71 @@ template <typename Bound>
     }
     return {};
   }
+  if (candidates.empty() || selected_candidate_index >= candidates.size() ||
+      !matches(0, PhysicalAccessKind::kTableScan,
+               ScanCost(source.estimated_rows, source.estimated_row_size))) {
+    return std::unexpected{InvariantFailure("table-scan access candidate is invalid")};
+  }
+
+  std::size_t candidate_index = 1;
+  if (candidate_index < candidates.size() &&
+      candidates[candidate_index].kind == PhysicalAccessKind::kRowIdLookup) {
+    if (!source.rowid_eligible ||
+        candidates[candidate_index].cost != RowIdCost(source.estimated_rows) ||
+        candidates[candidate_index].index.has_value()) {
+      return std::unexpected{InvariantFailure("rowid access candidates are invalid")};
+    }
+    ++candidate_index;
+  }
+  std::size_t table_index_position = 0;
+  const CatalogSnapshot* catalog = bound_select.catalog();
+  const std::span<const IndexId> table_indexes = source.table.has_value() && catalog != nullptr
+                                                     ? catalog->table_indexes(*source.table)
+                                                     : std::span<const IndexId>{};
+  for (; candidate_index < candidates.size(); ++candidate_index) {
+    const AccessPathCandidate& candidate = candidates[candidate_index];
+    if (candidate.kind != PhysicalAccessKind::kIndexScan || !candidate.index.has_value() ||
+        !candidate.covering) {
+      return std::unexpected{InvariantFailure("index access candidate is invalid")};
+    }
+    while (table_index_position < table_indexes.size() &&
+           table_indexes[table_index_position] != *candidate.index) {
+      ++table_index_position;
+    }
+    if (table_index_position >= table_indexes.size()) {
+      return std::unexpected{InvariantFailure("index access candidate order is invalid")};
+    }
+    ++table_index_position;
+  }
+
+  const AccessPathCandidate& selected = candidates[selected_candidate_index];
+  if (AccessKindOf(leaf) != selected.kind) {
+    return std::unexpected{InvariantFailure("selected access candidate does not match its leaf")};
+  }
   if (std::holds_alternative<PhysicalTableScanNode>(leaf.payload)) {
-    if (candidates.size() != 1U || selected_candidate_index != 0U ||
-        !matches(0, PhysicalAccessKind::kTableScan, ScanCost(source.estimated_rows))) {
-      return std::unexpected{InvariantFailure("table-scan access candidate is invalid")};
+    if (selected_candidate_index != 0U) {
+      return std::unexpected{InvariantFailure("selected table scan is not the first candidate")};
     }
     return {};
   }
   if (std::holds_alternative<PhysicalRowIdLookupNode>(leaf.payload)) {
-    if (candidates.size() != 2U || selected_candidate_index != 1U ||
-        !matches(0, PhysicalAccessKind::kTableScan, ScanCost(source.estimated_rows)) ||
-        !matches(1, PhysicalAccessKind::kRowIdLookup, RowIdCost(source.estimated_rows))) {
-      return std::unexpected{InvariantFailure("rowid access candidates are invalid")};
+    if (selected.kind != PhysicalAccessKind::kRowIdLookup ||
+        selected.cost != RowIdCost(source.estimated_rows)) {
+      return std::unexpected{InvariantFailure("selected rowid candidate is invalid")};
+    }
+    return {};
+  }
+  if (const auto* index = std::get_if<PhysicalIndexScanNode>(&leaf.payload); index != nullptr) {
+    if (selected.kind != PhysicalAccessKind::kIndexScan || selected.index != index->index ||
+        selected.covering != index->covering ||
+        selected.equality_term_count != index->equalities.size() ||
+        selected.range_bound_count !=
+            static_cast<std::uint32_t>(
+                index->range.has_value()
+                    ? static_cast<std::size_t>(index->range->lower.has_value()) +
+                          static_cast<std::size_t>(index->range->upper.has_value())
+                    : 0U)) {
+      return std::unexpected{InvariantFailure("selected index candidate is invalid")};
     }
     return {};
   }
@@ -616,8 +1290,31 @@ template <typename Bound>
     std::span<const BoundExpressionId> filter_predicates) {
   const bool empty_access = std::holds_alternative<PhysicalEmptyNode>(leaf.payload);
   const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf.payload);
+  const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
+  std::vector<std::pair<std::size_t, BoundExpressionId>> selected_index_predicates;
+  if (index_scan != nullptr) {
+    selected_index_predicates.reserve(
+        index_scan->equalities.size() +
+        static_cast<std::size_t>(index_scan->range.has_value() &&
+                                 index_scan->range->lower.has_value()) +
+        static_cast<std::size_t>(index_scan->range.has_value() &&
+                                 index_scan->range->upper.has_value()));
+    for (const PhysicalIndexEquality& equality : index_scan->equalities) {
+      selected_index_predicates.emplace_back(equality.conjunct_position, equality.predicate);
+    }
+    if (index_scan->range.has_value() && index_scan->range->lower.has_value()) {
+      selected_index_predicates.emplace_back(index_scan->range->lower->conjunct_position,
+                                             index_scan->range->lower->predicate);
+    }
+    if (index_scan->range.has_value() && index_scan->range->upper.has_value()) {
+      selected_index_predicates.emplace_back(index_scan->range->upper->conjunct_position,
+                                             index_scan->range->upper->predicate);
+    }
+    std::ranges::sort(selected_index_predicates, {}, [](const auto& entry) { return entry.first; });
+  }
   std::size_t guard_index = 0;
   std::size_t filter_index = 0;
+  std::size_t selected_index_predicate = 0;
   bool known_false = false;
   bool selected_rowid = false;
   bool invalid = false;
@@ -650,6 +1347,11 @@ template <typename Bound>
     if (empty_access) {
       return true;
     }
+    if (selected_index_predicate < selected_index_predicates.size() &&
+        selected_index_predicates[selected_index_predicate].second == predicate) {
+      ++selected_index_predicate;
+      return true;
+    }
     if (!selected_rowid) {
       const std::optional<BoundExpressionId> key = RowIdLookupKey(bound_select, source, predicate);
       if (key.has_value()) {
@@ -675,7 +1377,8 @@ template <typename Bound>
   }
   if (invalid || guard_index != guard_predicates.size() ||
       filter_index != filter_predicates.size() || empty_access != known_false ||
-      (lookup != nullptr) != selected_rowid) {
+      (lookup != nullptr) != selected_rowid ||
+      selected_index_predicate != selected_index_predicates.size()) {
     return std::unexpected{InvariantFailure("physical predicate classification is invalid")};
   }
   return {};
@@ -690,8 +1393,7 @@ template <typename Bound>
   if (nodes.size() < 2U || nodes.size() > 5U || root.value() != nodes.size() - 1U) {
     return std::unexpected{InvariantFailure("physical plan node arena is invalid")};
   }
-  if (candidates.empty() || candidates.size() > 2U ||
-      selected_candidate_index >= candidates.size() ||
+  if (candidates.empty() || selected_candidate_index >= candidates.size() ||
       AccessKindOf(nodes.front()) != candidates[selected_candidate_index].kind) {
     return std::unexpected{InvariantFailure("physical access candidates are invalid")};
   }
@@ -700,7 +1402,7 @@ template <typename Bound>
   const SourceInfo source = ResolveSource(logical_plan);
   const PhysicalNode& leaf = nodes.front();
   if (std::expected<void, OptimizerError> validated =
-          ValidateCandidates(source, leaf, candidates, selected_candidate_index);
+          ValidateCandidates(bound_select, source, leaf, candidates, selected_candidate_index);
       !validated.has_value()) {
     return validated;
   }
@@ -716,6 +1418,72 @@ template <typename Bound>
         !IsValidExpressionId(bound_select, lookup->key) ||
         ExpressionDependsOnSource(bound_select, lookup->key)) {
       return std::unexpected{InvariantFailure("physical rowid lookup is invalid")};
+    }
+  } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
+             index_scan != nullptr) {
+    if (source.source_kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
+        index_scan->table != source.table || index_scan->table_root_page != source.root_page ||
+        !index_scan->covering || bound_select.catalog() == nullptr ||
+        index_scan->index.value >= bound_select.catalog()->indexes().size()) {
+      return std::unexpected{InvariantFailure("physical index scan source is invalid")};
+    }
+    const CatalogTable& table = bound_select.catalog()->table(index_scan->table);
+    const CatalogIndex& index = bound_select.catalog()->index(index_scan->index);
+    if (index.table != index_scan->table || index.root_page != index_scan->index_root_page ||
+        !IsSupportedIndexShape(bound_select, table, index) ||
+        index_scan->equalities.size() > index.key_term_count) {
+      return std::unexpected{InvariantFailure("physical index scan metadata is invalid")};
+    }
+    for (std::size_t term_index = 0; term_index < index_scan->equalities.size(); ++term_index) {
+      const PhysicalIndexEquality& equality = index_scan->equalities[term_index];
+      const CatalogIndexTerm& term = index.terms[term_index];
+      const auto* column = std::get_if<ColumnId>(&term.target);
+      const std::optional<IndexConstraintMatch> match =
+          MatchIndexConstraint(bound_select, index_scan->table, term,
+                               ReadPredicateTerm{
+                                   .predicate = equality.predicate,
+                                   .conjunct_position = equality.conjunct_position,
+                               });
+      if (column == nullptr || equality.column != *column ||
+          equality.affinity != table.columns[column->value].affinity ||
+          !CatalogNamesEqual(equality.collation_name, term.collation_name) ||
+          equality.order != term.order || !match.has_value() ||
+          match->kind != IndexConstraintKind::kEquality || match->key != equality.key ||
+          match->reject_null != equality.reject_null) {
+        return std::unexpected{InvariantFailure("physical index equality is invalid")};
+      }
+    }
+    if (index_scan->range.has_value()) {
+      const std::size_t term_index = index_scan->equalities.size();
+      if (term_index >= index.key_term_count || index.statistics.unordered) {
+        return std::unexpected{InvariantFailure("physical index range position is invalid")};
+      }
+      const CatalogIndexTerm& term = index.terms[term_index];
+      const auto* column = std::get_if<ColumnId>(&term.target);
+      const PhysicalIndexRange& range = *index_scan->range;
+      if (column == nullptr || range.column != *column ||
+          range.affinity != table.columns[column->value].affinity ||
+          !CatalogNamesEqual(range.collation_name, term.collation_name) ||
+          range.order != term.order || (!range.lower.has_value() && !range.upper.has_value())) {
+        return std::unexpected{InvariantFailure("physical index range metadata is invalid")};
+      }
+      const auto validate_bound = [&](const PhysicalIndexBound& bound,
+                                      IndexConstraintKind expected) {
+        const std::optional<IndexConstraintMatch> match =
+            MatchIndexConstraint(bound_select, index_scan->table, term,
+                                 ReadPredicateTerm{
+                                     .predicate = bound.predicate,
+                                     .conjunct_position = bound.conjunct_position,
+                                 });
+        return match.has_value() && match->kind == expected && match->key == bound.key &&
+               match->inclusive == bound.inclusive;
+      };
+      if ((range.lower.has_value() && !validate_bound(*range.lower, IndexConstraintKind::kLower)) ||
+          (range.upper.has_value() && !validate_bound(*range.upper, IndexConstraintKind::kUpper))) {
+        return std::unexpected{InvariantFailure("physical index range bound is invalid")};
+      }
+    } else if (index_scan->equalities.empty() && index.statistics.unordered) {
+      return std::unexpected{InvariantFailure("unordered index cannot provide a full scan")};
     }
   } else if (std::holds_alternative<PhysicalSingleRowNode>(leaf.payload)) {
     if (!source.single_row) {
@@ -825,8 +1593,7 @@ struct PhysicalPlan::Impl {
 
   LogicalPlan logical_plan;
   std::vector<PhysicalNode> nodes;
-  std::array<AccessPathCandidate, 2> candidates{};
-  std::size_t candidate_count = 0;
+  std::vector<AccessPathCandidate> candidates;
   std::size_t selected_candidate = 0;
   PhysicalNodeId root{0};
 };
@@ -850,25 +1617,109 @@ class PhysicalPlanBuilder final {
     }
 
     const SourceInfo source = ResolveSource(logical_plan);
-    PredicateAnalysis predicates = AnalyzePredicate(logical_plan.bound_select(), source,
-                                                    logical_plan.bound_select().where_expression());
+    ReadPredicateAnalysis predicates = AnalyzeReadPredicate(
+        logical_plan.bound_select(), source, logical_plan.bound_select().where_expression());
+    std::vector<BoundExpressionId> residuals;
+    std::vector<ReadAccessCandidate> access_candidates;
+    if (!predicates.empty && !source.single_row) {
+      std::size_t index_count = 0;
+      if (source.source_kind == BoundSourceKind::kCatalogTable && source.table.has_value()) {
+        index_count = logical_plan.bound_select().catalog()->table_indexes(*source.table).size();
+      }
+      access_candidates.reserve(2U + index_count);
+      access_candidates.push_back(ReadAccessCandidate{
+          .published =
+              AccessPathCandidate{
+                  .kind = PhysicalAccessKind::kTableScan,
+                  .cost = ScanCost(source.estimated_rows, source.estimated_row_size),
+              },
+      });
+      for (std::size_t term_index = 0; term_index < predicates.terms.size(); ++term_index) {
+        const std::optional<BoundExpressionId> key = RowIdLookupKey(
+            logical_plan.bound_select(), source, predicates.terms[term_index].predicate);
+        if (key.has_value()) {
+          access_candidates.push_back(ReadAccessCandidate{
+              .published =
+                  AccessPathCandidate{
+                      .kind = PhysicalAccessKind::kRowIdLookup,
+                      .cost = RowIdCost(source.estimated_rows),
+                  },
+              .payload =
+                  RowIdCandidatePlan{
+                      .key = *key,
+                      .selected_term = term_index,
+                  },
+          });
+          break;
+        }
+      }
+      if (source.source_kind == BoundSourceKind::kCatalogTable && source.table.has_value() &&
+          source.rowid_eligible) {
+        const CatalogSnapshot& catalog = *logical_plan.bound_select().catalog();
+        for (const IndexId index_id : catalog.table_indexes(*source.table)) {
+          std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
+              logical_plan.bound_select(), *source.table, index_id, predicates.terms);
+          if (!candidate.has_value()) {
+            continue;
+          }
+          const AccessPathCandidate published =
+              PublishIndexCandidate(logical_plan.bound_select(), source, *candidate);
+          const bool constrained =
+              !candidate->node.equalities.empty() || candidate->node.range.has_value();
+          if (!constrained &&
+              published.cost.work_units >= access_candidates.front().published.cost.work_units) {
+            continue;
+          }
+          access_candidates.push_back(ReadAccessCandidate{
+              .published = published,
+              .payload = std::move(*candidate),
+          });
+        }
+      }
+    }
+
+    std::size_t selected_access = 0;
+    for (std::size_t index = 1; index < access_candidates.size(); ++index) {
+      if (PreferCandidate(access_candidates[index].published,
+                          access_candidates[selected_access].published)) {
+        selected_access = index;
+      }
+    }
+
+    std::vector<bool> selected_terms(predicates.terms.size(), false);
+    if (!access_candidates.empty()) {
+      if (const auto* rowid =
+              std::get_if<RowIdCandidatePlan>(&access_candidates[selected_access].payload);
+          rowid != nullptr) {
+        selected_terms[rowid->selected_term] = true;
+      } else if (const auto* index =
+                     std::get_if<IndexCandidatePlan>(&access_candidates[selected_access].payload);
+                 index != nullptr) {
+        selected_terms = index->selected_terms;
+      }
+    }
+    residuals.reserve(predicates.terms.size());
+    for (std::size_t index = 0; index < predicates.terms.size(); ++index) {
+      if (!selected_terms[index]) {
+        residuals.push_back(predicates.terms[index].predicate);
+      }
+    }
+
     const std::size_t node_count =
         2U + static_cast<std::size_t>(!predicates.guards.empty()) +
-        static_cast<std::size_t>(!predicates.residuals.empty()) +
+        static_cast<std::size_t>(!residuals.empty()) +
         static_cast<std::size_t>(logical_plan.bound_select().limit() != nullptr);
-
     auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
     impl->nodes.reserve(node_count);
 
     if (predicates.empty) {
-      impl->candidates[0] = AccessPathCandidate{
+      impl->candidates.push_back(AccessPathCandidate{
           .kind = PhysicalAccessKind::kEmpty,
           .cost = {},
-      };
-      impl->candidate_count = 1;
+      });
       impl->nodes.push_back(PhysicalNode{.payload = PhysicalEmptyNode{}});
     } else if (source.single_row) {
-      impl->candidates[0] = AccessPathCandidate{
+      impl->candidates.push_back(AccessPathCandidate{
           .kind = PhysicalAccessKind::kSingleRow,
           .cost =
               AccessPathCost{
@@ -876,40 +1727,29 @@ class PhysicalPlanBuilder final {
                   .estimated_output_rows = 1,
                   .work_units = 1,
               },
-      };
-      impl->candidate_count = 1;
+      });
       impl->nodes.push_back(PhysicalNode{.payload = PhysicalSingleRowNode{}});
     } else {
-      impl->candidates[0] = AccessPathCandidate{
-          .kind = PhysicalAccessKind::kTableScan,
-          .cost = ScanCost(source.estimated_rows),
-      };
-      impl->candidate_count = 1;
-      if (predicates.rowid_key.has_value()) {
-        impl->candidates[1] = AccessPathCandidate{
-            .kind = PhysicalAccessKind::kRowIdLookup,
-            .cost = RowIdCost(source.estimated_rows),
-        };
-        impl->candidate_count = 2;
-        if (PreferCandidate(impl->candidates[1], impl->candidates[0])) {
-          impl->selected_candidate = 1;
-        }
+      impl->candidates.reserve(access_candidates.size());
+      for (const ReadAccessCandidate& candidate : access_candidates) {
+        impl->candidates.push_back(candidate.published);
       }
-
-      if (impl->candidates[impl->selected_candidate].kind == PhysicalAccessKind::kRowIdLookup) {
-        if (!predicates.rowid_key.has_value()) {
-          return std::unexpected{InvariantFailure("selected rowid candidate has no key")};
-        }
-        const BoundExpressionId rowid_key = predicates.rowid_key.value();
+      impl->selected_candidate = selected_access;
+      ReadAccessCandidate& selected = access_candidates[selected_access];
+      if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload);
+          rowid != nullptr) {
         impl->nodes.push_back(PhysicalNode{
             .payload =
                 PhysicalRowIdLookupNode{
                     .source_kind = source.source_kind,
                     .table = source.table,
                     .root_page = source.root_page,
-                    .key = rowid_key,
+                    .key = rowid->key,
                 },
         });
+      } else if (auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
+                 index != nullptr) {
+        impl->nodes.push_back(PhysicalNode{.payload = std::move(index->node)});
       } else {
         impl->nodes.push_back(PhysicalNode{
             .payload =
@@ -933,12 +1773,12 @@ class PhysicalPlanBuilder final {
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
-    if (!predicates.residuals.empty()) {
+    if (!residuals.empty()) {
       impl->nodes.push_back(PhysicalNode{
           .payload =
               PhysicalFilterNode{
                   .input = input,
-                  .predicates = std::move(predicates.residuals),
+                  .predicates = std::move(residuals),
               },
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
@@ -963,15 +1803,14 @@ class PhysicalPlanBuilder final {
     });
     impl->root = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
 
-    const std::span<const AccessPathCandidate> candidates{impl->candidates.data(),
-                                                          impl->candidate_count};
+    const std::span<const AccessPathCandidate> candidates{impl->candidates};
     if (std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
             impl->logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork,
-                                 1U + impl->candidate_count);
+                                 1U + impl->candidates.size());
     return PhysicalPlan{std::move(impl)};
   }
 };
@@ -1056,6 +1895,8 @@ class PhysicalStatementPlanBuilder final {
         .table = target.table,
         .root_page = target.root_page,
         .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
+        .estimated_row_size =
+            table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
         .rowid_eligible = true,
     };
     PredicateAnalysis analysis = AnalyzePredicate(bound, source, predicate);
@@ -1129,6 +1970,8 @@ std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept {
       return "table_scan";
     case PhysicalAccessKind::kRowIdLookup:
       return "rowid_lookup";
+    case PhysicalAccessKind::kIndexScan:
+      return "index_scan";
   }
   return "unknown";
 }
@@ -1169,6 +2012,8 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "table_scan";
     case PhysicalNodeKind::kRowIdLookup:
       return "rowid_lookup";
+    case PhysicalNodeKind::kIndexScan:
+      return "index_scan";
     case PhysicalNodeKind::kGuard:
       return "guard";
     case PhysicalNodeKind::kFilter:
@@ -1225,8 +2070,7 @@ const PhysicalNode& PhysicalPlan::node(PhysicalNodeId id) const noexcept {
 PhysicalNodeId PhysicalPlan::root() const noexcept { return impl_->root; }
 
 std::span<const AccessPathCandidate> PhysicalPlan::candidates() const noexcept {
-  return impl_ != nullptr ? std::span<const AccessPathCandidate>{impl_->candidates.data(),
-                                                                 impl_->candidate_count}
+  return impl_ != nullptr ? std::span<const AccessPathCandidate>{impl_->candidates}
                           : std::span<const AccessPathCandidate>{};
 }
 
@@ -1282,6 +2126,44 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
   if (const auto* scan = std::get_if<PhysicalTableScanNode>(&access.payload); scan != nullptr) {
     explain = "SCAN ";
     AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &explain);
+    return explain;
+  }
+  if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&access.payload);
+      index_scan != nullptr) {
+    const BoundSelect& bound_select = plan.logical_plan().bound_select();
+    const CatalogSnapshot& catalog = *bound_select.catalog();
+    const CatalogTable& table = catalog.table(index_scan->table);
+    const CatalogIndex& index = catalog.index(index_scan->index);
+    const bool constrained = !index_scan->equalities.empty() || index_scan->range.has_value();
+    explain = constrained ? "SEARCH " : "SCAN ";
+    AppendExplainIdentifier(table.name, &explain);
+    explain.append(index_scan->covering ? " USING COVERING INDEX " : " USING INDEX ");
+    AppendExplainIdentifier(index.name, &explain);
+    if (!constrained) {
+      return explain;
+    }
+    explain.append(" (");
+    bool first = true;
+    const auto append_constraint = [&](ColumnId column, std::string_view operation) {
+      if (!first) {
+        explain.append(" AND ");
+      }
+      first = false;
+      AppendExplainIdentifier(table.columns[column.value].name, &explain);
+      explain.append(operation);
+    };
+    for (const PhysicalIndexEquality& equality : index_scan->equalities) {
+      append_constraint(equality.column, equality.reject_null ? "=?" : " IS ?");
+    }
+    if (index_scan->range.has_value() && index_scan->range->lower.has_value()) {
+      append_constraint(index_scan->range->column,
+                        index_scan->range->lower->inclusive ? ">=?" : ">?");
+    }
+    if (index_scan->range.has_value() && index_scan->range->upper.has_value()) {
+      append_constraint(index_scan->range->column,
+                        index_scan->range->upper->inclusive ? "<=?" : "<?");
+    }
+    explain.push_back(')');
     return explain;
   }
 

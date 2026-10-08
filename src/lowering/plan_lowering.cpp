@@ -492,6 +492,7 @@ class PlanLowerer final {
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
     rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
+    index_scan_ = std::get_if<PhysicalIndexScanNode>(&leaf_->payload);
     for (std::size_t index = 1; index < nodes.size(); ++index) {
       const PhysicalNode& node = nodes[index];
       if (const auto* guard = std::get_if<PhysicalGuardNode>(&node.payload); guard != nullptr) {
@@ -527,7 +528,8 @@ class PlanLowerer final {
     if (!std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalTableScanNode>(leaf_->payload) &&
-        !std::holds_alternative<PhysicalRowIdLookupNode>(leaf_->payload)) {
+        !std::holds_alternative<PhysicalRowIdLookupNode>(leaf_->payload) &&
+        !std::holds_alternative<PhysicalIndexScanNode>(leaf_->payload)) {
       return std::unexpected(InternalFailure("physical plan has an invalid access node"));
     }
     return {};
@@ -629,7 +631,7 @@ class PlanLowerer final {
         comparison_register_ = *comparison_register;
       }
 
-      if (IsTableScan()) {
+      if (IsRowLoopAccess()) {
         if (!zero_register_.has_value()) {
           auto zero_register = AllocateRegisters(1);
           if (!zero_register.has_value()) {
@@ -650,6 +652,18 @@ class PlanLowerer final {
         }
         negative_limit_register_ = *negative_register;
       }
+    }
+
+    if (index_scan_ != nullptr &&
+        (!index_scan_->equalities.empty() || index_scan_->range.has_value())) {
+      const std::size_t key_count =
+          index_scan_->equalities.size() + static_cast<std::size_t>(index_scan_->range.has_value());
+      auto key = AllocateRegisters(key_count);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      index_key_first_ = *key;
+      index_key_capacity_ = static_cast<std::uint32_t>(key_count);
     }
 
     return FinishRegisterLayout();
@@ -820,6 +834,87 @@ class PlanLowerer final {
       return {};
     }
 
+    source_cursor_fields_.assign(bound_select_->source_columns().size(), std::nullopt);
+    source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
+    source_rowid_cursor_field_.reset();
+
+    if (index_scan_ != nullptr) {
+      const CatalogSnapshot& catalog = *bound_select_->catalog();
+      if (index_scan_->table.value >= catalog.tables().size() ||
+          index_scan_->index.value >= catalog.indexes().size()) {
+        return std::unexpected(InternalFailure("covering index access ID is out of range"));
+      }
+      const CatalogTable& table = catalog.table(index_scan_->table);
+      const CatalogIndex& index = catalog.index(index_scan_->index);
+      if (!index_scan_->covering || table.without_rowid || index.table != index_scan_->table ||
+          table.root_page != index_scan_->table_root_page ||
+          index.root_page != index_scan_->index_root_page || index.terms.empty() ||
+          index.terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(InternalFailure("covering index access metadata is invalid"));
+      }
+
+      ReadCursorDescriptor descriptor{
+          .root_page = RootPageNumber(index.root_page.value),
+          .storage = CursorStorageKind::kIndex,
+          .record_field_count = static_cast<std::uint32_t>(index.terms.size()),
+          .fields = {},
+          .index_columns = {},
+      };
+      descriptor.fields.reserve(index.terms.size());
+      descriptor.index_columns.reserve(index.terms.size());
+      std::vector<std::optional<std::uint32_t>> field_by_column(table.columns.size());
+      for (std::size_t term_index = 0; term_index < index.terms.size(); ++term_index) {
+        const CatalogIndexTerm& term = index.terms[term_index];
+        const auto field = static_cast<std::uint32_t>(term_index);
+        descriptor.fields.push_back(CursorFieldSource{
+            .kind = CursorFieldSourceKind::kRecordField,
+            .record_field = field,
+        });
+        auto collation = SymbolForName(term.collation_name);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+        descriptor.index_columns.push_back(IndexColumnMetadata{
+            .collation = *collation,
+            .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                          : BytecodeSortOrder::kAscending,
+        });
+        if (const auto* column = std::get_if<ColumnId>(&term.target);
+            column != nullptr && column->value < field_by_column.size() &&
+            !field_by_column[column->value].has_value()) {
+          field_by_column[column->value] = field;
+        } else if (std::holds_alternative<RowIdIndexTerm>(term.target)) {
+          source_rowid_cursor_field_ = CursorFieldId{field};
+        }
+      }
+      if (table.rowid_alias.has_value() && source_rowid_cursor_field_.has_value() &&
+          !field_by_column[table.rowid_alias->value].has_value()) {
+        field_by_column[table.rowid_alias->value] = source_rowid_cursor_field_->value();
+      }
+      for (std::size_t source_index = 0; source_index < bound_select_->source_columns().size();
+           ++source_index) {
+        const BoundSourceColumn& source_column = bound_select_->source_columns()[source_index];
+        if (!source_column.catalog_column.has_value() ||
+            source_column.catalog_column->value >= field_by_column.size()) {
+          return std::unexpected(InternalFailure("covering index source column is invalid"));
+        }
+        const std::optional<std::uint32_t> field =
+            field_by_column[source_column.catalog_column->value];
+        if (field.has_value()) {
+          source_cursor_fields_[source_index] = CursorFieldId{*field};
+          source_field_real_affinity_[source_index] = source_column.affinity == TypeAffinity::kReal;
+        }
+      }
+
+      auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
+                                         "unable to add the covering index cursor descriptor");
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      cursor_ = *cursor;
+      return {};
+    }
+
     BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
     std::optional<TableId> access_table;
     std::uint32_t root_page = 0;
@@ -842,8 +937,6 @@ class PlanLowerer final {
         .fields = {},
         .index_columns = {},
     };
-    source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
-
     if (source_kind == BoundSourceKind::kSchemaTable) {
       constexpr std::uint32_t kSchemaFieldCount = 5;
       if (bound_select_->source_columns().size() != kSchemaFieldCount) {
@@ -856,6 +949,7 @@ class PlanLowerer final {
             .kind = CursorFieldSourceKind::kRecordField,
             .record_field = index,
         });
+        source_cursor_fields_[index] = CursorFieldId{index};
       }
     } else {
       if (!access_table.has_value()) {
@@ -891,6 +985,8 @@ class PlanLowerer final {
             descriptor.fields.push_back(*field);
             source_field_real_affinity_[index] = source_column.affinity == TypeAffinity::kReal;
           }
+          source_cursor_fields_[index] =
+              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
         }
       } else {
         descriptor.storage = CursorStorageKind::kIndex;
@@ -945,6 +1041,8 @@ class PlanLowerer final {
             return std::unexpected(std::move(field.error()));
           }
           descriptor.fields.push_back(*field);
+          source_cursor_fields_[index] =
+              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
           source_field_real_affinity_[index] = source_column.affinity == TypeAffinity::kReal;
         }
       }
@@ -1437,12 +1535,14 @@ class PlanLowerer final {
             .output = destination,
         });
       }
-      if (!cursor_.has_value() || column->column.value() >= source_field_real_affinity_.size()) {
+      if (!cursor_.has_value() || column->column.value() >= source_field_real_affinity_.size() ||
+          column->column.value() >= source_cursor_fields_.size() ||
+          !source_cursor_fields_[column->column.value()].has_value()) {
         return std::unexpected(InternalFailure("bound column has no cursor field"));
       }
       if (auto read = Append(ReadFieldInstruction{
               .cursor = AssumeValue(cursor_),
-              .field = CursorFieldId{column->column.value()},
+              .field = AssumeValue(source_cursor_fields_[column->column.value()]),
               .output = destination,
           });
           !read.has_value()) {
@@ -1465,6 +1565,13 @@ class PlanLowerer final {
       }
       if (!cursor_.has_value()) {
         return std::unexpected(InternalFailure("rowid expression has no cursor"));
+      }
+      if (source_rowid_cursor_field_.has_value()) {
+        return Append(ReadFieldInstruction{
+            .cursor = AssumeValue(cursor_),
+            .field = *source_rowid_cursor_field_,
+            .output = destination,
+        });
       }
       return Append(ReadRowIdInstruction{
           .cursor = AssumeValue(cursor_),
@@ -1857,6 +1964,292 @@ class PlanLowerer final {
       return bound;
     }
     return Append(HaltInstruction{});
+  }
+
+  struct OrderedIndexKey {
+    std::size_t conjunct_position = 0;
+    BoundExpressionId expression{0};
+    bool reject_null = true;
+  };
+
+  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(const PhysicalIndexScanNode& index,
+                                                             std::optional<Label> null_target) {
+    std::vector<OrderedIndexKey> keys;
+    keys.reserve(
+        index.equalities.size() +
+        static_cast<std::size_t>(index.range.has_value() && index.range->lower.has_value()) +
+        static_cast<std::size_t>(index.range.has_value() && index.range->upper.has_value()));
+    for (const PhysicalIndexEquality& equality : index.equalities) {
+      keys.push_back(OrderedIndexKey{
+          .conjunct_position = equality.conjunct_position,
+          .expression = equality.key,
+          .reject_null = equality.reject_null,
+      });
+    }
+    if (index.range.has_value() && index.range->lower.has_value()) {
+      keys.push_back(OrderedIndexKey{
+          .conjunct_position = index.range->lower->conjunct_position,
+          .expression = index.range->lower->key,
+          .reject_null = true,
+      });
+    }
+    if (index.range.has_value() && index.range->upper.has_value()) {
+      keys.push_back(OrderedIndexKey{
+          .conjunct_position = index.range->upper->conjunct_position,
+          .expression = index.range->upper->key,
+          .reject_null = true,
+      });
+    }
+    std::ranges::sort(keys, {}, &OrderedIndexKey::conjunct_position);
+    for (const OrderedIndexKey& key : keys) {
+      const RegisterId home = Home(key.expression);
+      if (auto emitted = EmitExpression(key.expression, home); !emitted.has_value()) {
+        return emitted;
+      }
+      if (key.reject_null) {
+        if (!null_target.has_value()) {
+          return std::unexpected(
+              InternalFailure("NULL-rejecting covering index key has no completion label"));
+        }
+        if (auto jumped = EmitJumpIf(home, JumpCondition::kIfNull, *null_target);
+            !jumped.has_value()) {
+          return jumped;
+        }
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
+      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound) {
+    const std::size_t count =
+        index.equalities.size() + static_cast<std::size_t>(range_bound != nullptr);
+    if (!index_key_first_.has_value() || count == 0U || count > index_key_capacity_) {
+      return std::unexpected(InternalFailure("covering index key register block is invalid"));
+    }
+    std::size_t offset = 0;
+    const auto copy_term = [&](BoundExpressionId expression,
+                               TypeAffinity affinity) -> LoweringResult<void> {
+      const RegisterId destination{AssumeValue(index_key_first_).value() +
+                                   static_cast<std::uint32_t>(offset++)};
+      if (auto copied = Append(CopyInstruction{
+              .input = Home(expression),
+              .output = destination,
+          });
+          !copied.has_value()) {
+        return copied;
+      }
+      return Append(ApplyAffinityInstruction{
+          .input = destination,
+          .affinity = affinity,
+          .output = destination,
+      });
+    };
+    for (const PhysicalIndexEquality& equality : index.equalities) {
+      if (auto copied = copy_term(equality.key, equality.affinity); !copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+    }
+    if (range_bound != nullptr) {
+      if (!index.range.has_value()) {
+        return std::unexpected(InternalFailure("covering index range bound has no range metadata"));
+      }
+      if (auto copied = copy_term(range_bound->key, index.range->affinity); !copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+    }
+    return static_cast<std::uint32_t>(count);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitIndexScan(const PhysicalIndexScanNode& index) {
+    if (!cursor_.has_value()) {
+      return std::unexpected(InternalFailure("covering index scan has no cursor"));
+    }
+    const PhysicalIndexBound* physical_start = nullptr;
+    const PhysicalIndexBound* physical_end = nullptr;
+    if (index.range.has_value()) {
+      if (index.range->order == SortOrder::kDescending) {
+        physical_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
+        physical_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
+      } else {
+        physical_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
+        physical_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
+      }
+    }
+    const bool has_start_key = !index.equalities.empty() || physical_start != nullptr;
+    const bool has_end_key = !index.equalities.empty() || physical_end != nullptr;
+    const bool rejects_null = std::ranges::any_of(index.equalities,
+                                                  [](const PhysicalIndexEquality& equality) {
+                                                    return equality.reject_null;
+                                                  }) ||
+                              index.range.has_value();
+
+    std::optional<Label> closed_completion;
+    if (NeedsPreopenCompletion() || rejects_null) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      closed_completion = *label;
+    }
+    if (auto limit = EmitLimitInitialization(closed_completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
+      return guards;
+    }
+    if (!index.equalities.empty() || index.range.has_value()) {
+      if (auto keys = EmitIndexKeyExpressions(index, closed_completion); !keys.has_value()) {
+        return keys;
+      }
+    }
+
+    std::uint32_t start_key_count = 0;
+    if (has_start_key) {
+      auto key = EmitIndexKeyBlock(index, physical_start);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      start_key_count = *key;
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+
+    auto unpositioned_completion = CreateLabel();
+    auto row_loop = CreateLabel();
+    auto advance = CreateLabel();
+    if (!unpositioned_completion.has_value()) {
+      return std::unexpected(std::move(unpositioned_completion.error()));
+    }
+    if (!row_loop.has_value()) {
+      return std::unexpected(std::move(row_loop.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (has_start_key) {
+      const IndexSeekMode mode = physical_start == nullptr || physical_start->inclusive
+                                     ? IndexSeekMode::kGreaterOrEqual
+                                     : IndexSeekMode::kGreater;
+      auto sought = ConvertProgramResult(
+          AssumeValue(builder_).EmitSeekIndex(AssumeValue(cursor_), AssumeValue(index_key_first_),
+                                              start_key_count, *unpositioned_completion, mode),
+          "unable to emit covering index seek");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
+    } else {
+      auto rewound = ConvertProgramResult(
+          AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *unpositioned_completion),
+          "unable to emit covering index rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+
+    std::uint32_t end_key_count = 0;
+    if (has_end_key) {
+      auto key = EmitIndexKeyBlock(index, physical_end);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      end_key_count = *key;
+    }
+
+    std::optional<Label> positioned_completion;
+    if (has_end_key || limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_completion = *label;
+    }
+    if (auto bound = BindLabel(*row_loop); !bound.has_value()) {
+      return bound;
+    }
+    if (has_end_key) {
+      const IndexRangeEndMode mode = physical_end == nullptr || physical_end->inclusive
+                                         ? IndexRangeEndMode::kInclusive
+                                         : IndexRangeEndMode::kExclusive;
+      auto checked =
+          ConvertProgramResult(AssumeValue(builder_).EmitCheckIndexRange(
+                                   AssumeValue(cursor_), AssumeValue(index_key_first_),
+                                   end_key_count, AssumeValue(positioned_completion), mode),
+                               "unable to emit covering index end check");
+      if (!checked.has_value()) {
+        return std::unexpected(std::move(checked.error()));
+      }
+    }
+    if (auto filters = EmitFilters(*advance); !filters.has_value()) {
+      return filters;
+    }
+    if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+      return offset;
+    }
+    if (auto projection = EmitProjection(); !projection.has_value()) {
+      return projection;
+    }
+
+    if (limit_ != nullptr) {
+      if (!positioned_completion.has_value() || !negative_limit_register_.has_value() ||
+          !limit_register_.has_value() || !one_register_.has_value()) {
+        return std::unexpected(InternalFailure("covering index LIMIT has no loop registers"));
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+          !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto decremented = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(one_register_),
+              .output = AssumeValue(limit_register_),
+          });
+          !decremented.has_value()) {
+        return decremented;
+      }
+      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
+                                   *positioned_completion);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNext(AssumeValue(cursor_), *row_loop),
+                             "unable to emit covering index advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*unpositioned_completion); !bound.has_value()) {
+      return bound;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (positioned_completion.has_value()) {
+      if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+        return halted;
+      }
+    }
+    if (closed_completion.has_value()) {
+      if (auto bound = BindLabel(*closed_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+        return halted;
+      }
+    }
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> EmitTableScan() {
@@ -2933,13 +3326,18 @@ class PlanLowerer final {
         lookup != nullptr) {
       return EmitRowIdLookup(*lookup);
     }
+    if (const auto* index = std::get_if<PhysicalIndexScanNode>(&leaf_->payload); index != nullptr) {
+      return EmitIndexScan(*index);
+    }
     return std::unexpected(InternalFailure("physical access node is unsupported"));
   }
 
-  [[nodiscard]] bool IsTableScan() const noexcept { return table_scan_ != nullptr; }
+  [[nodiscard]] bool IsRowLoopAccess() const noexcept {
+    return table_scan_ != nullptr || index_scan_ != nullptr;
+  }
 
   [[nodiscard]] bool IsCursorAccess() const noexcept {
-    return table_scan_ != nullptr || rowid_lookup_ != nullptr;
+    return table_scan_ != nullptr || rowid_lookup_ != nullptr || index_scan_ != nullptr;
   }
 
   struct NamedSymbol {
@@ -2965,6 +3363,7 @@ class PlanLowerer final {
   const PhysicalNode* leaf_ = nullptr;
   const PhysicalTableScanNode* table_scan_ = nullptr;
   const PhysicalRowIdLookupNode* rowid_lookup_ = nullptr;
+  const PhysicalIndexScanNode* index_scan_ = nullptr;
   const PhysicalGuardNode* guard_ = nullptr;
   const PhysicalFilterNode* filter_ = nullptr;
   const PhysicalLimitNode* limit_ = nullptr;
@@ -2981,6 +3380,8 @@ class PlanLowerer final {
   std::optional<RegisterId> one_register_;
   std::optional<RegisterId> comparison_register_;
   std::optional<RegisterId> negative_limit_register_;
+  std::optional<RegisterId> index_key_first_;
+  std::uint32_t index_key_capacity_ = 0;
 
   std::optional<ProgramBuilder> builder_;
   std::vector<std::optional<ConstantId>> literal_constants_;
@@ -2992,6 +3393,8 @@ class PlanLowerer final {
   std::vector<NamedSymbol> symbol_names_;
   std::optional<SymbolId> binary_symbol_;
   std::optional<CursorId> cursor_;
+  std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
+  std::optional<CursorFieldId> source_rowid_cursor_field_;
   std::vector<bool> source_field_real_affinity_;
   std::vector<RegisterId> source_snapshot_registers_;
   std::optional<RegisterId> source_rowid_register_;

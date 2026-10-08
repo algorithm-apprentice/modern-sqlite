@@ -241,6 +241,30 @@ lookup, then catalog-order index candidates. Lowest work wins, followed by
 estimated output, covering over noncovering, longer constrained prefixes,
 rowid lookup, and stable candidate order.
 
+The ordered covering slice publishes and selects only index candidates that
+need one index cursor. The following noncovering slice admits candidates that
+also require a table lookup. This delivery boundary preserves the final cost
+and ordering rules while ensuring that every selected plan is executable in
+the PR that first publishes it.
+
+Stable explain output extends the existing escaped canonical-identifier
+format:
+
+```text
+SCAN "<table>" USING COVERING INDEX "<index>"
+SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>"=?)
+SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>" IS ?)
+SEARCH "<table>" USING COVERING INDEX "<index>" ("<column>"=? AND "<column>">=? AND "<column>"<?)
+```
+
+A full covering-index scan uses `SCAN`. Any constrained index access uses
+`SEARCH`. Equality terms appear in physical index order, followed by the
+logical lower and upper bounds on the range term. Explain preserves `IS`
+versus `=`, and preserves inclusive versus exclusive range operators.
+Descending physical order does not swap the logical operators shown to the
+user. Table, index, and column names use the existing byte-stable identifier
+escaping contract.
+
 ### 5. Add typed index-range bytecode without planner leakage
 
 The bytecode layer gains typed equivalents of the pinned seek/range protocol:

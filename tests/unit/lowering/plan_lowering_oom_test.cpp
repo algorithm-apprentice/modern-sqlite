@@ -56,13 +56,16 @@ bool inject_failure = false;
   return std::move(*parsed->tree);
 }
 
-[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog() {
+[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog(bool indexed = false) {
   using namespace modern_sqlite;
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
   input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  if (indexed) {
+    input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
+  }
   input.tables.push_back(CatalogTableInput{
       .definition = SchemaDefinitionId{0},
       .name = "Items",
@@ -81,6 +84,29 @@ bool inject_failure = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.indexes.push_back(CatalogIndexInput{
+        .definition = SchemaDefinitionId{1},
+        .name = "items_name",
+        .table = TableId{0},
+        .root_page = RootPageId{3},
+        .origin = IndexOrigin::kCreateIndex,
+        .key_term_count = 1,
+        .terms =
+            {
+                CatalogIndexTerm{
+                    .target = ColumnId{1},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+                CatalogIndexTerm{
+                    .target = RowIdIndexTerm{},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+            },
+    });
+  }
   CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
   if (!created.has_value()) {
     throw std::runtime_error{"failed to create lowering OOM catalog"};
@@ -123,6 +149,26 @@ bool inject_failure = false;
   OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
   if (!physical.has_value()) {
     throw std::runtime_error{"failed to optimize lowering OOM fixture"};
+  }
+  return std::move(*physical);
+}
+
+[[nodiscard]] modern_sqlite::PhysicalPlan PhysicalIndexFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindSelectResult bound =
+      BindSelectStatement(ParseTree("SELECT id, Name FROM Items WHERE Name=?1"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind covering index lowering OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan covering index lowering OOM fixture"};
+  }
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  if (!physical.has_value() ||
+      physical->selected_candidate().kind != PhysicalAccessKind::kIndexScan) {
+    throw std::runtime_error{"failed to optimize covering index lowering OOM fixture"};
   }
   return std::move(*physical);
 }
@@ -250,7 +296,9 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
+  const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
   const PhysicalPlan physical = PhysicalFixture(catalog);
+  const PhysicalPlan index = PhysicalIndexFixture(indexed_catalog);
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   const PhysicalMutationPlan update = UpdateFixture(catalog);
@@ -287,8 +335,9 @@ int main() try {
     return LowerPlan(plan).has_value();
   };
 
-  return verify_oom(physical) && verify_oom(mutation) && verify_oom(deletion) &&
-                 verify_oom(update) && verify_oom(stable_update) && verify_oom(create)
+  return verify_oom(physical) && verify_oom(index) && verify_oom(mutation) &&
+                 verify_oom(deletion) && verify_oom(update) && verify_oom(stable_update) &&
+                 verify_oom(create)
              ? 0
              : 1;
 } catch (...) {

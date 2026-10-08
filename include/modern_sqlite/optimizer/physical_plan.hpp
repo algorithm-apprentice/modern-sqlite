@@ -40,6 +40,7 @@ enum class PhysicalAccessKind : std::uint8_t {
   kEmpty,
   kTableScan,
   kRowIdLookup,
+  kIndexScan,
 };
 
 [[nodiscard]] std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept;
@@ -55,6 +56,10 @@ struct AccessPathCost {
 struct AccessPathCandidate {
   PhysicalAccessKind kind = PhysicalAccessKind::kSingleRow;
   AccessPathCost cost{};
+  std::optional<IndexId> index{};
+  bool covering = false;
+  std::uint32_t equality_term_count = 0;
+  std::uint32_t range_bound_count = 0;
 
   constexpr auto operator<=>(const AccessPathCandidate&) const noexcept = default;
 };
@@ -74,6 +79,43 @@ struct PhysicalRowIdLookupNode {
   std::optional<TableId> table{};
   RootPageId root_page{};
   BoundExpressionId key;
+};
+
+struct PhysicalIndexEquality {
+  ColumnId column{};
+  BoundExpressionId key{0};
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  TypeAffinity affinity = TypeAffinity::kNone;
+  std::string_view collation_name = "BINARY";
+  SortOrder order = SortOrder::kAscending;
+  bool reject_null = true;
+};
+
+struct PhysicalIndexBound {
+  BoundExpressionId key{0};
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  bool inclusive = false;
+};
+
+struct PhysicalIndexRange {
+  ColumnId column{};
+  TypeAffinity affinity = TypeAffinity::kNone;
+  std::string_view collation_name = "BINARY";
+  SortOrder order = SortOrder::kAscending;
+  std::optional<PhysicalIndexBound> lower{};
+  std::optional<PhysicalIndexBound> upper{};
+};
+
+struct PhysicalIndexScanNode {
+  TableId table{};
+  RootPageId table_root_page{};
+  IndexId index{};
+  RootPageId index_root_page{};
+  std::vector<PhysicalIndexEquality> equalities{};
+  std::optional<PhysicalIndexRange> range{};
+  bool covering = false;
 };
 
 struct PhysicalGuardNode {
@@ -99,8 +141,8 @@ struct PhysicalProjectionNode {
 
 using PhysicalNodePayload =
     std::variant<PhysicalSingleRowNode, PhysicalEmptyNode, PhysicalTableScanNode,
-                 PhysicalRowIdLookupNode, PhysicalGuardNode, PhysicalFilterNode, PhysicalLimitNode,
-                 PhysicalProjectionNode>;
+                 PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
+                 PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -111,6 +153,7 @@ enum class PhysicalNodeKind : std::uint8_t {
   kEmpty,
   kTableScan,
   kRowIdLookup,
+  kIndexScan,
   kGuard,
   kFilter,
   kLimit,

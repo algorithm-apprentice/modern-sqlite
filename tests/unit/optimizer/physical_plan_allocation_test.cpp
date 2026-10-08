@@ -61,13 +61,16 @@ bool fail_allocations = false;
   return std::move(*parsed->tree);
 }
 
-[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog() {
+[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog(bool indexed = false) {
   using namespace modern_sqlite;
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
   input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  if (indexed) {
+    input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
+  }
   input.tables.push_back(CatalogTableInput{
       .definition = SchemaDefinitionId{0},
       .name = "Items",
@@ -86,6 +89,29 @@ bool fail_allocations = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.indexes.push_back(CatalogIndexInput{
+        .definition = SchemaDefinitionId{1},
+        .name = "items_name",
+        .table = TableId{0},
+        .root_page = RootPageId{3},
+        .origin = IndexOrigin::kCreateIndex,
+        .key_term_count = 1,
+        .terms =
+            {
+                CatalogIndexTerm{
+                    .target = ColumnId{1},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+                CatalogIndexTerm{
+                    .target = RowIdIndexTerm{},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+            },
+    });
+  }
   CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
   if (!created.has_value()) {
     throw std::runtime_error{"failed to create optimizer allocation catalog"};
@@ -182,20 +208,26 @@ int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
 
-  if (OptimizeAllocationCount("SELECT Name FROM Items", catalog) != 2U) {
+  if (OptimizeAllocationCount("SELECT Name FROM Items", catalog) != 4U) {
     return 1;
   }
-  if (OptimizeAllocationCount("SELECT Name FROM Items WHERE Name=?", catalog) != 3U) {
+  if (OptimizeAllocationCount("SELECT Name FROM Items WHERE Name=?", catalog) != 9U) {
     return 1;
   }
   if (OptimizeAllocationCount("SELECT Name FROM Items WHERE stable_guard(?)=1", catalog,
-                              TestEnvironment()) != 3U) {
+                              TestEnvironment()) != 7U) {
     return 1;
   }
   constexpr std::string_view kMixedSql =
       "SELECT Name FROM Items "
       "WHERE stable_guard(?)=1 AND rowid=volatile_key() AND Name=?";
-  if (OptimizeAllocationCount(kMixedSql, catalog, TestEnvironment()) != 4U) {
+  if (OptimizeAllocationCount(kMixedSql, catalog, TestEnvironment()) != 9U) {
+    return 1;
+  }
+  const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
+  const std::size_t index_allocations =
+      OptimizeAllocationCount("SELECT id, Name FROM Items WHERE Name=?1", indexed_catalog);
+  if (index_allocations != 14U) {
     return 1;
   }
 

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,23 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
 [[nodiscard]] CatalogIndexTerm ColumnTerm(std::size_t column) {
   return CatalogIndexTerm{
       .target = ColumnId{column},
+      .collation_name = "BINARY",
+      .order = SortOrder::kAscending,
+  };
+}
+
+[[nodiscard]] CatalogIndexTerm ColumnTerm(std::size_t column, std::string collation,
+                                          SortOrder order = SortOrder::kAscending) {
+  return CatalogIndexTerm{
+      .target = ColumnId{column},
+      .collation_name = std::move(collation),
+      .order = order,
+  };
+}
+
+[[nodiscard]] CatalogIndexTerm RowIdTerm() {
+  return CatalogIndexTerm{
+      .target = RowIdIndexTerm{},
       .collation_name = "BINARY",
       .order = SortOrder::kAscending,
   };
@@ -148,6 +166,207 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr IndexedCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 29, .generation = 13},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items("
+                "id INTEGER PRIMARY KEY, "
+                "Category TEXT COLLATE NOCASE, "
+                "Score INT, "
+                "Flag INT, "
+                "Code TEXT NOT NULL, "
+                "Payload BLOB"
+                ")"));
+  input.definitions.push_back(
+      ParseTree("CREATE INDEX items_category_score ON Items(Category COLLATE NOCASE, Score DESC)"));
+  input.definitions.push_back(ParseTree("CREATE INDEX items_score_desc ON Items(Score DESC)"));
+  input.definitions.push_back(ParseTree("CREATE INDEX items_flag ON Items(Flag)"));
+  input.definitions.push_back(ParseTree("CREATE UNIQUE INDEX items_code_unique ON Items(Code)"));
+  SyntaxTree partial_definition =
+      ParseTree("CREATE INDEX items_partial ON Items(Category) WHERE Flag=1");
+  const auto& partial_statement = std::get<CreateIndexStatement>(partial_definition.statement());
+  if (!partial_statement.where.has_value()) {
+    throw std::runtime_error{"partial index test definition has no predicate"};
+  }
+  const ExpressionId partial_predicate = *partial_statement.where;
+  input.definitions.push_back(std::move(partial_definition));
+  SyntaxTree expression_definition =
+      ParseTree("CREATE INDEX items_expression ON Items(lower(Category))");
+  const auto& expression_statement =
+      std::get<CreateIndexStatement>(expression_definition.statement());
+  const ExpressionId expression_term = expression_statement.terms[0].expression;
+  input.definitions.push_back(std::move(expression_definition));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Category",
+                  .declared_type = "TEXT",
+                  .collation_name = "NOCASE",
+              },
+              CatalogColumnInput{
+                  .name = "Score",
+                  .declared_type = "INT",
+              },
+              CatalogColumnInput{
+                  .name = "Flag",
+                  .declared_type = "INT",
+              },
+              CatalogColumnInput{
+                  .name = "Code",
+                  .declared_type = "TEXT",
+                  .not_null_conflict = ConflictAction::kDefault,
+              },
+              CatalogColumnInput{
+                  .name = "Payload",
+                  .declared_type = "BLOB",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+      .statistics =
+          TableStatistics{
+              .has_stat1 = true,
+              .estimated_rows = 4096,
+              .average_row_size = 512,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "items_category_score",
+      .table = TableId{0},
+      .root_page = RootPageId{10},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 2,
+      .terms =
+          {
+              ColumnTerm(1, "NOCASE"),
+              ColumnTerm(2, "BINARY", SortOrder::kDescending),
+              RowIdTerm(),
+          },
+      .statistics =
+          IndexStatistics{
+              .has_stat1 = true,
+              .rows_per_prefix = {4096, 16, 1},
+              .average_row_size = 28,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{2},
+      .name = "items_score_desc",
+      .table = TableId{0},
+      .root_page = RootPageId{11},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(2, "BINARY", SortOrder::kDescending),
+              RowIdTerm(),
+          },
+      .statistics =
+          IndexStatistics{
+              .has_stat1 = true,
+              .rows_per_prefix = {4096},
+              .average_row_size = 8,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{3},
+      .name = "items_flag",
+      .table = TableId{0},
+      .root_page = RootPageId{12},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(3),
+              RowIdTerm(),
+          },
+      .statistics =
+          IndexStatistics{
+              .has_stat1 = true,
+              .rows_per_prefix = {4096, 4096},
+              .average_row_size = 8,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{4},
+      .name = "items_code_unique",
+      .table = TableId{0},
+      .root_page = RootPageId{13},
+      .origin = IndexOrigin::kCreateIndex,
+      .unique = true,
+      .conflict_action = ConflictAction::kDefault,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(4),
+              RowIdTerm(),
+          },
+      .statistics =
+          IndexStatistics{
+              .has_stat1 = true,
+              .rows_per_prefix = {4096},
+              .average_row_size = 24,
+              .unordered = true,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{5},
+      .name = "items_partial",
+      .table = TableId{0},
+      .root_page = RootPageId{14},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(1, "NOCASE"),
+              RowIdTerm(),
+          },
+      .partial_predicate =
+          SchemaExpression{
+              .definition = SchemaDefinitionId{5},
+              .expression = partial_predicate,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{6},
+      .name = "items_expression",
+      .table = TableId{0},
+      .root_page = RootPageId{15},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              CatalogIndexTerm{
+                  .target =
+                      SchemaExpression{
+                          .definition = SchemaDefinitionId{6},
+                          .expression = expression_term,
+                      },
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+              RowIdTerm(),
+          },
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] Result<SqlValue> ReturnOne(const ScalarFunctionContext&, std::span<const SqlValue>) {
   return SqlValue::Integer(1);
 }
@@ -167,6 +386,93 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
       &RTrimCollation(),
   };
   return BindEnvironment{registry, collations, 7};
+}
+
+class ReverseCollation final : public Collation {
+ public:
+  [[nodiscard]] std::string_view name() const noexcept override { return "REVERSE"; }
+
+  [[nodiscard]] std::weak_ordering Compare(Utf8View left, Utf8View right) const noexcept override {
+    const std::weak_ordering order = BinaryCollation().Compare(left, right);
+    if (order == std::weak_ordering::less) {
+      return std::weak_ordering::greater;
+    }
+    if (order == std::weak_ordering::greater) {
+      return std::weak_ordering::less;
+    }
+    return std::weak_ordering::equivalent;
+  }
+};
+
+[[nodiscard]] BindEnvironment CustomCollationEnvironment() {
+  static const ReverseCollation reverse;
+  static const std::array<const Collation*, 4> collations{
+      &BinaryCollation(),
+      &NoCaseCollation(),
+      &RTrimCollation(),
+      &reverse,
+  };
+  return BindEnvironment{CoreFunctionRegistry(), collations, 19};
+}
+
+[[nodiscard]] CatalogSnapshotPtr CustomCollationCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 31, .generation = 17},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Custom(id INTEGER PRIMARY KEY, Value TEXT COLLATE REVERSE)"));
+  input.definitions.push_back(
+      ParseTree("CREATE INDEX custom_value ON Custom(Value COLLATE REVERSE)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Custom",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "TEXT",
+                  .collation_name = "REVERSE",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+      .statistics =
+          TableStatistics{
+              .has_stat1 = true,
+              .estimated_rows = 100,
+              .average_row_size = 100,
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "custom_value",
+      .table = TableId{0},
+      .root_page = RootPageId{3},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(1, "REVERSE"),
+              RowIdTerm(),
+          },
+      .statistics =
+          IndexStatistics{
+              .has_stat1 = true,
+              .rows_per_prefix = {100, 1},
+              .average_row_size = 20,
+          },
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
 }
 
 [[nodiscard]] BoundSelect BindOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
@@ -226,6 +532,7 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("empty", PhysicalAccessKindName(PhysicalAccessKind::kEmpty));
   EXPECT_EQ("table_scan", PhysicalAccessKindName(PhysicalAccessKind::kTableScan));
   EXPECT_EQ("rowid_lookup", PhysicalAccessKindName(PhysicalAccessKind::kRowIdLookup));
+  EXPECT_EQ("index_scan", PhysicalAccessKindName(PhysicalAccessKind::kIndexScan));
   EXPECT_EQ("unknown",
             PhysicalAccessKindName(static_cast<PhysicalAccessKind>(255)));  // NOLINT
   EXPECT_EQ("empty", MutationAccessKindName(MutationAccessKind::kEmpty));
@@ -236,6 +543,7 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("unknown",
             MutationAtomicityName(static_cast<MutationAtomicity>(255)));  // NOLINT
 
+  EXPECT_EQ("index_scan", PhysicalNodeKindName(PhysicalNodeKind::kIndexScan));
   EXPECT_EQ("guard", PhysicalNodeKindName(PhysicalNodeKind::kGuard));
   EXPECT_EQ("projection", PhysicalNodeKindName(PhysicalNodeKind::kProjection));
   EXPECT_EQ("unknown",
@@ -426,7 +734,7 @@ TEST(PhysicalPlan, ChoosesFullScanWithExplicitCostAndResidualFilter) {
   EXPECT_EQ(0U, plan.selected_candidate_index());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.selected_candidate().kind);
   EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 100, .estimated_output_rows = 100, .work_units = 100}),
+                .estimated_input_rows = 100, .estimated_output_rows = 100, .work_units = 2400}),
             plan.selected_candidate().cost);
   EXPECT_EQ("SCAN \"Items\"", ExplainPhysicalPlan(plan));
 }
@@ -472,7 +780,7 @@ TEST(PhysicalPlan, RecognizesCompatibleRowIdSpellingsAndTieBreaksLookup) {
 
   const PhysicalPlan tiny = OptimizeOrThrow("SELECT id FROM Tiny WHERE rowid=?", catalog);
   ASSERT_EQ(2U, tiny.candidates().size());
-  EXPECT_EQ(1U, tiny.candidates()[0].cost.work_units);
+  EXPECT_EQ(8U, tiny.candidates()[0].cost.work_units);
   EXPECT_EQ(1U, tiny.candidates()[1].cost.work_units);
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, tiny.selected_candidate().kind);
 }
@@ -557,6 +865,210 @@ TEST(PhysicalPlan, OrdersGuardLookupResidualLimitAndProjection) {
   const auto& projection = std::get<PhysicalProjectionNode>(plan.nodes()[4].payload);
   EXPECT_EQ(PhysicalNodeId{3}, projection.input);
   EXPECT_EQ(plan.logical_plan().root(), projection.logical_projection);
+}
+
+TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT Category, Score FROM Items "
+      "WHERE Category=?1 AND Score>=?2 AND Score<?3",
+      catalog);
+
+  ASSERT_EQ(2U, plan.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
+  EXPECT_EQ((AccessPathCost{
+                .estimated_input_rows = 4096,
+                .estimated_output_rows = 4096,
+                .work_units = 2'097'152,
+            }),
+            plan.candidates()[0].cost);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.candidates()[1].kind);
+  EXPECT_EQ(IndexId{0}, plan.candidates()[1].index);
+  EXPECT_TRUE(plan.candidates()[1].covering);
+  EXPECT_EQ(1U, plan.candidates()[1].equality_term_count);
+  EXPECT_EQ(2U, plan.candidates()[1].range_bound_count);
+  EXPECT_EQ((AccessPathCost{
+                .estimated_input_rows = 4096,
+                .estimated_output_rows = 1,
+                .work_units = 41,
+            }),
+            plan.candidates()[1].cost);
+  EXPECT_EQ(1U, plan.selected_candidate_index());
+
+  const auto& index = std::get<PhysicalIndexScanNode>(plan.nodes()[0].payload);
+  EXPECT_EQ(TableId{0}, index.table);
+  EXPECT_EQ(RootPageId{2}, index.table_root_page);
+  EXPECT_EQ(IndexId{0}, index.index);
+  EXPECT_EQ(RootPageId{10}, index.index_root_page);
+  EXPECT_TRUE(index.covering);
+  ASSERT_EQ(1U, index.equalities.size());
+  EXPECT_EQ(ColumnId{1}, index.equalities[0].column);
+  EXPECT_TRUE(index.equalities[0].reject_null);
+  EXPECT_EQ(SortOrder::kAscending, index.equalities[0].order);
+  ASSERT_TRUE(index.range.has_value());
+  EXPECT_EQ(ColumnId{2}, index.range->column);
+  EXPECT_EQ(SortOrder::kDescending, index.range->order);
+  ASSERT_TRUE(index.range->lower.has_value());
+  EXPECT_TRUE(index.range->lower->inclusive);
+  ASSERT_TRUE(index.range->upper.has_value());
+  EXPECT_FALSE(index.range->upper->inclusive);
+  EXPECT_FALSE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalFilterNode>(node.payload);
+  }));
+  EXPECT_EQ(
+      "SEARCH \"Items\" USING COVERING INDEX \"items_category_score\" "
+      "(\"Category\"=? AND \"Score\">=? AND \"Score\"<?)",
+      ExplainPhysicalPlan(plan));
+
+  const PhysicalPlan reversed =
+      OptimizeOrThrow("SELECT id, Score FROM Items WHERE ?1<Score AND ?2>=Score", catalog);
+  const auto& reversed_index = std::get<PhysicalIndexScanNode>(reversed.nodes()[0].payload);
+  ASSERT_TRUE(reversed_index.range.has_value());
+  ASSERT_TRUE(reversed_index.range->lower.has_value());
+  EXPECT_FALSE(reversed_index.range->lower->inclusive);
+  ASSERT_TRUE(reversed_index.range->upper.has_value());
+  EXPECT_TRUE(reversed_index.range->upper->inclusive);
+  EXPECT_EQ(
+      "SEARCH \"Items\" USING COVERING INDEX \"items_score_desc\" "
+      "(\"Score\">? AND \"Score\"<=?)",
+      ExplainPhysicalPlan(reversed));
+}
+
+TEST(PhysicalPlan, CostsFullUniqueAndUnselectiveCoveringIndexes) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+
+  const PhysicalPlan full = OptimizeOrThrow("SELECT Category, Score FROM Items", catalog);
+  ASSERT_EQ(2U, full.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, full.selected_candidate().kind);
+  EXPECT_EQ(IndexId{0}, full.selected_candidate().index);
+  EXPECT_EQ((AccessPathCost{
+                .estimated_input_rows = 4096,
+                .estimated_output_rows = 4096,
+                .work_units = 114'688,
+            }),
+            full.selected_candidate().cost);
+  EXPECT_EQ("SCAN \"Items\" USING COVERING INDEX \"items_category_score\"",
+            ExplainPhysicalPlan(full));
+
+  const PhysicalPlan unique = OptimizeOrThrow("SELECT Code FROM Items WHERE Code IS ?1", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, unique.selected_candidate().kind);
+  EXPECT_EQ(IndexId{3}, unique.selected_candidate().index);
+  EXPECT_EQ(1U, unique.selected_candidate().cost.estimated_output_rows);
+  EXPECT_EQ(37U, unique.selected_candidate().cost.work_units);
+  const auto& unique_node = std::get<PhysicalIndexScanNode>(unique.nodes()[0].payload);
+  ASSERT_EQ(1U, unique_node.equalities.size());
+  EXPECT_FALSE(unique_node.equalities[0].reject_null);
+  EXPECT_EQ("SEARCH \"Items\" USING COVERING INDEX \"items_code_unique\" (\"Code\" IS ?)",
+            ExplainPhysicalPlan(unique));
+
+  const PhysicalPlan unordered_full = OptimizeOrThrow("SELECT Code FROM Items", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, unordered_full.selected_candidate().kind);
+
+  const PhysicalPlan unselective = OptimizeOrThrow("SELECT id FROM Items WHERE Flag=?1", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, unselective.selected_candidate().kind);
+  EXPECT_EQ(IndexId{2}, unselective.selected_candidate().index);
+  EXPECT_EQ(4096U, unselective.selected_candidate().cost.estimated_output_rows);
+  EXPECT_EQ(32'781U, unselective.selected_candidate().cost.work_units);
+
+  const PhysicalPlan noncovering =
+      OptimizeOrThrow("SELECT Payload FROM Items WHERE Flag=?1", catalog);
+  ASSERT_EQ(1U, noncovering.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, noncovering.selected_candidate().kind);
+}
+
+TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT id, Score FROM Items WHERE id=?1 AND Category=?2", catalog);
+
+  ASSERT_EQ(3U, plan.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, plan.candidates()[1].kind);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.candidates()[2].kind);
+  EXPECT_EQ(IndexId{0}, plan.candidates()[2].index);
+  EXPECT_EQ(1U, plan.selected_candidate_index());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, plan.selected_candidate().kind);
+}
+
+TEST(PhysicalPlan, AppliesDefaultNullAndRangeEstimates) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+
+  const PhysicalPlan collated_null =
+      OptimizeOrThrow("SELECT id, Category FROM Items WHERE Category IS NULL", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, collated_null.selected_candidate().kind);
+  EXPECT_EQ(IndexId{0}, collated_null.selected_candidate().index);
+  EXPECT_EQ(16U, collated_null.selected_candidate().cost.estimated_output_rows);
+
+  const PhysicalPlan null_equality =
+      OptimizeOrThrow("SELECT id, Score FROM Items WHERE Score IS NULL", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, null_equality.selected_candidate().kind);
+  EXPECT_EQ(IndexId{1}, null_equality.selected_candidate().index);
+  EXPECT_EQ(20U, null_equality.selected_candidate().cost.estimated_output_rows);
+  EXPECT_EQ(173U, null_equality.selected_candidate().cost.work_units);
+
+  const PhysicalPlan two_sided_range =
+      OptimizeOrThrow("SELECT id, Score FROM Items WHERE Score>=?1 AND Score<?2", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, two_sided_range.selected_candidate().kind);
+  EXPECT_EQ(IndexId{1}, two_sided_range.selected_candidate().index);
+  EXPECT_EQ(64U, two_sided_range.selected_candidate().cost.estimated_output_rows);
+  EXPECT_EQ(525U, two_sided_range.selected_candidate().cost.work_units);
+}
+
+TEST(PhysicalPlan, KeepsIneligibleConstraintsAsCoveringScanResiduals) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const std::array<std::string_view, 3> queries{
+      "SELECT Category, Score FROM Items WHERE Score=?1",
+      "SELECT Category, Score FROM Items WHERE Category COLLATE BINARY=?1",
+      "SELECT Category, Score FROM Items WHERE +Category=?1",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate().kind);
+    EXPECT_EQ(IndexId{0}, plan.selected_candidate().index);
+    EXPECT_EQ(0U, plan.selected_candidate().equality_term_count);
+    EXPECT_EQ(0U, plan.selected_candidate().range_bound_count);
+    EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(plan.nodes()[1].payload));
+    EXPECT_EQ("SCAN \"Items\" USING COVERING INDEX \"items_category_score\"",
+              ExplainPhysicalPlan(plan));
+  }
+}
+
+TEST(PhysicalPlan, FollowsTransparentIndexPredicateWrappers) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const std::array<std::string_view, 3> queries{
+      "SELECT Category FROM Items WHERE likely(Category=?1)",
+      "SELECT Category FROM Items WHERE (Category=?1) COLLATE NOCASE",
+      "SELECT Category AS selected FROM Items WHERE selected=?1",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate().kind);
+    EXPECT_EQ(IndexId{0}, plan.selected_candidate().index);
+    EXPECT_EQ(1U, plan.selected_candidate().equality_term_count);
+    EXPECT_FALSE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalFilterNode>(node.payload);
+    }));
+  }
+}
+
+TEST(PhysicalPlan, SelectsOnlyIndexesWhoseCollationsAreRegistered) {
+  const CatalogSnapshotPtr catalog = CustomCollationCatalog();
+
+  const PhysicalPlan unavailable = OptimizeOrThrow("SELECT id, Value FROM Custom", catalog);
+  ASSERT_EQ(1U, unavailable.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, unavailable.selected_candidate().kind);
+
+  const PhysicalPlan full =
+      OptimizeOrThrow("SELECT id, Value FROM Custom", catalog, CustomCollationEnvironment());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, full.selected_candidate().kind);
+  EXPECT_EQ(IndexId{0}, full.selected_candidate().index);
+
+  const PhysicalPlan constrained = OptimizeOrThrow("SELECT id FROM Custom WHERE Value=?1", catalog,
+                                                   CustomCollationEnvironment());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, constrained.selected_candidate().kind);
+  EXPECT_EQ(27U, constrained.selected_candidate().cost.work_units);
 }
 
 TEST(PhysicalPlan, PreservesPriorGuardsWhenPredicateBecomesEmpty) {
