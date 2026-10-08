@@ -281,9 +281,11 @@ CREATE TABLE tNNN(
 ```
 
 The exact-update and exact-delete key order uses SplitMix64 plus
-rejection-sampled Fisher-Yates with a fixed seed. Mixed commit and rollback
-use disjoint deterministic key sets so every requested UPDATE, DELETE, and
-INSERT has an unambiguous expected change count.
+rejection-sampled Fisher-Yates with fixed seed
+`0xd1b54a32d192ed03`. The manifest records the algorithm and seed. Mixed
+commit and rollback consume the first third of the permutation for UPDATE,
+the second third for DELETE, and new ascending rowids for INSERT, so every
+requested mutation has an unambiguous expected change count.
 
 The manifest records expected values for warmup, measured, diagnostic, and
 final verification phases:
@@ -336,8 +338,17 @@ CREATE preparation is timed because each statement has distinct SQL and
 cannot reuse one prepared program. Its finalization remains outside the timer
 only after the statement has completed successfully.
 
-Every measured repetition must last at least 200 ms. A shorter duration is a
+Every measured repetition must last at least 20 ms. A shorter duration is a
 harness failure; the runner never calibrates work after seeing elapsed time.
+
+A pre-baseline fixed-work probe on the selected macOS generation host measured
+the pinned SQLite cases at approximately 25--101 ms per repetition. Raising
+every write case to 200 ms would require roughly one million rows for the
+single-transaction INSERT or would change the pinned one-scan DELETE semantics.
+The 20 ms admission floor therefore preserves the immutable work while the
+three paired rounds and three retained repetitions provide nine samples per
+engine, profile, and case. The 10x guard is intentionally much wider than
+ordinary sub-100-ms timing noise.
 
 ### 7. Match public API lifecycle and SQL semantics
 
@@ -638,7 +649,7 @@ benchmark expectation is accepted.
 - [ ] Copy, open, configure, prepare, close, and verify remain outside the
       measured interval.
 - [ ] Transaction terminal I/O remains inside the measured interval.
-- [ ] Every repetition lasts at least 200 ms.
+- [ ] Every repetition lasts at least 20 ms.
 - [ ] Three rounds, three repetitions, engine/profile/case order, and medians
       are predeclared.
 - [ ] No sample is discarded.

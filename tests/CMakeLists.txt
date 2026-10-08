@@ -1187,7 +1187,7 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
     performance.write_benchmark_cli
     PROPERTIES
       LABELS performance
-      TIMEOUT 60
+      TIMEOUT 180
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
   add_test(

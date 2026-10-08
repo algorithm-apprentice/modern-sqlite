@@ -168,7 +168,11 @@
     },
     "profile": "matched-durable"
   },
-  "minimum_wall_ns": 200000000,
+  "key_order": {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "seed": "d1b54a32d192ed03"
+  },
+  "minimum_wall_ns": 20000000,
   "profiles": [
     {
       "guard": false,

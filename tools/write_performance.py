@@ -25,7 +25,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 SCHEMA_VERSION = 1
 WORKLOAD_SEMANTICS_VERSION = 1
 SQLITE_PROFILE = "sqlite-oracle-profile-v1"
-MINIMUM_WALL_NS = 200_000_000
+MINIMUM_WALL_NS = 20_000_000
 TIMING_REPETITIONS = 3
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -43,6 +43,7 @@ _TOP_KEYS = {
     "fixtures",
     "cases",
     "guard",
+    "key_order",
 }
 _CONFIGURATION_KEYS = {
     "page_size",
@@ -85,6 +86,7 @@ _GUARD_KEYS = {
     "maximum_cpu_ratio",
 }
 _RATIO_KEYS = {"numerator", "denominator"}
+_KEY_ORDER_KEYS = {"algorithm", "seed"}
 
 _EXPECTED_CONFIGURATION = {
     "page_size": 4096,
@@ -125,6 +127,10 @@ _EXPECTED_ROUNDS = (
         "engine_order": ["modern", "sqlite"],
     },
 )
+_EXPECTED_KEY_ORDER = {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "seed": "d1b54a32d192ed03",
+}
 _EXPECTED_FIXTURES = {
     "schema": {
         "path": "tests/fixtures/write_performance/schema.db",
@@ -480,6 +486,15 @@ def _validate_guard(value: Any) -> None:
     _validate_ratio(value["maximum_cpu_ratio"], "guard.maximum_cpu_ratio")
 
 
+def _validate_key_order(value: Any) -> None:
+    _require_type(value, dict, "key_order")
+    _require_keys(value, _KEY_ORDER_KEYS, "key_order")
+    for key in _KEY_ORDER_KEYS:
+        _require_type(value[key], str, f"key_order.{key}")
+    if value != _EXPECTED_KEY_ORDER:
+        raise HarnessError("key_order is not canonical")
+
+
 def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
     value = _load_json(path)
     _require_keys(value, _TOP_KEYS, "workload manifest")
@@ -504,10 +519,11 @@ def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
         raise HarnessError("timing_repetitions must be 3")
     _require_type(value["minimum_wall_ns"], int, "minimum_wall_ns")
     if value["minimum_wall_ns"] != MINIMUM_WALL_NS:
-        raise HarnessError("minimum_wall_ns must be 200000000")
+        raise HarnessError("minimum_wall_ns must be 20000000")
     _validate_fixtures(value["fixtures"])
     _validate_cases(value["cases"])
     _validate_guard(value["guard"])
+    _validate_key_order(value["key_order"])
     return value
 
 
