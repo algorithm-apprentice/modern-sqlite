@@ -332,6 +332,11 @@ struct DeleteCurrentTableInstruction {
   InstructionAddress exhausted_target;
 };
 
+struct UpdateCurrentTableInstruction {
+  CursorId cursor;
+  RegisterId record;
+};
+
 struct UpdateTableInstruction {
   WriteCursorId cursor;
   RegisterId old_rowid;
@@ -390,9 +395,10 @@ using Instruction = std::variant<
     AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
     SeekRowIdInstruction, ReadFieldInstruction, ReadRowIdInstruction, ResolveInsertRowIdInstruction,
     BuildTableRecordInstruction, InsertTableInstruction, DeleteTableInstruction,
-    DeleteCurrentTableInstruction, UpdateTableInstruction, EnsureDatabaseInitializedInstruction,
-    CreateTableRootInstruction, IncrementSchemaCookieInstruction, CompareInstruction,
-    CallScalarInstruction, JumpInstruction, JumpIfInstruction, ResultRowInstruction>;
+    DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
+    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
+    IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
+    JumpIfInstruction, ResultRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -426,6 +432,7 @@ enum class InstructionKind : std::uint8_t {
   kInsertTable,
   kDeleteTable,
   kDeleteCurrentTable,
+  kUpdateCurrentTable,
   kUpdateTable,
   kEnsureDatabaseInitialized,
   kCreateTableRoot,

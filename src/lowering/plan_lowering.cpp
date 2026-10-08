@@ -2308,109 +2308,6 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitMutationScan(const PhysicalMutationAccess& access,
-                                                      PointMutationKind kind) {
-    if (cursor_ == std::nullopt || write_cursor_ == std::nullopt ||
-        !source_rowid_register_.has_value()) {
-      return std::unexpected(InternalFailure("scan mutation access metadata is incomplete"));
-    }
-
-    std::optional<Label> guard_completion;
-    if (!access.guards.empty()) {
-      auto completion = CreateLabel();
-      if (!completion.has_value()) {
-        return std::unexpected(std::move(completion.error()));
-      }
-      guard_completion = *completion;
-      if (auto guards = EmitMutationPredicates(access.guards, *guard_completion);
-          !guards.has_value()) {
-        return guards;
-      }
-    }
-
-    if (auto opened = Append(OpenWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
-        !opened.has_value()) {
-      return opened;
-    }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
-        !opened.has_value()) {
-      return opened;
-    }
-
-    auto exhausted = CreateLabel();
-    auto candidate = CreateLabel();
-    auto advance = CreateLabel();
-    if (!exhausted.has_value()) {
-      return std::unexpected(std::move(exhausted.error()));
-    }
-    if (!candidate.has_value()) {
-      return std::unexpected(std::move(candidate.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *exhausted),
-                             "unable to emit mutation scan rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*candidate); !bound.has_value()) {
-      return bound;
-    }
-    if (auto snapshot = SnapshotMutationRow(); !snapshot.has_value()) {
-      return snapshot;
-    }
-    if (auto residuals = EmitMutationPredicates(access.residuals, *advance);
-        !residuals.has_value()) {
-      return residuals;
-    }
-    if (auto mutated = EmitPointMutation(kind); !mutated.has_value()) {
-      return mutated;
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
-        !opened.has_value()) {
-      return opened;
-    }
-    auto sought =
-        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
-                                 AssumeValue(cursor_), AssumeValue(source_rowid_register_),
-                                 *exhausted, RowIdSeekMode::kGreater),
-                             "unable to emit mutation scan advance");
-    if (!sought.has_value()) {
-      return std::unexpected(std::move(sought.error()));
-    }
-    if (auto jumped = EmitJump(*candidate); !jumped.has_value()) {
-      return jumped;
-    }
-
-    if (auto bound = BindLabel(*exhausted); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
-        !closed.has_value()) {
-      return closed;
-    }
-    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
-        !closed.has_value()) {
-      return closed;
-    }
-    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
-      return halted;
-    }
-
-    if (guard_completion.has_value()) {
-      if (auto bound = BindLabel(*guard_completion); !bound.has_value()) {
-        return bound;
-      }
-      return Append(HaltInstruction{});
-    }
-    return {};
-  }
-
   [[nodiscard]] LoweringResult<void> EmitDeleteScan(const PhysicalMutationAccess& access) {
     if (!cursor_.has_value() || !source_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("one-pass DELETE scan resources are incomplete"));
@@ -2490,6 +2387,100 @@ class PlanLowerer final {
       return bound;
     }
     if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (guard_completion.has_value()) {
+      if (auto bound = BindLabel(*guard_completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUpdateScan(const PhysicalMutationAccess& access) {
+    if (!cursor_.has_value() || !write_cursor_.has_value() || !source_rowid_register_.has_value()) {
+      return std::unexpected(InternalFailure("one-pass UPDATE scan resources are incomplete"));
+    }
+    const CursorId cursor = AssumeValue(cursor_);
+
+    std::optional<Label> guard_completion;
+    if (!access.guards.empty()) {
+      auto completion = CreateLabel();
+      if (!completion.has_value()) {
+        return std::unexpected(std::move(completion.error()));
+      }
+      guard_completion = *completion;
+      if (auto guards = EmitMutationPredicates(access.guards, *guard_completion);
+          !guards.has_value()) {
+        return guards;
+      }
+    }
+
+    if (auto opened = Append(OpenWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto opened = Append(OpenMutationCursorInstruction{.cursor = cursor});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto exhausted = CreateLabel();
+    auto candidate = CreateLabel();
+    auto advance = CreateLabel();
+    if (!exhausted.has_value()) {
+      return std::unexpected(std::move(exhausted.error()));
+    }
+    if (!candidate.has_value()) {
+      return std::unexpected(std::move(candidate.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *exhausted),
+                                        "unable to emit one-pass UPDATE rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*candidate); !bound.has_value()) {
+      return bound;
+    }
+    if (auto snapshot = SnapshotMutationRow(false); !snapshot.has_value()) {
+      return snapshot;
+    }
+    if (auto residuals = EmitMutationPredicates(access.residuals, *advance);
+        !residuals.has_value()) {
+      return residuals;
+    }
+    if (auto prepared = PrepareUpdateRecord(); !prepared.has_value()) {
+      return prepared;
+    }
+    if (auto updated = Append(UpdateCurrentTableInstruction{
+            .cursor = cursor,
+            .record = AssumeValue(update_record_register_),
+        });
+        !updated.has_value()) {
+      return updated;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *candidate),
+                                     "unable to emit one-pass UPDATE advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*exhausted); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = AssumeValue(write_cursor_)});
+        !closed.has_value()) {
       return closed;
     }
     if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
@@ -2702,7 +2693,7 @@ class PlanLowerer final {
         if (update.collect_original_rowids) {
           return EmitCollectedUpdateScan(update.access);
         }
-        return EmitMutationScan(update.access, PointMutationKind::kUpdate);
+        return EmitUpdateScan(update.access);
     }
     return std::unexpected(InternalFailure("physical UPDATE access kind is invalid"));
   }

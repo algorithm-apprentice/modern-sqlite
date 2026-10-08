@@ -820,6 +820,18 @@ template <typename T>
                                              index, operation.cursor.value()));
             }
             return check_target(operation.exhausted_target, index);
+          } else if constexpr (std::is_same_v<Operation, UpdateCurrentTableInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kUpdate) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.cursors[operation.cursor.value()].storage != CursorStorageKind::kRowIdTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kRowIdOperationRequiresRowIdTable,
+                                             index, operation.cursor.value()));
+            }
+            return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kUpdate) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
@@ -1332,6 +1344,14 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return merge_state(operation.exhausted_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, UpdateCurrentTableInstruction>) {
+            if (auto result = require_positioned(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.record); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
             if (auto result = require_write_open(operation.cursor); !result) {
               return result;
@@ -1501,6 +1521,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "delete_table";
     case InstructionKind::kDeleteCurrentTable:
       return "delete_current_table";
+    case InstructionKind::kUpdateCurrentTable:
+      return "update_current_table";
     case InstructionKind::kUpdateTable:
       return "update_table";
     case InstructionKind::kEnsureDatabaseInitialized:

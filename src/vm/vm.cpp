@@ -1168,6 +1168,30 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const UpdateCurrentTableInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    TableBtreeMutationCursor* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
+    if (cursor == nullptr || !cursor->valid()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "current update used an invalid mutation cursor"));
+    }
+    const std::optional<ByteView> record = Register(operation.record).blob_value();
+    if (!record.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
+    }
+    Status updated = cursor->ReplaceCurrent(*record);
+    if (!updated.has_value()) {
+      return std::unexpected(std::move(updated.error()));
+    }
+    if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
+    }
+    ++change_count_;
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const UpdateTableInstruction& operation) {
     RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
     if (!runtime.table.has_value()) {

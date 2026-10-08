@@ -38,6 +38,17 @@ void RequireStatus(Status status) {
   }
 }
 
+[[nodiscard]] ByteBuffer FilledBuffer(std::size_t size, std::byte value) {
+  ByteBuffer buffer{ByteCount{size}};
+  std::ranges::fill(buffer.mutable_view(), value);
+  return buffer;
+}
+
+[[nodiscard]] std::byte ReplacementFill(std::int64_t rowid) {
+  return static_cast<std::byte>(
+      static_cast<std::uint8_t>(static_cast<std::uint64_t>(rowid) ^ 0xa5U));
+}
+
 [[nodiscard]] std::uint32_t Load32(ByteView bytes, std::size_t offset) {
   return LoadBigEndian<std::uint32_t>(std::span<const std::byte, sizeof(std::uint32_t)>{
       bytes.data() + static_cast<std::ptrdiff_t>(offset), sizeof(std::uint32_t)});
@@ -380,6 +391,67 @@ TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
   }
   EXPECT_EQ(0U, TakeValue(table.Clear()));
   RequireStatus(pager->Rollback());
+}
+
+TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
+  test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  const PageNumber root_page = table.root_page();
+  constexpr std::int64_t kRowCount = 24;
+  for (std::int64_t rowid = 1; rowid <= kRowCount; ++rowid) {
+    const ByteBuffer payload = FilledBuffer(380U, std::byte{0x11});
+    RequireStatus(table.Insert(rowid, payload.view()));
+  }
+
+  std::int64_t expected_rowid = 1;
+  {
+    TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    while (cursor.valid()) {
+      const TableBtreeMutationRow before = TakeValue(cursor.row());
+      ASSERT_EQ(expected_rowid, before.rowid);
+      const std::size_t size =
+          expected_rowid % 3 == 0 ? 2'000U : (expected_rowid % 3 == 1 ? 380U : 32U);
+      const auto fill = ReplacementFill(expected_rowid);
+      const ByteBuffer replacement = FilledBuffer(size, fill);
+      RequireStatus(cursor.ReplaceCurrent(replacement.view()));
+
+      const TableBtreeMutationRow after = TakeValue(cursor.row());
+      EXPECT_EQ(expected_rowid, after.rowid);
+      ASSERT_EQ(size, after.payload.size());
+      EXPECT_TRUE(
+          std::ranges::all_of(after.payload, [fill](std::byte value) { return value == fill; }));
+      ++expected_rowid;
+      EXPECT_EQ(expected_rowid <= kRowCount, TakeValue(cursor.Next()));
+    }
+  }
+  EXPECT_EQ(kRowCount + 1, expected_rowid);
+  RequireStatus(pager->Commit());
+  {
+    TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    expected_rowid = 1;
+    do {
+      EXPECT_EQ(expected_rowid, TakeValue(reader.rowid()));
+      const std::size_t size =
+          expected_rowid % 3 == 0 ? 2'000U : (expected_rowid % 3 == 1 ? 380U : 32U);
+      const auto fill = ReplacementFill(expected_rowid);
+      const ByteBuffer payload = TakeValue(reader.CopyPayload());
+      ASSERT_EQ(size, payload.size().value());
+      EXPECT_TRUE(
+          std::ranges::all_of(payload.view(), [fill](std::byte value) { return value == fill; }));
+      ++expected_rowid;
+    } while (TakeValue(reader.Next()));
+  }
+  EXPECT_EQ(kRowCount + 1, expected_rowid);
+  RequireStatus(pager->EndRead());
 }
 
 TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {

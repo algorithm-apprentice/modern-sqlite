@@ -809,6 +809,7 @@ template <typename Runner>
     return {};
   }
   const modern_sqlite::ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x51});
+  const modern_sqlite::ByteBuffer replacement = FilledBuffer(2'500U, std::byte{0x72});
   {
     auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
     if (!session.has_value()) {
@@ -858,11 +859,26 @@ template <typename Runner>
           allocations = Disarm();
           error = row.error().code();
         } else {
-          auto deleted = cursor->DeleteAndNext();
-          allocations = Disarm();
-          succeeded = deleted.has_value() && !*deleted;
-          if (!deleted.has_value()) {
-            error = deleted.error().code();
+          auto replaced = cursor->ReplaceCurrent(replacement.view());
+          if (!replaced.has_value()) {
+            allocations = Disarm();
+            error = replaced.error().code();
+          } else {
+            auto replaced_row = cursor->row();
+            if (!replaced_row.has_value()) {
+              allocations = Disarm();
+              error = replaced_row.error().code();
+            } else {
+              const bool replacement_matches =
+                  replaced_row->rowid == 1 &&
+                  replaced_row->payload.size() == replacement.size().value();
+              auto deleted = cursor->DeleteAndNext();
+              allocations = Disarm();
+              succeeded = deleted.has_value() && !*deleted && replacement_matches;
+              if (!deleted.has_value()) {
+                error = deleted.error().code();
+              }
+            }
           }
         }
       }

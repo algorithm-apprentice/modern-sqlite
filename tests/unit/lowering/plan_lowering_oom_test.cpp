@@ -188,6 +188,26 @@ bool inject_failure = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan StableUpdateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound = BindStatement(ParseTree("UPDATE Items SET Name=coalesce(?1,Name) "
+                                                      "WHERE stable_guard(?2)=1 AND Name<>?3"),
+                                            catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind stable UPDATE lowering OOM fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan stable UPDATE lowering OOM fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize stable UPDATE lowering OOM fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 [[nodiscard]] modern_sqlite::PhysicalMutationPlan CreateFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   using namespace modern_sqlite;
@@ -234,6 +254,7 @@ int main() try {
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   const PhysicalMutationPlan update = UpdateFixture(catalog);
+  const PhysicalMutationPlan stable_update = StableUpdateFixture(catalog);
   const PhysicalMutationPlan create = CreateFixture(catalog);
 
   const auto verify_oom = [](const auto& plan) {
@@ -267,7 +288,7 @@ int main() try {
   };
 
   return verify_oom(physical) && verify_oom(mutation) && verify_oom(deletion) &&
-                 verify_oom(update) && verify_oom(create)
+                 verify_oom(update) && verify_oom(stable_update) && verify_oom(create)
              ? 0
              : 1;
 } catch (...) {
