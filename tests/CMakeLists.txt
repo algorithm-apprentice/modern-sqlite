@@ -1173,6 +1173,22 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
   add_test(
+    NAME performance.write_benchmark_cli
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/performance/write_benchmark_cli_test.py"
+      --binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_benchmark"
+      --fixture
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
+  )
+  set_tests_properties(
+    performance.write_benchmark_cli
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+  add_test(
     NAME performance.read_fixture_regeneration
     COMMAND
       "${Python3_EXECUTABLE}"

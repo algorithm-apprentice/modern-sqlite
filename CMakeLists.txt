@@ -398,6 +398,19 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   modern_sqlite_set_project_warnings(modern_sqlite_read_benchmark PRIVATE)
   modern_sqlite_enable_clang_tidy(modern_sqlite_read_benchmark)
 
+  add_executable(
+    modern_sqlite_write_benchmark
+    benchmarks/write_performance.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_write_benchmark
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_write_benchmark PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_write_benchmark)
+
   add_library(
     modern_sqlite_read_diagnostic_engine
     STATIC
@@ -575,6 +588,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
+  "${PROJECT_SOURCE_DIR}/benchmarks/write_performance.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"

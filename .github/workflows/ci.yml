@@ -250,6 +250,7 @@ jobs:
             --target \
               modern_sqlite_read_benchmark \
               modern_sqlite_read_diagnostics \
+              modern_sqlite_write_benchmark \
               modern_sqlite_benchmark_sqlite_shared \
               modern_sqlite_btree_writer_sqlite_compatibility \
               modern_sqlite_transaction_sqlite_compatibility \
@@ -261,7 +262,7 @@ jobs:
         run: |
           ctest --test-dir build/benchmark \
             --output-on-failure \
-            -R '^(performance\.(read_(benchmark_cli|fixture_regeneration)|write_fixture_regeneration)|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|transaction_sqlite|write_pager_sqlite|write_session_sqlite(_(page_case|crash_case|invalid_case))?))$'
+            -R '^(performance\.(read_(benchmark_cli|fixture_regeneration)|write_(benchmark_cli|fixture_regeneration))|compatibility\.(btree_writer_sqlite|rollback_journal_fixture_regeneration|transaction_sqlite|write_pager_sqlite|write_session_sqlite(_(page_case|crash_case|invalid_case))?))$'
       - name: Report compiler cache
         if: github.event_name == 'push' || matrix.run_on_pr
         run: ccache --show-stats
