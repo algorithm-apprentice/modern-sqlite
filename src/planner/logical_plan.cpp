@@ -239,6 +239,12 @@ class LogicalStatementPlanBuilder final {
       };
       return Mutation(std::move(bound_statement), mutation);
     }
+    if (const auto* create = std::get_if<BoundCreateIndex>(&bound_statement); create != nullptr) {
+      const LogicalCreateIndexMutation mutation{
+          .no_op = create->no_op(),
+      };
+      return Mutation(std::move(bound_statement), mutation);
+    }
     if (std::holds_alternative<BoundInsert>(bound_statement)) {
       return Mutation(std::move(bound_statement), LogicalInsertMutation{});
     }
@@ -325,6 +331,8 @@ std::string_view LogicalMutationKindName(LogicalMutationKind kind) noexcept {
       return "delete";
     case LogicalMutationKind::kCreateTable:
       return "create_table";
+    case LogicalMutationKind::kCreateIndex:
+      return "create_index";
   }
   return "unknown";
 }

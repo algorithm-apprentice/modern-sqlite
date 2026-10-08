@@ -117,6 +117,7 @@ class PlanLowerer final {
       return;
     }
     bound_create_ = std::get_if<BoundCreateTable>(&plan.logical_plan().bound_statement());
+    bound_create_index_ = std::get_if<BoundCreateIndex>(&plan.logical_plan().bound_statement());
   }
 
   [[nodiscard]] LowerPlanResult Run() {
@@ -210,6 +211,10 @@ class PlanLowerer final {
     const auto* create = std::get_if<PhysicalCreateTableMutation>(&mutation_plan_->payload());
     if (create != nullptr) {
       return RunCreateTable(*create);
+    }
+    const auto* create_index = std::get_if<PhysicalCreateIndexMutation>(&mutation_plan_->payload());
+    if (create_index != nullptr) {
+      return RunCreateIndex(*create_index);
     }
     return std::unexpected(UnsupportedFailure("physical mutation plan is not implemented"));
   }
@@ -483,6 +488,11 @@ class PlanLowerer final {
         return std::unexpected(std::move(halted.error()));
       }
     } else {
+      auto schema_cursor = AddSchemaWriteCursorDescriptor();
+      if (!schema_cursor.has_value()) {
+        return std::unexpected(std::move(schema_cursor.error()));
+      }
+      schema_write_cursor_ = *schema_cursor;
       if (auto emitted = EmitCreateTable(); !emitted.has_value()) {
         return std::unexpected(std::move(emitted.error()));
       }
@@ -490,6 +500,76 @@ class PlanLowerer final {
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
                                       "lowered CREATE TABLE bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
+  [[nodiscard]] LowerPlanResult RunCreateIndex(const PhysicalCreateIndexMutation& create) {
+    if (bound_create_index_ == nullptr || !std::holds_alternative<LogicalCreateIndexMutation>(
+                                              mutation_plan_->logical_plan().payload())) {
+      return std::unexpected(
+          InternalFailure("physical CREATE INDEX plan has inconsistent ownership"));
+    }
+    if (bound_create_index_->catalog() == nullptr) {
+      return std::unexpected(InternalFailure("bound CREATE INDEX does not retain a catalog"));
+    }
+    const std::size_t key_register_count = bound_create_index_->terms().size() + 1U;
+    if (key_register_count > std::numeric_limits<std::uint32_t>::max() - 8U) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kRegisterLimitExceeded},
+                         "CREATE INDEX register count exceeds the bytecode identity range"));
+    }
+    const std::uint32_t register_count =
+        create.no_op ? 0U : static_cast<std::uint32_t>(8U + key_register_count);
+    const CatalogVersion version = bound_create_index_->required_catalog_version();
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = register_count,
+                                                .parameters = 0,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    builder_.emplace(std::move(*created));
+
+    const ProgramRollbackMode rollback_mode = create.atomicity == MutationAtomicity::kStatement
+                                                  ? ProgramRollbackMode::kStatement
+                                                  : ProgramRollbackMode::kTransaction;
+    auto metadata = ConvertProgramResult(
+        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kCreateIndex,
+                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        "unable to set CREATE INDEX execution metadata");
+    if (!metadata.has_value()) {
+      return std::unexpected(std::move(metadata.error()));
+    }
+    if (create.no_op) {
+      if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+        return std::unexpected(std::move(halted.error()));
+      }
+    } else {
+      auto snapshot = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
+                                           "unable to require a database snapshot");
+      if (!snapshot.has_value()) {
+        return std::unexpected(std::move(snapshot.error()));
+      }
+      if (auto descriptors = AddCreateIndexDescriptors(); !descriptors.has_value()) {
+        return std::unexpected(std::move(descriptors.error()));
+      }
+      if (auto emitted = EmitCreateIndex(); !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+    }
+
+    auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
+                                      "lowered CREATE INDEX bytecode failed verification");
     if (!built.has_value()) {
       return std::unexpected(std::move(built.error()));
     }
@@ -1284,6 +1364,141 @@ class PlanLowerer final {
       }
       index_write_cursors_.push_back(*cursor);
     }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<WriteCursorId> AddSchemaWriteCursorDescriptor() {
+    WriteCursorDescriptor descriptor{
+        .root_page = RootPageNumber(1),
+        .columns =
+            {
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kInteger,
+                    .not_null = true,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kText,
+                    .not_null = true,
+                },
+            },
+        .rowid_alias = std::nullopt,
+        .index_columns = {},
+        .key_term_count = 0,
+        .unique = false,
+        .unique_not_null = false,
+        .pending_root = false,
+        .storage = WriteCursorStorageKind::kRowIdTable,
+    };
+    return ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(descriptor)),
+                                "unable to add the schema write cursor");
+  }
+
+  [[nodiscard]] LoweringResult<void> AddCreateIndexDescriptors() {
+    const CatalogSnapshot* catalog = bound_create_index_->catalog();
+    const std::span<const BoundCreateIndexTerm> terms = bound_create_index_->terms();
+    if (catalog == nullptr || bound_create_index_->table().value >= catalog->tables().size() ||
+        terms.empty() || terms.size() >= std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(InternalFailure("bound CREATE INDEX metadata is invalid"));
+    }
+    const CatalogTable& table = catalog->table(bound_create_index_->table());
+    if (table.without_rowid || table.root_page != bound_create_index_->table_root_page() ||
+        table.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(InternalFailure("bound CREATE INDEX table metadata is invalid"));
+    }
+
+    ReadCursorDescriptor read_descriptor{
+        .root_page = RootPageNumber(table.root_page.value),
+        .storage = CursorStorageKind::kRowIdTable,
+        .record_field_count = static_cast<std::uint32_t>(table.columns.size()),
+        .fields = {},
+        .index_columns = {},
+    };
+    read_descriptor.fields.reserve(terms.size());
+    for (const BoundCreateIndexTerm& term : terms) {
+      if (term.column.value >= table.columns.size()) {
+        return std::unexpected(InternalFailure("CREATE INDEX term column is out of range"));
+      }
+      if (term.rowid) {
+        if (table.rowid_alias != term.column) {
+          return std::unexpected(InternalFailure("CREATE INDEX rowid term metadata is invalid"));
+        }
+        read_descriptor.fields.push_back(CursorFieldSource{
+            .kind = CursorFieldSourceKind::kRowId,
+            .record_field = 0,
+        });
+      } else {
+        auto field = CatalogFieldSource(table.columns[term.column.value],
+                                        static_cast<std::uint32_t>(term.column.value));
+        if (!field.has_value()) {
+          return std::unexpected(std::move(field.error()));
+        }
+        read_descriptor.fields.push_back(*field);
+      }
+    }
+    auto read_cursor =
+        ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(read_descriptor)),
+                             "unable to add the CREATE INDEX table cursor");
+    if (!read_cursor.has_value()) {
+      return std::unexpected(std::move(read_cursor.error()));
+    }
+    create_index_table_cursor_ = *read_cursor;
+
+    auto schema_cursor = AddSchemaWriteCursorDescriptor();
+    if (!schema_cursor.has_value()) {
+      return std::unexpected(std::move(schema_cursor.error()));
+    }
+    schema_write_cursor_ = *schema_cursor;
+
+    WriteCursorDescriptor index_descriptor{
+        .root_page = RootPageNumber(0),
+        .columns = {},
+        .rowid_alias = std::nullopt,
+        .index_columns = {},
+        .key_term_count = static_cast<std::uint32_t>(terms.size()),
+        .unique = bound_create_index_->unique(),
+        .unique_not_null = bound_create_index_->unique_not_null(),
+        .pending_root = true,
+        .storage = WriteCursorStorageKind::kIndex,
+    };
+    index_descriptor.index_columns.reserve(terms.size() + 1U);
+    for (const BoundCreateIndexTerm& term : terms) {
+      auto collation = SymbolForName(term.collation_name);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      index_descriptor.index_columns.push_back(IndexColumnMetadata{
+          .collation = *collation,
+          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                        : BytecodeSortOrder::kAscending,
+      });
+    }
+    auto binary = SymbolForName("BINARY");
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    index_descriptor.index_columns.push_back(IndexColumnMetadata{
+        .collation = *binary,
+        .order = BytecodeSortOrder::kAscending,
+    });
+    auto index_cursor =
+        ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(index_descriptor)),
+                             "unable to add the created index cursor");
+    if (!index_cursor.has_value()) {
+      return std::unexpected(std::move(index_cursor.error()));
+    }
+    create_index_write_cursor_ = *index_cursor;
     return {};
   }
 
@@ -3612,23 +3827,27 @@ class PlanLowerer final {
     return std::unexpected(InternalFailure("physical UPDATE access kind is invalid"));
   }
 
-  [[nodiscard]] LoweringResult<void> EmitCreateTable() {
-    if (bound_create_->table_name().empty() || bound_create_->canonical_sql().empty()) {
-      return std::unexpected(InternalFailure("CREATE TABLE metadata is incomplete"));
+  [[nodiscard]] LoweringResult<void> EmitSchemaRecord(std::string_view type_name,
+                                                      std::string_view object_name,
+                                                      std::string_view table_name,
+                                                      std::string_view canonical_sql) {
+    if (!schema_write_cursor_.has_value() || type_name.empty() || object_name.empty() ||
+        table_name.empty() || canonical_sql.empty()) {
+      return std::unexpected(InternalFailure("schema record metadata is incomplete"));
     }
-    auto type = AddConstant(SqlValue::Text("table"));
+    auto type = AddConstant(SqlValue::Text(std::string{type_name}));
     if (!type.has_value()) {
       return std::unexpected(std::move(type.error()));
     }
-    auto name = AddConstant(SqlValue::Text(std::string{bound_create_->table_name()}));
+    auto name = AddConstant(SqlValue::Text(std::string{object_name}));
     if (!name.has_value()) {
       return std::unexpected(std::move(name.error()));
     }
-    auto table_name = AddConstant(SqlValue::Text(std::string{bound_create_->table_name()}));
-    if (!table_name.has_value()) {
-      return std::unexpected(std::move(table_name.error()));
+    auto table = AddConstant(SqlValue::Text(std::string{table_name}));
+    if (!table.has_value()) {
+      return std::unexpected(std::move(table.error()));
     }
-    auto sql = AddConstant(SqlValue::Text(std::string{bound_create_->canonical_sql()}));
+    auto sql = AddConstant(SqlValue::Text(std::string{canonical_sql}));
     if (!sql.has_value()) {
       return std::unexpected(std::move(sql.error()));
     }
@@ -3636,67 +3855,10 @@ class PlanLowerer final {
     if (!null_rowid.has_value()) {
       return std::unexpected(std::move(null_rowid.error()));
     }
-
-    WriteCursorDescriptor descriptor{
-        .root_page = RootPageNumber(1),
-        .columns =
-            {
-                WriteColumnDescriptor{
-                    .affinity = TypeAffinity::kText,
-                    .not_null = true,
-                    .rowid_alias = false,
-                    .default_value = std::nullopt,
-                },
-                WriteColumnDescriptor{
-                    .affinity = TypeAffinity::kText,
-                    .not_null = true,
-                    .rowid_alias = false,
-                    .default_value = std::nullopt,
-                },
-                WriteColumnDescriptor{
-                    .affinity = TypeAffinity::kText,
-                    .not_null = true,
-                    .rowid_alias = false,
-                    .default_value = std::nullopt,
-                },
-                WriteColumnDescriptor{
-                    .affinity = TypeAffinity::kInteger,
-                    .not_null = true,
-                    .rowid_alias = false,
-                    .default_value = std::nullopt,
-                },
-                WriteColumnDescriptor{
-                    .affinity = TypeAffinity::kText,
-                    .not_null = true,
-                    .rowid_alias = false,
-                    .default_value = std::nullopt,
-                },
-            },
-        .rowid_alias = std::nullopt,
-        .index_columns = {},
-        .key_term_count = 0,
-        .unique = false,
-        .unique_not_null = false,
-        .storage = WriteCursorStorageKind::kRowIdTable,
-    };
-    auto cursor = ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(descriptor)),
-                                       "unable to add the sqlite_schema write cursor");
-    if (!cursor.has_value()) {
-      return std::unexpected(std::move(cursor.error()));
-    }
-    const WriteCursorId schema_cursor = AssumeValue(cursor);
-
-    if (auto ensured = Append(EnsureDatabaseInitializedInstruction{}); !ensured.has_value()) {
-      return ensured;
-    }
-    if (auto root = Append(CreateTableRootInstruction{.output = RegisterId{3}});
-        !root.has_value()) {
-      return root;
-    }
     const std::array loads{
         LoadConstantInstruction{.constant = AssumeValue(type), .output = RegisterId{0}},
         LoadConstantInstruction{.constant = AssumeValue(name), .output = RegisterId{1}},
-        LoadConstantInstruction{.constant = AssumeValue(table_name), .output = RegisterId{2}},
+        LoadConstantInstruction{.constant = AssumeValue(table), .output = RegisterId{2}},
         LoadConstantInstruction{.constant = AssumeValue(sql), .output = RegisterId{4}},
         LoadConstantInstruction{.constant = AssumeValue(null_rowid), .output = RegisterId{5}},
     };
@@ -3705,6 +3867,7 @@ class PlanLowerer final {
         return loaded;
       }
     }
+    const WriteCursorId schema_cursor = AssumeValue(schema_write_cursor_);
     if (auto opened = Append(OpenWriteCursorInstruction{.cursor = schema_cursor});
         !opened.has_value()) {
       return opened;
@@ -3738,7 +3901,145 @@ class PlanLowerer final {
         !closed.has_value()) {
       return closed;
     }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitCreateTable() {
+    if (bound_create_->table_name().empty() || bound_create_->canonical_sql().empty()) {
+      return std::unexpected(InternalFailure("CREATE TABLE metadata is incomplete"));
+    }
+    if (auto ensured = Append(EnsureDatabaseInitializedInstruction{}); !ensured.has_value()) {
+      return ensured;
+    }
+    if (auto root = Append(CreateTableRootInstruction{.output = RegisterId{3}});
+        !root.has_value()) {
+      return root;
+    }
+    if (auto schema = EmitSchemaRecord("table", bound_create_->table_name(),
+                                       bound_create_->table_name(), bound_create_->canonical_sql());
+        !schema.has_value()) {
+      return schema;
+    }
     if (auto cookie = Append(IncrementSchemaCookieInstruction{.output = RegisterId{7}});
+        !cookie.has_value()) {
+      return cookie;
+    }
+    return Append(HaltInstruction{});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitCreateIndex() {
+    if (!create_index_table_cursor_.has_value() || !schema_write_cursor_.has_value() ||
+        !create_index_write_cursor_.has_value() || bound_create_index_->index_name().empty() ||
+        bound_create_index_->table_name().empty() || bound_create_index_->canonical_sql().empty()) {
+      return std::unexpected(InternalFailure("CREATE INDEX lowering resources are incomplete"));
+    }
+    const std::span<const BoundCreateIndexTerm> terms = bound_create_index_->terms();
+    const auto key_count = static_cast<std::uint32_t>(terms.size());
+    constexpr RegisterId kRootPage{3};
+    constexpr RegisterId kSchemaCookie{7};
+    constexpr RegisterId kFirstKey{8};
+    const CursorId table_cursor = AssumeValue(create_index_table_cursor_);
+    const WriteCursorId index_cursor = AssumeValue(create_index_write_cursor_);
+
+    if (auto root = Append(CreateIndexRootInstruction{
+            .cursor = index_cursor,
+            .output = kRootPage,
+        });
+        !root.has_value()) {
+      return root;
+    }
+    if (auto schema = EmitSchemaRecord("index", bound_create_index_->index_name(),
+                                       bound_create_index_->table_name(),
+                                       bound_create_index_->canonical_sql());
+        !schema.has_value()) {
+      return schema;
+    }
+
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = table_cursor});
+        !opened.has_value()) {
+      return opened;
+    }
+    auto exhausted = CreateLabel();
+    auto loop = CreateLabel();
+    if (!exhausted.has_value()) {
+      return std::unexpected(std::move(exhausted.error()));
+    }
+    if (!loop.has_value()) {
+      return std::unexpected(std::move(loop.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(table_cursor, *exhausted),
+                                        "unable to emit CREATE INDEX table rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*loop); !bound.has_value()) {
+      return bound;
+    }
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+      const RegisterId output{kFirstKey.value() + static_cast<std::uint32_t>(index)};
+      if (auto field = Append(ReadFieldInstruction{
+              .cursor = table_cursor,
+              .field = CursorFieldId{static_cast<std::uint32_t>(index)},
+              .output = output,
+          });
+          !field.has_value()) {
+        return field;
+      }
+      const TypeAffinity affinity = terms[index].affinity == TypeAffinity::kReal
+                                        ? TypeAffinity::kNumeric
+                                        : terms[index].affinity;
+      if (auto applied = Append(ApplyAffinityInstruction{
+              .input = output,
+              .affinity = affinity,
+              .output = output,
+          });
+          !applied.has_value()) {
+        return applied;
+      }
+    }
+    const RegisterId rowid{kFirstKey.value() + key_count};
+    if (auto read = Append(ReadRowIdInstruction{
+            .cursor = table_cursor,
+            .output = rowid,
+        });
+        !read.has_value()) {
+      return read;
+    }
+    if (bound_create_index_->unique()) {
+      if (auto checked = Append(CheckUniqueIndexInstruction{
+              .cursor = index_cursor,
+              .first_key = kFirstKey,
+              .key_count = key_count,
+              .ignored_rowid = std::nullopt,
+          });
+          !checked.has_value()) {
+        return checked;
+      }
+    }
+    if (auto inserted = Append(InsertIndexInstruction{
+            .cursor = index_cursor,
+            .first_value = kFirstKey,
+            .value_count = key_count + 1U,
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(table_cursor, *loop),
+                                     "unable to emit CREATE INDEX table advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*exhausted); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = table_cursor}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = index_cursor});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (auto cookie = Append(IncrementSchemaCookieInstruction{.output = kSchemaCookie});
         !cookie.has_value()) {
       return cookie;
     }
@@ -4003,6 +4304,7 @@ class PlanLowerer final {
   const BoundDelete* bound_delete_ = nullptr;
   const BoundUpdate* bound_update_ = nullptr;
   const BoundCreateTable* bound_create_ = nullptr;
+  const BoundCreateIndex* bound_create_index_ = nullptr;
   std::span<const BoundExpression> expressions_;
   std::span<const BoundParameter> parameters_;
   std::span<const BoundCollation> collations_;
@@ -4061,6 +4363,9 @@ class PlanLowerer final {
   std::optional<RegisterId> update_record_register_;
   std::optional<WriteCursorId> write_cursor_;
   std::vector<WriteCursorId> index_write_cursors_;
+  std::optional<CursorId> create_index_table_cursor_;
+  std::optional<WriteCursorId> schema_write_cursor_;
+  std::optional<WriteCursorId> create_index_write_cursor_;
 };
 
 }  // namespace

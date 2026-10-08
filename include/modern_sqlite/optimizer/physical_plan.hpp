@@ -253,8 +253,14 @@ struct PhysicalCreateTableMutation {
   MutationAtomicity atomicity = MutationAtomicity::kStatement;
 };
 
-using PhysicalMutationPayload = std::variant<PhysicalInsertMutation, PhysicalUpdateMutation,
-                                             PhysicalDeleteMutation, PhysicalCreateTableMutation>;
+struct PhysicalCreateIndexMutation {
+  bool no_op = false;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
+};
+
+using PhysicalMutationPayload =
+    std::variant<PhysicalInsertMutation, PhysicalUpdateMutation, PhysicalDeleteMutation,
+                 PhysicalCreateTableMutation, PhysicalCreateIndexMutation>;
 
 class PhysicalMutationPlan final {
  public:

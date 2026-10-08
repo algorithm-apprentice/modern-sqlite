@@ -111,6 +111,7 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalNodeKindName(static_cast<LogicalNodeKind>(255)));  // NOLINT
   EXPECT_EQ("insert", LogicalMutationKindName(LogicalMutationKind::kInsert));
   EXPECT_EQ("create_table", LogicalMutationKindName(LogicalMutationKind::kCreateTable));
+  EXPECT_EQ("create_index", LogicalMutationKindName(LogicalMutationKind::kCreateIndex));
   EXPECT_EQ("unknown",
             LogicalMutationKindName(static_cast<LogicalMutationKind>(255)));  // NOLINT
 
@@ -155,6 +156,12 @@ TEST(LogicalStatementPlan, BuildsTypedMutationAndTransactionPayloads) {
       StatementPlanOrThrow("CREATE TABLE NewItems(id INTEGER PRIMARY KEY)", catalog);
   const auto& create_plan = std::get<LogicalMutationPlan>(create_statement);
   EXPECT_FALSE(std::get<LogicalCreateTableMutation>(create_plan.payload()).no_op);
+
+  LogicalStatementPlan create_index_statement =
+      StatementPlanOrThrow("CREATE INDEX items_name ON Items(Name)", catalog);
+  const auto& create_index_plan = std::get<LogicalMutationPlan>(create_index_statement);
+  EXPECT_FALSE(std::get<LogicalCreateIndexMutation>(create_index_plan.payload()).no_op);
+  EXPECT_TRUE(std::holds_alternative<BoundCreateIndex>(create_index_plan.bound_statement()));
 
   EXPECT_TRUE(std::holds_alternative<BoundBeginTransaction>(
       StatementPlanOrThrow("BEGIN IMMEDIATE", catalog)));

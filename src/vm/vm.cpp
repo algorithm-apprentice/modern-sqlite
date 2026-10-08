@@ -1022,6 +1022,10 @@ struct Vm::Impl {
           VmError(ErrorCode::kMisuse, "write cursor requires a transaction writer"));
     }
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    if (descriptor.pending_root) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "dynamic write cursor requires root creation"));
+    }
     RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
     if (descriptor.storage == WriteCursorStorageKind::kRowIdTable) {
       auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
@@ -1444,6 +1448,31 @@ struct Vm::Impl {
     }
     return SetRegister(operation.output,
                        SqlValue::Integer(static_cast<std::int64_t>(table->root_page().value())));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CreateIndexRootInstruction& operation) {
+    if (writer_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "index root creation requires a transaction writer"));
+    }
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    std::vector<IndexColumnOrder> columns;
+    columns.reserve(descriptor.index_columns.size());
+    for (const IndexColumnMetadata& column : descriptor.index_columns) {
+      const bool descending = record_options_.schema_format == DatabaseSchemaFormat::kFour &&
+                              column.order == BytecodeSortOrder::kDescending;
+      columns.emplace_back(
+          CollationFor(column.collation),
+          descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
+          descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+    }
+    auto index = writer_->CreateIndexBtree(columns);
+    if (!index.has_value()) {
+      return std::unexpected(std::move(index.error()));
+    }
+    const std::int64_t root_page = static_cast<std::int64_t>(index->root_page().value());
+    WriteCursor(operation.cursor).index = std::move(*index);
+    return SetRegister(operation.output, SqlValue::Integer(root_page));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,

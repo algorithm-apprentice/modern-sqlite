@@ -1948,12 +1948,18 @@ class PhysicalStatementPlanBuilder final {
           .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
           .collect_original_rowids = scan && !delete_statement->target().indexes.empty(),
       };
-    } else {
-      const auto& create = std::get<BoundCreateTable>(statement);
+    } else if (const auto* create = std::get_if<BoundCreateTable>(&statement); create != nullptr) {
       payload = PhysicalCreateTableMutation{
-          .no_op = create.no_op(),
+          .no_op = create->no_op(),
           .atomicity =
-              create.no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+              create->no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+      };
+    } else {
+      const auto& create_index = std::get<BoundCreateIndex>(statement);
+      payload = PhysicalCreateIndexMutation{
+          .no_op = create_index.no_op(),
+          .atomicity = create_index.no_op() ? MutationAtomicity::kTransaction
+                                            : MutationAtomicity::kStatement,
       };
     }
 

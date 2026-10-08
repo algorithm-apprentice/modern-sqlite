@@ -399,6 +399,21 @@ struct BoundCreateTable::Impl final {
   std::optional<ColumnId> rowid_alias;
 };
 
+struct BoundCreateIndex::Impl final {
+  std::string source;
+  CatalogSnapshotPtr catalog;
+  TableId table{};
+  RootPageId table_root_page{};
+  std::string index_name;
+  std::string table_name;
+  bool unique = false;
+  bool unique_not_null = false;
+  bool if_not_exists = false;
+  bool no_op = false;
+  std::string canonical_sql;
+  std::vector<BoundCreateIndexTerm> terms;
+};
+
 namespace binder_detail {
 
 class StatementBinder final {
@@ -510,6 +525,13 @@ class StatementBinder final {
         return std::unexpected(std::move(create.error()));
       }
       return BoundStatement{std::in_place_type<BoundCreateTable>, std::move(*create)};
+    }
+    if (std::holds_alternative<CreateIndexStatement>(tree_.statement())) {
+      BindExpected<BoundCreateIndex> create = RunCreateIndex();
+      if (!create.has_value()) {
+        return std::unexpected(std::move(create.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundCreateIndex>, std::move(*create)};
     }
     BindExpected<void> environment = ValidateEnvironment();
     if (!environment.has_value()) {
@@ -838,6 +860,155 @@ class StatementBinder final {
     }
     output->rowid_alias = rowid_alias;
     return BoundCreateTable(std::move(output));
+  }
+
+  [[nodiscard]] BindExpected<BoundCreateIndex> RunCreateIndex() {
+    const auto& index = std::get<CreateIndexStatement>(tree_.statement());
+    BindExpected<void> environment = ValidateEnvironment();
+    if (!environment.has_value()) {
+      return std::unexpected(std::move(environment.error()));
+    }
+
+    BindExpected<DecodedNameParts> index_parts = NameParts(index.name);
+    if (!index_parts.has_value()) {
+      return std::unexpected(std::move(index_parts.error()));
+    }
+    if (index_parts->empty() || index_parts->size() > 2U ||
+        (index_parts->size() == 2U && !NamesEqual(index_parts->front(), catalog_->schema_name()))) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, index.name.span,
+                                         "only the main schema is writable"));
+    }
+    BindExpected<DecodedNameParts> table_parts = NameParts(index.table);
+    if (!table_parts.has_value()) {
+      return std::unexpected(std::move(table_parts.error()));
+    }
+    if (table_parts->size() != 1U) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, index.table.span,
+                                         "CREATE INDEX table names must be unqualified"));
+    }
+
+    const std::string_view index_name = index_parts->back();
+    const std::string_view table_name = table_parts->back();
+    const std::optional<TableId> table_id = catalog_->FindTable(table_name);
+    if (!table_id.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, index.table.span,
+                                         "no such table: main." + std::string{table_name}));
+    }
+    const CatalogTable& table = catalog_->table(*table_id);
+    if (table.without_rowid || HasSqlitePrefix(table.name)) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, index.table.span,
+                                         "table shape is not supported for CREATE INDEX"));
+    }
+    if (HasSqlitePrefix(index_name)) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kObjectNameReserved, index.name.span,
+                      "object name reserved for internal use: " + std::string{index_name}));
+    }
+    if (catalog_->FindTable(index_name).has_value()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kTableAlreadyExists, index.name.span,
+                      "there is already a table named " + std::string{index_name}));
+    }
+
+    auto output = std::make_unique<BoundCreateIndex::Impl>();
+    output->source.assign(tree_.source().bytes());
+    output->catalog = catalog_;
+    output->table = *table_id;
+    output->table_root_page = table.root_page;
+    output->index_name = std::string{index_name};
+    output->table_name = table.name;
+    output->unique = index.unique;
+    output->unique_not_null = index.unique;
+    output->if_not_exists = index.if_not_exists;
+
+    if (catalog_->FindIndex(index_name).has_value()) {
+      if (!index.if_not_exists) {
+        return std::unexpected(BinderError(BindErrorCode::kIndexAlreadyExists, index.name.span,
+                                           "index " + std::string{index_name} + " already exists"));
+      }
+      output->no_op = true;
+      return BoundCreateIndex(std::move(output));
+    }
+    if (index.where.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, index.span,
+                                         "partial indexes are not supported"));
+    }
+
+    output->terms.reserve(index.terms.size());
+    for (const IndexedTerm& term : index.terms) {
+      ExpressionId expression_id = term.expression;
+      std::optional<SourceSpan> collation_span = term.collation;
+      while (true) {
+        const Expression& expression = tree_.expression(expression_id);
+        if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+            parenthesized != nullptr) {
+          expression_id = parenthesized->inner;
+          continue;
+        }
+        if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+            collate != nullptr) {
+          if (!collation_span.has_value()) {
+            collation_span = collate->collation;
+          }
+          expression_id = collate->operand;
+          continue;
+        }
+        break;
+      }
+
+      const Expression& expression = tree_.expression(expression_id);
+      const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
+      if (identifier == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, term.span,
+                                           "index expressions are not supported"));
+      }
+      BindExpected<DecodedNameParts> column_parts = NameParts(identifier->name);
+      if (!column_parts.has_value()) {
+        return std::unexpected(std::move(column_parts.error()));
+      }
+      if (column_parts->size() != 1U) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, term.span,
+                                           "qualified index terms are not supported"));
+      }
+      const std::optional<ColumnId> column_id =
+          catalog_->FindColumn(*table_id, column_parts->front());
+      if (!column_id.has_value()) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kNoSuchColumn, term.span,
+                        "no such column: " + std::string{column_parts->front()}));
+      }
+      const CatalogColumn& column = table.columns[column_id->value];
+      std::string collation_name = column.collation_name;
+      if (collation_span.has_value()) {
+        BindExpected<std::string> decoded = Dequote(*collation_span);
+        if (!decoded.has_value()) {
+          return std::unexpected(std::move(decoded.error()));
+        }
+        collation_name = std::move(*decoded);
+      }
+      if (FindRegisteredCollation(collation_name) == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kNoSuchCollation, term.span,
+                                           "no such collation sequence: " + collation_name));
+      }
+      const bool rowid = table.rowid_alias == *column_id;
+      const bool not_null = rowid || column.effective_not_null_conflict.has_value();
+      output->unique_not_null = output->unique_not_null && not_null;
+      output->terms.push_back(BoundCreateIndexTerm{
+          .column = *column_id,
+          .affinity = column.affinity,
+          .collation_name = std::move(collation_name),
+          .order =
+              term.order == SortOrder::kDescending ? SortOrder::kDescending : SortOrder::kAscending,
+          .rowid = rowid,
+      });
+    }
+
+    const std::size_t retained_begin = index.name.parts.back().begin().value();
+    const std::size_t retained_end = index.span.end().value();
+    output->canonical_sql = index.unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ";
+    output->canonical_sql.append(
+        tree_.source().bytes().substr(retained_begin, retained_end - retained_begin));
+    return BoundCreateIndex(std::move(output));
   }
 
  private:
@@ -2711,6 +2882,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "duplicate_column";
     case BindErrorCode::kTableAlreadyExists:
       return "table_already_exists";
+    case BindErrorCode::kIndexAlreadyExists:
+      return "index_already_exists";
     case BindErrorCode::kObjectNameReserved:
       return "object_name_reserved";
     case BindErrorCode::kIndexedTableUnsupported:
@@ -2746,6 +2919,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kColumnCountMismatch:
     case BindErrorCode::kDuplicateColumn:
     case BindErrorCode::kTableAlreadyExists:
+    case BindErrorCode::kIndexAlreadyExists:
     case BindErrorCode::kObjectNameReserved:
       return ErrorCode::kGeneric;
   }
@@ -3083,6 +3257,66 @@ std::span<const BoundCreateColumn> BoundCreateTable::columns() const noexcept {
 
 std::optional<ColumnId> BoundCreateTable::rowid_alias() const noexcept {
   return impl_ != nullptr ? impl_->rowid_alias : std::nullopt;
+}
+
+BoundCreateIndex::BoundCreateIndex(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundCreateIndex::BoundCreateIndex(BoundCreateIndex&&) noexcept = default;
+
+BoundCreateIndex& BoundCreateIndex::operator=(BoundCreateIndex&&) noexcept = default;
+
+BoundCreateIndex::~BoundCreateIndex() = default;
+
+bool BoundCreateIndex::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundCreateIndex::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundCreateIndex::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundCreateIndex::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+TableId BoundCreateIndex::table() const noexcept {
+  return impl_ != nullptr ? impl_->table : TableId{};
+}
+
+RootPageId BoundCreateIndex::table_root_page() const noexcept {
+  return impl_ != nullptr ? impl_->table_root_page : RootPageId{};
+}
+
+std::string_view BoundCreateIndex::index_name() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->index_name} : std::string_view{};
+}
+
+std::string_view BoundCreateIndex::table_name() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->table_name} : std::string_view{};
+}
+
+bool BoundCreateIndex::unique() const noexcept { return impl_ != nullptr && impl_->unique; }
+
+bool BoundCreateIndex::unique_not_null() const noexcept {
+  return impl_ != nullptr && impl_->unique_not_null;
+}
+
+bool BoundCreateIndex::if_not_exists() const noexcept {
+  return impl_ != nullptr && impl_->if_not_exists;
+}
+
+bool BoundCreateIndex::no_op() const noexcept { return impl_ != nullptr && impl_->no_op; }
+
+std::string_view BoundCreateIndex::canonical_sql() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->canonical_sql} : std::string_view{};
+}
+
+std::span<const BoundCreateIndexTerm> BoundCreateIndex::terms() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundCreateIndexTerm>{impl_->terms}
+                          : std::span<const BoundCreateIndexTerm>{};
 }
 
 BindStatementResult BindStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,

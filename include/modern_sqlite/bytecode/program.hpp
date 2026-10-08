@@ -67,6 +67,7 @@ enum class ProgramStatementKind : std::uint8_t {
   kUpdate,
   kDelete,
   kCreateTable,
+  kCreateIndex,
 };
 
 enum class ProgramTransactionAccess : std::uint8_t {
@@ -162,6 +163,7 @@ struct WriteCursorDescriptor {
   std::uint32_t key_term_count = 0;
   bool unique = false;
   bool unique_not_null = false;
+  bool pending_root = false;
   WriteCursorStorageKind storage = WriteCursorStorageKind::kRowIdTable;
 };
 
@@ -424,6 +426,11 @@ struct CreateTableRootInstruction {
   RegisterId output;
 };
 
+struct CreateIndexRootInstruction {
+  WriteCursorId cursor;
+  RegisterId output;
+};
+
 struct IncrementSchemaCookieInstruction {
   RegisterId output;
 };
@@ -473,7 +480,7 @@ using Instruction = std::variant<
     BuildTableRecordInstruction, CheckUniqueIndexInstruction, InsertIndexInstruction,
     DeleteIndexInstruction, InsertTableInstruction, DeleteTableInstruction,
     DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
-    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
+    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction, CreateIndexRootInstruction,
     IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
     JumpIfInstruction, ResultRowInstruction>;
 
@@ -521,6 +528,7 @@ enum class InstructionKind : std::uint8_t {
   kUpdateTable,
   kEnsureDatabaseInitialized,
   kCreateTableRoot,
+  kCreateIndexRoot,
   kIncrementSchemaCookie,
   kCompare,
   kCallScalar,

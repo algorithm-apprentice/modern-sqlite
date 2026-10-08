@@ -401,6 +401,13 @@ CREATE INDEX publishes zero user changes and no last-insert-rowid event.
 Failure at any root, schema, population, uniqueness, cookie, or candidate-load
 boundary rolls the whole statement back.
 
+The bytecode descriptor for the newly allocated index is an index write
+descriptor with a pending root rather than a fabricated page number.
+`CreateIndexRootInstruction` creates the B-tree with that descriptor's
+comparison metadata, publishes the real root page to the schema-record
+register, and opens the typed index capability used by population. Ordinary
+open-write instructions reject pending-root descriptors.
+
 ### 8. Implement STAT1-only ANALYZE as catalog refresh
 
 Add immutable syntax and bound forms for:

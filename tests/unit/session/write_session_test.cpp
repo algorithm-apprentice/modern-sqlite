@@ -307,6 +307,93 @@ TEST(WriteSession, MaintainsIndexesForDmlStatements) {
   EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE flag=7 AND id=5001").empty());
 }
 
+TEST(WriteSession, CreatesPopulatesAndPublishesIndexes) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'alpha',7)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'beta',8)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(3,NULL,9)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(4,NULL,9)");
+  WriteStatement prepared = PrepareOne(
+      session, "SELECT id,Score FROM Items WHERE Name COLLATE NOCASE='ALPHA' AND Score=7");
+
+  ExecuteDone(session,
+              "CREATE UNIQUE INDEX IF NOT EXISTS main.items_name_score "
+              "ON Items(Name COLLATE NOCASE DESC,Score)");
+  EXPECT_EQ(1U, session.changes());
+  EXPECT_EQ(4, session.last_insert_rowid());
+
+  const auto schema = QueryRows(
+      session, "SELECT sql FROM sqlite_schema WHERE name='items_name_score' AND type='index'");
+  ASSERT_EQ(1U, schema.size());
+  EXPECT_EQ("CREATE UNIQUE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)",
+            Text(schema[0][0]));
+
+  ASSERT_EQ(WriteStep::kRow, TakeValue(prepared.Step()));
+  ASSERT_EQ(2U, prepared.row().size());
+  EXPECT_EQ(1, prepared.row()[0].integer_value());
+  EXPECT_EQ(7.0, prepared.row()[1].real_value());
+  EXPECT_EQ(WriteStep::kDone, TakeValue(prepared.Step()));
+
+  ExecuteDone(session,
+              "CREATE UNIQUE INDEX IF NOT EXISTS items_name_score "
+              "ON Items(no_such_column)");
+  EXPECT_EQ(1U, session.changes());
+
+  WriteStatement duplicate = PrepareOne(session, "INSERT INTO Items VALUES(5,'ALPHA',7)");
+  const auto duplicate_step = duplicate.Step();
+  ASSERT_FALSE(duplicate_step.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_step.error().code());
+  EXPECT_EQ(0U, session.changes());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM Items WHERE id=5").empty());
+}
+
+TEST(WriteSession, RollsBackCreatedIndexesAndCatalogs) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'same')");
+
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "CREATE UNIQUE INDEX items_name ON Items(Name)");
+  ASSERT_EQ(1U,
+            QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").size());
+  ExecuteDone(session, "ROLLBACK");
+  EXPECT_TRUE(QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").empty());
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'same')");
+  EXPECT_EQ(1U, session.changes());
+
+  ExecuteDone(session, "SAVEPOINT s");
+  ExecuteDone(session, "CREATE INDEX items_name ON Items(Name DESC)");
+  ASSERT_EQ(1U,
+            QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").size());
+  ExecuteDone(session, "ROLLBACK TO s");
+  ExecuteDone(session, "RELEASE s");
+  EXPECT_TRUE(QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").empty());
+}
+
+TEST(WriteSession, RollsBackFailedUniqueIndexPopulation) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'same')");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'same')");
+
+  WriteStatement unique = PrepareOne(session, "CREATE UNIQUE INDEX items_name ON Items(Name)");
+  const auto failed = unique.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, failed.error().code());
+  EXPECT_EQ(1U, session.changes());
+  EXPECT_EQ(2, session.last_insert_rowid());
+  EXPECT_TRUE(QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").empty());
+  EXPECT_EQ(2U, QueryRows(session, "SELECT id FROM Items").size());
+
+  ExecuteDone(session, "CREATE INDEX items_name ON Items(Name)");
+  EXPECT_EQ(1U,
+            QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").size());
+}
+
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

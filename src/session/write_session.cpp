@@ -302,6 +302,10 @@ struct WriteSession::State final {
       if (const auto* create = std::get_if<PhysicalCreateTableMutation>(&mutation->payload());
           create != nullptr) {
         output.creates_schema = !create->no_op;
+      } else if (const auto* create_index =
+                     std::get_if<PhysicalCreateIndexMutation>(&mutation->payload());
+                 create_index != nullptr) {
+        output.creates_schema = !create_index->no_op;
       }
       auto lowered = LowerPlan(*mutation);
       if (!lowered.has_value()) {
@@ -582,7 +586,7 @@ struct WriteStatement::Impl final {
     }
     if (creates_schema) {
       if (!candidate_generation.has_value()) {
-        return FailAndRollback(Internal("CREATE TABLE candidate generation is missing"));
+        return FailAndRollback(Internal("schema candidate generation is missing"));
       }
       auto loaded =
           LoadCatalog(*state->pager, CatalogLoadOptions{.generation = *candidate_generation});
