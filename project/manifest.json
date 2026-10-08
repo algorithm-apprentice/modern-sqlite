@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "one-pass-mutation-optimization",
+    "status": "index-planning-design",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
