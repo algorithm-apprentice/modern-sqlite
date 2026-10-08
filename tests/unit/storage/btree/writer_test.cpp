@@ -329,6 +329,59 @@ TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
+  test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  for (std::int64_t rowid = 1; rowid <= 128; ++rowid) {
+    ByteBuffer payload{ByteCount{380}};
+    std::ranges::fill(payload.mutable_view(),
+                      static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
+    RequireStatus(table.Insert(rowid, payload.view()));
+  }
+
+  std::uint64_t deleted = 0;
+  {
+    TableBtreeMutationCursor opened = TakeValue(table.OpenMutationCursor());
+    TableBtreeMutationCursor cursor = std::move(opened);
+    // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+    const auto moved_from = opened.First();
+    // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+    ASSERT_FALSE(moved_from.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, moved_from.error().code());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    while (cursor.valid()) {
+      const TableBtreeMutationRow row = TakeValue(cursor.row());
+      const auto expected_rowid = static_cast<std::int64_t>(deleted) + 1;
+      EXPECT_EQ(expected_rowid, row.rowid);
+      ASSERT_EQ(380U, row.payload.size());
+      EXPECT_EQ(static_cast<std::byte>(static_cast<std::uint8_t>(expected_rowid)), row.payload[0]);
+      ++deleted;
+      const bool has_next = TakeValue(cursor.DeleteAndNext());
+      EXPECT_EQ(deleted < 128U, has_next);
+    }
+  }
+  EXPECT_EQ(128U, deleted);
+  {
+    TableBtreeMutationCursor empty = TakeValue(table.OpenMutationCursor());
+    EXPECT_FALSE(TakeValue(empty.First()));
+    const auto row = empty.row();
+    const auto deleted_empty = empty.DeleteAndNext();
+    ASSERT_FALSE(row.has_value());
+    ASSERT_FALSE(deleted_empty.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, row.error().code());
+    EXPECT_EQ(ErrorCode::kMisuse, deleted_empty.error().code());
+  }
+  EXPECT_EQ(0U, TakeValue(table.Clear()));
+  RequireStatus(pager->Rollback());
+}
+
 TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);

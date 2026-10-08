@@ -315,6 +315,11 @@ struct TableSeekResult {
   std::size_t tree_depth;
 };
 
+struct WritableTableRow {
+  std::int64_t rowid;
+  ByteView payload;
+};
+
 struct IndexSeekResult {
   std::size_t insertion_index;
   int comparison;
@@ -342,6 +347,9 @@ class WritableCursor final {
 
   [[nodiscard]] Status CheckActive() const;
   [[nodiscard]] Result<TableSeekResult> SeekTable(std::int64_t rowid);
+  [[nodiscard]] Result<bool> FirstTable();
+  [[nodiscard]] Result<bool> NextTable();
+  [[nodiscard]] Result<WritableTableRow> CurrentTableRow(std::vector<std::byte>& scratch);
   [[nodiscard]] Result<IndexSeekResult> SeekIndex(std::span<const SqlValue> key,
                                                   std::span<const IndexColumnOrder> columns,
                                                   RecordCodecOptions options,
@@ -357,6 +365,7 @@ class WritableCursor final {
                                    std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Result<bool> DeleteCurrentTableAndNext(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteIndex(std::span<const SqlValue> key,
                                    std::span<const IndexColumnOrder> columns,
                                    RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
@@ -389,6 +398,8 @@ class WritableCursor final {
                                            std::optional<PageNumber> left_child,
                                            BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status Descend(std::size_t child_index, const BtreePageView& parent);
+  [[nodiscard]] Status DescendLeftmost();
+  void InvalidatePosition() noexcept;
   void ReleaseDescendants() noexcept;
   void EnterFault() noexcept;
 
