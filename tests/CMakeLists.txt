@@ -917,6 +917,20 @@ set_tests_properties(
     TIMEOUT 30
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+add_test(
+  NAME performance.write_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest
+    tests/performance/write_performance_tool_test.py
+)
+set_tests_properties(
+  performance.write_performance_tool
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
   add_test(
     NAME performance.read_baseline_validation
