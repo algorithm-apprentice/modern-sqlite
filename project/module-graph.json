@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "establish-write-performance-baseline",
+  "currentNode": "optimize-one-pass-mutations",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",
@@ -43,6 +43,7 @@
     "implement-dml-ddl",
     "build-writable-mvp-harness",
     "establish-write-performance-baseline",
+    "optimize-one-pass-mutations",
     "implement-index-planning",
     "implement-advanced-sql",
     "implement-concurrency-locking",
@@ -340,9 +341,20 @@
       "acceptance": ["Reports separate default and matched durability configurations and verify final contents."],
       "performanceSensitive": true
     },
+    "optimize-one-pass-mutations": {
+      "layer": "performance",
+      "dependsOn": ["establish-write-performance-baseline", "implement-dml-ddl", "implement-btree-write"],
+      "deliverable": "SQLite-aligned one-pass stable-rowid UPDATE and DELETE scan mutation with save-position cursor semantics.",
+      "acceptance": [
+        "Writable correctness, crash, fuzz, and interoperability gates remain green.",
+        "Matched scan UPDATE and DELETE satisfy aggregate and every-round 10x wall and CPU guards.",
+        "The regenerated write baseline preserves all workload and durability semantics."
+      ],
+      "performanceSensitive": true
+    },
     "implement-index-planning": {
       "layer": "planner",
-      "dependsOn": ["implement-btree-write", "implement-basic-optimizer", "implement-catalog-loader", "build-writable-mvp-harness"],
+      "dependsOn": ["optimize-one-pass-mutations", "implement-btree-write", "implement-basic-optimizer", "implement-catalog-loader", "build-writable-mvp-harness"],
       "deliverable": "Index creation, index scans, covering scans, selectivity estimates, and ANALYZE/statistics support.",
       "acceptance": ["Plan and result tests match SQLite for supported index cases and retain scan fallbacks."],
       "performanceSensitive": true

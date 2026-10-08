@@ -59,13 +59,14 @@ explains the canonical linearization and completion gates.
 38. `implement-dml-ddl`
 39. `build-writable-mvp-harness`
 40. `establish-write-performance-baseline`
-41. `implement-index-planning`
-42. `implement-advanced-sql`
-43. `implement-concurrency-locking`
-44. `implement-wal`
-45. `implement-c-api-compatibility`
-46. `implement-extensions`
-47. `harden-engine`
+41. `optimize-one-pass-mutations`
+42. `implement-index-planning`
+43. `implement-advanced-sql`
+44. `implement-concurrency-locking`
+45. `implement-wal`
+46. `implement-c-api-compatibility`
+47. `implement-extensions`
+48. `harden-engine`
 
 ## Milestones
 
@@ -102,7 +103,7 @@ This milestone reads SQLite-created databases but does not modify them.
 
 ### Writable MVP milestone
 
-Nodes 33 through 40 provide:
+Nodes 33 through 41 provide:
 
 - Rollback-journal DELETE mode.
 - Writable pager and B-tree mutation.
@@ -112,19 +113,21 @@ Nodes 33 through 40 provide:
 - Deterministic crash recovery at every mutating I/O boundary.
 - Modern-write/SQLite-read interoperability and `integrity_check`.
 - A matched write-performance baseline.
+- SQLite-aligned one-pass stable-rowid UPDATE and DELETE scan mutation that
+  remediates the admitted baseline guard failures.
 
 The writable MVP intentionally excludes WAL, attached databases, triggers,
 foreign keys, views, virtual tables, and advanced SQL.
 
 ### Compatibility expansion
 
-Nodes 41 through 46 add index-aware planning, broader SQL semantics,
+Nodes 42 through 47 add index-aware planning, broader SQL semantics,
 multi-connection locking, WAL, C API compatibility, and extensions. Each is a
 separate reviewed scope, not part of the initial writable MVP.
 
 ### Hardening
 
-Node 47 integrates:
+Node 48 integrates:
 
 - Debug and optimized builds.
 - ASan, UBSan, and TSan where applicable.
