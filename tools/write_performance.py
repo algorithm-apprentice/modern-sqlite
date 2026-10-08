@@ -18,8 +18,25 @@ class HarnessError(RuntimeError):
     pass
 
 
-class BenchmarkMismatch(HarnessError):
-    pass
+class ChildRunFailure(HarnessError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: tuple[str, ...],
+        returncode: int,
+        stdout: bytes,
+        stderr: bytes,
+        elapsed_ns: int,
+        timed_out: bool,
+    ) -> None:
+        super().__init__(message)
+        self.command = command
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.elapsed_ns = elapsed_ns
+        self.timed_out = timed_out
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -251,6 +268,49 @@ _SOURCE_KEYS = {"revision", "tree"}
 _SQLITE_IDENTITY_KEYS = {"compile_options", "source_id", "version"}
 _IDENTITY_KEYS = {"build", "mode", "schema_version", "source", "sqlite"}
 _GIT_OBJECT = re.compile(r"[0-9a-f]{40,64}\Z")
+_ARTIFACT_KEYS = {"path", "sha256", "size_bytes"}
+_INPUT_KEYS = {"role", "path", "sha256", "size_bytes"}
+_BINARY_REFERENCE_KEYS = {"path", "sha256", "size_bytes", "identity"}
+_PROCESS_KEYS = {"returncode", "elapsed_ns"}
+_TIMING_RUN_KEYS = {
+    "ordinal",
+    "profile",
+    "round",
+    "case",
+    "engine",
+    "command",
+    "process",
+    "stdout",
+    "stderr",
+}
+_DIAGNOSTIC_RUN_KEYS = _TIMING_RUN_KEYS - {"round"}
+_RUN_MANIFEST_KEYS = {
+    "schema_version",
+    "status",
+    "source",
+    "host",
+    "inputs",
+    "binaries",
+    "timing_runs",
+    "diagnostic_runs",
+    "aggregate",
+}
+_SOURCE_STATE_KEYS = {
+    "revision",
+    "tree",
+    "clean",
+    "status_sha256",
+    "worktree_content_sha256",
+}
+_HOST_KEYS = {
+    "os",
+    "kernel",
+    "architecture",
+    "cpu",
+    "logical_cpu_count",
+    "wall_timer",
+    "cpu_timer",
+}
 
 _EXPECTED_CONFIGURATION = {
     "page_size": 4096,
@@ -1646,40 +1706,64 @@ def run_timing_child(
             stdout_limit=4 * 1024 * 1024,
             stderr_limit=1024 * 1024,
         )
-    except (common.HarnessError, common.ChildExecutionError) as error:
+    except common.ChildExecutionError as error:
+        raise ChildRunFailure(
+            str(error),
+            command=command,
+            returncode=error.returncode,
+            stdout=error.stdout,
+            stderr=error.stderr,
+            elapsed_ns=error.elapsed_ns,
+            timed_out=error.timed_out,
+        ) from error
+    except common.HarnessError as error:
         raise HarnessError(str(error)) from error
+    def fail(message: str) -> None:
+        raise ChildRunFailure(
+            message,
+            command=command,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            elapsed_ns=result.elapsed_ns,
+            timed_out=False,
+        )
+
     if result.returncode == 2:
-        raise BenchmarkMismatch(
+        fail(
             f"timing child reported a correctness mismatch for "
             f"{engine} {profile} {case_id}"
         )
     if result.returncode != 0:
-        raise HarnessError(
+        fail(
             f"timing child failed for {engine} {profile} {case_id} "
             f"with exit {result.returncode}"
         )
     if result.stderr:
-        raise HarnessError(
+        fail(
             f"timing child wrote stderr for {engine} {profile} {case_id}"
         )
-    report = load_json_bytes_strict(
-        result.stdout,
-        f"timing {engine} {profile} {case_id}",
-    )
-    validate_raw_timing_report(
-        report,
-        workload_manifest=workload_manifest,
-        expected_engine=engine,
-        expected_profile=profile,
-        expected_case=case_id,
-        expected_run_kind=run_kind,
-    )
+    try:
+        report = load_json_bytes_strict(
+            result.stdout,
+            f"timing {engine} {profile} {case_id}",
+        )
+        validate_raw_timing_report(
+            report,
+            workload_manifest=workload_manifest,
+            expected_engine=engine,
+            expected_profile=profile,
+            expected_case=case_id,
+            expected_run_kind=run_kind,
+        )
+    except HarnessError as error:
+        fail(str(error))
     try:
         remaining = list(scratch_path.iterdir())
     except OSError as error:
         raise HarnessError(f"cannot inspect timing scratch cleanup: {error}") from error
     if remaining:
-        raise BenchmarkMismatch("timing child left scratch database artifacts")
+        fail("timing child left scratch database artifacts")
     return TimingChildResult(
         command=command,
         returncode=result.returncode,
@@ -1744,33 +1828,58 @@ def run_diagnostic_child(
             stdout_limit=4 * 1024 * 1024,
             stderr_limit=1024 * 1024,
         )
-    except (common.HarnessError, common.ChildExecutionError) as error:
+    except common.ChildExecutionError as error:
+        raise ChildRunFailure(
+            str(error),
+            command=command,
+            returncode=error.returncode,
+            stdout=error.stdout,
+            stderr=error.stderr,
+            elapsed_ns=error.elapsed_ns,
+            timed_out=error.timed_out,
+        ) from error
+    except common.HarnessError as error:
         raise HarnessError(str(error)) from error
+
+    def fail(message: str) -> None:
+        raise ChildRunFailure(
+            message,
+            command=command,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            elapsed_ns=result.elapsed_ns,
+            timed_out=False,
+        )
+
     if result.returncode == 2:
-        raise BenchmarkMismatch(
+        fail(
             f"diagnostic child reported a correctness mismatch for "
             f"{engine} {profile} {case_id}"
         )
     if result.returncode != 0:
-        raise HarnessError(
+        fail(
             f"diagnostic child failed for {engine} {profile} {case_id} "
             f"with exit {result.returncode}"
         )
     if result.stderr:
-        raise HarnessError(
+        fail(
             f"diagnostic child wrote stderr for {engine} {profile} {case_id}"
         )
-    report = load_json_bytes_strict(
-        result.stdout,
-        f"diagnostic {engine} {profile} {case_id}",
-    )
-    validate_raw_diagnostic_report(
-        report,
-        workload_manifest=workload_manifest,
-        expected_engine=engine,
-        expected_profile=profile,
-        expected_case=case_id,
-    )
+    try:
+        report = load_json_bytes_strict(
+            result.stdout,
+            f"diagnostic {engine} {profile} {case_id}",
+        )
+        validate_raw_diagnostic_report(
+            report,
+            workload_manifest=workload_manifest,
+            expected_engine=engine,
+            expected_profile=profile,
+            expected_case=case_id,
+        )
+    except HarnessError as error:
+        fail(str(error))
     try:
         remaining = list(scratch_path.iterdir())
     except OSError as error:
@@ -1778,9 +1887,7 @@ def run_diagnostic_child(
             f"cannot inspect diagnostic scratch cleanup: {error}"
         ) from error
     if remaining:
-        raise BenchmarkMismatch(
-            "diagnostic child left scratch database artifacts"
-        )
+        fail("diagnostic child left scratch database artifacts")
     return DiagnosticChildResult(
         command=command,
         returncode=result.returncode,
@@ -1789,6 +1896,983 @@ def run_diagnostic_child(
         elapsed_ns=result.elapsed_ns,
         report=report,
     )
+
+
+def build_timing_schedule(
+    workload_manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    case_ids = [case["id"] for case in workload_manifest["cases"]]
+    schedule = []
+    ordinal = 0
+    for profile in workload_manifest["profiles"]:
+        for round_definition in workload_manifest["rounds"]:
+            ordered_cases = (
+                case_ids
+                if round_definition["case_order"] == "canonical"
+                else list(reversed(case_ids))
+            )
+            for case_id in ordered_cases:
+                for engine in round_definition["engine_order"]:
+                    schedule.append(
+                        {
+                            "ordinal": ordinal,
+                            "profile": profile["id"],
+                            "round": round_definition["index"],
+                            "case": case_id,
+                            "engine": engine,
+                        }
+                    )
+                    ordinal += 1
+    return schedule
+
+
+def build_diagnostic_schedule(
+    workload_manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    schedule = []
+    ordinal = 0
+    for profile in workload_manifest["profiles"]:
+        for case in workload_manifest["cases"]:
+            for engine in ("modern", "sqlite"):
+                schedule.append(
+                    {
+                        "ordinal": ordinal,
+                        "profile": profile["id"],
+                        "case": case["id"],
+                        "engine": engine,
+                    }
+                )
+                ordinal += 1
+    return schedule
+
+
+def _ratio_within(
+    numerator: int,
+    denominator: int,
+    limit: dict[str, int],
+) -> bool:
+    if denominator <= 0:
+        raise HarnessError("ratio denominator must be positive")
+    return (
+        numerator * limit["denominator"]
+        <= denominator * limit["numerator"]
+    )
+
+
+def _ratio_less(
+    left: tuple[int, int],
+    right: tuple[int, int],
+) -> bool:
+    return left[0] * right[1] < right[0] * left[1]
+
+
+def _aggregate_metric(
+    *,
+    reports: dict[tuple[str, int, str, str], dict[str, Any]],
+    profile: str,
+    case_id: str,
+    field: str,
+) -> dict[str, Any]:
+    common = _read_performance_module()
+    all_samples: dict[str, list[int]] = {"modern": [], "sqlite": []}
+    round_rows = []
+    ratio_pairs = []
+    for round_index in range(3):
+        medians = {}
+        for engine in ("modern", "sqlite"):
+            report = reports[(profile, round_index, case_id, engine)]
+            samples = [row[field] for row in report["repetitions"]]
+            all_samples[engine].extend(samples)
+            medians[engine] = common.median_integer(samples)
+        if medians["sqlite"] <= 0:
+            raise HarnessError(
+                f"{profile} {case_id} {field} SQLite median is not positive"
+            )
+        ratio_pair = (medians["modern"], medians["sqlite"])
+        ratio_pairs.append(ratio_pair)
+        round_rows.append(
+            {
+                "round": round_index,
+                "modern_median_ns": medians["modern"],
+                "sqlite_median_ns": medians["sqlite"],
+                "ratio": common.exact_ratio(*ratio_pair),
+            }
+        )
+    medians = {
+        engine: common.median_integer(samples)
+        for engine, samples in all_samples.items()
+    }
+    if medians["sqlite"] <= 0:
+        raise HarnessError(
+            f"{profile} {case_id} {field} SQLite aggregate median "
+            "is not positive"
+        )
+    minimum = ratio_pairs[0]
+    maximum = ratio_pairs[0]
+    for candidate in ratio_pairs[1:]:
+        if _ratio_less(candidate, minimum):
+            minimum = candidate
+        if _ratio_less(maximum, candidate):
+            maximum = candidate
+    return {
+        "sample_count": len(all_samples["modern"]),
+        "modern_median_ns": medians["modern"],
+        "sqlite_median_ns": medians["sqlite"],
+        "ratio": common.exact_ratio(
+            medians["modern"],
+            medians["sqlite"],
+        ),
+        "round_ratios": round_rows,
+        "minimum_round_ratio": common.exact_ratio(*minimum),
+        "maximum_round_ratio": common.exact_ratio(*maximum),
+    }
+
+
+def aggregate_timing_reports(
+    workload_manifest: dict[str, Any],
+    reports: dict[tuple[str, int, str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    expected_keys = {
+        (
+            item["profile"],
+            item["round"],
+            item["case"],
+            item["engine"],
+        )
+        for item in build_timing_schedule(workload_manifest)
+    }
+    if set(reports) != expected_keys:
+        raise HarnessError("timing report matrix is incomplete or duplicated")
+    for profile, round_index, case_id, engine in sorted(expected_keys):
+        validate_raw_timing_report(
+            reports[(profile, round_index, case_id, engine)],
+            workload_manifest=workload_manifest,
+            expected_engine=engine,
+            expected_profile=profile,
+            expected_case=case_id,
+            expected_run_kind="baseline",
+        )
+
+    guard = workload_manifest["guard"]
+    guard_passed = True
+    profile_rows = []
+    for profile_definition in workload_manifest["profiles"]:
+        profile_id = profile_definition["id"]
+        guarded = profile_definition["guard"]
+        case_rows = []
+        profile_passed = True
+        for case in workload_manifest["cases"]:
+            wall = _aggregate_metric(
+                reports=reports,
+                profile=profile_id,
+                case_id=case["id"],
+                field="wall_ns",
+            )
+            cpu = _aggregate_metric(
+                reports=reports,
+                profile=profile_id,
+                case_id=case["id"],
+                field="cpu_ns",
+            )
+            case_passed = True
+            if guarded:
+                for metric, limit in (
+                    (wall, guard["maximum_wall_ratio"]),
+                    (cpu, guard["maximum_cpu_ratio"]),
+                ):
+                    if not _ratio_within(
+                        metric["ratio"]["numerator"],
+                        metric["ratio"]["denominator"],
+                        limit,
+                    ):
+                        case_passed = False
+                    for round_row in metric["round_ratios"]:
+                        ratio = round_row["ratio"]
+                        if not _ratio_within(
+                            ratio["numerator"],
+                            ratio["denominator"],
+                            limit,
+                        ):
+                            case_passed = False
+            profile_passed = profile_passed and case_passed
+            case_rows.append(
+                {
+                    "id": case["id"],
+                    "guard_passed": case_passed if guarded else None,
+                    "wall": wall,
+                    "cpu": cpu,
+                }
+            )
+        if guarded:
+            guard_passed = guard_passed and profile_passed
+            status = "passed" if profile_passed else "failed"
+        else:
+            status = "informational"
+        profile_rows.append(
+            {
+                "id": profile_id,
+                "guard": guarded,
+                "status": status,
+                "cases": case_rows,
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "workload_semantics_version": WORKLOAD_SEMANTICS_VERSION,
+        "status": "complete",
+        "guard": guard,
+        "guard_passed": guard_passed,
+        "profiles": profile_rows,
+    }
+
+
+def _repository_input_reference(
+    *,
+    role: str,
+    path: pathlib.Path,
+    repository_root: pathlib.Path,
+) -> dict[str, Any]:
+    common = _read_performance_module()
+    relative = common._repository_relative_path(
+        path,
+        repository_root,
+        f"{role} input",
+    )
+    return {
+        "role": role,
+        "path": relative,
+        "sha256": _sha256(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def _binary_reference(
+    *,
+    path: pathlib.Path,
+    identity: dict[str, Any],
+    repository_root: pathlib.Path,
+) -> dict[str, Any]:
+    common = _read_performance_module()
+    return {
+        "path": common._repository_relative_path(
+            path,
+            repository_root,
+            "benchmark binary",
+        ),
+        "sha256": _sha256(path),
+        "size_bytes": path.stat().st_size,
+        "identity": identity,
+    }
+
+
+def _write_child_artifacts(
+    *,
+    baseline_path: pathlib.Path,
+    group: str,
+    stem: str,
+    stdout: bytes,
+    stderr: bytes,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    common = _read_performance_module()
+    stdout_path = baseline_path / "raw" / group / f"{stem}.json"
+    stderr_path = baseline_path / "raw" / group / f"{stem}.stderr"
+    common._write_new_bytes(stdout_path, stdout)
+    common._write_new_bytes(stderr_path, stderr)
+    return (
+        common._artifact_reference(stdout_path, baseline_path),
+        common._artifact_reference(stderr_path, baseline_path),
+    )
+
+
+def _fixture_path_for_case(
+    *,
+    repository_root: pathlib.Path,
+    workload_manifest: dict[str, Any],
+    case_id: str,
+    zero_path: pathlib.Path,
+) -> pathlib.Path:
+    case = _case_by_id(workload_manifest, case_id)
+    if case["fixture"] == "zero":
+        return zero_path
+    fixture = _fixture_by_id(workload_manifest, case["fixture"])
+    return repository_root / pathlib.PurePosixPath(fixture["path"])
+
+
+def generate_baseline(
+    *,
+    repository_root: pathlib.Path,
+    workload_path: pathlib.Path,
+    timing_binary_path: pathlib.Path,
+    diagnostic_binary_path: pathlib.Path,
+    output_path: pathlib.Path,
+) -> dict[str, Any]:
+    repository_root = repository_root.resolve()
+    workload_path = workload_path.resolve()
+    timing_binary_path = timing_binary_path.resolve()
+    diagnostic_binary_path = diagnostic_binary_path.resolve()
+    output_path = output_path.resolve()
+    workload_manifest = load_and_validate_workloads(workload_path)
+    common = _read_performance_module()
+    protected = [
+        workload_path,
+        timing_binary_path,
+        diagnostic_binary_path,
+        pathlib.Path(__file__).resolve(),
+        repository_root / "benchmarks/write_performance.cpp",
+    ]
+    common.validate_new_output_path(output_path, protected_paths=protected)
+    baseline_relative = common._repository_relative_path(
+        output_path,
+        repository_root,
+        "baseline output",
+    )
+    source = common._capture_source_state(
+        repository_root,
+        baseline_relative,
+    )
+    if not source["clean"]:
+        raise HarnessError("baseline generation requires a clean worktree")
+    timing_identity = read_binary_identity(
+        binary_path=timing_binary_path,
+        repository_root=repository_root,
+        instrumentation=False,
+    )
+    diagnostic_identity = read_binary_identity(
+        binary_path=diagnostic_binary_path,
+        repository_root=repository_root,
+        instrumentation=True,
+    )
+    expected_source = {
+        "revision": source["revision"],
+        "tree": source["tree"],
+    }
+    if (
+        timing_identity["source"] != expected_source
+        or diagnostic_identity["source"] != expected_source
+    ):
+        raise HarnessError(
+            "benchmark binary source identity does not match the clean tree"
+        )
+    timing_build = dict(timing_identity["build"])
+    diagnostic_build = dict(diagnostic_identity["build"])
+    timing_build.pop("instrumentation")
+    diagnostic_build.pop("instrumentation")
+    if (
+        timing_build != diagnostic_build
+        or timing_identity["sqlite"] != diagnostic_identity["sqlite"]
+    ):
+        raise HarnessError(
+            "timing and diagnostic binary identities do not match"
+        )
+
+    try:
+        output_path.mkdir()
+        for group in ("timing", "diagnostic"):
+            (output_path / "raw" / group).mkdir(parents=True)
+        scratch_root = output_path / "scratch"
+        scratch_root.mkdir()
+        zero_path = scratch_root / "zero-input.db"
+        zero_path.write_bytes(b"")
+    except OSError as error:
+        raise HarnessError(
+            f"cannot initialize write baseline output: {error}"
+        ) from error
+
+    timing_reports: dict[
+        tuple[str, int, str, str],
+        dict[str, Any],
+    ] = {}
+    timing_records = []
+    diagnostic_records = []
+    try:
+        for item in build_timing_schedule(workload_manifest):
+            stem = (
+                f"{item['ordinal']:03d}-round-{item['round']}-"
+                f"{item['profile']}-{item['case']}-{item['engine']}"
+            )
+            scratch = scratch_root / f"timing-{item['ordinal']:03d}"
+            scratch.mkdir()
+            fixture_path = _fixture_path_for_case(
+                repository_root=repository_root,
+                workload_manifest=workload_manifest,
+                case_id=item["case"],
+                zero_path=zero_path,
+            )
+            try:
+                result = run_timing_child(
+                    binary_path=timing_binary_path,
+                    repository_root=repository_root,
+                    workload_manifest=workload_manifest,
+                    engine=item["engine"],
+                    profile=item["profile"],
+                    case_id=item["case"],
+                    fixture_path=fixture_path,
+                    scratch_path=scratch,
+                    run_kind="baseline",
+                )
+            except ChildRunFailure as error:
+                _write_child_artifacts(
+                    baseline_path=output_path,
+                    group="timing",
+                    stem=stem,
+                    stdout=error.stdout,
+                    stderr=error.stderr,
+                )
+                raise
+            stdout_ref, stderr_ref = _write_child_artifacts(
+                baseline_path=output_path,
+                group="timing",
+                stem=stem,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            timing_records.append(
+                {
+                    **item,
+                    "command": [
+                        timing_binary_path.name,
+                        "run",
+                        item["engine"],
+                        item["profile"],
+                        item["case"],
+                        fixture_path.name,
+                        "SCRATCH",
+                        "baseline",
+                    ],
+                    "process": {
+                        "returncode": result.returncode,
+                        "elapsed_ns": result.elapsed_ns,
+                    },
+                    "stdout": stdout_ref,
+                    "stderr": stderr_ref,
+                }
+            )
+            timing_reports[
+                (
+                    item["profile"],
+                    item["round"],
+                    item["case"],
+                    item["engine"],
+                )
+            ] = result.report
+            scratch.rmdir()
+
+        diagnostic_reports = {}
+        for item in build_diagnostic_schedule(workload_manifest):
+            stem = (
+                f"{item['ordinal']:03d}-{item['profile']}-"
+                f"{item['case']}-{item['engine']}"
+            )
+            scratch = scratch_root / f"diagnostic-{item['ordinal']:03d}"
+            scratch.mkdir()
+            fixture_path = _fixture_path_for_case(
+                repository_root=repository_root,
+                workload_manifest=workload_manifest,
+                case_id=item["case"],
+                zero_path=zero_path,
+            )
+            try:
+                result = run_diagnostic_child(
+                    binary_path=diagnostic_binary_path,
+                    repository_root=repository_root,
+                    workload_manifest=workload_manifest,
+                    engine=item["engine"],
+                    profile=item["profile"],
+                    case_id=item["case"],
+                    fixture_path=fixture_path,
+                    scratch_path=scratch,
+                )
+            except ChildRunFailure as error:
+                _write_child_artifacts(
+                    baseline_path=output_path,
+                    group="diagnostic",
+                    stem=stem,
+                    stdout=error.stdout,
+                    stderr=error.stderr,
+                )
+                raise
+            stdout_ref, stderr_ref = _write_child_artifacts(
+                baseline_path=output_path,
+                group="diagnostic",
+                stem=stem,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            diagnostic_records.append(
+                {
+                    **item,
+                    "command": [
+                        diagnostic_binary_path.name,
+                        "run",
+                        item["engine"],
+                        item["profile"],
+                        item["case"],
+                        fixture_path.name,
+                        "SCRATCH",
+                        "diagnostic",
+                    ],
+                    "process": {
+                        "returncode": result.returncode,
+                        "elapsed_ns": result.elapsed_ns,
+                    },
+                    "stdout": stdout_ref,
+                    "stderr": stderr_ref,
+                }
+            )
+            diagnostic_reports[
+                (item["profile"], item["case"], item["engine"])
+            ] = result.report
+            scratch.rmdir()
+
+        expected_diagnostic_keys = {
+            (item["profile"], item["case"], item["engine"])
+            for item in build_diagnostic_schedule(workload_manifest)
+        }
+        if set(diagnostic_reports) != expected_diagnostic_keys:
+            raise HarnessError(
+                "diagnostic report matrix is incomplete or duplicated"
+            )
+        aggregate = aggregate_timing_reports(
+            workload_manifest,
+            timing_reports,
+        )
+        common._write_new_json(output_path / "aggregate.json", aggregate)
+        inputs = [
+            _repository_input_reference(
+                role="workload-manifest",
+                path=workload_path,
+                repository_root=repository_root,
+            ),
+            _repository_input_reference(
+                role="benchmark-source",
+                path=repository_root / "benchmarks/write_performance.cpp",
+                repository_root=repository_root,
+            ),
+            _repository_input_reference(
+                role="runner-source",
+                path=pathlib.Path(__file__).resolve(),
+                repository_root=repository_root,
+            ),
+        ]
+        for fixture in workload_manifest["fixtures"]:
+            inputs.append(
+                _repository_input_reference(
+                    role=f"fixture-{fixture['id']}",
+                    path=repository_root
+                    / pathlib.PurePosixPath(fixture["path"]),
+                    repository_root=repository_root,
+                )
+            )
+            inputs.append(
+                _repository_input_reference(
+                    role=f"fixture-sql-{fixture['id']}",
+                    path=repository_root
+                    / pathlib.PurePosixPath(fixture["sql_path"]),
+                    repository_root=repository_root,
+                )
+            )
+        run_manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "status": "complete",
+            "source": source,
+            "host": common._capture_host_provenance(repository_root),
+            "inputs": inputs,
+            "binaries": {
+                "timing": _binary_reference(
+                    path=timing_binary_path,
+                    identity=timing_identity,
+                    repository_root=repository_root,
+                ),
+                "diagnostic": _binary_reference(
+                    path=diagnostic_binary_path,
+                    identity=diagnostic_identity,
+                    repository_root=repository_root,
+                ),
+            },
+            "timing_runs": timing_records,
+            "diagnostic_runs": diagnostic_records,
+            "aggregate": common._artifact_reference(
+                output_path / "aggregate.json",
+                output_path,
+            ),
+        }
+        common._write_new_json(
+            output_path / "run-manifest.json",
+            run_manifest,
+        )
+        zero_path.unlink()
+        scratch_root.rmdir()
+        return aggregate
+    except (HarnessError, OSError) as error:
+        failure_path = output_path / "failure.json"
+        if not failure_path.exists():
+            common._write_new_json(
+                failure_path,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "failed",
+                    "error_kind": type(error).__name__,
+                    "message": str(error),
+                },
+            )
+        if isinstance(error, OSError):
+            raise HarnessError(
+                f"write baseline filesystem operation failed: {error}"
+            ) from error
+        raise
+
+
+def _validate_input_reference(
+    value: Any,
+    *,
+    repository_root: pathlib.Path,
+    label: str,
+) -> pathlib.Path:
+    _require_type(value, dict, label)
+    _require_keys(value, _INPUT_KEYS, label)
+    for key in ("role", "path", "sha256"):
+        _require_type(value[key], str, f"{label}.{key}")
+    _require_type(value["size_bytes"], int, f"{label}.size_bytes")
+    pure = pathlib.PurePosixPath(value["path"])
+    if pure.is_absolute() or ".." in pure.parts:
+        raise HarnessError(f"{label}.path is not repository-relative")
+    path = repository_root.joinpath(*pure.parts)
+    if not path.is_file():
+        raise HarnessError(f"{label} input does not exist")
+    if path.stat().st_size != value["size_bytes"] or _sha256(path) != value["sha256"]:
+        raise HarnessError(f"{label} input fingerprint differs")
+    return path
+
+
+def _validate_binary_reference(
+    value: Any,
+    *,
+    instrumentation: bool,
+    label: str,
+) -> None:
+    _require_type(value, dict, label)
+    _require_keys(value, _BINARY_REFERENCE_KEYS, label)
+    for key in ("path", "sha256"):
+        _require_type(value[key], str, f"{label}.{key}")
+    if _SHA256.fullmatch(value["sha256"]) is None:
+        raise HarnessError(f"{label}.sha256 is invalid")
+    _require_type(value["size_bytes"], int, f"{label}.size_bytes")
+    if value["size_bytes"] <= 0:
+        raise HarnessError(f"{label}.size_bytes must be positive")
+    validate_binary_identity(
+        value["identity"],
+        instrumentation=instrumentation,
+    )
+
+
+def _validate_source_state(
+    value: Any,
+    *,
+    repository_root: pathlib.Path,
+    baseline_relative: str,
+    verify_current_source: bool,
+) -> None:
+    _require_type(value, dict, "run manifest.source")
+    _require_keys(value, _SOURCE_STATE_KEYS, "run manifest.source")
+    for key in ("revision", "tree"):
+        _require_type(value[key], str, f"run manifest.source.{key}")
+        if _GIT_OBJECT.fullmatch(value[key]) is None:
+            raise HarnessError(f"run manifest.source.{key} is invalid")
+    if value["clean"] is not True:
+        raise HarnessError("run manifest source must be clean")
+    empty_status = hashlib.sha256(b"").hexdigest()
+    if value["status_sha256"] != empty_status:
+        raise HarnessError("clean source status hash is invalid")
+    for key in ("status_sha256", "worktree_content_sha256"):
+        if _SHA256.fullmatch(value[key]) is None:
+            raise HarnessError(f"run manifest.source.{key} is invalid")
+    if verify_current_source:
+        common = _read_performance_module()
+        current = common._capture_source_state(
+            repository_root,
+            baseline_relative,
+        )
+        if (
+            not current["clean"]
+            or current["status_sha256"] != value["status_sha256"]
+            or current["worktree_content_sha256"]
+            != value["worktree_content_sha256"]
+        ):
+            raise HarnessError(
+                "current source state does not match the write baseline"
+            )
+
+
+def _validate_run_record(
+    value: Any,
+    *,
+    expected: dict[str, Any],
+    baseline_path: pathlib.Path,
+    workload_manifest: dict[str, Any],
+    diagnostic: bool,
+    expected_identity: dict[str, Any],
+) -> tuple[pathlib.Path, pathlib.Path, dict[str, Any]]:
+    common = _read_performance_module()
+    label = (
+        f"diagnostic_runs[{expected['ordinal']}]"
+        if diagnostic
+        else f"timing_runs[{expected['ordinal']}]"
+    )
+    _require_type(value, dict, label)
+    _require_keys(
+        value,
+        _DIAGNOSTIC_RUN_KEYS if diagnostic else _TIMING_RUN_KEYS,
+        label,
+    )
+    for key in ("ordinal", "profile", "case", "engine"):
+        if value[key] != expected[key]:
+            raise HarnessError(f"{label}.{key} does not match the schedule")
+    if not diagnostic and value["round"] != expected["round"]:
+        raise HarnessError(f"{label}.round does not match the schedule")
+    _require_type(value["command"], list, f"{label}.command")
+    if len(value["command"]) != 8 or any(
+        not isinstance(item, str) or not item
+        for item in value["command"]
+    ):
+        raise HarnessError(f"{label}.command is invalid")
+    process = value["process"]
+    _require_type(process, dict, f"{label}.process")
+    _require_keys(process, _PROCESS_KEYS, f"{label}.process")
+    if process["returncode"] != 0:
+        raise HarnessError(f"{label}.process did not succeed")
+    _require_type(process["elapsed_ns"], int, f"{label}.process.elapsed_ns")
+    if process["elapsed_ns"] <= 0:
+        raise HarnessError(f"{label}.process.elapsed_ns must be positive")
+    stdout_path = common._validate_artifact_reference(
+        value["stdout"],
+        baseline_path=baseline_path,
+        label=f"{label}.stdout",
+        maximum_size=4 * 1024 * 1024,
+    )
+    stderr_path = common._validate_artifact_reference(
+        value["stderr"],
+        baseline_path=baseline_path,
+        label=f"{label}.stderr",
+        maximum_size=1024 * 1024,
+    )
+    if stderr_path.stat().st_size != 0:
+        raise HarnessError(f"{label}.stderr is not empty")
+    report = load_json_bytes_strict(
+        stdout_path.read_bytes(),
+        label,
+    )
+    if diagnostic:
+        validate_raw_diagnostic_report(
+            report,
+            workload_manifest=workload_manifest,
+            expected_engine=expected["engine"],
+            expected_profile=expected["profile"],
+            expected_case=expected["case"],
+        )
+    else:
+        validate_raw_timing_report(
+            report,
+            workload_manifest=workload_manifest,
+            expected_engine=expected["engine"],
+            expected_profile=expected["profile"],
+            expected_case=expected["case"],
+            expected_run_kind="baseline",
+        )
+        measured_wall = sum(
+            repetition["wall_ns"]
+            for repetition in report["repetitions"]
+        )
+        if process["elapsed_ns"] < measured_wall:
+            raise HarnessError(
+                f"{label}.process elapsed time is below measured wall time"
+            )
+    if (
+        report["build"] != expected_identity["build"]
+        or report["source"] != expected_identity["source"]
+        or report["sqlite"] != expected_identity["sqlite"]
+    ):
+        raise HarnessError(f"{label} identity differs from its binary")
+    return stdout_path, stderr_path, report
+
+
+def validate_baseline_directory(
+    *,
+    baseline_path: pathlib.Path,
+    repository_root: pathlib.Path,
+    workload_path: pathlib.Path,
+    verify_current_source: bool,
+) -> dict[str, Any]:
+    baseline_path = baseline_path.resolve()
+    repository_root = repository_root.resolve()
+    workload_path = workload_path.resolve()
+    if not baseline_path.is_dir():
+        raise HarnessError(f"write baseline does not exist: {baseline_path}")
+    workload_manifest = load_and_validate_workloads(workload_path)
+    run_manifest = _load_json(baseline_path / "run-manifest.json")
+    aggregate = _load_json(baseline_path / "aggregate.json")
+    _require_keys(run_manifest, _RUN_MANIFEST_KEYS, "run manifest")
+    if run_manifest["schema_version"] != SCHEMA_VERSION:
+        raise HarnessError("run manifest schema_version must be 1")
+    if run_manifest["status"] != "complete":
+        raise HarnessError("run manifest status is not complete")
+    common = _read_performance_module()
+    baseline_relative = common._repository_relative_path(
+        baseline_path,
+        repository_root,
+        "write baseline",
+    )
+    _validate_source_state(
+        run_manifest["source"],
+        repository_root=repository_root,
+        baseline_relative=baseline_relative,
+        verify_current_source=verify_current_source,
+    )
+    host = run_manifest["host"]
+    _require_type(host, dict, "run manifest.host")
+    _require_keys(host, _HOST_KEYS, "run manifest.host")
+    for key in _HOST_KEYS - {"logical_cpu_count"}:
+        _require_type(host[key], str, f"run manifest.host.{key}")
+    _require_type(
+        host["logical_cpu_count"],
+        int,
+        "run manifest.host.logical_cpu_count",
+    )
+    if host["logical_cpu_count"] <= 0:
+        raise HarnessError("run manifest host CPU count must be positive")
+    inputs = run_manifest["inputs"]
+    _require_type(inputs, list, "run manifest.inputs")
+    roles = []
+    for index, value in enumerate(inputs):
+        _validate_input_reference(
+            value,
+            repository_root=repository_root,
+            label=f"run manifest.inputs[{index}]",
+        )
+        roles.append(value["role"])
+    expected_roles = {
+        "workload-manifest",
+        "benchmark-source",
+        "runner-source",
+        "fixture-schema",
+        "fixture-sql-schema",
+        "fixture-populated",
+        "fixture-sql-populated",
+    }
+    if set(roles) != expected_roles or len(roles) != len(expected_roles):
+        raise HarnessError("run manifest input roles are incomplete or duplicated")
+    binaries = run_manifest["binaries"]
+    _require_type(binaries, dict, "run manifest.binaries")
+    _require_keys(binaries, {"timing", "diagnostic"}, "run manifest.binaries")
+    _validate_binary_reference(
+        binaries["timing"],
+        instrumentation=False,
+        label="run manifest.binaries.timing",
+    )
+    _validate_binary_reference(
+        binaries["diagnostic"],
+        instrumentation=True,
+        label="run manifest.binaries.diagnostic",
+    )
+    timing_build = dict(binaries["timing"]["identity"]["build"])
+    diagnostic_build = dict(binaries["diagnostic"]["identity"]["build"])
+    timing_build.pop("instrumentation")
+    diagnostic_build.pop("instrumentation")
+    if (
+        timing_build != diagnostic_build
+        or binaries["timing"]["identity"]["source"]
+        != binaries["diagnostic"]["identity"]["source"]
+        or binaries["timing"]["identity"]["sqlite"]
+        != binaries["diagnostic"]["identity"]["sqlite"]
+    ):
+        raise HarnessError("baseline binary identities differ")
+    expected_binary_source = {
+        "revision": run_manifest["source"]["revision"],
+        "tree": run_manifest["source"]["tree"],
+    }
+    if binaries["timing"]["identity"]["source"] != expected_binary_source:
+        raise HarnessError(
+            "baseline binary source does not match the run manifest"
+        )
+
+    referenced_paths = {
+        baseline_path / "run-manifest.json",
+        baseline_path / "aggregate.json",
+    }
+    timing_records = run_manifest["timing_runs"]
+    timing_schedule = build_timing_schedule(workload_manifest)
+    _require_type(timing_records, list, "run manifest.timing_runs")
+    if len(timing_records) != len(timing_schedule):
+        raise HarnessError("run manifest timing run count is invalid")
+    timing_reports = {}
+    for record, expected in zip(
+        timing_records,
+        timing_schedule,
+        strict=True,
+    ):
+        stdout_path, stderr_path, report = _validate_run_record(
+            record,
+            expected=expected,
+            baseline_path=baseline_path,
+            workload_manifest=workload_manifest,
+            diagnostic=False,
+            expected_identity=binaries["timing"]["identity"],
+        )
+        referenced_paths.update((stdout_path, stderr_path))
+        timing_reports[
+            (
+                expected["profile"],
+                expected["round"],
+                expected["case"],
+                expected["engine"],
+            )
+        ] = report
+
+    diagnostic_records = run_manifest["diagnostic_runs"]
+    diagnostic_schedule = build_diagnostic_schedule(workload_manifest)
+    _require_type(
+        diagnostic_records,
+        list,
+        "run manifest.diagnostic_runs",
+    )
+    if len(diagnostic_records) != len(diagnostic_schedule):
+        raise HarnessError("run manifest diagnostic run count is invalid")
+    for record, expected in zip(
+        diagnostic_records,
+        diagnostic_schedule,
+        strict=True,
+    ):
+        stdout_path, stderr_path, _ = _validate_run_record(
+            record,
+            expected=expected,
+            baseline_path=baseline_path,
+            workload_manifest=workload_manifest,
+            diagnostic=True,
+            expected_identity=binaries["diagnostic"]["identity"],
+        )
+        referenced_paths.update((stdout_path, stderr_path))
+
+    aggregate_path = common._validate_artifact_reference(
+        run_manifest["aggregate"],
+        baseline_path=baseline_path,
+        label="run manifest.aggregate",
+        maximum_size=4 * 1024 * 1024,
+    )
+    if aggregate_path != baseline_path / "aggregate.json":
+        raise HarnessError("run manifest aggregate path is invalid")
+    recomputed = aggregate_timing_reports(
+        workload_manifest,
+        timing_reports,
+    )
+    if aggregate != recomputed:
+        raise HarnessError("write aggregate does not match raw timing reports")
+    actual_paths = {
+        path
+        for path in baseline_path.rglob("*")
+        if path.is_file()
+    }
+    if actual_paths != referenced_paths:
+        raise HarnessError("write baseline contains missing or extra artifacts")
+    return aggregate
 
 
 def _sha256(path: pathlib.Path) -> str:
@@ -2103,15 +3187,69 @@ def _parse_arguments() -> argparse.Namespace:
         choices=("schema", "populated"),
     )
     regenerate.add_argument("--output", required=True, type=pathlib.Path)
+    generate = subparsers.add_parser("generate-baseline")
+    generate.add_argument(
+        "--repository-root",
+        required=True,
+        type=pathlib.Path,
+    )
+    generate.add_argument("--workloads", required=True, type=pathlib.Path)
+    generate.add_argument(
+        "--timing-binary",
+        required=True,
+        type=pathlib.Path,
+    )
+    generate.add_argument(
+        "--diagnostic-binary",
+        required=True,
+        type=pathlib.Path,
+    )
+    generate.add_argument("--output", required=True, type=pathlib.Path)
+    validate_baseline = subparsers.add_parser("validate-baseline")
+    validate_baseline.add_argument(
+        "--repository-root",
+        required=True,
+        type=pathlib.Path,
+    )
+    validate_baseline.add_argument(
+        "--workloads",
+        required=True,
+        type=pathlib.Path,
+    )
+    validate_baseline.add_argument(
+        "--baseline",
+        required=True,
+        type=pathlib.Path,
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     try:
         arguments = _parse_arguments()
-        if arguments.command != "validate-workloads":
-            if arguments.command != "regenerate-fixture":
-                raise HarnessError("unknown command")
+        if arguments.command == "generate-baseline":
+            aggregate = generate_baseline(
+                repository_root=arguments.repository_root,
+                workload_path=arguments.workloads,
+                timing_binary_path=arguments.timing_binary,
+                diagnostic_binary_path=arguments.diagnostic_binary,
+                output_path=arguments.output,
+            )
+            print(json.dumps(aggregate, sort_keys=True))
+            return 0 if aggregate["guard_passed"] else 2
+        if arguments.command == "validate-baseline":
+            aggregate = validate_baseline_directory(
+                baseline_path=arguments.baseline,
+                repository_root=arguments.repository_root,
+                workload_path=arguments.workloads,
+                verify_current_source=True,
+            )
+            print(
+                "validated write baseline with "
+                f"{len(aggregate['profiles'])} profiles"
+            )
+            return 0
+        if arguments.command == "regenerate-fixture":
             metadata = create_fixture(
                 profile_path=arguments.profile.resolve(),
                 sqlite_library_path=arguments.sqlite_library.resolve(),
@@ -2122,13 +3260,15 @@ def main() -> int:
                 output_path=arguments.output.resolve(),
             )
             print(json.dumps(metadata, sort_keys=True))
-        else:
+            return 0
+        if arguments.command == "validate-workloads":
             cases, profiles = validate_workloads(arguments.workloads)
             print(
                 f"validated {cases} write performance cases and "
                 f"{profiles} profiles"
             )
-        return 0
+            return 0
+        raise HarnessError("unknown command")
     except HarnessError as error:
         print(error, file=sys.stderr)
         return 1
