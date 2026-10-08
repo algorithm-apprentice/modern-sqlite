@@ -196,10 +196,10 @@ collation, VFS, pager, and B-tree contracts. It does not depend on syntax,
 catalog, binder, planner, lowering, VM, session, or API types.
 
 The session owns an immutable temporary-storage configuration and a narrow
-factory backed by its VFS. The factory is injected into VM creation beside
-the existing pager and transaction capabilities. The VM requests
-statement-owned sorter or ephemeral-relation handles; it never opens a
-platform file directly and never retains the session.
+factory backed by its VFS. `VmExecutionContext` borrows the factory beside
+the existing execution-scoped pager and transaction capabilities. The VM
+requests statement-owned sorter or ephemeral-relation handles; it never
+opens a platform file directly and never retains the session.
 
 It provides two typed capabilities:
 
@@ -450,7 +450,8 @@ No trigger callback performs parser, binder, or planner work at VM runtime.
 The canonical slice order is:
 
 1. this architecture ADR and pinned behavior audit;
-2. ORDER BY with the shared spill-capable sorter and exact sort semantics;
+2. ORDER BY with the shared spill-capable sorter, bounded ordering relation,
+   and exact sort/LIMIT semantics;
 3. DISTINCT, VALUES, and compound SELECT, introducing the shared keyed
    ephemeral relation with its first consumers;
 4. aggregate registry, GROUP BY, HAVING, aggregate-local DISTINCT, and
