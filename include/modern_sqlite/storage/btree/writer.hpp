@@ -123,8 +123,9 @@ class TableBtreeMutationCursor final {
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Next();
-  // The payload view remains valid until the cursor moves or is destroyed.
+  // The payload view remains valid until the cursor moves, mutates the row, or is destroyed.
   [[nodiscard]] Result<TableBtreeMutationRow> row();
+  [[nodiscard]] Status ReplaceCurrent(ByteView payload);
   [[nodiscard]] Result<bool> DeleteAndNext();
 
  private:

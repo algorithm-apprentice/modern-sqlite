@@ -408,6 +408,38 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
 
   input.instructions.erase(input.instructions.begin() + 3);
   EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
+
+  ProgramInput scan;
+  scan.statement_kind = ProgramStatementKind::kUpdate;
+  scan.transaction_access = ProgramTransactionAccess::kWrite;
+  scan.rollback_mode = ProgramRollbackMode::kStatement;
+  scan.mutation_result.publishes_changes = true;
+  scan.register_count = 1;
+  scan.constants.push_back(SqlValue::Blob(ByteBuffer::CopyOf(record_bytes)));
+  scan.cursors.push_back(RowIdCursorDescriptor());
+  scan.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenMutationCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{
+          .cursor = Cursor(0),
+          .empty_target = Address(5),
+      },
+      UpdateCurrentTableInstruction{
+          .cursor = Cursor(0),
+          .record = Reg(0),
+      },
+      NextInstruction{
+          .cursor = Cursor(0),
+          .next_target = Address(3),
+      },
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(scan).has_value());
+  EXPECT_EQ("update_current_table", InstructionKindName(InstructionKindOf(scan.instructions[3])));
+
+  scan.instructions.erase(scan.instructions.begin() + 2);
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(scan));
 }
 
 TEST(BytecodeProgramTest, VerifiesRowidListLifecycleAndBranches) {

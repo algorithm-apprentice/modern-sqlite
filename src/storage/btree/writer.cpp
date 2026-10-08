@@ -749,6 +749,17 @@ Result<TableBtreeMutationRow> TableBtreeMutationCursor::row() {
   };
 }
 
+Status TableBtreeMutationCursor::ReplaceCurrent(ByteView payload) {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return impl_->cursor_->ReplaceCurrentTable(payload, impl_->core_->workspace());
+}
+
 Result<bool> TableBtreeMutationCursor::DeleteAndNext() {
   if (impl_ == nullptr || !impl_->cursor_.has_value()) {
     return std::unexpected(Misuse("table mutation cursor is moved from"));

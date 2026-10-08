@@ -937,15 +937,18 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
   const BytecodeProgram scan =
       LowerMutationOrThrow("UPDATE Items SET Name=Name||?1 WHERE Score>=?2", catalog);
   EXPECT_EQ(ProgramRollbackMode::kStatement, scan.rollback_mode());
-  bool greater_seek = false;
+  bool mutation_open = false;
   bool update = false;
   for (const Instruction& instruction : scan.instructions()) {
+    mutation_open =
+        mutation_open || std::holds_alternative<OpenMutationCursorInstruction>(instruction);
     if (const auto* seek = std::get_if<SeekRowIdInstruction>(&instruction); seek != nullptr) {
-      greater_seek = greater_seek || seek->mode == RowIdSeekMode::kGreater;
+      EXPECT_NE(RowIdSeekMode::kGreater, seek->mode);
     }
-    update = update || std::holds_alternative<UpdateTableInstruction>(instruction);
+    EXPECT_FALSE(std::holds_alternative<UpdateTableInstruction>(instruction));
+    update = update || std::holds_alternative<UpdateCurrentTableInstruction>(instruction);
   }
-  EXPECT_TRUE(greater_seek);
+  EXPECT_TRUE(mutation_open);
   EXPECT_TRUE(update);
 
   const BytecodeProgram function_scan = LowerMutationOrThrow(
@@ -961,14 +964,15 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
     if (!call.has_value() && std::holds_alternative<CallScalarInstruction>(instruction)) {
       call = index;
     }
-    if (!update_index.has_value() && std::holds_alternative<UpdateTableInstruction>(instruction)) {
+    if (!update_index.has_value() &&
+        std::holds_alternative<UpdateCurrentTableInstruction>(instruction)) {
       update_index = index;
     }
   }
-  EXPECT_LT(TakeOptional(close, "missing UPDATE read close"),
-            TakeOptional(call, "missing UPDATE assignment call"));
   EXPECT_LT(TakeOptional(call, "missing UPDATE assignment call"),
-            TakeOptional(update_index, "missing UPDATE point mutation"));
+            TakeOptional(update_index, "missing UPDATE current mutation"));
+  EXPECT_LT(TakeOptional(update_index, "missing UPDATE current mutation"),
+            TakeOptional(close, "missing UPDATE mutation cursor close"));
 
   const BytecodeProgram moving_scan =
       LowerMutationOrThrow("UPDATE Items SET id=id+10 WHERE Score>=?1", catalog);
@@ -982,6 +986,7 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
   EXPECT_TRUE(has_kind(InstructionKind::kRewindRowIdList));
   EXPECT_TRUE(has_kind(InstructionKind::kNextRowIdList));
   EXPECT_TRUE(has_kind(InstructionKind::kUpdateTable));
+  EXPECT_FALSE(has_kind(InstructionKind::kUpdateCurrentTable));
 }
 
 TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {

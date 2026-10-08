@@ -4432,6 +4432,81 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
                              std::nullopt, workspace);
 }
 
+Status WritableCursor::ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace& workspace) {
+  if (!table_) {
+    return std::unexpected(Misuse("current table replacement requires a table B-tree cursor"));
+  }
+  auto current_page = CurrentPage();
+  if (!current_page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(current_page.error()));
+  }
+  if (state_ != WritableCursorState::kValid || !current_page->is_leaf() ||
+      current_index_ >= current_page->cell_count()) {
+    return std::unexpected(Misuse("current table replacement requires a valid row"));
+  }
+  auto current_cell = current_page->cell(current_index_);
+  if (!current_cell.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(current_cell.error()));
+  }
+  if (!current_cell->rowid().has_value()) {
+    EnterFault();
+    return std::unexpected(Corruption("current table replacement row has no rowid"));
+  }
+  const std::int64_t rowid = *current_cell->rowid();
+  const std::size_t index = current_index_;
+  const std::size_t old_payload_size = current_cell->payload_size().value();
+
+  auto promoted = PromoteCurrent();
+  if (!promoted.has_value()) {
+    return promoted;
+  }
+  auto opened = MutableBtreePage::Open(*owner_, current_owner_slot(), geometry_);
+  if (!opened.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(opened.error()));
+  }
+  MutableBtreePage page = std::move(*opened);
+  const std::uint64_t checkpoint = owner_->operation_checkpoint();
+  const auto fail = [this, &page, checkpoint](Error error) -> Status {
+    page.ClearStagedCells();
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+
+  if (old_payload_size == payload.size()) {
+    auto overwritten = page.OverwritePayload(index, payload, workspace);
+    if (!overwritten.has_value()) {
+      return fail(std::move(overwritten.error()));
+    }
+    return {};
+  }
+
+  auto formatted = FillTableLeafCell(*owner_, geometry_, workspace, rowid, payload);
+  if (!formatted.has_value()) {
+    return fail(std::move(formatted.error()));
+  }
+  auto inserted =
+      InsertFormattedCell(std::move(page), index, true, formatted->bytes, std::nullopt, workspace);
+  if (!inserted.has_value()) {
+    return inserted;
+  }
+  auto sought = SeekTable(rowid);
+  if (!sought.has_value()) {
+    owner_->MarkRollbackRequiredAfter(sought.error().code(), checkpoint);
+    return std::unexpected(std::move(sought.error()));
+  }
+  if (!sought->exact) {
+    Error error = Corruption("replaced table rowid is missing");
+    owner_->MarkRollbackRequiredAfter(error.code(), checkpoint);
+    EnterFault();
+    return std::unexpected(std::move(error));
+  }
+  return {};
+}
+
 Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> key,
                                    std::span<const IndexColumnOrder> columns,
                                    RecordCodecOptions options, BtreeInsertMode mode,

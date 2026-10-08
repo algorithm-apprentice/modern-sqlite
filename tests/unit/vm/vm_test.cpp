@@ -419,6 +419,43 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram TableUpdateScanProgram(SqlValue record) {
+  ProgramInput input;
+  input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  input.statement_kind = ProgramStatementKind::kUpdate;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.register_count = 1;
+  input.constants.push_back(std::move(record));
+  input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(1),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns = {},
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenMutationCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{
+          .cursor = Cursor(0),
+          .empty_target = Address(5),
+      },
+      UpdateCurrentTableInstruction{
+          .cursor = Cursor(0),
+          .record = Reg(0),
+      },
+      NextInstruction{
+          .cursor = Cursor(0),
+          .next_target = Address(3),
+      },
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] BytecodeProgram CreateTablePrimitiveProgram(bool fail_after_cookie) {
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
@@ -1037,6 +1074,83 @@ TEST(VmWriteTest, DeletesAllRowsThroughOnePassMutationCursor) {
     EXPECT_EQ(0U, vm.change_count());
     RequireStatus(vm.DetachExecutionContext());
     RequireStatus(statement.Succeed());
+  }
+}
+
+TEST(VmWriteTest, UpdatesAllRowsThroughOnePassMutationCursor) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, -3, "negative");
+  InsertDirectWriteRow(vfs, 1, "first");
+  InsertDirectWriteRow(vfs, 3, "third");
+
+  std::vector<SqlValue> fields;
+  fields.emplace_back();
+  fields.push_back(SqlValue::Text("updated"));
+  const ByteBuffer record = TakeValue(EncodeRecord(fields));
+  const BytecodeProgram program =
+      TableUpdateScanProgram(SqlValue::Blob(ByteBuffer::CopyOf(record.view())));
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(3U, vm.change_count());
+    EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  const auto rows = ReadWriteTableRows(vfs);
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(-3, rows[0].first);
+  EXPECT_EQ(1, rows[1].first);
+  EXPECT_EQ(3, rows[2].first);
+  for (const auto& [rowid, values] : rows) {
+    static_cast<void>(rowid);
+    ASSERT_EQ(2U, values.size());
+    ExpectText(values[1], "updated");
+  }
+
+  test::WritePagerFixedVfs empty_vfs{false};
+  static_cast<void>(InitializedWriteDatabase(empty_vfs));
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(empty_vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    const BytecodeProgram malformed = TableUpdateScanProgram(SqlValue::Text("not-a-record"));
+    Vm vm = TakeValue(Vm::Create(malformed, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const auto updated = vm.Step();
+    ASSERT_FALSE(updated.has_value());
+    EXPECT_EQ(ErrorCode::kTypeMismatch, updated.error().code());
+    EXPECT_EQ(0U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Rollback());
   }
 }
 

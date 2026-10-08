@@ -359,6 +359,7 @@ class WritableCursor final {
   [[nodiscard]] Status Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status InsertTable(std::int64_t rowid, ByteView payload, BtreeInsertMode mode,
                                    BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status InsertIndex(ByteView record, std::span<const SqlValue> key,
                                    std::span<const IndexColumnOrder> columns,
                                    RecordCodecOptions options, BtreeInsertMode mode,
