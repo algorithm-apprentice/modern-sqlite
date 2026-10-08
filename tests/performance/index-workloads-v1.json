@@ -55,6 +55,7 @@
       "kind": "index",
       "measured_iterations": 4096,
       "primary_unit": "lookup",
+      "query_only": true,
       "sql": "SELECT id,score FROM items WHERE category=?1",
       "warmup_iterations": 128
     },
@@ -113,6 +114,7 @@
       "kind": "index",
       "measured_iterations": 4096,
       "primary_unit": "lookup",
+      "query_only": true,
       "sql": "SELECT id,score FROM items WHERE category=?1",
       "warmup_iterations": 128
     },
@@ -171,6 +173,7 @@
       "kind": "index",
       "measured_iterations": 4096,
       "primary_unit": "lookup",
+      "query_only": true,
       "sql": "SELECT payload FROM items WHERE category=?1",
       "warmup_iterations": 128
     },
@@ -229,6 +232,7 @@
       "kind": "index",
       "measured_iterations": 4096,
       "primary_unit": "lookup",
+      "query_only": true,
       "sql": "SELECT id FROM items WHERE category=?1 AND score=?2",
       "warmup_iterations": 128
     },
@@ -287,6 +291,7 @@
       "kind": "index",
       "measured_iterations": 2048,
       "primary_unit": "range",
+      "query_only": true,
       "sql": "SELECT id,score FROM items WHERE category>=?1 AND category<?2",
       "warmup_iterations": 2
     },
@@ -345,7 +350,126 @@
       "kind": "index",
       "measured_iterations": 2048,
       "primary_unit": "range",
+      "query_only": true,
       "sql": "SELECT payload FROM items WHERE category>=?1 AND category<?2",
+      "warmup_iterations": 2
+    },
+    {
+      "diagnostic_iterations": 2,
+      "expected": {
+        "diagnostic": {
+          "bytes": 2048,
+          "digest": "4c545fa7e9832419",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 2097152,
+          "digest": "ca040064e621f670",
+          "items": 131072,
+          "operations": 2048,
+          "result_hits": 2048,
+          "result_misses": 0,
+          "rows": 131072
+        },
+        "smoke": {
+          "bytes": 1024,
+          "digest": "b24111b959173180",
+          "items": 64,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 64
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 2048,
+          "digest": "4c545fa7e9832419",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-range-lower-only-covering",
+      "items_per_iteration": 64,
+      "kind": "index",
+      "measured_iterations": 2048,
+      "primary_unit": "range",
+      "query_only": true,
+      "sql": "SELECT id,score FROM items WHERE category>=?1",
+      "warmup_iterations": 2
+    },
+    {
+      "diagnostic_iterations": 2,
+      "expected": {
+        "diagnostic": {
+          "bytes": 2048,
+          "digest": "da147ae25e7e020d",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        },
+        "measured": {
+          "bytes": 2097152,
+          "digest": "2dcc661adbe23ec8",
+          "items": 131072,
+          "operations": 2048,
+          "result_hits": 2048,
+          "result_misses": 0,
+          "rows": 131072
+        },
+        "smoke": {
+          "bytes": 1024,
+          "digest": "5b6b1d599874d0d4",
+          "items": 64,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 64
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 2048,
+          "digest": "da147ae25e7e020d",
+          "items": 128,
+          "operations": 2,
+          "result_hits": 2,
+          "result_misses": 0,
+          "rows": 128
+        }
+      },
+      "fixture": "fit",
+      "id": "index-range-upper-only-covering",
+      "items_per_iteration": 64,
+      "kind": "index",
+      "measured_iterations": 2048,
+      "primary_unit": "range",
+      "query_only": true,
+      "sql": "SELECT id,score FROM items WHERE category<?1",
       "warmup_iterations": 2
     },
     {
@@ -403,6 +527,7 @@
       "kind": "scan",
       "measured_iterations": 32,
       "primary_unit": "traversal",
+      "query_only": true,
       "sql": "SELECT payload FROM items WHERE flag=?1",
       "warmup_iterations": 1
     },
@@ -461,7 +586,303 @@
       "kind": "index",
       "measured_iterations": 256,
       "primary_unit": "traversal",
+      "query_only": true,
       "sql": "SELECT id FROM items WHERE flag=?1",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 8,
+      "expected": {
+        "diagnostic": {
+          "bytes": 1304,
+          "digest": "83cba44b78603de5",
+          "items": 8,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 8
+        },
+        "measured": {
+          "bytes": 5216,
+          "digest": "f6254a9b814c5f11",
+          "items": 32,
+          "operations": 32,
+          "result_hits": 32,
+          "result_misses": 0,
+          "rows": 32
+        },
+        "smoke": {
+          "bytes": 163,
+          "digest": "5429a7d7fe07cc39",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 652,
+          "digest": "6b31db7280e7b4e1",
+          "items": 4,
+          "operations": 4,
+          "result_hits": 4,
+          "result_misses": 0,
+          "rows": 4
+        }
+      },
+      "fixture": "fit",
+      "id": "index-insert",
+      "items_per_iteration": 1,
+      "kind": "write",
+      "measured_iterations": 32,
+      "primary_unit": "statement",
+      "query_only": false,
+      "sql": "INSERT INTO items(id,category,score,flag,payload) VALUES(?1,?2,?3,?4,?5)",
+      "warmup_iterations": 4
+    },
+    {
+      "diagnostic_iterations": 8,
+      "expected": {
+        "diagnostic": {
+          "bytes": 216,
+          "digest": "498c689fa9a9a4eb",
+          "items": 8,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 8
+        },
+        "measured": {
+          "bytes": 864,
+          "digest": "ac05e88dce68318c",
+          "items": 32,
+          "operations": 32,
+          "result_hits": 32,
+          "result_misses": 0,
+          "rows": 32
+        },
+        "smoke": {
+          "bytes": 27,
+          "digest": "420152407a2a5fcf",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 108,
+          "digest": "640fb2c804ba3c01",
+          "items": 4,
+          "operations": 4,
+          "result_hits": 4,
+          "result_misses": 0,
+          "rows": 4
+        }
+      },
+      "fixture": "fit",
+      "id": "index-update",
+      "items_per_iteration": 1,
+      "kind": "write",
+      "measured_iterations": 32,
+      "primary_unit": "statement",
+      "query_only": false,
+      "sql": "UPDATE items SET category=?1,score=?2 WHERE id=?3",
+      "warmup_iterations": 4
+    },
+    {
+      "diagnostic_iterations": 8,
+      "expected": {
+        "diagnostic": {
+          "bytes": 64,
+          "digest": "25e32d4d5eb54409",
+          "items": 8,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 8
+        },
+        "measured": {
+          "bytes": 256,
+          "digest": "b44cbdf711546e1f",
+          "items": 32,
+          "operations": 32,
+          "result_hits": 32,
+          "result_misses": 0,
+          "rows": 32
+        },
+        "smoke": {
+          "bytes": 8,
+          "digest": "6b47bfaabb9e4086",
+          "items": 1,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 1
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 32,
+          "digest": "4863b06c0e585966",
+          "items": 4,
+          "operations": 4,
+          "result_hits": 4,
+          "result_misses": 0,
+          "rows": 4
+        }
+      },
+      "fixture": "fit",
+      "id": "index-delete",
+      "items_per_iteration": 1,
+      "kind": "write",
+      "measured_iterations": 32,
+      "primary_unit": "statement",
+      "query_only": false,
+      "sql": "DELETE FROM items WHERE id=?1",
+      "warmup_iterations": 4
+    },
+    {
+      "diagnostic_iterations": 8,
+      "expected": {
+        "diagnostic": {
+          "bytes": 0,
+          "digest": "e24d1064ed011d15",
+          "items": 32768,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "measured": {
+          "bytes": 0,
+          "digest": "e24d1064ed011d15",
+          "items": 32768,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "smoke": {
+          "bytes": 0,
+          "digest": "32f8770555574b02",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 0,
+          "digest": "e24d1064ed011d15",
+          "items": 32768,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 0
+        }
+      },
+      "fixture": "fit",
+      "id": "index-create",
+      "items_per_iteration": 4096,
+      "kind": "schema",
+      "measured_iterations": 8,
+      "primary_unit": "index-build",
+      "query_only": false,
+      "sql": "CREATE INDEX benchmark_payload_{iteration} ON items(payload)",
+      "warmup_iterations": 8
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 0,
+          "digest": "3437f226abbcf86d",
+          "items": 12288,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "measured": {
+          "bytes": 0,
+          "digest": "5c064f72f09a4215",
+          "items": 196608,
+          "operations": 16,
+          "result_hits": 16,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "smoke": {
+          "bytes": 0,
+          "digest": "3437f226abbcf86d",
+          "items": 12288,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 0
+        },
+        "verification": {
+          "bytes": 557056,
+          "digest": "d0470b9dd267e30c",
+          "items": 4096,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 4096
+        },
+        "warmup": {
+          "bytes": 0,
+          "digest": "3437f226abbcf86d",
+          "items": 12288,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 0
+        }
+      },
+      "fixture": "fit",
+      "id": "index-analyze",
+      "items_per_iteration": 12288,
+      "kind": "schema",
+      "measured_iterations": 16,
+      "primary_unit": "analysis",
+      "query_only": false,
+      "sql": "ANALYZE",
       "warmup_iterations": 1
     }
   ],

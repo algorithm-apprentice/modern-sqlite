@@ -56,12 +56,16 @@ void RunWriteDatabaseImageInput(std::span<const std::uint8_t> input) {
                  "payload BLOB"
                  ")");
   ExecuteBounded(session, "INSERT INTO fuzz_target VALUES(1,'one',1,x'01')");
+  ExecuteBounded(session,
+                 "CREATE INDEX IF NOT EXISTS fuzz_target_value_score "
+                 "ON fuzz_target(value COLLATE NOCASE DESC,score)");
   ExecuteBounded(session, "UPDATE fuzz_target SET value=value||'x' WHERE id=1");
   ExecuteBounded(session, "DELETE FROM fuzz_target WHERE id=2");
   ExecuteBounded(session, "SAVEPOINT fuzz_scope");
   ExecuteBounded(session, "INSERT INTO fuzz_target VALUES(2,'rollback',2,x'02')");
   ExecuteBounded(session, "ROLLBACK TO fuzz_scope");
   ExecuteBounded(session, "RELEASE fuzz_scope");
+  ExecuteBounded(session, "ANALYZE fuzz_target");
   ExecuteBounded(session, "SELECT id,value,score,payload FROM fuzz_target");
   if (!session.autocommit()) {
     ExecuteBounded(session, "ROLLBACK");

@@ -327,7 +327,11 @@ Index-key construction reads the physical table storage value before
 result-facing REAL affinity is applied. This mirrors pinned
 `sqlite3GenerateIndexKey()`, which removes the preceding REAL-affinity opcode
 so an integral value stored compactly in the table remains integral in the
-index record.
+index record. A newly assigned REAL-affinity value first undergoes SQLite's
+REAL conversion, including IEEE-754 rounding, and an exactly integral rounded
+result is then stored compactly in both the table and index record. Physical
+key preservation therefore retains the rounded storage value, not the
+pre-affinity input integer.
 
 For a UNIQUE index, a key containing NULL never conflicts. Otherwise the VM
 performs a prefix seek over `key_term_count` fields. INSERT conflicts on any
@@ -541,6 +545,21 @@ The pre-feature baseline records Modern's table-scan fallback against pinned
 SQLite's selected index. The final baseline preserves the same corpus,
 statistics, page/cache configuration, result digest, and durability settings.
 Profiler or diagnostic builds cannot replace uninstrumented timing.
+
+The final version-1 baseline extends the original eight read cases with
+lower-only and upper-only ranges plus indexed INSERT, UPDATE, DELETE,
+CREATE INDEX population, and ANALYZE. Writable repetitions run against fresh
+copies of the same fixture and include real DELETE-journal,
+FULL-synchronous autocommit durability in the timed region. Every committed
+copy is checked by pinned SQLite before removal, while the source fixture
+remains byte-identical.
+
+The committed baseline was generated from clean source revision
+`22b22429af2bb48a782ead8fc88037dfe665375b`. All fifteen workloads pass the
+matched 10x CPU and wall-time guard in aggregate and in every paired round.
+The largest observed paired-round ratios are `7.353395` CPU and `6.834338`
+wall for CREATE INDEX population, consistent with the accepted first-version
+point-insertion strategy rather than SQLite's sorter-based refill.
 
 Node completion requires:
 

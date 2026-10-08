@@ -247,6 +247,11 @@ struct RealAffinityInstruction {
   RegisterId output;
 };
 
+struct RealStorageAffinityInstruction {
+  RegisterId input;
+  RegisterId output;
+};
+
 struct CastInstruction {
   RegisterId input;
   CastTarget target;
@@ -496,11 +501,11 @@ struct ResultRowInstruction {
 using Instruction = std::variant<
     HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
     UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
-    RealAffinityInstruction, CastInstruction, OpenReadCursorInstruction,
-    OpenMutationCursorInstruction, OpenWriteCursorInstruction, CloseCursorInstruction,
-    CloseWriteCursorInstruction, RewindInstruction, NextInstruction, ClearRowIdListInstruction,
-    AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
-    SeekRowIdInstruction, SeekTableRowIdInstruction, SeekIndexInstruction,
+    RealAffinityInstruction, RealStorageAffinityInstruction, CastInstruction,
+    OpenReadCursorInstruction, OpenMutationCursorInstruction, OpenWriteCursorInstruction,
+    CloseCursorInstruction, CloseWriteCursorInstruction, RewindInstruction, NextInstruction,
+    ClearRowIdListInstruction, AppendRowIdListInstruction, RewindRowIdListInstruction,
+    NextRowIdListInstruction, SeekRowIdInstruction, SeekTableRowIdInstruction, SeekIndexInstruction,
     CheckIndexRangeInstruction, ReadFieldInstruction, ReadRowIdInstruction,
     ResolveInsertRowIdInstruction, CheckInsertRowIdInstruction, CheckUpdateRowIdInstruction,
     BuildTableRecordInstruction, CheckUniqueIndexInstruction, InsertIndexInstruction,
@@ -523,6 +528,7 @@ enum class InstructionKind : std::uint8_t {
   kApplyAffinity,
   kMustBeInteger,
   kRealAffinity,
+  kRealStorageAffinity,
   kCast,
   kOpenRead,
   kOpenMutation,

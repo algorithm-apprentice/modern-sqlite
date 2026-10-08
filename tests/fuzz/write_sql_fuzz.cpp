@@ -36,7 +36,11 @@ constexpr std::size_t kMaximumRowsPerStatement = 256;
                      "score REAL,"
                      "payload BLOB"
                      ")") &&
-         ExecuteDone(session, "INSERT INTO fuzz_target VALUES(1,'one',1,x'01')");
+         ExecuteDone(session, "INSERT INTO fuzz_target VALUES(1,'one',1,x'01')") &&
+         ExecuteDone(session,
+                     "CREATE INDEX fuzz_target_value_score "
+                     "ON fuzz_target(value COLLATE NOCASE DESC,score)") &&
+         ExecuteDone(session, "ANALYZE fuzz_target");
 }
 
 [[nodiscard]] bool ConsumeStatement(WriteStatement& statement, std::size_t& total_steps) {

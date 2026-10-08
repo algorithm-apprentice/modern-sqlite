@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
 import json
 import pathlib
 import subprocess
@@ -24,85 +25,16 @@ CASE_IDS = (
     "index-multi-equality-covering",
     "index-range-covering",
     "index-range-noncovering",
+    "index-range-lower-only-covering",
+    "index-range-upper-only-covering",
     "index-unselective-noncovering",
     "index-unselective-covering",
+    "index-insert",
+    "index-update",
+    "index-delete",
+    "index-create",
+    "index-analyze",
 )
-
-EXPECTED_SMOKE = {
-    "index-equality-covering-hit": {
-        "bytes": 16,
-        "digest": "9ffef6e3243d783e",
-        "items": 1,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 1,
-    },
-    "index-equality-covering-miss": {
-        "bytes": 0,
-        "digest": "4a8be64d5309cff3",
-        "items": 1,
-        "operations": 1,
-        "result_hits": 0,
-        "result_misses": 1,
-        "rows": 0,
-    },
-    "index-equality-noncovering-hit": {
-        "bytes": 128,
-        "digest": "50df843383db7694",
-        "items": 1,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 1,
-    },
-    "index-multi-equality-covering": {
-        "bytes": 8,
-        "digest": "85e2a2550e2e0b0d",
-        "items": 1,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 1,
-    },
-    "index-range-covering": {
-        "bytes": 1024,
-        "digest": "93049f748b0d35a5",
-        "items": 64,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 64,
-    },
-    "index-range-noncovering": {
-        "bytes": 8192,
-        "digest": "e955cfbed36e5f4e",
-        "items": 64,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 64,
-    },
-    "index-unselective-noncovering": {
-        "bytes": 262144,
-        "digest": "9156e0a13a7f27da",
-        "items": 2048,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 2048,
-    },
-    "index-unselective-covering": {
-        "bytes": 16384,
-        "digest": "a8ccc1a94d5c8252",
-        "items": 2048,
-        "operations": 1,
-        "result_hits": 1,
-        "result_misses": 0,
-        "rows": 2048,
-    },
-}
-
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -182,7 +114,11 @@ class IndexBenchmarkCliTest(unittest.TestCase):
                 repetition = reports[engine]["repetitions"][0]
                 self.assertEqual(0, repetition["index"])
                 self.assertEqual(
-                    EXPECTED_SMOKE[case_id],
+                    next(
+                        case["expected"]["smoke"]
+                        for case in self.workloads["cases"]
+                        if case["id"] == case_id
+                    ),
                     {
                         key: value
                         for key, value in repetition.items()
@@ -226,6 +162,38 @@ class IndexBenchmarkCliTest(unittest.TestCase):
                         work = report["work"]
                     else:
                         self.assertEqual(work, report["work"])
+                    if case_id == "index-insert":
+                        malformed = copy.deepcopy(report)
+                        selected = malformed["counters"][engine]
+                        selected[
+                            "pages_written"
+                            if engine == "modern"
+                            else "cache_writes"
+                        ] = "invalid"
+                        with self.assertRaises(read_performance.HarnessError):
+                            read_performance.validate_raw_diagnostic_report(
+                                malformed,
+                                workload_manifest=self.workloads,
+                                expected_engine=engine,
+                                expected_case=case_id,
+                            )
+
+    def test_stateful_report_shape_errors_are_harness_errors(self) -> None:
+        with self.assertRaises(read_performance.HarnessError):
+            read_performance.validate_raw_timing_report(
+                {},
+                workload_manifest=self.workloads,
+                expected_engine="modern",
+                expected_case="index-insert",
+                expected_run_kind="smoke",
+            )
+        with self.assertRaises(read_performance.HarnessError):
+            read_performance.validate_raw_diagnostic_report(
+                {},
+                workload_manifest=self.workloads,
+                expected_engine="modern",
+                expected_case="index-insert",
+            )
 
 
 if __name__ == "__main__":

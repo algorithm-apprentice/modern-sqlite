@@ -179,6 +179,20 @@ template <typename T>
   };
 }
 
+[[nodiscard]] std::string QuerySingleText(WriteSession& session, std::string_view sql) {
+  WriteStatement statement = PrepareOne(session, sql);
+  if (TakeValue(statement.Step()) != WriteStep::kRow || statement.row().size() != 1U ||
+      statement.row()[0].type() != SqlValueType::kText) {
+    throw std::runtime_error{"crash harness read an invalid text query result"};
+  }
+  const std::string value{
+      TakeOptional(statement.row()[0].text_value(), "text query value is missing").bytes()};
+  if (TakeValue(statement.Step()) != WriteStep::kDone || !statement.Finalize().has_value()) {
+    throw std::runtime_error{"crash harness text query returned duplicate rows"};
+  }
+  return value;
+}
+
 [[nodiscard]] LogicalState InitialState() {
   return LogicalState{
       .rows =
@@ -206,6 +220,24 @@ template <typename T>
   return ByteBuffer::CopyOf(vfs->database_bytes());
 }
 
+[[nodiscard]] ByteBuffer CreateAnalyzedInitialImage() {
+  auto owned_vfs = std::make_unique<WritePagerFixedVfs>(false);
+  const WritePagerFixedVfs* const vfs = owned_vfs.get();
+  WriteSession session =
+      TakeValue(WriteSession::Open(std::move(owned_vfs), kWritePagerDatabasePath));
+  if (!ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,Name TEXT NOT NULL)") ||
+      !ExecuteDone(session, "INSERT INTO Items VALUES(1,'one')") ||
+      !ExecuteDone(session, "INSERT INTO Items VALUES(2,'two')") ||
+      !ExecuteDone(session, "INSERT INTO Items VALUES(3,'three')") ||
+      !ExecuteDone(session, "CREATE INDEX items_name ON Items(Name DESC)") ||
+      !ExecuteDone(session, "ANALYZE Items") || vfs->journal_present() ||
+      QueryState(session) != InitialState() ||
+      QuerySingleText(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_name'") != "3 1") {
+    throw std::runtime_error{"crash harness could not create its analyzed initial image"};
+  }
+  return ByteBuffer::CopyOf(vfs->database_bytes());
+}
+
 [[nodiscard]] bool ImplicitInsert(WriteSession& session) {
   return ExecuteDone(session, "INSERT INTO Items VALUES(4,'four')");
 }
@@ -220,6 +252,20 @@ template <typename T>
 
 [[nodiscard]] bool ImplicitAnalyze(WriteSession& session) {
   return ExecuteDone(session, "ANALYZE Items");
+}
+
+[[nodiscard]] bool AnalyzeExistingStat1(WriteSession& session) {
+  return ExecuteDone(session, "BEGIN") &&
+         ExecuteDone(session, "UPDATE Items SET Name='same' WHERE id>=1") &&
+         ExecuteDone(session, "ANALYZE Items") && ExecuteDone(session, "COMMIT");
+}
+
+[[nodiscard]] bool IndexedDmlCommit(WriteSession& session) {
+  return ExecuteDone(session, "BEGIN") &&
+         ExecuteDone(session, "CREATE UNIQUE INDEX items_name ON Items(Name DESC)") &&
+         ExecuteDone(session, "UPDATE Items SET Name=Name||'x' WHERE id=2") &&
+         ExecuteDone(session, "INSERT INTO Items VALUES(4,'four')") &&
+         ExecuteDone(session, "DELETE FROM Items WHERE id=1") && ExecuteDone(session, "COMMIT");
 }
 
 [[nodiscard]] bool ExactRowIdMove(WriteSession& session) {
@@ -321,6 +367,20 @@ template <typename T>
           .id = "implicit-analyze",
           .execute = ImplicitAnalyze,
           .terminal = InitialState(),
+      },
+      CrashScenario{
+          .id = "indexed-dml-commit",
+          .execute = IndexedDmlCommit,
+          .terminal =
+              LogicalState{
+                  .rows =
+                      {
+                          {.rowid = 2, .name = "twox"},
+                          {.rowid = 3, .name = "three"},
+                          {.rowid = 4, .name = "four"},
+                      },
+                  .temp_visible = false,
+              },
       },
       CrashScenario{
           .id = "exact-rowid-move",
@@ -432,6 +492,23 @@ template <typename T>
           .execute = FullDmlRollback,
           .terminal = InitialState(),
       },
+  };
+}
+
+[[nodiscard]] CrashScenario AnalyzeExistingStat1Scenario() {
+  return CrashScenario{
+      .id = "analyze-existing-stat1",
+      .execute = AnalyzeExistingStat1,
+      .terminal =
+          LogicalState{
+              .rows =
+                  {
+                      {.rowid = 1, .name = "same"},
+                      {.rowid = 2, .name = "same"},
+                      {.rowid = 3, .name = "same"},
+                  },
+              .temp_visible = false,
+          },
   };
 }
 
@@ -599,6 +676,9 @@ void RunWriteSessionTransactionCrashHarness(WriteSessionCrashVerification verifi
   for (const CrashScenario& scenario : TransactionScenarios()) {
     VerifyScenarioBothDurabilities(scenario, initial_image.view(), verification);
   }
+  const ByteBuffer analyzed_initial_image = CreateAnalyzedInitialImage();
+  VerifyScenarioBothDurabilities(AnalyzeExistingStat1Scenario(), analyzed_initial_image.view(),
+                                 verification);
 }
 
 }  // namespace modern_sqlite::test

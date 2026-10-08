@@ -225,6 +225,12 @@ struct CrashExpectedState {
   if (scenario == "implicit-analyze") {
     return kInitial;
   }
+  if (scenario == "analyze-existing-stat1") {
+    return CrashExpectedState{.rows = "1:same,2:same,3:same", .temp_visible = false};
+  }
+  if (scenario == "indexed-dml-commit") {
+    return CrashExpectedState{.rows = "2:twox,3:three,4:four", .temp_visible = false};
+  }
   if (scenario == "exact-rowid-move") {
     return CrashExpectedState{.rows = "2:two,3:three,10:moved", .temp_visible = false};
   }
@@ -278,7 +284,40 @@ void VerifyCrashImageWithSqlite(void* raw_context, std::string_view scenario, st
       "SELECT group_concat(id||':'||Name,',') FROM (SELECT id,Name FROM Items ORDER BY id)");
   const bool temp_visible =
       QueryInteger(sqlite.get(), "SELECT count(*) FROM sqlite_schema WHERE name='Temp'") == 1;
-  if (rows != expected.rows || temp_visible != expected.temp_visible) {
+  const bool index_expected =
+      scenario == "analyze-existing-stat1" ||
+      (terminal && (scenario == "implicit-create-index" || scenario == "indexed-dml-commit"));
+  const bool index_visible = QueryInteger(sqlite.get(),
+                                          "SELECT count(*) FROM sqlite_schema "
+                                          "WHERE type='index' AND name='items_name'") == 1;
+  std::string indexed_rows;
+  if (index_visible) {
+    indexed_rows = QueryText(sqlite.get(),
+                             "SELECT group_concat(id||':'||Name,',') FROM "
+                             "(SELECT id,Name FROM Items INDEXED BY items_name ORDER BY id)");
+  }
+  const std::string_view expected_indexed_rows = expected.rows;
+
+  const bool stat1_expected =
+      scenario == "analyze-existing-stat1" || (terminal && scenario == "implicit-analyze");
+  const bool stat1_visible = QueryInteger(sqlite.get(),
+                                          "SELECT count(*) FROM sqlite_schema "
+                                          "WHERE type='table' AND name='sqlite_stat1'") == 1;
+  std::string stat1_rows;
+  if (stat1_visible) {
+    stat1_rows = QueryText(sqlite.get(),
+                           "SELECT group_concat(tbl||':'||coalesce(idx,'NULL')||':'||stat,',') "
+                           "FROM (SELECT tbl,idx,stat FROM sqlite_stat1 ORDER BY tbl,idx)");
+  }
+
+  const std::string_view expected_stat1_rows =
+      scenario == "analyze-existing-stat1"
+          ? (terminal ? "Items:items_name:3 3" : "Items:items_name:3 1")
+          : "Items:NULL:3";
+  if (rows != expected.rows || temp_visible != expected.temp_visible ||
+      index_visible != index_expected ||
+      (index_expected && indexed_rows != expected_indexed_rows) ||
+      stat1_visible != stat1_expected || (stat1_expected && stat1_rows != expected_stat1_rows)) {
     throw std::runtime_error{std::string{scenario} + " cut=" + std::to_string(cut) +
                              " durability=" + (writes_are_durable ? "durable" : "volatile") +
                              " disagrees in pinned SQLite"};
@@ -999,11 +1038,44 @@ void VerifyAnalyzeStoredIndexes(const std::filesystem::path& path) {
   }
 }
 
-constexpr std::array<std::string_view, 14> kCrashCaseIds{
+void VerifyRealAffinityRounding(const std::filesystem::path& path) {
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,Score REAL)");
+    ExecuteModern(session, "CREATE INDEX items_score ON Items(Score)");
+    ExecuteModern(session, "INSERT INTO Items VALUES(1,9007199254740993)");
+  }
+
+  const Database sqlite{path, kReadOnlyFlags};
+  VerifyIntegrity(sqlite.get());
+  if (QueryText(sqlite.get(), "SELECT typeof(Score)||'|'||quote(Score) FROM Items") !=
+          "real|9007199254740992.0" ||
+      QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE Score=9007199254740993") != 0 ||
+      QueryInteger(sqlite.get(),
+                   "SELECT count(*) FROM Items INDEXED BY items_score "
+                   "WHERE Score=9007199254740993") != 0 ||
+      QueryInteger(sqlite.get(),
+                   "SELECT count(*) FROM Items NOT INDEXED "
+                   "WHERE Score=9007199254740993") != 0 ||
+      QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE Score=9007199254740992") != 1 ||
+      QueryInteger(sqlite.get(),
+                   "SELECT count(*) FROM Items INDEXED BY items_score "
+                   "WHERE Score=9007199254740992") != 1 ||
+      QueryInteger(sqlite.get(),
+                   "SELECT count(*) FROM Items NOT INDEXED "
+                   "WHERE Score=9007199254740992") != 1) {
+    throw std::runtime_error{"Modern REAL-affinity rounding disagrees with pinned SQLite"};
+  }
+}
+
+constexpr std::array<std::string_view, 16> kCrashCaseIds{
+    "analyze-existing-stat1",
     "implicit-insert",
     "implicit-create",
     "implicit-create-index",
     "implicit-analyze",
+    "indexed-dml-commit",
     "exact-rowid-move",
     "scan-rowid-move",
     "scan-delete",
@@ -1020,21 +1092,43 @@ constexpr std::array<int, 8> kPageSizes{
     512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 };
 
-constexpr std::array<std::string_view, 6> kNonPageCaseIds{
-    "analyze-stored-indexes", "differential-trace",    "modern-created",
-    "sqlite-created",         "alternating-ownership", "unsupported-boundaries",
+constexpr std::array<std::string_view, 7> kNonPageCaseIds{
+    "analyze-stored-indexes", "differential-trace", "modern-created",
+    "real-affinity-rounding", "sqlite-created",     "alternating-ownership",
+    "unsupported-boundaries",
 };
 
-constexpr std::array<std::string_view, 28> kAllCaseIds{
-    "alternating-ownership",  "analyze-stored-indexes", "constraint-then-commit",
-    "create-full-rollback",   "create-rollback-to",     "differential-trace",
-    "exact-rowid-move",       "explicit-commit",        "full-dml-rollback",
-    "implicit-analyze",       "implicit-create",        "implicit-create-index",
-    "implicit-insert",        "modern-created",         "named-rollback-then-commit",
-    "page-size-1024",         "page-size-16384",        "page-size-2048",
-    "page-size-32768",        "page-size-4096",         "page-size-512",
-    "page-size-65536",        "page-size-8192",         "scan-delete",
-    "scan-rowid-move",        "sqlite-created",         "transaction-savepoint-release",
+constexpr std::array<std::string_view, 31> kAllCaseIds{
+    "alternating-ownership",
+    "analyze-existing-stat1",
+    "analyze-stored-indexes",
+    "constraint-then-commit",
+    "create-full-rollback",
+    "create-rollback-to",
+    "differential-trace",
+    "exact-rowid-move",
+    "explicit-commit",
+    "full-dml-rollback",
+    "implicit-analyze",
+    "implicit-create",
+    "implicit-create-index",
+    "implicit-insert",
+    "indexed-dml-commit",
+    "modern-created",
+    "named-rollback-then-commit",
+    "page-size-1024",
+    "page-size-16384",
+    "page-size-2048",
+    "page-size-32768",
+    "page-size-4096",
+    "page-size-512",
+    "page-size-65536",
+    "page-size-8192",
+    "real-affinity-rounding",
+    "scan-delete",
+    "scan-rowid-move",
+    "sqlite-created",
+    "transaction-savepoint-release",
     "unsupported-boundaries",
 };
 
@@ -1163,6 +1257,8 @@ void RunNonCrashCase(std::string_view case_id, const TemporaryDirectory& directo
     VerifyUnsupportedMutationBoundaries(directory.DatabasePath("unsupported-boundaries"));
   } else if (case_id == "analyze-stored-indexes") {
     VerifyAnalyzeStoredIndexes(directory.DatabasePath("analyze-stored-indexes"));
+  } else if (case_id == "real-affinity-rounding") {
+    VerifyRealAffinityRounding(directory.DatabasePath("real-affinity-rounding"));
   } else {
     VerifyOnePageSize(
         directory, TakeOptional(PageSizeCase(case_id), "page-size compatibility case is invalid"));

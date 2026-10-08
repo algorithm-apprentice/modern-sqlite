@@ -1208,14 +1208,16 @@ if(TARGET modern_sqlite_read_benchmark AND
       TIMEOUT 300
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
-  if(EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/index_performance/indexed.db")
+  if(TARGET modern_sqlite_index_benchmark AND
+     TARGET modern_sqlite_index_diagnostics AND
+     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/index_performance/indexed.db")
     add_test(
       NAME performance.index_benchmark_cli
       COMMAND
         "${Python3_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/tests/performance/index_benchmark_cli_test.py"
-        --timing-binary "$<TARGET_FILE:modern_sqlite_read_benchmark>"
-        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_read_diagnostics>"
+        --timing-binary "$<TARGET_FILE:modern_sqlite_index_benchmark>"
+        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_index_diagnostics>"
         --repository-root "${PROJECT_SOURCE_DIR}"
         --workloads "${PROJECT_SOURCE_DIR}/tests/performance/index-workloads-v1.json"
     )

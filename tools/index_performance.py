@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import pathlib
@@ -36,8 +37,15 @@ CASE_IDS = (
     "index-multi-equality-covering",
     "index-range-covering",
     "index-range-noncovering",
+    "index-range-lower-only-covering",
+    "index-range-upper-only-covering",
     "index-unselective-noncovering",
     "index-unselective-covering",
+    "index-insert",
+    "index-update",
+    "index-delete",
+    "index-create",
+    "index-analyze",
 )
 
 _TOP_KEYS = {
@@ -75,6 +83,7 @@ _CASE_KEYS = {
     "measured_iterations",
     "diagnostic_iterations",
     "items_per_iteration",
+    "query_only",
     "expected",
 }
 _EXPECTED_KEYS = {"warmup", "measured", "diagnostic", "smoke", "verification"}
@@ -87,6 +96,7 @@ _CASE_CONTRACTS = {
         4096,
         128,
         1,
+        True,
     ),
     "index-equality-covering-miss": (
         "index",
@@ -96,6 +106,7 @@ _CASE_CONTRACTS = {
         4096,
         128,
         1,
+        True,
     ),
     "index-equality-noncovering-hit": (
         "index",
@@ -105,6 +116,7 @@ _CASE_CONTRACTS = {
         4096,
         128,
         1,
+        True,
     ),
     "index-multi-equality-covering": (
         "index",
@@ -114,6 +126,7 @@ _CASE_CONTRACTS = {
         4096,
         128,
         1,
+        True,
     ),
     "index-range-covering": (
         "index",
@@ -123,6 +136,7 @@ _CASE_CONTRACTS = {
         2048,
         2,
         64,
+        True,
     ),
     "index-range-noncovering": (
         "index",
@@ -132,6 +146,27 @@ _CASE_CONTRACTS = {
         2048,
         2,
         64,
+        True,
+    ),
+    "index-range-lower-only-covering": (
+        "index",
+        "SELECT id,score FROM items WHERE category>=?1",
+        "range",
+        2,
+        2048,
+        2,
+        64,
+        True,
+    ),
+    "index-range-upper-only-covering": (
+        "index",
+        "SELECT id,score FROM items WHERE category<?1",
+        "range",
+        2,
+        2048,
+        2,
+        64,
+        True,
     ),
     "index-unselective-noncovering": (
         "scan",
@@ -141,6 +176,7 @@ _CASE_CONTRACTS = {
         32,
         1,
         2048,
+        True,
     ),
     "index-unselective-covering": (
         "index",
@@ -150,10 +186,63 @@ _CASE_CONTRACTS = {
         256,
         1,
         2048,
+        True,
+    ),
+    "index-insert": (
+        "write",
+        "INSERT INTO items(id,category,score,flag,payload) VALUES(?1,?2,?3,?4,?5)",
+        "statement",
+        4,
+        32,
+        8,
+        1,
+        False,
+    ),
+    "index-update": (
+        "write",
+        "UPDATE items SET category=?1,score=?2 WHERE id=?3",
+        "statement",
+        4,
+        32,
+        8,
+        1,
+        False,
+    ),
+    "index-delete": (
+        "write",
+        "DELETE FROM items WHERE id=?1",
+        "statement",
+        4,
+        32,
+        8,
+        1,
+        False,
+    ),
+    "index-create": (
+        "schema",
+        "CREATE INDEX benchmark_payload_{iteration} ON items(payload)",
+        "index-build",
+        8,
+        8,
+        8,
+        4096,
+        False,
+    ),
+    "index-analyze": (
+        "schema",
+        "ANALYZE",
+        "analysis",
+        1,
+        16,
+        1,
+        12288,
+        False,
     ),
 }
 
-_COMMON_COLLECT_INPUT_REFERENCES = common._collect_input_references
+_COMMON_EXPECTED_COMPLETION = common._expected_completion
+_COMMON_VALIDATE_RAW_DIAGNOSTIC_REPORT = common.validate_raw_diagnostic_report
+_COMMON_VALIDATE_RAW_TIMING_REPORT = common.validate_raw_timing_report
 
 
 def create_fixture(
@@ -405,6 +494,8 @@ def validate_workload_manifest(
 
     cases = value["cases"]
     common._require_type(cases, list, "index workload cases")
+    for index, case in enumerate(cases):
+        common._require_type(case, dict, f"index workload cases[{index}]")
     if tuple(case.get("id") for case in cases) != CASE_IDS:
         raise HarnessError(f"index workload case IDs must be {list(CASE_IDS)}")
     for index, case in enumerate(cases):
@@ -420,6 +511,7 @@ def validate_workload_manifest(
             "measured_iterations": contract[4],
             "diagnostic_iterations": contract[5],
             "items_per_iteration": contract[6],
+            "query_only": contract[7],
         }
         for key, expected in exact.items():
             if case[key] != expected:
@@ -463,29 +555,386 @@ def _collect_input_references(
     workload_path: pathlib.Path,
     workload_manifest: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    references = _COMMON_COLLECT_INPUT_REFERENCES(
-        repository_root=repository_root,
-        workload_path=workload_path,
-        workload_manifest=workload_manifest,
+    profile_path = common._resolve_repository_file(
+        repository_root,
+        workload_manifest["sqlite_profile"],
+        "index workload sqlite_profile",
     )
-    references.append(
+    references = [
+        common._repository_input_reference(
+            role="workload-manifest",
+            path=workload_path,
+            repository_root=repository_root,
+        ),
+        common._repository_input_reference(
+            role="sqlite-profile",
+            path=profile_path,
+            repository_root=repository_root,
+        ),
+        common._repository_input_reference(
+            role="benchmark-source",
+            path=repository_root / "benchmarks/index_performance.cpp",
+            repository_root=repository_root,
+        ),
+        common._repository_input_reference(
+            role="shared-runner-source",
+            path=repository_root / "tools/read_performance.py",
+            repository_root=repository_root,
+        ),
         common._repository_input_reference(
             role="index-runner-source",
             path=repository_root / "tools/index_performance.py",
             repository_root=repository_root,
+        ),
+    ]
+    for fixture in workload_manifest["fixtures"]:
+        references.append(
+            common._repository_input_reference(
+                role=f"fixture-{fixture['id']}",
+                path=repository_root / pathlib.PurePosixPath(fixture["path"]),
+                repository_root=repository_root,
+            )
         )
-    )
+        references.append(
+            common._repository_input_reference(
+                role=f"fixture-sql-{fixture['id']}",
+                path=repository_root / pathlib.PurePosixPath(fixture["sql_path"]),
+                repository_root=repository_root,
+            )
+        )
     return references
+
+
+def _expected_stateful_completion(
+    case: dict[str, Any],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    if mode == "baseline":
+        repetition_count = 3
+        iterations = case["measured_iterations"]
+    elif mode == "smoke":
+        repetition_count = 1
+        iterations = 1
+    elif mode == "diagnostic":
+        repetition_count = 1
+        iterations = case["diagnostic_iterations"]
+    else:
+        raise HarnessError("unknown stateful completion mode")
+    execution_count = 1 + repetition_count
+    if case["id"] == "index-create":
+        statement_prepares = (
+            case["warmup_iterations"] + iterations * repetition_count + 2
+        )
+    else:
+        statement_prepares = execution_count + 2
+    return {
+        "session_opens": execution_count + 2,
+        "statement_prepares": statement_prepares,
+        "statement_finalizes": statement_prepares,
+        "statement_resets": (
+            case["warmup_iterations"] + iterations * repetition_count + 2
+        ),
+        "pre_verifications": 1,
+        "post_verifications": execution_count + 1,
+        "status": "complete",
+    }
+
+
+def _validate_stateful_configuration(
+    value: dict[str, Any],
+    workload_manifest: dict[str, Any],
+    label: str,
+) -> None:
+    expected = dict(workload_manifest["configuration"])
+    expected["query_only"] = False
+    if value != expected:
+        raise HarnessError(f"{label} does not match the writable index contract")
+
+
+def _validate_completion_shape(value: Any, label: str) -> None:
+    common._require_type(value, dict, label)
+    common._require_exact_keys(value, common._COMPLETION_KEYS, label)
+    if value["status"] != "complete":
+        raise HarnessError(f"{label}.status must be complete")
+    for key in common._COMPLETION_KEYS - {"status"}:
+        common._require_integer(value[key], f"{label}.{key}", minimum=1)
+
+
+def _validate_stateful_timing_shape(value: Any) -> None:
+    common._require_type(value, dict, "timing report")
+    common._require_exact_keys(value, common._RAW_TIMING_KEYS, "timing report")
+    common._require_type(
+        value["effective_configuration"],
+        dict,
+        "timing report.effective_configuration",
+    )
+    _validate_completion_shape(value["completion"], "timing report.completion")
+
+
+def _validate_stateful_diagnostic_shape(
+    value: Any,
+    *,
+    expected_engine: str,
+) -> None:
+    common._require_type(value, dict, "diagnostic report")
+    common._require_exact_keys(
+        value,
+        common._RAW_DIAGNOSTIC_KEYS,
+        "diagnostic report",
+    )
+    common._require_type(
+        value["effective_configuration"],
+        dict,
+        "diagnostic report.effective_configuration",
+    )
+    _validate_completion_shape(value["completion"], "diagnostic report.completion")
+    counters = value["counters"]
+    common._require_type(counters, dict, "diagnostic report.counters")
+    common._require_exact_keys(
+        counters,
+        common._COUNTER_GROUP_KEYS,
+        "diagnostic report.counters",
+    )
+    if expected_engine == "modern":
+        common._validate_counter_object(
+            counters["modern"],
+            expected_names=common.MODERN_COUNTER_NAMES,
+            label="diagnostic report.counters.modern",
+        )
+        if counters["sqlite"] != {}:
+            raise HarnessError(
+                "Modern diagnostics must not publish SQLite counters"
+            )
+    elif expected_engine == "sqlite":
+        common._validate_counter_object(
+            counters["sqlite"],
+            expected_names=common.SQLITE_COUNTER_NAMES,
+            label="diagnostic report.counters.sqlite",
+        )
+        if counters["modern"] != {}:
+            raise HarnessError(
+                "SQLite diagnostics must not publish Modern counters"
+            )
+    else:
+        raise HarnessError("expected engine must be modern or sqlite")
+
+
+def validate_raw_timing_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_case: str,
+    expected_run_kind: str = "baseline",
+) -> dict[str, Any]:
+    case = common._case_by_id(workload_manifest, expected_case)
+    if case["query_only"]:
+        return _COMMON_VALIDATE_RAW_TIMING_REPORT(
+            value,
+            workload_manifest=workload_manifest,
+            expected_engine=expected_engine,
+            expected_case=expected_case,
+            expected_run_kind=expected_run_kind,
+        )
+    _validate_stateful_timing_shape(value)
+    normalized = copy.deepcopy(value)
+    normalized["effective_configuration"]["query_only"] = True
+    normalized["completion"] = _COMMON_EXPECTED_COMPLETION(
+        case,
+        mode=expected_run_kind,
+    )
+    _COMMON_VALIDATE_RAW_TIMING_REPORT(
+        normalized,
+        workload_manifest=workload_manifest,
+        expected_engine=expected_engine,
+        expected_case=expected_case,
+        expected_run_kind=expected_run_kind,
+    )
+    _validate_stateful_configuration(
+        value["effective_configuration"],
+        workload_manifest,
+        "timing report.effective_configuration",
+    )
+    common._validate_completion(
+        value["completion"],
+        "timing report.completion",
+        _expected_stateful_completion(case, mode=expected_run_kind),
+    )
+    return value
+
+
+def validate_raw_diagnostic_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_case: str,
+) -> dict[str, Any]:
+    case = common._case_by_id(workload_manifest, expected_case)
+    if case["query_only"]:
+        return _COMMON_VALIDATE_RAW_DIAGNOSTIC_REPORT(
+            value,
+            workload_manifest=workload_manifest,
+            expected_engine=expected_engine,
+            expected_case=expected_case,
+        )
+    _validate_stateful_diagnostic_shape(
+        value,
+        expected_engine=expected_engine,
+    )
+    normalized = copy.deepcopy(value)
+    normalized["effective_configuration"]["query_only"] = True
+    normalized["completion"] = _COMMON_EXPECTED_COMPLETION(
+        case,
+        mode="diagnostic",
+    )
+    if expected_engine == "modern":
+        normalized["counters"]["modern"]["pages_written"] = 0
+        normalized["counters"]["modern"]["pages_read"] = 0
+        normalized["counters"]["modern"]["cache_misses"] = 0
+    else:
+        normalized["counters"]["sqlite"]["cache_writes"] = 0
+        normalized["counters"]["sqlite"]["cache_misses"] = 0
+    _COMMON_VALIDATE_RAW_DIAGNOSTIC_REPORT(
+        normalized,
+        workload_manifest=workload_manifest,
+        expected_engine=expected_engine,
+        expected_case=expected_case,
+    )
+    _validate_stateful_configuration(
+        value["effective_configuration"],
+        workload_manifest,
+        "diagnostic report.effective_configuration",
+    )
+    common._validate_completion(
+        value["completion"],
+        "diagnostic report.completion",
+        _expected_stateful_completion(case, mode="diagnostic"),
+    )
+    counters = value["counters"][expected_engine]
+    write_counter = "pages_written" if expected_engine == "modern" else "cache_writes"
+    if counters[write_counter] == 0:
+        raise HarnessError(
+            f"diagnostic report.counters.{expected_engine}.{write_counter} must be nonzero"
+        )
+    if expected_engine == "modern" and counters["pages_read"] != counters["cache_misses"]:
+        raise HarnessError(
+            "Modern stateful diagnostic page reads and cache misses must match"
+        )
+    return value
+
+
+def _capture_actual_build_flags(
+    *,
+    cache: dict[str, str],
+    repository_root: pathlib.Path,
+    build_directory: pathlib.Path,
+    sqlite_source_directory: pathlib.Path,
+) -> dict[str, str]:
+    if cache["CMAKE_GENERATOR"] != "Ninja":
+        raise HarnessError("benchmark provenance requires the pinned Ninja generator")
+    compile_commands = common.load_json_strict(
+        build_directory / "compile_commands.json"
+    )
+    common._require_type(
+        compile_commands,
+        list,
+        "benchmark compile_commands.json",
+    )
+    targets = {
+        "actual_sqlite_c_compile_flags": (
+            "CMakeFiles/modern_sqlite_benchmark_sqlite.dir/",
+            True,
+        ),
+        "actual_modern_cxx_compile_flags": (
+            "CMakeFiles/modern_sqlite.dir/",
+            True,
+        ),
+        "actual_harness_cxx_compile_flags": (
+            "CMakeFiles/modern_sqlite_index_benchmark.dir/",
+            True,
+        ),
+    }
+    captured: dict[str, str] = {}
+    for field, (needle, require_optimization) in targets.items():
+        flags = set()
+        for index, entry in enumerate(compile_commands):
+            common._require_type(
+                entry,
+                dict,
+                f"benchmark compile command {index}",
+            )
+            command = common._require_string(
+                entry.get("command"),
+                f"benchmark compile command {index}.command",
+            )
+            if needle not in command:
+                continue
+            extracted = common._extract_compile_flags(
+                command,
+                repository_root=repository_root,
+                build_directory=build_directory,
+                sqlite_source_directory=sqlite_source_directory,
+            )
+            common._validate_benchmark_flags(
+                extracted,
+                require_optimization=require_optimization,
+                label=field,
+            )
+            flags.add(extracted)
+        if not flags:
+            raise HarnessError(f"no actual compile commands found for {field}")
+        captured[field] = "\n".join(sorted(flags))
+
+    make_program = cache.get("CMAKE_MAKE_PROGRAM")
+    if not make_program:
+        raise HarnessError("CMake cache is missing CMAKE_MAKE_PROGRAM")
+    target = "modern_sqlite_index_benchmark"
+    commands = common._command_output(
+        [make_program, "-C", str(build_directory), "-t", "commands", target],
+        cwd=repository_root,
+        label="Ninja index timing-target command lookup",
+    ).decode("utf-8", errors="strict")
+    link_candidates = [
+        line
+        for line in commands.splitlines()
+        if target in line
+        and " -c " not in line
+        and (f" -o {target} " in line or f"/OUT:{target}".upper() in line.upper())
+    ]
+    if len(link_candidates) != 1:
+        raise HarnessError(
+            "Ninja command graph must contain one index timing executable link command"
+        )
+    link_flags = common._extract_link_flags(
+        link_candidates[0],
+        compiler_path=cache["CMAKE_CXX_COMPILER"],
+        output_name=target,
+        repository_root=repository_root,
+        build_directory=build_directory,
+        sqlite_source_directory=sqlite_source_directory,
+    )
+    common._validate_benchmark_flags(
+        link_flags,
+        require_optimization=False,
+        label="actual_timing_link_flags",
+    )
+    captured["actual_timing_link_flags"] = link_flags
+    return captured
 
 
 def _configure_common() -> None:
     common.EXPECTED_CASE_IDS = CASE_IDS
     common.MINIMUM_WALL_NS = MINIMUM_WALL_NS
-    common.MAX_BASELINE_ARTIFACTS = 132
-    common.ENFORCE_GUARD_ON_VALIDATION = False
+    common.MAX_BASELINE_ARTIFACTS = 260
+    common.ENFORCE_GUARD_ON_VALIDATION = True
     common.validate_workload_manifest = validate_workload_manifest
     common._smoke_work = _smoke_work
     common._collect_input_references = _collect_input_references
+    common.validate_raw_timing_report = validate_raw_timing_report
+    common.validate_raw_diagnostic_report = validate_raw_diagnostic_report
+    common._capture_actual_build_flags = _capture_actual_build_flags
 
 
 def _build_parser() -> argparse.ArgumentParser:

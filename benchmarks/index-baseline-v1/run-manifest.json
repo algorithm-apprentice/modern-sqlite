@@ -21,8 +21,8 @@
         "mode": "identity",
         "schema_version": 1,
         "source": {
-          "revision": "c9e8b4303314ac35f98294c5ffd2de8b4560dc04",
-          "tree": "ce87819b646ad196d729978ff80ef4a92295a8ed"
+          "revision": "22b22429af2bb48a782ead8fc88037dfe665375b",
+          "tree": "b757363f8f35a77174bb3d7624d17bd63d1e1650"
         },
         "sqlite": {
           "compile_options": [
@@ -69,9 +69,9 @@
           "version": "3.54.0"
         }
       },
-      "logical_name": "modern_sqlite_read_diagnostics",
-      "sha256": "1a2ea0731eddd08b61d8b449d05e61f9e362b036ea94d38b8713dc2ac7e48b16",
-      "size_bytes": 3209456
+      "logical_name": "modern_sqlite_index_diagnostics",
+      "sha256": "eb8377b918eb068121f04ed7d57eaad885a706ea4bff62b5911fae71fdd95387",
+      "size_bytes": 3650208
     },
     "timing": {
       "identity": {
@@ -94,8 +94,8 @@
         "mode": "identity",
         "schema_version": 1,
         "source": {
-          "revision": "c9e8b4303314ac35f98294c5ffd2de8b4560dc04",
-          "tree": "ce87819b646ad196d729978ff80ef4a92295a8ed"
+          "revision": "22b22429af2bb48a782ead8fc88037dfe665375b",
+          "tree": "b757363f8f35a77174bb3d7624d17bd63d1e1650"
         },
         "sqlite": {
           "compile_options": [
@@ -142,9 +142,9 @@
           "version": "3.54.0"
         }
       },
-      "logical_name": "modern_sqlite_read_benchmark",
-      "sha256": "07f9d6cdc7c36d69ffab5305972d77612e43b8904eec5f530a78ef275e91e96b",
-      "size_bytes": 3207504
+      "logical_name": "modern_sqlite_index_benchmark",
+      "sha256": "22e2cdd9af9724a838c2b6049060a9408bf2ed792793ab48565136915a152a69",
+      "size_bytes": 3645456
     }
   },
   "build": {
@@ -184,7 +184,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-equality-covering-hit",
@@ -194,7 +194,7 @@
       "ordinal": 0,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 169876042,
+        "runner_elapsed_ns": 9543375,
         "timed_out": false
       },
       "stderr": {
@@ -204,8 +204,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/000-index-equality-covering-hit-modern.json",
-        "sha256": "8dc170405799143166b0df90962f0d0be51e71a5869a6d0e7b0bdb66ce7678ca",
-        "size_bytes": 2033
+        "sha256": "bb36775e0701841bc6bd2280e327a14a958b83792ac01d2e53007898d25c46d6",
+        "size_bytes": 2031
       }
     },
     {
@@ -221,7 +221,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-equality-covering-hit",
@@ -231,7 +231,7 @@
       "ordinal": 1,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9375958,
+        "runner_elapsed_ns": 9170125,
         "timed_out": false
       },
       "stderr": {
@@ -258,7 +258,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-equality-covering-miss",
@@ -268,7 +268,7 @@
       "ordinal": 2,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 173298125,
+        "runner_elapsed_ns": 8638208,
         "timed_out": false
       },
       "stderr": {
@@ -278,8 +278,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/002-index-equality-covering-miss-modern.json",
-        "sha256": "99fab4d29b8f58303d39884086f43ead74ecaca9fd365a93c95fae6b63cd4ac1",
-        "size_bytes": 2029
+        "sha256": "b908fbc6455b398ddb4b7d88ec720289ec0ca9f7802446b8c050a6eeb9ce02a2",
+        "size_bytes": 2026
       }
     },
     {
@@ -295,7 +295,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-equality-covering-miss",
@@ -305,7 +305,7 @@
       "ordinal": 3,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9098958,
+        "runner_elapsed_ns": 8185000,
         "timed_out": false
       },
       "stderr": {
@@ -332,7 +332,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-equality-noncovering-hit",
@@ -342,7 +342,7 @@
       "ordinal": 4,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 170556625,
+        "runner_elapsed_ns": 8877000,
         "timed_out": false
       },
       "stderr": {
@@ -352,8 +352,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/004-index-equality-noncovering-hit-modern.json",
-        "sha256": "f12855a326f1a4d1dfaf37a70476ab881202fee022b3b12143d2709b5afd9ddf",
-        "size_bytes": 2037
+        "sha256": "22c199943e97e9ec0385cb2eaf0c15a69d935714fcc6ac076cde9e4d8895c5fa",
+        "size_bytes": 2036
       }
     },
     {
@@ -369,7 +369,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-equality-noncovering-hit",
@@ -379,7 +379,7 @@
       "ordinal": 5,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 11235583,
+        "runner_elapsed_ns": 9573958,
         "timed_out": false
       },
       "stderr": {
@@ -406,7 +406,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-multi-equality-covering",
@@ -416,7 +416,7 @@
       "ordinal": 6,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 170899833,
+        "runner_elapsed_ns": 9078125,
         "timed_out": false
       },
       "stderr": {
@@ -426,8 +426,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/006-index-multi-equality-covering-modern.json",
-        "sha256": "37137430bc2d16259762b89e53ef60cf7226b60032a4b914f513f57bd5cb3384",
-        "size_bytes": 2035
+        "sha256": "fb54df82062482e26f13787640d01897297bb563744f1ecc86fdaab0c40d3f20",
+        "size_bytes": 2033
       }
     },
     {
@@ -443,7 +443,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-multi-equality-covering",
@@ -453,7 +453,7 @@
       "ordinal": 7,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8889375,
+        "runner_elapsed_ns": 8655458,
         "timed_out": false
       },
       "stderr": {
@@ -480,7 +480,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-range-covering",
@@ -490,7 +490,7 @@
       "ordinal": 8,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10729917,
+        "runner_elapsed_ns": 7717875,
         "timed_out": false
       },
       "stderr": {
@@ -500,8 +500,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/008-index-range-covering-modern.json",
-        "sha256": "a0281a4079ce161e7d9cfc8521fd92eacc195453690afcbc988c45eea0e34126",
-        "size_bytes": 2014
+        "sha256": "3a64ceb454f38e285fafac26eee91c82fedfb00f1b93bd341a9b44bf422d9e6c",
+        "size_bytes": 2013
       }
     },
     {
@@ -517,7 +517,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-range-covering",
@@ -527,7 +527,7 @@
       "ordinal": 9,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7535166,
+        "runner_elapsed_ns": 8303875,
         "timed_out": false
       },
       "stderr": {
@@ -554,7 +554,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-range-noncovering",
@@ -564,7 +564,7 @@
       "ordinal": 10,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 10985541,
+        "runner_elapsed_ns": 7498667,
         "timed_out": false
       },
       "stderr": {
@@ -574,8 +574,8 @@
       },
       "stdout": {
         "path": "raw/diagnostic/010-index-range-noncovering-modern.json",
-        "sha256": "5b5f05d8e7cc7e158159d0fe264bef6f5a713d1afb244220036e97295772b656",
-        "size_bytes": 2019
+        "sha256": "b1ad8190dfc5fca3dc58f54b0016389a3d8f41e0c900b54aa8fd83acf5df6a23",
+        "size_bytes": 2020
       }
     },
     {
@@ -591,7 +591,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-range-noncovering",
@@ -601,7 +601,7 @@
       "ordinal": 11,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7691375,
+        "runner_elapsed_ns": 8136875,
         "timed_out": false
       },
       "stderr": {
@@ -616,39 +616,187 @@
       }
     },
     {
-      "case": "index-unselective-noncovering",
+      "case": "index-range-lower-only-covering",
       "database": {
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/012-index-unselective-noncovering-modern.db",
+        "copy_path": "scratch/012-index-range-lower-only-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
-        "index-unselective-noncovering",
-        "scratch/012-index-unselective-noncovering-modern.db",
+        "index-range-lower-only-covering",
+        "scratch/012-index-range-lower-only-covering-modern.db",
         "diagnostic"
       ],
       "ordinal": 12,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 9606250,
+        "runner_elapsed_ns": 6893833,
         "timed_out": false
       },
       "stderr": {
-        "path": "raw/diagnostic/012-index-unselective-noncovering-modern.stderr",
+        "path": "raw/diagnostic/012-index-range-lower-only-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/diagnostic/012-index-unselective-noncovering-modern.json",
-        "sha256": "b57a3d9a1abe1af2f936cd4e4b5f260e19dca697e5dcc1c7b9b6183f8c20403a",
+        "path": "raw/diagnostic/012-index-range-lower-only-covering-modern.json",
+        "sha256": "43497ab7dcfa8b2b92f11e766cfde5fbb7a2167904ecf3d409d31faf84805197",
+        "size_bytes": 2023
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/013-index-range-lower-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-range-lower-only-covering",
+        "scratch/013-index-range-lower-only-covering-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 13,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 7773666,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/013-index-range-lower-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/013-index-range-lower-only-covering-sqlite.json",
+        "sha256": "7011ad383ece49a00fefd2fe2cbac47aeaac0380f9e92dd294b7f64eb9dafc0a",
+        "size_bytes": 2077
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/014-index-range-upper-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-range-upper-only-covering",
+        "scratch/014-index-range-upper-only-covering-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 14,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 7331333,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/014-index-range-upper-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/014-index-range-upper-only-covering-modern.json",
+        "sha256": "641f8231fbac322f91f331e17ddc117f4e6dc1494728af50785a8b8fc5da801d",
+        "size_bytes": 2024
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/015-index-range-upper-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-range-upper-only-covering",
+        "scratch/015-index-range-upper-only-covering-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 15,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 8531750,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/015-index-range-upper-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/015-index-range-upper-only-covering-sqlite.json",
+        "sha256": "6e4c45e68a9f9480603517d4275a31149a25d6c815d97c36e1902fb1cb27a202",
+        "size_bytes": 2077
+      }
+    },
+    {
+      "case": "index-unselective-noncovering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/016-index-unselective-noncovering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-unselective-noncovering",
+        "scratch/016-index-unselective-noncovering-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 16,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 9164500,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/016-index-unselective-noncovering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/016-index-unselective-noncovering-modern.json",
+        "sha256": "4c071205f2000df157b5d5267085e1bdbcf84ef384f5d3c9976110a042d19fa0",
         "size_bytes": 2029
       }
     },
@@ -658,33 +806,33 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/013-index-unselective-noncovering-sqlite.db",
+        "copy_path": "scratch/017-index-unselective-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-unselective-noncovering",
-        "scratch/013-index-unselective-noncovering-sqlite.db",
+        "scratch/017-index-unselective-noncovering-sqlite.db",
         "diagnostic"
       ],
-      "ordinal": 13,
+      "ordinal": 17,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8624625,
+        "runner_elapsed_ns": 8709667,
         "timed_out": false
       },
       "stderr": {
-        "path": "raw/diagnostic/013-index-unselective-noncovering-sqlite.stderr",
+        "path": "raw/diagnostic/017-index-unselective-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/diagnostic/013-index-unselective-noncovering-sqlite.json",
+        "path": "raw/diagnostic/017-index-unselective-noncovering-sqlite.json",
         "sha256": "0efa85de63e864aec3ab3fba44009677373acfc213252429280b84b40564e000",
         "size_bytes": 2086
       }
@@ -695,35 +843,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/014-index-unselective-covering-modern.db",
+        "copy_path": "scratch/018-index-unselective-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "modern",
         "index-unselective-covering",
-        "scratch/014-index-unselective-covering-modern.db",
+        "scratch/018-index-unselective-covering-modern.db",
         "diagnostic"
       ],
-      "ordinal": 14,
+      "ordinal": 18,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 8894167,
+        "runner_elapsed_ns": 7734000,
         "timed_out": false
       },
       "stderr": {
-        "path": "raw/diagnostic/014-index-unselective-covering-modern.stderr",
+        "path": "raw/diagnostic/018-index-unselective-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/diagnostic/014-index-unselective-covering-modern.json",
-        "sha256": "5a96dfb02eed9e606fa47acfdebe967940f54148a21d16201562fd726435dcc6",
-        "size_bytes": 2023
+        "path": "raw/diagnostic/018-index-unselective-covering-modern.json",
+        "sha256": "c730a3a75f5236158cf4e43a7d7f424ed0b6251921aadc232e2b1d7e91485daf",
+        "size_bytes": 2024
       }
     },
     {
@@ -732,35 +880,405 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/015-index-unselective-covering-sqlite.db",
+        "copy_path": "scratch/019-index-unselective-covering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_diagnostics",
+        "modern_sqlite_index_diagnostics",
         "run",
         "sqlite",
         "index-unselective-covering",
-        "scratch/015-index-unselective-covering-sqlite.db",
+        "scratch/019-index-unselective-covering-sqlite.db",
         "diagnostic"
       ],
-      "ordinal": 15,
+      "ordinal": 19,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7699375,
+        "runner_elapsed_ns": 7569375,
         "timed_out": false
       },
       "stderr": {
-        "path": "raw/diagnostic/015-index-unselective-covering-sqlite.stderr",
+        "path": "raw/diagnostic/019-index-unselective-covering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/diagnostic/015-index-unselective-covering-sqlite.json",
+        "path": "raw/diagnostic/019-index-unselective-covering-sqlite.json",
         "sha256": "4735a6a40f7765bb51512dcd16b6290fa995573897b6f0d51fbc552f9e4fac19",
         "size_bytes": 2076
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/020-index-insert-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-insert",
+        "scratch/020-index-insert-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 20,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 16500959,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/020-index-insert-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/020-index-insert-modern.json",
+        "sha256": "4093c0f81c491df08dda80d57af8b298499072873682aa20afcd4470db883714",
+        "size_bytes": 2010
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/021-index-insert-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-insert",
+        "scratch/021-index-insert-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 21,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 18032709,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/021-index-insert-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/021-index-insert-sqlite.json",
+        "sha256": "57895581e79a1d322e2d7a1122022c10197eb5dc7a3de3c69cc7fde165898b71",
+        "size_bytes": 2057
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/022-index-update-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-update",
+        "scratch/022-index-update-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 22,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 17342167,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/022-index-update-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/022-index-update-modern.json",
+        "sha256": "ea6e91b4987749378e932b9634f35dd35b6d011208bf33f765d8940a84e8eaa8",
+        "size_bytes": 2010
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/023-index-update-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-update",
+        "scratch/023-index-update-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 23,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 18255625,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/023-index-update-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/023-index-update-sqlite.json",
+        "sha256": "2a6469425e93b3df39c94a844d2176c5c6597336dbc17520b906d7695c7bf4d2",
+        "size_bytes": 2056
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/024-index-delete-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-delete",
+        "scratch/024-index-delete-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 24,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 17135125,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/024-index-delete-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/024-index-delete-modern.json",
+        "sha256": "7ef2907966418e4b6a56a8d6aba2b3b83cbac426c401c5dc8c5f8c79b15148ba",
+        "size_bytes": 2009
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/025-index-delete-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-delete",
+        "scratch/025-index-delete-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 25,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 18474708,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/025-index-delete-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/025-index-delete-sqlite.json",
+        "sha256": "fd9ba94cfcdf7f6339b9753a12d18b0f5e56b1d640417c58bc5f05a74a43d75d",
+        "size_bytes": 2055
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/026-index-create-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-create",
+        "scratch/026-index-create-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 26,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 147065750,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/026-index-create-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/026-index-create-modern.json",
+        "sha256": "31c14b5593b0b9c10070ea032f493653122198e600e1b564e3571e001446d722",
+        "size_bytes": 2027
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/027-index-create-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-create",
+        "scratch/027-index-create-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 27,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 43910541,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/027-index-create-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/027-index-create-sqlite.json",
+        "sha256": "3bfe69ddec11a1c94df16f68b76a0f70b49e8921425c5f21651b247ceda251f6",
+        "size_bytes": 2073
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/028-index-analyze-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "modern",
+        "index-analyze",
+        "scratch/028-index-analyze-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 28,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 16076167,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/028-index-analyze-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/028-index-analyze-modern.json",
+        "sha256": "a3fb46d1524749d75e6c95a58c126910998a0811058ff384454e29904709412c",
+        "size_bytes": 2011
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/029-index-analyze-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_diagnostics",
+        "run",
+        "sqlite",
+        "index-analyze",
+        "scratch/029-index-analyze-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 29,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 15147000,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/029-index-analyze-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/029-index-analyze-sqlite.json",
+        "sha256": "36f3e34c8dc26e153ea29127abf5bd559ccf210b402dea17000713bf8c2dd424",
+        "size_bytes": 2060
       }
     }
   ],
@@ -778,8 +1296,8 @@
     {
       "path": "tests/performance/index-workloads-v1.json",
       "role": "workload-manifest",
-      "sha256": "051ee67d21288458b10e698e5d32817128a20fe7e2a528ab8e07b6f117161b90",
-      "size_bytes": 14983
+      "sha256": "1d9f43dac385e9ec2c2668dbf4a40adc97582485fbc860809d6cf97cbf927891",
+      "size_bytes": 25805
     },
     {
       "path": "tests/compatibility/sqlite-oracle-profile-v1.json",
@@ -788,16 +1306,22 @@
       "size_bytes": 3072
     },
     {
-      "path": "benchmarks/read_performance.cpp",
+      "path": "benchmarks/index_performance.cpp",
       "role": "benchmark-source",
-      "sha256": "e8db47a144ceae2b1189e5e5a0dc615aa4e886891c468ded4393c9241a2f5cfd",
-      "size_bytes": 94924
+      "sha256": "e16ebee20c8c32384260eeae3ba1131dd65fc4b99b9018c59efbcf14c81a6cea",
+      "size_bytes": 140320
     },
     {
       "path": "tools/read_performance.py",
-      "role": "runner-source",
+      "role": "shared-runner-source",
       "sha256": "d80818e178db25f8454861bd48f9aec9fb2a5447bb455d4651e6a11052d26ba4",
       "size_bytes": 139308
+    },
+    {
+      "path": "tools/index_performance.py",
+      "role": "index-runner-source",
+      "sha256": "2fe7b57c14c13b37dfbb442e013b36b32a63f07c12b81f5e5982a13b80eff04a",
+      "size_bytes": 35275
     },
     {
       "path": "tests/fixtures/index_performance/indexed.db",
@@ -810,12 +1334,6 @@
       "role": "fixture-sql-fit",
       "sha256": "adbf161f16fab86c672296818ea38178ca1b2a0afe873dc5f2c40d1dcabe7570",
       "size_bytes": 881
-    },
-    {
-      "path": "tools/index_performance.py",
-      "role": "index-runner-source",
-      "sha256": "f260e8678f16229983c63e6fe655382709210de5e9f5f2f8e3fc6ccaf5d14820",
-      "size_bytes": 20846
     }
   ],
   "schedule": [
@@ -847,10 +1365,10 @@
   "schema_version": 1,
   "source": {
     "clean": true,
-    "revision": "c9e8b4303314ac35f98294c5ffd2de8b4560dc04",
+    "revision": "22b22429af2bb48a782ead8fc88037dfe665375b",
     "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "tree": "ce87819b646ad196d729978ff80ef4a92295a8ed",
-    "worktree_content_sha256": "45b898e9073ee6d5d6d61d08d2a41475169def6cfa61e76c4f46a44d9866e19a"
+    "tree": "b757363f8f35a77174bb3d7624d17bd63d1e1650",
+    "worktree_content_sha256": "1444ab68a717efed0f8fefe250c402997f536f34a031a5383a9279af2fb5021a"
   },
   "sqlite": {
     "compile_options": [
@@ -914,7 +1432,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-equality-covering-hit",
@@ -924,7 +1442,7 @@
       "ordinal": 0,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7664055709,
+        "runner_elapsed_ns": 57388875,
         "timed_out": false
       },
       "round": 0,
@@ -935,8 +1453,8 @@
       },
       "stdout": {
         "path": "raw/timing/000-round-0-index-equality-covering-hit-modern.json",
-        "sha256": "d79fc1d2650408b7f05ce3d229ee10eee59b576c60500654e9b240c76690f491",
-        "size_bytes": 2411
+        "sha256": "620bc009a91de0873c6a19846ce1f10cbccd776c8de74f140b9c28652f1cc396",
+        "size_bytes": 2399
       }
     },
     {
@@ -952,7 +1470,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-equality-covering-hit",
@@ -962,7 +1480,7 @@
       "ordinal": 1,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 40681500,
+        "runner_elapsed_ns": 39586000,
         "timed_out": false
       },
       "round": 0,
@@ -973,7 +1491,7 @@
       },
       "stdout": {
         "path": "raw/timing/001-round-0-index-equality-covering-hit-sqlite.json",
-        "sha256": "1240513f56de1857bfd4005d995da2c10989b721d6e42d7591268f19ddfed089",
+        "sha256": "19fe09983a087aa14254ab2c656eacdf9d20a8c553a61a7d5e2fcca041f7e0ea",
         "size_bytes": 2399
       }
     },
@@ -990,7 +1508,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-equality-covering-miss",
@@ -1000,7 +1518,7 @@
       "ordinal": 2,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7566433125,
+        "runner_elapsed_ns": 52622042,
         "timed_out": false
       },
       "round": 0,
@@ -1011,8 +1529,8 @@
       },
       "stdout": {
         "path": "raw/timing/002-round-0-index-equality-covering-miss-modern.json",
-        "sha256": "1f33eafb5ac99034d939d98460d66fbb5b7a6ba3159fee924c5322af5bc0d7dd",
-        "size_bytes": 2386
+        "sha256": "36bc9c3c33d8fd2b1426a5aebecd7fd5646e306d8560443ee65b57f99235cb09",
+        "size_bytes": 2374
       }
     },
     {
@@ -1028,7 +1546,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-equality-covering-miss",
@@ -1038,7 +1556,7 @@
       "ordinal": 3,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 38573000,
+        "runner_elapsed_ns": 38125208,
         "timed_out": false
       },
       "round": 0,
@@ -1049,7 +1567,7 @@
       },
       "stdout": {
         "path": "raw/timing/003-round-0-index-equality-covering-miss-sqlite.json",
-        "sha256": "e676816bb3b1bc56edb3f006a8026e63c581a005e545b66ea7c3b8f753202731",
+        "sha256": "107d72c25c47f07c6ae8819e9741709a02220aa4472a318c722e65d6bee8dbd3",
         "size_bytes": 2374
       }
     },
@@ -1066,7 +1584,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-equality-noncovering-hit",
@@ -1076,7 +1594,7 @@
       "ordinal": 4,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7586954959,
+        "runner_elapsed_ns": 66807125,
         "timed_out": false
       },
       "round": 0,
@@ -1087,8 +1605,8 @@
       },
       "stdout": {
         "path": "raw/timing/004-round-0-index-equality-noncovering-hit-modern.json",
-        "sha256": "410d3688afe47926bcb3cb0d79fa297028081f300eb56a1d4b4f4ed8385a191a",
-        "size_bytes": 2418
+        "sha256": "e1a5c9e4231a5a3d2e843fc0a523eea4eabcf96d570dca1842cb75bebeed8d4f",
+        "size_bytes": 2406
       }
     },
     {
@@ -1104,7 +1622,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-equality-noncovering-hit",
@@ -1114,7 +1632,7 @@
       "ordinal": 5,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 43682209,
+        "runner_elapsed_ns": 44007000,
         "timed_out": false
       },
       "round": 0,
@@ -1125,7 +1643,7 @@
       },
       "stdout": {
         "path": "raw/timing/005-round-0-index-equality-noncovering-hit-sqlite.json",
-        "sha256": "f907c927f1f9bfd63ea3f7cb1f874c8f8db3a253672f4ad1653ce73425387d74",
+        "sha256": "61a4e93de47d8e6d4277e0df425be2257bb318bb28aff92ca5a5b3d6ec52bafe",
         "size_bytes": 2406
       }
     },
@@ -1142,7 +1660,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-multi-equality-covering",
@@ -1152,7 +1670,7 @@
       "ordinal": 6,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 7661610292,
+        "runner_elapsed_ns": 59228750,
         "timed_out": false
       },
       "round": 0,
@@ -1163,8 +1681,8 @@
       },
       "stdout": {
         "path": "raw/timing/006-round-0-index-multi-equality-covering-modern.json",
-        "sha256": "54ffeedc00a85f492965c6308e46ca3322c11c52fd23bf5bd346484915d65a30",
-        "size_bytes": 2413
+        "sha256": "c2fd5811a0bdfbc36ad8d7e504e3938c74aab1c930c1785e2157e9532acd42b5",
+        "size_bytes": 2401
       }
     },
     {
@@ -1180,7 +1698,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-multi-equality-covering",
@@ -1190,7 +1708,7 @@
       "ordinal": 7,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 40655542,
+        "runner_elapsed_ns": 43601291,
         "timed_out": false
       },
       "round": 0,
@@ -1201,7 +1719,7 @@
       },
       "stdout": {
         "path": "raw/timing/007-round-0-index-multi-equality-covering-sqlite.json",
-        "sha256": "01a1a5d0db79ee0ff71bc7aa167818285dd206faccbaca446b98681373508f72",
+        "sha256": "7fa3bb12c5d64a94ac2d72dee563c67c27aeeb373e8132eaaa4a3837d4c411f8",
         "size_bytes": 2401
       }
     },
@@ -1218,7 +1736,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-range-covering",
@@ -1228,7 +1746,7 @@
       "ordinal": 8,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 4636421542,
+        "runner_elapsed_ns": 101784834,
         "timed_out": false
       },
       "round": 0,
@@ -1239,8 +1757,8 @@
       },
       "stdout": {
         "path": "raw/timing/008-round-0-index-range-covering-modern.json",
-        "sha256": "78ffb7f2a05e7a165ed3b11852fef9752eac182dc4d4314d2d2aeff7aa8d5eab",
-        "size_bytes": 2417
+        "sha256": "2e3b5f9c85034c4e903c66efea9ee64c56ee9e77a5b759f4954cd497ceabb5d8",
+        "size_bytes": 2405
       }
     },
     {
@@ -1256,7 +1774,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-covering",
@@ -1266,7 +1784,7 @@
       "ordinal": 9,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 37021541,
+        "runner_elapsed_ns": 39966750,
         "timed_out": false
       },
       "round": 0,
@@ -1277,7 +1795,7 @@
       },
       "stdout": {
         "path": "raw/timing/009-round-0-index-range-covering-sqlite.json",
-        "sha256": "196d7378122d48e22c9fd6da2e620b3784ce7755cea8ade625928ab8d9e0f598",
+        "sha256": "e7c676162e8888f1346fa7d50334a81ea61f5f3b889d40241840268247982da1",
         "size_bytes": 2405
       }
     },
@@ -1294,7 +1812,7 @@
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-range-noncovering",
@@ -1304,7 +1822,7 @@
       "ordinal": 10,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 4698101875,
+        "runner_elapsed_ns": 300383584,
         "timed_out": false
       },
       "round": 0,
@@ -1315,8 +1833,8 @@
       },
       "stdout": {
         "path": "raw/timing/010-round-0-index-range-noncovering-modern.json",
-        "sha256": "953d7b2d44a3329de8515d63fae509e11b6e50f3599a50ef78a2d1347d3a9615",
-        "size_bytes": 2424
+        "sha256": "5fe78d3a5527a1c8a389bf414890f755eb798123b865c967881df72133979acb",
+        "size_bytes": 2414
       }
     },
     {
@@ -1332,7 +1850,7 @@
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-noncovering",
@@ -1342,7 +1860,7 @@
       "ordinal": 11,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 83929500,
+        "runner_elapsed_ns": 83430458,
         "timed_out": false
       },
       "round": 0,
@@ -1353,8 +1871,160 @@
       },
       "stdout": {
         "path": "raw/timing/011-round-0-index-range-noncovering-sqlite.json",
-        "sha256": "55b29e028267ad33d4b5c35ee4be80016d64d8208c455479bc73f5c24b8c90ef",
+        "sha256": "6349d4de19a1974b8d373db5a2d0fb93f88b9a664c30a7c9f3a86e2ef807961d",
         "size_bytes": 2412
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/012-round-0-index-range-lower-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-lower-only-covering",
+        "scratch/012-round-0-index-range-lower-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 12,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 70664833,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/012-round-0-index-range-lower-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/012-round-0-index-range-lower-only-covering-modern.json",
+        "sha256": "1b3e79ee53ed623d58a0040aeb7a4d4a548025715be4dced477ac1c53f450d02",
+        "size_bytes": 2416
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/013-round-0-index-range-lower-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-lower-only-covering",
+        "scratch/013-round-0-index-range-lower-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 13,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 32403042,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/013-round-0-index-range-lower-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/013-round-0-index-range-lower-only-covering-sqlite.json",
+        "sha256": "4e1b8f7501d3afcdec669d4395ba7d316ca13400318a047e3c51d007e4d7a067",
+        "size_bytes": 2410
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/014-round-0-index-range-upper-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-upper-only-covering",
+        "scratch/014-round-0-index-range-upper-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 14,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 84081958,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/014-round-0-index-range-upper-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/014-round-0-index-range-upper-only-covering-modern.json",
+        "sha256": "531bc9c33f3332b02643a1560c39aa87fbb0936fe7fd11af5d0ddbf1b10ba574",
+        "size_bytes": 2416
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/015-round-0-index-range-upper-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-upper-only-covering",
+        "scratch/015-round-0-index-range-upper-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 15,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 34250167,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/015-round-0-index-range-upper-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/015-round-0-index-range-upper-only-covering-sqlite.json",
+        "sha256": "d6ddede1bc98c90ead79327580056baa134afb11604cc3fd20cc1afb7c70e0b5",
+        "size_bytes": 2410
       }
     },
     {
@@ -1363,35 +2033,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/012-round-0-index-unselective-noncovering-modern.db",
+        "copy_path": "scratch/016-round-0-index-unselective-noncovering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-noncovering",
-        "scratch/012-round-0-index-unselective-noncovering-modern.db",
+        "scratch/016-round-0-index-unselective-noncovering-modern.db",
         "baseline"
       ],
-      "ordinal": 12,
+      "ordinal": 16,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 95024834,
+        "runner_elapsed_ns": 94364625,
         "timed_out": false
       },
       "round": 0,
       "stderr": {
-        "path": "raw/timing/012-round-0-index-unselective-noncovering-modern.stderr",
+        "path": "raw/timing/016-round-0-index-unselective-noncovering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/012-round-0-index-unselective-noncovering-modern.json",
-        "sha256": "3d20722c7d4aa39f72530e932fc44001d92ed2f4834fa0d8f24749dc21a5fe16",
+        "path": "raw/timing/016-round-0-index-unselective-noncovering-modern.json",
+        "sha256": "97eeb4972dadf2b47655d342bfd516595a99ad8368d7fba410c1940624201b99",
         "size_bytes": 2398
       }
     },
@@ -1401,35 +2071,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/013-round-0-index-unselective-noncovering-sqlite.db",
+        "copy_path": "scratch/017-round-0-index-unselective-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-unselective-noncovering",
-        "scratch/013-round-0-index-unselective-noncovering-sqlite.db",
+        "scratch/017-round-0-index-unselective-noncovering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 13,
+      "ordinal": 17,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 36013000,
+        "runner_elapsed_ns": 36967666,
         "timed_out": false
       },
       "round": 0,
       "stderr": {
-        "path": "raw/timing/013-round-0-index-unselective-noncovering-sqlite.stderr",
+        "path": "raw/timing/017-round-0-index-unselective-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/013-round-0-index-unselective-noncovering-sqlite.json",
-        "sha256": "5d5e6c87a47a08642757e720732ea877aa4268e860d78b3bff701e70769a1830",
+        "path": "raw/timing/017-round-0-index-unselective-noncovering-sqlite.json",
+        "sha256": "c301b986a2cee5aa61ac27f7704968299db7ee9881892b2be0d3b62856275fec",
         "size_bytes": 2394
       }
     },
@@ -1439,73 +2109,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/014-round-0-index-unselective-covering-modern.db",
+        "copy_path": "scratch/018-round-0-index-unselective-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-covering",
-        "scratch/014-round-0-index-unselective-covering-modern.db",
+        "scratch/018-round-0-index-unselective-covering-modern.db",
         "baseline"
       ],
-      "ordinal": 14,
+      "ordinal": 18,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 495147583,
+        "runner_elapsed_ns": 200584458,
         "timed_out": false
       },
       "round": 0,
       "stderr": {
-        "path": "raw/timing/014-round-0-index-unselective-covering-modern.stderr",
+        "path": "raw/timing/018-round-0-index-unselective-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/014-round-0-index-unselective-covering-modern.json",
-        "sha256": "093fb65cebc977ea091b5c3bd533aa956591f6299239dd3d847cfc624e0f2cdf",
-        "size_bytes": 2413
-      }
-    },
-    {
-      "case": "index-unselective-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/015-round-0-index-unselective-covering-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-unselective-covering",
-        "scratch/015-round-0-index-unselective-covering-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 15,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 41988875,
-        "timed_out": false
-      },
-      "round": 0,
-      "stderr": {
-        "path": "raw/timing/015-round-0-index-unselective-covering-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/015-round-0-index-unselective-covering-sqlite.json",
-        "sha256": "bcf1a9c6bafa260eefbf738324ce9f13d1675142736974822084c0971a0c4876",
+        "path": "raw/timing/018-round-0-index-unselective-covering-modern.json",
+        "sha256": "b114d6677c508bfe607630246ce6c36c8afe0fe0564dac7b2c295d0bb59341b3",
         "size_bytes": 2407
       }
     },
@@ -1515,35 +2147,833 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/016-round-1-index-unselective-covering-sqlite.db",
+        "copy_path": "scratch/019-round-0-index-unselective-covering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-unselective-covering",
-        "scratch/016-round-1-index-unselective-covering-sqlite.db",
+        "scratch/019-round-0-index-unselective-covering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 16,
+      "ordinal": 19,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 41051916,
+        "runner_elapsed_ns": 42278125,
         "timed_out": false
       },
-      "round": 1,
+      "round": 0,
       "stderr": {
-        "path": "raw/timing/016-round-1-index-unselective-covering-sqlite.stderr",
+        "path": "raw/timing/019-round-0-index-unselective-covering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/016-round-1-index-unselective-covering-sqlite.json",
-        "sha256": "278e5de5014192cd691a998c8a562699e1684144152fbee7227f78e0320eafaf",
+        "path": "raw/timing/019-round-0-index-unselective-covering-sqlite.json",
+        "sha256": "534a4058f7dfc2693b9b910fd0946fa434de0ecbbee04e7e696c0a70faa75e88",
+        "size_bytes": 2407
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/020-round-0-index-insert-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-insert",
+        "scratch/020-round-0-index-insert-modern.db",
+        "baseline"
+      ],
+      "ordinal": 20,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 47544625,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/020-round-0-index-insert-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/020-round-0-index-insert-modern.json",
+        "sha256": "48de6f0caa6cf697599debfc6a214cafbc5d23a7ebb3415823d3fd21e577129f",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/021-round-0-index-insert-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-insert",
+        "scratch/021-round-0-index-insert-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 21,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46385750,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/021-round-0-index-insert-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/021-round-0-index-insert-sqlite.json",
+        "sha256": "e29fcfa3354dc702e8bc0a15f354dedf8510d742d47c0b4600b07a76733d6fcf",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/022-round-0-index-update-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-update",
+        "scratch/022-round-0-index-update-modern.db",
+        "baseline"
+      ],
+      "ordinal": 22,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 47396458,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/022-round-0-index-update-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/022-round-0-index-update-modern.json",
+        "sha256": "2ab62d1220c3eaabfccd8455da2fc04d64a8ec42e74dd823f46ac3f19e72fc04",
+        "size_bytes": 2339
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/023-round-0-index-update-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-update",
+        "scratch/023-round-0-index-update-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 23,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 43940166,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/023-round-0-index-update-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/023-round-0-index-update-sqlite.json",
+        "sha256": "f91274880bc967e09713e4a6ab31af29476111dc80f5a90267f357d195da889c",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/024-round-0-index-delete-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-delete",
+        "scratch/024-round-0-index-delete-modern.db",
+        "baseline"
+      ],
+      "ordinal": 24,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46000959,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/024-round-0-index-delete-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/024-round-0-index-delete-modern.json",
+        "sha256": "bf87659cd672a0ff5cba72c4a5d435e016e0a0ff4b99a16be7439005ca2201df",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/025-round-0-index-delete-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-delete",
+        "scratch/025-round-0-index-delete-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 25,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 44002750,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/025-round-0-index-delete-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/025-round-0-index-delete-sqlite.json",
+        "sha256": "fd3e116e06cf93fbc718d99ee8c39feceb2775183dee5fdbfe06d597a006dd64",
+        "size_bytes": 2337
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/026-round-0-index-create-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-create",
+        "scratch/026-round-0-index-create-modern.db",
+        "baseline"
+      ],
+      "ordinal": 26,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 280858750,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/026-round-0-index-create-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/026-round-0-index-create-modern.json",
+        "sha256": "687f74d59c0c8128abd870df9952200f1c5b1689ba320f22b6393eb7f411664a",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/027-round-0-index-create-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-create",
+        "scratch/027-round-0-index-create-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 27,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 75676875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/027-round-0-index-create-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/027-round-0-index-create-sqlite.json",
+        "sha256": "0daad490ca5b897667d9585713e0e7c6975624b3295800a4ce6e6f3f43b38b5e",
+        "size_bytes": 2335
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/028-round-0-index-analyze-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-analyze",
+        "scratch/028-round-0-index-analyze-modern.db",
+        "baseline"
+      ],
+      "ordinal": 28,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 78676125,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/028-round-0-index-analyze-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/028-round-0-index-analyze-modern.json",
+        "sha256": "1c16126ef5f6fcf80d64ff5e4ea0fcc4e084a7ad952210e6bc0c2cdf96a44c7a",
+        "size_bytes": 2349
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/029-round-0-index-analyze-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-analyze",
+        "scratch/029-round-0-index-analyze-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 29,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 40999625,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/029-round-0-index-analyze-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/029-round-0-index-analyze-sqlite.json",
+        "sha256": "ea4d5510136e6aae1c42b26b15d8d27b2f6dbc04b1697034422d1661b7522891",
+        "size_bytes": 2343
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/030-round-1-index-analyze-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-analyze",
+        "scratch/030-round-1-index-analyze-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 30,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 39000958,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/030-round-1-index-analyze-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/030-round-1-index-analyze-sqlite.json",
+        "sha256": "ece02e9149b78fb552695a47ab5377bd3fe6575bc322203dd0fcb15260f6d08c",
+        "size_bytes": 2343
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/031-round-1-index-analyze-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-analyze",
+        "scratch/031-round-1-index-analyze-modern.db",
+        "baseline"
+      ],
+      "ordinal": 31,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 77314250,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/031-round-1-index-analyze-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/031-round-1-index-analyze-modern.json",
+        "sha256": "b248527087f9f5ba8ffc2e35d658d61efb12a4fc458505a635492c92ac054c7b",
+        "size_bytes": 2349
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/032-round-1-index-create-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-create",
+        "scratch/032-round-1-index-create-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 32,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 76401792,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/032-round-1-index-create-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/032-round-1-index-create-sqlite.json",
+        "sha256": "c93ae652a319390a7f986db34cefe0d4de8a031a11952c43cc0c4cd2f88a8fe4",
+        "size_bytes": 2336
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/033-round-1-index-create-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-create",
+        "scratch/033-round-1-index-create-modern.db",
+        "baseline"
+      ],
+      "ordinal": 33,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 285157584,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/033-round-1-index-create-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/033-round-1-index-create-modern.json",
+        "sha256": "b2011b69d7f3e617dd3bf4a50b8aa65bc994fe8fd89fc3ecfc8a3b2d781c8123",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/034-round-1-index-delete-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-delete",
+        "scratch/034-round-1-index-delete-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 34,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46258625,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/034-round-1-index-delete-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/034-round-1-index-delete-sqlite.json",
+        "sha256": "076a27bc0e9ad27004d89333f1a6e8218ac85169c1f2ee7aafcf891fcc1da747",
+        "size_bytes": 2337
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/035-round-1-index-delete-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-delete",
+        "scratch/035-round-1-index-delete-modern.db",
+        "baseline"
+      ],
+      "ordinal": 35,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 44421084,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/035-round-1-index-delete-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/035-round-1-index-delete-modern.json",
+        "sha256": "40915cd8e98c88287d6f70e60928ec5b8518ab78786db3340062aae93ef74e59",
+        "size_bytes": 2337
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/036-round-1-index-update-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-update",
+        "scratch/036-round-1-index-update-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 36,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 43917792,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/036-round-1-index-update-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/036-round-1-index-update-sqlite.json",
+        "sha256": "87507dd3654048b1b76e05de362c64a360aa1c2f996ec69f16039c7af37fe145",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/037-round-1-index-update-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-update",
+        "scratch/037-round-1-index-update-modern.db",
+        "baseline"
+      ],
+      "ordinal": 37,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 47834833,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/037-round-1-index-update-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/037-round-1-index-update-modern.json",
+        "sha256": "ae0cf73ed945520661fa55eaab2fdddd5378891661537d11705e81779aa0d241",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/038-round-1-index-insert-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-insert",
+        "scratch/038-round-1-index-insert-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 38,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46226000,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/038-round-1-index-insert-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/038-round-1-index-insert-sqlite.json",
+        "sha256": "92e2db2de19c94302caa2bd617f4a6731ab9094af6d77f06c8a42080a5faf06a",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/039-round-1-index-insert-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-insert",
+        "scratch/039-round-1-index-insert-modern.db",
+        "baseline"
+      ],
+      "ordinal": 39,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 47783625,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/039-round-1-index-insert-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/039-round-1-index-insert-modern.json",
+        "sha256": "bf3b77d9736e2fdc13b2c752f71eed8d9ddcfe78a9755bbfc94a2e4e8dc57dd4",
+        "size_bytes": 2342
+      }
+    },
+    {
+      "case": "index-unselective-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/040-round-1-index-unselective-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-unselective-covering",
+        "scratch/040-round-1-index-unselective-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 40,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 42014875,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/040-round-1-index-unselective-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/040-round-1-index-unselective-covering-sqlite.json",
+        "sha256": "ba409dd40a791f930e70efef42d88039c52f878d051dad195450a30fa0eb310a",
         "size_bytes": 2407
       }
     },
@@ -1553,36 +2983,36 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/017-round-1-index-unselective-covering-modern.db",
+        "copy_path": "scratch/041-round-1-index-unselective-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-covering",
-        "scratch/017-round-1-index-unselective-covering-modern.db",
+        "scratch/041-round-1-index-unselective-covering-modern.db",
         "baseline"
       ],
-      "ordinal": 17,
+      "ordinal": 41,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 497975833,
+        "runner_elapsed_ns": 201547542,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/017-round-1-index-unselective-covering-modern.stderr",
+        "path": "raw/timing/041-round-1-index-unselective-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/017-round-1-index-unselective-covering-modern.json",
-        "sha256": "4d463dbc69f644e3d8bdb76df5b42365ce52dee690ab9a54e0df4c7a140748ad",
-        "size_bytes": 2413
+        "path": "raw/timing/041-round-1-index-unselective-covering-modern.json",
+        "sha256": "7589b6b47b28ece4554eefe44bef388b1a4bbdb57090a69afa5483ec2a56884d",
+        "size_bytes": 2407
       }
     },
     {
@@ -1591,35 +3021,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/018-round-1-index-unselective-noncovering-sqlite.db",
+        "copy_path": "scratch/042-round-1-index-unselective-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-unselective-noncovering",
-        "scratch/018-round-1-index-unselective-noncovering-sqlite.db",
+        "scratch/042-round-1-index-unselective-noncovering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 18,
+      "ordinal": 42,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 36184375,
+        "runner_elapsed_ns": 36313542,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/018-round-1-index-unselective-noncovering-sqlite.stderr",
+        "path": "raw/timing/042-round-1-index-unselective-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/018-round-1-index-unselective-noncovering-sqlite.json",
-        "sha256": "a9640867c5011f863a6efd380d19a11cf6ed5e9de8d16b8576baa6f807fbd885",
+        "path": "raw/timing/042-round-1-index-unselective-noncovering-sqlite.json",
+        "sha256": "b5fd0e1154d360aea1e47c031ec819476fd06aeb4ecbe17dd8c71330f5029b72",
         "size_bytes": 2392
       }
     },
@@ -1629,36 +3059,188 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/019-round-1-index-unselective-noncovering-modern.db",
+        "copy_path": "scratch/043-round-1-index-unselective-noncovering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-noncovering",
-        "scratch/019-round-1-index-unselective-noncovering-modern.db",
+        "scratch/043-round-1-index-unselective-noncovering-modern.db",
         "baseline"
       ],
-      "ordinal": 19,
+      "ordinal": 43,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 94243250,
+        "runner_elapsed_ns": 94818334,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/019-round-1-index-unselective-noncovering-modern.stderr",
+        "path": "raw/timing/043-round-1-index-unselective-noncovering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/019-round-1-index-unselective-noncovering-modern.json",
-        "sha256": "3cb68a6f95202f4981e5cb21cf5b138a1e073a01b278343528948798d65c1a37",
+        "path": "raw/timing/043-round-1-index-unselective-noncovering-modern.json",
+        "sha256": "31777e740dc8147ee7d6d3730271727e498fd914173bebb5aaaf25841cf7a418",
         "size_bytes": 2398
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/044-round-1-index-range-upper-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-upper-only-covering",
+        "scratch/044-round-1-index-range-upper-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 44,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 34696666,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/044-round-1-index-range-upper-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/044-round-1-index-range-upper-only-covering-sqlite.json",
+        "sha256": "be2c0b67de838758ee5ee986e5d03897bf0efedd1e14d687816050d4970ee223",
+        "size_bytes": 2410
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/045-round-1-index-range-upper-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-upper-only-covering",
+        "scratch/045-round-1-index-range-upper-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 45,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 85331708,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/045-round-1-index-range-upper-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/045-round-1-index-range-upper-only-covering-modern.json",
+        "sha256": "47a7b1f6be9c326636f0fbaba3e68d4758dad81c908bf5d6783a68e8941612d5",
+        "size_bytes": 2416
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/046-round-1-index-range-lower-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-lower-only-covering",
+        "scratch/046-round-1-index-range-lower-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 46,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 32276708,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/046-round-1-index-range-lower-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/046-round-1-index-range-lower-only-covering-sqlite.json",
+        "sha256": "201386b3aeae41f7607ad8438e68722ee0f8c5a29cd60f738f3b4e1f7b9e8261",
+        "size_bytes": 2410
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/047-round-1-index-range-lower-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-lower-only-covering",
+        "scratch/047-round-1-index-range-lower-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 47,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 70606958,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/047-round-1-index-range-lower-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/047-round-1-index-range-lower-only-covering-modern.json",
+        "sha256": "d8c935b2f347df49cb8ace42fab1bc989b0506cf9edadbad9632d26c43ec9291",
+        "size_bytes": 2416
       }
     },
     {
@@ -1667,35 +3249,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/020-round-1-index-range-noncovering-sqlite.db",
+        "copy_path": "scratch/048-round-1-index-range-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-noncovering",
-        "scratch/020-round-1-index-range-noncovering-sqlite.db",
+        "scratch/048-round-1-index-range-noncovering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 20,
+      "ordinal": 48,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 82757916,
+        "runner_elapsed_ns": 84132666,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/020-round-1-index-range-noncovering-sqlite.stderr",
+        "path": "raw/timing/048-round-1-index-range-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/020-round-1-index-range-noncovering-sqlite.json",
-        "sha256": "3259af197ecb8dc929fe308d215d8bced08228e02cf100d7d9fc0139d90b0b7d",
+        "path": "raw/timing/048-round-1-index-range-noncovering-sqlite.json",
+        "sha256": "88f2a13bc6bde65a538368f25bfa17e5d4c5afa8f90c772470441612d53e8dd2",
         "size_bytes": 2412
       }
     },
@@ -1705,36 +3287,36 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/021-round-1-index-range-noncovering-modern.db",
+        "copy_path": "scratch/049-round-1-index-range-noncovering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-range-noncovering",
-        "scratch/021-round-1-index-range-noncovering-modern.db",
+        "scratch/049-round-1-index-range-noncovering-modern.db",
         "baseline"
       ],
-      "ordinal": 21,
+      "ordinal": 49,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 4718154792,
+        "runner_elapsed_ns": 286237833,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/021-round-1-index-range-noncovering-modern.stderr",
+        "path": "raw/timing/049-round-1-index-range-noncovering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/021-round-1-index-range-noncovering-modern.json",
-        "sha256": "a6d78fb8a4da4fd887be162ad30a22cf61563f82df81593c4ee505affb397677",
-        "size_bytes": 2424
+        "path": "raw/timing/049-round-1-index-range-noncovering-modern.json",
+        "sha256": "bbf873f947a098ca2065d9051eed358ef21e3ad2a8546efd19848b168659c3f0",
+        "size_bytes": 2412
       }
     },
     {
@@ -1743,681 +3325,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/022-round-1-index-range-covering-sqlite.db",
+        "copy_path": "scratch/050-round-1-index-range-covering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-covering",
-        "scratch/022-round-1-index-range-covering-sqlite.db",
+        "scratch/050-round-1-index-range-covering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 22,
+      "ordinal": 50,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 35871166,
+        "runner_elapsed_ns": 36017500,
         "timed_out": false
       },
       "round": 1,
       "stderr": {
-        "path": "raw/timing/022-round-1-index-range-covering-sqlite.stderr",
+        "path": "raw/timing/050-round-1-index-range-covering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/022-round-1-index-range-covering-sqlite.json",
-        "sha256": "e236d428e45b4a09b35db65fc9b361495d67c05a9281984ed454218cadfdfe65",
-        "size_bytes": 2399
-      }
-    },
-    {
-      "case": "index-range-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/023-round-1-index-range-covering-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-range-covering",
-        "scratch/023-round-1-index-range-covering-modern.db",
-        "baseline"
-      ],
-      "ordinal": 23,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 4694544791,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/023-round-1-index-range-covering-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/023-round-1-index-range-covering-modern.json",
-        "sha256": "f8a48e340f770ee29f97bfc4a2c9b3e96c54d6e3d2c0c0a1f02254b5ab1d2153",
-        "size_bytes": 2417
-      }
-    },
-    {
-      "case": "index-multi-equality-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/024-round-1-index-multi-equality-covering-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-multi-equality-covering",
-        "scratch/024-round-1-index-multi-equality-covering-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 24,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 40572083,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/024-round-1-index-multi-equality-covering-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/024-round-1-index-multi-equality-covering-sqlite.json",
-        "sha256": "45bd615fb42fa9c87e7dcb15972ebecab36c0f0cb553cede4e8d3bcb0d9d39c9",
-        "size_bytes": 2401
-      }
-    },
-    {
-      "case": "index-multi-equality-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/025-round-1-index-multi-equality-covering-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-multi-equality-covering",
-        "scratch/025-round-1-index-multi-equality-covering-modern.db",
-        "baseline"
-      ],
-      "ordinal": 25,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7621070459,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/025-round-1-index-multi-equality-covering-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/025-round-1-index-multi-equality-covering-modern.json",
-        "sha256": "a14c66625f90d22b1c293dfd1c78d31e4e1082fa74caa530af9e9e4f2d6fd201",
-        "size_bytes": 2413
-      }
-    },
-    {
-      "case": "index-equality-noncovering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/026-round-1-index-equality-noncovering-hit-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-noncovering-hit",
-        "scratch/026-round-1-index-equality-noncovering-hit-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 26,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 44368875,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/026-round-1-index-equality-noncovering-hit-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/026-round-1-index-equality-noncovering-hit-sqlite.json",
-        "sha256": "e550fa97ad6ff3bdca767260a4f394f7de99a1bb8072f69623081f74db7d7197",
-        "size_bytes": 2406
-      }
-    },
-    {
-      "case": "index-equality-noncovering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/027-round-1-index-equality-noncovering-hit-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-noncovering-hit",
-        "scratch/027-round-1-index-equality-noncovering-hit-modern.db",
-        "baseline"
-      ],
-      "ordinal": 27,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7721045708,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/027-round-1-index-equality-noncovering-hit-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/027-round-1-index-equality-noncovering-hit-modern.json",
-        "sha256": "57a8f069afaaf5d71c09961dcef078b45bc8c6e998910e76d591b26b33d7aa45",
-        "size_bytes": 2418
-      }
-    },
-    {
-      "case": "index-equality-covering-miss",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/028-round-1-index-equality-covering-miss-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-covering-miss",
-        "scratch/028-round-1-index-equality-covering-miss-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 28,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 39448500,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/028-round-1-index-equality-covering-miss-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/028-round-1-index-equality-covering-miss-sqlite.json",
-        "sha256": "96fac353fb02d12051cbba0cdaf4b752613ecc85ba3f0bd47de0f78ad209d27d",
-        "size_bytes": 2374
-      }
-    },
-    {
-      "case": "index-equality-covering-miss",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/029-round-1-index-equality-covering-miss-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-covering-miss",
-        "scratch/029-round-1-index-equality-covering-miss-modern.db",
-        "baseline"
-      ],
-      "ordinal": 29,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7502358083,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/029-round-1-index-equality-covering-miss-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/029-round-1-index-equality-covering-miss-modern.json",
-        "sha256": "6db9a648525f7d108fcce7c253f5591d9293f7d511742a384b50d22937f90433",
-        "size_bytes": 2386
-      }
-    },
-    {
-      "case": "index-equality-covering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/030-round-1-index-equality-covering-hit-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-covering-hit",
-        "scratch/030-round-1-index-equality-covering-hit-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 30,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 39882875,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/030-round-1-index-equality-covering-hit-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/030-round-1-index-equality-covering-hit-sqlite.json",
-        "sha256": "250e21eafd82596e1b1c7b649cef25f6f4b3c9aa5fc5e7bd43a4fe70956a5a6d",
-        "size_bytes": 2399
-      }
-    },
-    {
-      "case": "index-equality-covering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/031-round-1-index-equality-covering-hit-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-covering-hit",
-        "scratch/031-round-1-index-equality-covering-hit-modern.db",
-        "baseline"
-      ],
-      "ordinal": 31,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7842850667,
-        "timed_out": false
-      },
-      "round": 1,
-      "stderr": {
-        "path": "raw/timing/031-round-1-index-equality-covering-hit-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/031-round-1-index-equality-covering-hit-modern.json",
-        "sha256": "2cee39f6f617ffa4baf93fd9fb71b6bd2e85b4cf9918ed87038e71576a0b50d9",
-        "size_bytes": 2411
-      }
-    },
-    {
-      "case": "index-equality-covering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/032-round-2-index-equality-covering-hit-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-covering-hit",
-        "scratch/032-round-2-index-equality-covering-hit-modern.db",
-        "baseline"
-      ],
-      "ordinal": 32,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7718876166,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/032-round-2-index-equality-covering-hit-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/032-round-2-index-equality-covering-hit-modern.json",
-        "sha256": "f94af8d5f4e1296439dbb8b3e23af7c80339f57d2e2cd8990ac55ffef653175f",
-        "size_bytes": 2411
-      }
-    },
-    {
-      "case": "index-equality-covering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/033-round-2-index-equality-covering-hit-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-covering-hit",
-        "scratch/033-round-2-index-equality-covering-hit-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 33,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 41681625,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/033-round-2-index-equality-covering-hit-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/033-round-2-index-equality-covering-hit-sqlite.json",
-        "sha256": "f24f488fff278fc23399e4a0e38df2a6562b6d0422ac1f9e92f7d26c1d26d83f",
-        "size_bytes": 2399
-      }
-    },
-    {
-      "case": "index-equality-covering-miss",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/034-round-2-index-equality-covering-miss-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-covering-miss",
-        "scratch/034-round-2-index-equality-covering-miss-modern.db",
-        "baseline"
-      ],
-      "ordinal": 34,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7714931125,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/034-round-2-index-equality-covering-miss-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/034-round-2-index-equality-covering-miss-modern.json",
-        "sha256": "606453438f95bbd90b2c55f1b0bbc53556fd125839859f3a7ce75ac211a41208",
-        "size_bytes": 2386
-      }
-    },
-    {
-      "case": "index-equality-covering-miss",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/035-round-2-index-equality-covering-miss-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-covering-miss",
-        "scratch/035-round-2-index-equality-covering-miss-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 35,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 39112125,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/035-round-2-index-equality-covering-miss-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/035-round-2-index-equality-covering-miss-sqlite.json",
-        "sha256": "883a8d67ba73e22a10a5aa5b55d5864889aa4ac4b65529f2f4be1507c7f439d5",
-        "size_bytes": 2374
-      }
-    },
-    {
-      "case": "index-equality-noncovering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/036-round-2-index-equality-noncovering-hit-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-equality-noncovering-hit",
-        "scratch/036-round-2-index-equality-noncovering-hit-modern.db",
-        "baseline"
-      ],
-      "ordinal": 36,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7781124000,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/036-round-2-index-equality-noncovering-hit-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/036-round-2-index-equality-noncovering-hit-modern.json",
-        "sha256": "a2d3163e7b4932fa3aee9d05e53bd30ea60a0f8ce5c0d7195a349a242ed77d45",
-        "size_bytes": 2418
-      }
-    },
-    {
-      "case": "index-equality-noncovering-hit",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/037-round-2-index-equality-noncovering-hit-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-equality-noncovering-hit",
-        "scratch/037-round-2-index-equality-noncovering-hit-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 37,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 44898584,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/037-round-2-index-equality-noncovering-hit-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/037-round-2-index-equality-noncovering-hit-sqlite.json",
-        "sha256": "968355da0af20a518e966b619a1a76116a284fdd8b3e9c191b6c514336e730b9",
-        "size_bytes": 2406
-      }
-    },
-    {
-      "case": "index-multi-equality-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/038-round-2-index-multi-equality-covering-modern.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "modern",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "modern",
-        "index-multi-equality-covering",
-        "scratch/038-round-2-index-multi-equality-covering-modern.db",
-        "baseline"
-      ],
-      "ordinal": 38,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 7697070542,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/038-round-2-index-multi-equality-covering-modern.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/038-round-2-index-multi-equality-covering-modern.json",
-        "sha256": "eabb1e1148de3c2bcd33b396a7762a6a3a1613c5be7c0ac56de2352b7a6f38aa",
-        "size_bytes": 2413
-      }
-    },
-    {
-      "case": "index-multi-equality-covering",
-      "database": {
-        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
-        "cleanup": "removed",
-        "copy_path": "scratch/039-round-2-index-multi-equality-covering-sqlite.db",
-        "fixture": "fit",
-        "sidecars_remaining": [],
-        "source_path": "tests/fixtures/index_performance/indexed.db"
-      },
-      "engine": "sqlite",
-      "logical_argv": [
-        "modern_sqlite_read_benchmark",
-        "run",
-        "sqlite",
-        "index-multi-equality-covering",
-        "scratch/039-round-2-index-multi-equality-covering-sqlite.db",
-        "baseline"
-      ],
-      "ordinal": 39,
-      "process": {
-        "returncode": 0,
-        "runner_elapsed_ns": 41032000,
-        "timed_out": false
-      },
-      "round": 2,
-      "stderr": {
-        "path": "raw/timing/039-round-2-index-multi-equality-covering-sqlite.stderr",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "size_bytes": 0
-      },
-      "stdout": {
-        "path": "raw/timing/039-round-2-index-multi-equality-covering-sqlite.json",
-        "sha256": "378d156339c7577a702f37e41a137b23dfc4547a58e480c2bd1ec0024d4e22d1",
+        "path": "raw/timing/050-round-1-index-range-covering-sqlite.json",
+        "sha256": "5aa1c91ee62c9ce3f0537c90f0d8534817e76024481b5756475ce44b1d80af16",
         "size_bytes": 2401
       }
     },
@@ -2427,36 +3363,644 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/040-round-2-index-range-covering-modern.db",
+        "copy_path": "scratch/051-round-1-index-range-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-range-covering",
-        "scratch/040-round-2-index-range-covering-modern.db",
+        "scratch/051-round-1-index-range-covering-modern.db",
         "baseline"
       ],
-      "ordinal": 40,
+      "ordinal": 51,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 4688281708,
+        "runner_elapsed_ns": 91665125,
         "timed_out": false
       },
-      "round": 2,
+      "round": 1,
       "stderr": {
-        "path": "raw/timing/040-round-2-index-range-covering-modern.stderr",
+        "path": "raw/timing/051-round-1-index-range-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/040-round-2-index-range-covering-modern.json",
-        "sha256": "7aa499aa6b6568e0ec964a25adc536b8ba804ff7de05ad725b945c345b15ac46",
-        "size_bytes": 2417
+        "path": "raw/timing/051-round-1-index-range-covering-modern.json",
+        "sha256": "c6a6aa89ded5bb20445ccdd0442e83e532f56162f12427e9f628dd76c9507a87",
+        "size_bytes": 2405
+      }
+    },
+    {
+      "case": "index-multi-equality-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/052-round-1-index-multi-equality-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-multi-equality-covering",
+        "scratch/052-round-1-index-multi-equality-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 52,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 40396708,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/052-round-1-index-multi-equality-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/052-round-1-index-multi-equality-covering-sqlite.json",
+        "sha256": "ee9924044d5b87811803c0a3fd120622abb86d0b5f386a74370df5a1d58bc878",
+        "size_bytes": 2401
+      }
+    },
+    {
+      "case": "index-multi-equality-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/053-round-1-index-multi-equality-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-multi-equality-covering",
+        "scratch/053-round-1-index-multi-equality-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 53,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 59532541,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/053-round-1-index-multi-equality-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/053-round-1-index-multi-equality-covering-modern.json",
+        "sha256": "87bb87467ce1bed3500f804bf5388e45ad7dc742045d2ae3525ecad4daa460f8",
+        "size_bytes": 2401
+      }
+    },
+    {
+      "case": "index-equality-noncovering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/054-round-1-index-equality-noncovering-hit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-noncovering-hit",
+        "scratch/054-round-1-index-equality-noncovering-hit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 54,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 44923250,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/054-round-1-index-equality-noncovering-hit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/054-round-1-index-equality-noncovering-hit-sqlite.json",
+        "sha256": "9dae9b296927a51685a2aa38261dbfc4d4c0af895b3ef2241a3936a5e97de5ea",
+        "size_bytes": 2406
+      }
+    },
+    {
+      "case": "index-equality-noncovering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/055-round-1-index-equality-noncovering-hit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-noncovering-hit",
+        "scratch/055-round-1-index-equality-noncovering-hit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 55,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 68363917,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/055-round-1-index-equality-noncovering-hit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/055-round-1-index-equality-noncovering-hit-modern.json",
+        "sha256": "78ae250da4af3990ce6c93a127ceccca74464fd137ab6b4213ce33d79db4e5a3",
+        "size_bytes": 2406
+      }
+    },
+    {
+      "case": "index-equality-covering-miss",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/056-round-1-index-equality-covering-miss-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-covering-miss",
+        "scratch/056-round-1-index-equality-covering-miss-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 56,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 38705542,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/056-round-1-index-equality-covering-miss-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/056-round-1-index-equality-covering-miss-sqlite.json",
+        "sha256": "c3eeedfcf089bcd2fbe98ac9b4ed6b492c2d6b459539fc891f8927a3d5692f5a",
+        "size_bytes": 2374
+      }
+    },
+    {
+      "case": "index-equality-covering-miss",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/057-round-1-index-equality-covering-miss-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-covering-miss",
+        "scratch/057-round-1-index-equality-covering-miss-modern.db",
+        "baseline"
+      ],
+      "ordinal": 57,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 52527917,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/057-round-1-index-equality-covering-miss-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/057-round-1-index-equality-covering-miss-modern.json",
+        "sha256": "7e9d90549d8bb97885b333376f8d39b6b620036e33c33134aa111e1041a398b6",
+        "size_bytes": 2374
+      }
+    },
+    {
+      "case": "index-equality-covering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/058-round-1-index-equality-covering-hit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-covering-hit",
+        "scratch/058-round-1-index-equality-covering-hit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 58,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 40608166,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/058-round-1-index-equality-covering-hit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/058-round-1-index-equality-covering-hit-sqlite.json",
+        "sha256": "95867026e65cb94dc2215824021ae308a8d887d8a3a191f1876f9f5dbc8eb31e",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "index-equality-covering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/059-round-1-index-equality-covering-hit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-covering-hit",
+        "scratch/059-round-1-index-equality-covering-hit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 59,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 57483917,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/059-round-1-index-equality-covering-hit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/059-round-1-index-equality-covering-hit-modern.json",
+        "sha256": "3f957d559526a7e168de6480c817507911a930f94b85509e62186ea2100a796a",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "index-equality-covering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/060-round-2-index-equality-covering-hit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-covering-hit",
+        "scratch/060-round-2-index-equality-covering-hit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 60,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 59192000,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/060-round-2-index-equality-covering-hit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/060-round-2-index-equality-covering-hit-modern.json",
+        "sha256": "c59ed9bd2f5eb658300dca8caaab948d241503d46f33b751b41e33c1ef8dc9b2",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "index-equality-covering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/061-round-2-index-equality-covering-hit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-covering-hit",
+        "scratch/061-round-2-index-equality-covering-hit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 61,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 42794334,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/061-round-2-index-equality-covering-hit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/061-round-2-index-equality-covering-hit-sqlite.json",
+        "sha256": "4109f3dcf8177bc230638f735a16dc5e7167b22f3b4ddb0efcba6658c3333812",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "index-equality-covering-miss",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/062-round-2-index-equality-covering-miss-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-covering-miss",
+        "scratch/062-round-2-index-equality-covering-miss-modern.db",
+        "baseline"
+      ],
+      "ordinal": 62,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 55403667,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/062-round-2-index-equality-covering-miss-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/062-round-2-index-equality-covering-miss-modern.json",
+        "sha256": "829f3ee90c005661e9074f7d8c8e56036fec5acd65f71fa0bf2d0b2a5afb0c29",
+        "size_bytes": 2374
+      }
+    },
+    {
+      "case": "index-equality-covering-miss",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/063-round-2-index-equality-covering-miss-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-covering-miss",
+        "scratch/063-round-2-index-equality-covering-miss-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 63,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 41559792,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/063-round-2-index-equality-covering-miss-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/063-round-2-index-equality-covering-miss-sqlite.json",
+        "sha256": "c5780cef67bbf3b6b71cb12f5a34628635dc987cb02f70785006c1556e2da0da",
+        "size_bytes": 2374
+      }
+    },
+    {
+      "case": "index-equality-noncovering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/064-round-2-index-equality-noncovering-hit-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-equality-noncovering-hit",
+        "scratch/064-round-2-index-equality-noncovering-hit-modern.db",
+        "baseline"
+      ],
+      "ordinal": 64,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 71392417,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/064-round-2-index-equality-noncovering-hit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/064-round-2-index-equality-noncovering-hit-modern.json",
+        "sha256": "fe878fe36db6e165fe8b19754c27c8ae339a9704cbb962b614d0120ed51a54ac",
+        "size_bytes": 2406
+      }
+    },
+    {
+      "case": "index-equality-noncovering-hit",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/065-round-2-index-equality-noncovering-hit-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-equality-noncovering-hit",
+        "scratch/065-round-2-index-equality-noncovering-hit-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 65,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46570000,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/065-round-2-index-equality-noncovering-hit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/065-round-2-index-equality-noncovering-hit-sqlite.json",
+        "sha256": "066bba1180644817ad5b4d3eef53c7df48623389a25341cccc8d049c728a70fb",
+        "size_bytes": 2406
+      }
+    },
+    {
+      "case": "index-multi-equality-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/066-round-2-index-multi-equality-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-multi-equality-covering",
+        "scratch/066-round-2-index-multi-equality-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 66,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 61107500,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/066-round-2-index-multi-equality-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/066-round-2-index-multi-equality-covering-modern.json",
+        "sha256": "31dfd767bfc17a9f8b00f3682309f837aa57a99ca4fa67cb46cb667ca11aaffb",
+        "size_bytes": 2401
+      }
+    },
+    {
+      "case": "index-multi-equality-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/067-round-2-index-multi-equality-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-multi-equality-covering",
+        "scratch/067-round-2-index-multi-equality-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 67,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 43370541,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/067-round-2-index-multi-equality-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/067-round-2-index-multi-equality-covering-sqlite.json",
+        "sha256": "9efb94a9a6d030dfda564388ce0d54d3137c45b47c97c5dd01112da4b3ca8096",
+        "size_bytes": 2401
       }
     },
     {
@@ -2465,35 +4009,73 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/041-round-2-index-range-covering-sqlite.db",
+        "copy_path": "scratch/068-round-2-index-range-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-covering",
+        "scratch/068-round-2-index-range-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 68,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 95352500,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/068-round-2-index-range-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/068-round-2-index-range-covering-modern.json",
+        "sha256": "7c71a77eae4da2b398ba4d3b1cee05ad8b2ab41564ddc6ff2583296edee494d8",
+        "size_bytes": 2405
+      }
+    },
+    {
+      "case": "index-range-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/069-round-2-index-range-covering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-covering",
-        "scratch/041-round-2-index-range-covering-sqlite.db",
+        "scratch/069-round-2-index-range-covering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 41,
+      "ordinal": 69,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 36312500,
+        "runner_elapsed_ns": 37234958,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/041-round-2-index-range-covering-sqlite.stderr",
+        "path": "raw/timing/069-round-2-index-range-covering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/041-round-2-index-range-covering-sqlite.json",
-        "sha256": "1be4183e12da493bb8466fb16a1011459dcde17c9dcaf3ac22a07f8c5071ceaf",
+        "path": "raw/timing/069-round-2-index-range-covering-sqlite.json",
+        "sha256": "084bf00b4e75e2b3662071c1868c37b9b350fffd5613aa3348d9fcd7fdc01537",
         "size_bytes": 2403
       }
     },
@@ -2503,36 +4085,36 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/042-round-2-index-range-noncovering-modern.db",
+        "copy_path": "scratch/070-round-2-index-range-noncovering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-range-noncovering",
-        "scratch/042-round-2-index-range-noncovering-modern.db",
+        "scratch/070-round-2-index-range-noncovering-modern.db",
         "baseline"
       ],
-      "ordinal": 42,
+      "ordinal": 70,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 4734330541,
+        "runner_elapsed_ns": 298182375,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/042-round-2-index-range-noncovering-modern.stderr",
+        "path": "raw/timing/070-round-2-index-range-noncovering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/042-round-2-index-range-noncovering-modern.json",
-        "sha256": "2d3aee10b5f04c3d1bb6aaef6b0b0ecd6ccd663d4d61394b2d656e84c4eb8289",
-        "size_bytes": 2424
+        "path": "raw/timing/070-round-2-index-range-noncovering-modern.json",
+        "sha256": "d2688bc735e6654c1fc341d55dd0f4f760a36d491fbcbf61f1698e3c7c8571e4",
+        "size_bytes": 2412
       }
     },
     {
@@ -2541,36 +4123,188 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/043-round-2-index-range-noncovering-sqlite.db",
+        "copy_path": "scratch/071-round-2-index-range-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-range-noncovering",
-        "scratch/043-round-2-index-range-noncovering-sqlite.db",
+        "scratch/071-round-2-index-range-noncovering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 43,
+      "ordinal": 71,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 85143583,
+        "runner_elapsed_ns": 88584459,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/043-round-2-index-range-noncovering-sqlite.stderr",
+        "path": "raw/timing/071-round-2-index-range-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/043-round-2-index-range-noncovering-sqlite.json",
-        "sha256": "187b66ab4d2a2104ce318ae3bc0e0fd0d143ab2ad8ddf824004433a57db3f731",
+        "path": "raw/timing/071-round-2-index-range-noncovering-sqlite.json",
+        "sha256": "44ba184facb724374c230519d5904dfd3c0214ddde5d3afb37f364aeed3012fb",
         "size_bytes": 2412
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/072-round-2-index-range-lower-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-lower-only-covering",
+        "scratch/072-round-2-index-range-lower-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 72,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 74516625,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/072-round-2-index-range-lower-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/072-round-2-index-range-lower-only-covering-modern.json",
+        "sha256": "4be6fe60a165e1915983c9775c7f977315104b71537a73f9575de3dcdf1a375a",
+        "size_bytes": 2416
+      }
+    },
+    {
+      "case": "index-range-lower-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/073-round-2-index-range-lower-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-lower-only-covering",
+        "scratch/073-round-2-index-range-lower-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 73,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 33749666,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/073-round-2-index-range-lower-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/073-round-2-index-range-lower-only-covering-sqlite.json",
+        "sha256": "b47c0b15d574cd903ea999de8f0bf16a59fa64bae2e4fad72e6130cf4a5cd32b",
+        "size_bytes": 2410
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/074-round-2-index-range-upper-only-covering-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-range-upper-only-covering",
+        "scratch/074-round-2-index-range-upper-only-covering-modern.db",
+        "baseline"
+      ],
+      "ordinal": 74,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 87245958,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/074-round-2-index-range-upper-only-covering-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/074-round-2-index-range-upper-only-covering-modern.json",
+        "sha256": "fbb7ff7e0bc2c779635866420da51feca64917c7cfb97753953ea0725935430d",
+        "size_bytes": 2416
+      }
+    },
+    {
+      "case": "index-range-upper-only-covering",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/075-round-2-index-range-upper-only-covering-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-range-upper-only-covering",
+        "scratch/075-round-2-index-range-upper-only-covering-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 75,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 34833708,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/075-round-2-index-range-upper-only-covering-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/075-round-2-index-range-upper-only-covering-sqlite.json",
+        "sha256": "d1ab07491e6656bed039ab00626c555586b42d3a45d4a507c6116c0fb4d8a5e1",
+        "size_bytes": 2410
       }
     },
     {
@@ -2579,35 +4313,35 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/044-round-2-index-unselective-noncovering-modern.db",
+        "copy_path": "scratch/076-round-2-index-unselective-noncovering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-noncovering",
-        "scratch/044-round-2-index-unselective-noncovering-modern.db",
+        "scratch/076-round-2-index-unselective-noncovering-modern.db",
         "baseline"
       ],
-      "ordinal": 44,
+      "ordinal": 76,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 97073958,
+        "runner_elapsed_ns": 99486500,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/044-round-2-index-unselective-noncovering-modern.stderr",
+        "path": "raw/timing/076-round-2-index-unselective-noncovering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/044-round-2-index-unselective-noncovering-modern.json",
-        "sha256": "582ffcd4422a37b09c559c9c5e6bd6064e9c63009c8ea980516496537c29d14a",
+        "path": "raw/timing/076-round-2-index-unselective-noncovering-modern.json",
+        "sha256": "e7a3ead9b23de8d75044750b5f43da1d054b23c3b56c6a869902f7670d47a9ba",
         "size_bytes": 2398
       }
     },
@@ -2617,36 +4351,36 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/045-round-2-index-unselective-noncovering-sqlite.db",
+        "copy_path": "scratch/077-round-2-index-unselective-noncovering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-unselective-noncovering",
-        "scratch/045-round-2-index-unselective-noncovering-sqlite.db",
+        "scratch/077-round-2-index-unselective-noncovering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 45,
+      "ordinal": 77,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 35839334,
+        "runner_elapsed_ns": 37318709,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/045-round-2-index-unselective-noncovering-sqlite.stderr",
+        "path": "raw/timing/077-round-2-index-unselective-noncovering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/045-round-2-index-unselective-noncovering-sqlite.json",
-        "sha256": "72507f1bd251b841e0d7d8cd4a102c984d18f0a0b437ac14858ee377c9bd1471",
-        "size_bytes": 2392
+        "path": "raw/timing/077-round-2-index-unselective-noncovering-sqlite.json",
+        "sha256": "10c55d5e873381623fb746dec554028da15b956fee7e199e81f8a0eeed19ba5e",
+        "size_bytes": 2396
       }
     },
     {
@@ -2655,36 +4389,36 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/046-round-2-index-unselective-covering-modern.db",
+        "copy_path": "scratch/078-round-2-index-unselective-covering-modern.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "modern",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "modern",
         "index-unselective-covering",
-        "scratch/046-round-2-index-unselective-covering-modern.db",
+        "scratch/078-round-2-index-unselective-covering-modern.db",
         "baseline"
       ],
-      "ordinal": 46,
+      "ordinal": 78,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 506699875,
+        "runner_elapsed_ns": 201177375,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/046-round-2-index-unselective-covering-modern.stderr",
+        "path": "raw/timing/078-round-2-index-unselective-covering-modern.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/046-round-2-index-unselective-covering-modern.json",
-        "sha256": "4c1c1c0bb993d0e151f2ad23a4e5f4746991f47653dd1ac73e62ab24c85a35f4",
-        "size_bytes": 2413
+        "path": "raw/timing/078-round-2-index-unselective-covering-modern.json",
+        "sha256": "918be0e2cee92c94180f13aea8024218197668e42aab94bc3889d246866361fb",
+        "size_bytes": 2407
       }
     },
     {
@@ -2693,43 +4427,423 @@
         "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
         "cleanup": "removed",
-        "copy_path": "scratch/047-round-2-index-unselective-covering-sqlite.db",
+        "copy_path": "scratch/079-round-2-index-unselective-covering-sqlite.db",
         "fixture": "fit",
         "sidecars_remaining": [],
         "source_path": "tests/fixtures/index_performance/indexed.db"
       },
       "engine": "sqlite",
       "logical_argv": [
-        "modern_sqlite_read_benchmark",
+        "modern_sqlite_index_benchmark",
         "run",
         "sqlite",
         "index-unselective-covering",
-        "scratch/047-round-2-index-unselective-covering-sqlite.db",
+        "scratch/079-round-2-index-unselective-covering-sqlite.db",
         "baseline"
       ],
-      "ordinal": 47,
+      "ordinal": 79,
       "process": {
         "returncode": 0,
-        "runner_elapsed_ns": 41580375,
+        "runner_elapsed_ns": 42298500,
         "timed_out": false
       },
       "round": 2,
       "stderr": {
-        "path": "raw/timing/047-round-2-index-unselective-covering-sqlite.stderr",
+        "path": "raw/timing/079-round-2-index-unselective-covering-sqlite.stderr",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "size_bytes": 0
       },
       "stdout": {
-        "path": "raw/timing/047-round-2-index-unselective-covering-sqlite.json",
-        "sha256": "86c52a93758d07f2461ae74cb7aa7e1dc828c62c1954ea12e37fbb628d3cfb19",
+        "path": "raw/timing/079-round-2-index-unselective-covering-sqlite.json",
+        "sha256": "aa8ad8a7d581ae51ec675afaf03b0304ef5f7edb7a46408e6797ad78c3dfedbe",
         "size_bytes": 2407
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/080-round-2-index-insert-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-insert",
+        "scratch/080-round-2-index-insert-modern.db",
+        "baseline"
+      ],
+      "ordinal": 80,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46163083,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/080-round-2-index-insert-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/080-round-2-index-insert-modern.json",
+        "sha256": "8f5b15530af0577ad7131a12403ae572cda4dab4d21ec23e472ec209711b8079",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-insert",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/081-round-2-index-insert-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-insert",
+        "scratch/081-round-2-index-insert-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 81,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 46386750,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/081-round-2-index-insert-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/081-round-2-index-insert-sqlite.json",
+        "sha256": "ec52706a64bd65a7f1c2373a5d8b70cd466e5b194b198a90b8050193d866fb50",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/082-round-2-index-update-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-update",
+        "scratch/082-round-2-index-update-modern.db",
+        "baseline"
+      ],
+      "ordinal": 82,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 47400875,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/082-round-2-index-update-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/082-round-2-index-update-modern.json",
+        "sha256": "6d2babfc339f8bd6552e96b1b21a25f4eb3920b69d105e56cbafd49656848d64",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-update",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/083-round-2-index-update-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-update",
+        "scratch/083-round-2-index-update-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 83,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 44104416,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/083-round-2-index-update-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/083-round-2-index-update-sqlite.json",
+        "sha256": "ebc1bb9be54da4596f2356abe57154507d45c5f733b0f5b6d1ae9bb29a030c75",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/084-round-2-index-delete-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-delete",
+        "scratch/084-round-2-index-delete-modern.db",
+        "baseline"
+      ],
+      "ordinal": 84,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 43755041,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/084-round-2-index-delete-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/084-round-2-index-delete-modern.json",
+        "sha256": "4a72770bdd7078bbd3f4ed5716c11836b076c90677b910d494b71830c7d1fdff",
+        "size_bytes": 2337
+      }
+    },
+    {
+      "case": "index-delete",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/085-round-2-index-delete-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-delete",
+        "scratch/085-round-2-index-delete-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 85,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 42712083,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/085-round-2-index-delete-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/085-round-2-index-delete-sqlite.json",
+        "sha256": "4023ed71c7de4bec284d3a08e876858143352b2155420ed39b83f06fc2d3260f",
+        "size_bytes": 2337
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/086-round-2-index-create-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-create",
+        "scratch/086-round-2-index-create-modern.db",
+        "baseline"
+      ],
+      "ordinal": 86,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 323277416,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/086-round-2-index-create-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/086-round-2-index-create-modern.json",
+        "sha256": "94be008195c11f3198204e354ab7b011545f374080e985faec671b8300140214",
+        "size_bytes": 2341
+      }
+    },
+    {
+      "case": "index-create",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/087-round-2-index-create-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-create",
+        "scratch/087-round-2-index-create-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 87,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 84608041,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/087-round-2-index-create-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/087-round-2-index-create-sqlite.json",
+        "sha256": "318ee83bebe01d259f0d05bf6429b8bfaf57e378f9f31f78ddd1e75e7baa7c36",
+        "size_bytes": 2338
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/088-round-2-index-analyze-modern.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "modern",
+        "index-analyze",
+        "scratch/088-round-2-index-analyze-modern.db",
+        "baseline"
+      ],
+      "ordinal": 88,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 79739708,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/088-round-2-index-analyze-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/088-round-2-index-analyze-modern.json",
+        "sha256": "6159c10d32386022829fbbfc965907641a8eb83d96b1cac34af1275a7f542074",
+        "size_bytes": 2349
+      }
+    },
+    {
+      "case": "index-analyze",
+      "database": {
+        "after_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "before_sha256": "3ec1f973ddd77bf931b51bdf1309b854e2d0b60166e0d153bba4f566307f4ea9",
+        "cleanup": "removed",
+        "copy_path": "scratch/089-round-2-index-analyze-sqlite.db",
+        "fixture": "fit",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/index_performance/indexed.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_index_benchmark",
+        "run",
+        "sqlite",
+        "index-analyze",
+        "scratch/089-round-2-index-analyze-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 89,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 39063167,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/089-round-2-index-analyze-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/089-round-2-index-analyze-sqlite.json",
+        "sha256": "69a0e512b21aa08221699cd8019cd7a9a94aaac95651e68fe79f90a87147b1a3",
+        "size_bytes": 2343
       }
     }
   ],
   "workload_manifest": {
     "path": "tests/performance/index-workloads-v1.json",
-    "sha256": "051ee67d21288458b10e698e5d32817128a20fe7e2a528ab8e07b6f117161b90",
-    "size_bytes": 14983
+    "sha256": "1d9f43dac385e9ec2c2668dbf4a40adc97582485fbc860809d6cf97cbf927891",
+    "size_bytes": 25805
   },
   "workload_semantics_version": 1
 }

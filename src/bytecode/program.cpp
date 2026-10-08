@@ -743,7 +743,8 @@ template <typename T>
             }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, MustBeIntegerInstruction> ||
-                               std::is_same_v<Operation, RealAffinityInstruction>) {
+                               std::is_same_v<Operation, RealAffinityInstruction> ||
+                               std::is_same_v<Operation, RealStorageAffinityInstruction>) {
             if (auto result = check_register(operation.input, index); !result) {
               return result;
             }
@@ -1501,6 +1502,7 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
                                std::is_same_v<Operation, ApplyAffinityInstruction> ||
                                std::is_same_v<Operation, MustBeIntegerInstruction> ||
                                std::is_same_v<Operation, RealAffinityInstruction> ||
+                               std::is_same_v<Operation, RealStorageAffinityInstruction> ||
                                std::is_same_v<Operation, CastInstruction>) {
             if (auto result = require_initialized(operation.input); !result) {
               return result;
@@ -1897,6 +1899,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "must_be_integer";
     case InstructionKind::kRealAffinity:
       return "real_affinity";
+    case InstructionKind::kRealStorageAffinity:
+      return "real_storage_affinity";
     case InstructionKind::kCast:
       return "cast";
     case InstructionKind::kOpenRead:
