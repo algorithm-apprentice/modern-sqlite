@@ -30,12 +30,29 @@ struct BoundMutationColumn {
   bool rowid_alias = false;
 };
 
+struct BoundIndexTerm {
+  std::optional<ColumnId> column{};
+  bool rowid = false;
+  std::string_view collation_name = "BINARY";
+  SortOrder order = SortOrder::kAscending;
+};
+
+struct BoundIndexMaintenance {
+  IndexId index{};
+  RootPageId root_page{};
+  bool unique = false;
+  bool unique_not_null = false;
+  std::uint32_t key_term_count = 0;
+  std::vector<BoundIndexTerm> terms{};
+};
+
 struct BoundMutationTarget {
   TableId table{};
   RootPageId root_page{};
   SourceSpan span{};
   std::vector<BoundMutationColumn> columns{};
   std::optional<ColumnId> rowid_alias{};
+  std::vector<BoundIndexMaintenance> indexes{};
 };
 
 struct BoundMutationField {

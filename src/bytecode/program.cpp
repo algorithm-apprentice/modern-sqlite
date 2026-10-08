@@ -870,6 +870,19 @@ template <typename T>
               return result;
             }
             return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, CheckInsertRowIdInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kInsert) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.write_cursors[operation.cursor.value()].storage !=
+                WriteCursorStorageKind::kRowIdTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
+            return check_register(operation.rowid, index);
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
                 input.statement_kind != ProgramStatementKind::kUpdate &&
@@ -1507,6 +1520,14 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             initialize(operation.output);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CheckInsertRowIdInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.rowid); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
             if (auto result = require_write_open(operation.cursor); !result) {
               return result;
@@ -1745,6 +1766,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "read_rowid";
     case InstructionKind::kResolveInsertRowId:
       return "resolve_insert_rowid";
+    case InstructionKind::kCheckInsertRowId:
+      return "check_insert_rowid";
     case InstructionKind::kBuildTableRecord:
       return "build_table_record";
     case InstructionKind::kCheckUniqueIndex:

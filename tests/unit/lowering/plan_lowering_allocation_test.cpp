@@ -306,6 +306,22 @@ int main() try {
     }
   }
 
+  const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
+  constexpr std::size_t kExpectedIndexedInsertAllocations = 29U;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    const LowerPlanResult lowered = LowerPlan(indexed_insert);
+    count_allocations = false;
+    if (!lowered.has_value()) {
+      return 1;
+    }
+    const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+    if (allocations != kExpectedIndexedInsertAllocations) {
+      return 1;
+    }
+  }
+
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   constexpr std::size_t kExpectedDeleteAllocations = 27U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {

@@ -209,6 +209,10 @@ struct ShiftArguments {
   return converted;
 }
 
+[[nodiscard]] TypeAffinity StorageAffinity(TypeAffinity affinity) noexcept {
+  return affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : affinity;
+}
+
 struct ResolvedCall {
   std::uint32_t address = 0;
   const ScalarFunction* function = nullptr;
@@ -1116,7 +1120,7 @@ struct Vm::Impl {
                            : ApplyAffinity(Register(RegisterId(operation.first_value.value() +
                                                                static_cast<std::uint32_t>(index)))
                                                .Clone(),
-                                           column.affinity);
+                                           StorageAffinity(column.affinity));
       if (!column.rowid_alias && column.not_null && value.type() == SqlValueType::kNull) {
         return std::unexpected(VmError(ErrorCode::kConstraint, "NOT NULL constraint failed"));
       }
@@ -1127,6 +1131,27 @@ struct Vm::Impl {
       return std::unexpected(std::move(encoded.error()));
     }
     return SetRegister(operation.output, SqlValue::Blob(std::move(*encoded)));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const CheckInsertRowIdInstruction& operation) {
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
+    const std::optional<std::int64_t> rowid = Register(operation.rowid).integer_value();
+    if (!rowid.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "INSERT rowid is not an integer"));
+    }
+    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    auto found = cursor->Seek(*rowid, BtreeSeekMode::kEqual);
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (*found) {
+      return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+    }
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
