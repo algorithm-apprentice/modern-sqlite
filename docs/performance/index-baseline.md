@@ -1,16 +1,13 @@
 # Index Performance Baseline
 
 ADR-0052 defines a separate version-1 indexed workload contract so the
-existing read and write baselines remain immutable.
-
-The pre-feature baseline intentionally compares Modern SQLite's table-scan
-fallback with pinned SQLite 3.54.0 index plans. A complete validated run may
-therefore exit with the severe-regression status before index planning is
-implemented.
+existing general read and write baselines remain immutable. The initial
+pre-feature run covered indexed reads. The final contract extends that same
+fixture and comparison machinery to the complete index-planning node.
 
 ## Workloads
 
-`tests/performance/index-workloads-v1.json` pins eight cases over one
+`tests/performance/index-workloads-v1.json` pins fifteen cases over one
 SQLite-created 4,096-row fixture:
 
 1. covering equality hit;
@@ -19,12 +16,26 @@ SQLite-created 4,096-row fixture:
 4. two-column covering equality;
 5. covering two-sided range;
 6. noncovering two-sided range;
-7. deliberately unselective noncovering STAT1 fallback; and
-8. the same unselective predicate with a covering result.
+7. covering lower-only range;
+8. covering upper-only range;
+9. deliberately unselective noncovering STAT1 fallback;
+10. the same unselective predicate with a covering result;
+11. indexed INSERT;
+12. indexed UPDATE;
+13. indexed DELETE;
+14. CREATE INDEX population; and
+15. ANALYZE.
 
-The fixture and every logical result vector are byte-reproducible. The
-unselective noncovering case must report SQLite full-scan steps; the other
-SQLite cases must not.
+The fixture and every logical result vector are byte-reproducible. Read cases
+use query-only connections. Writable cases copy the fixture for every warmup
+and measured repetition, execute real DELETE-journal/FULL-synchronous
+autocommit statements inside the timed region, verify the committed result
+with pinned SQLite, and remove the owned copy. The source fixture must remain
+byte-identical and sidecar-free.
+
+The unselective noncovering case must report SQLite full-scan steps. Bounded
+read cases must not. Writable diagnostics must report page/cache writes and
+exact fixed work.
 
 Each baseline repetition must run for at least 5 milliseconds. This lower
 floor is deliberate: scaling an indexed point lookup to the read baseline's
@@ -34,15 +45,15 @@ control impractically long without changing the fixed work.
 ## Build and smoke validation
 
 Configure the benchmark preset with the pinned amalgamation and build the
-existing read timing and diagnostic binaries:
+dedicated index timing and diagnostic binaries:
 
 ```sh
 cmake --preset benchmark \
   -DMODERN_SQLITE_PINNED_SQLITE_C=/absolute/path/to/sqlite3.c \
   -DMODERN_SQLITE_PINNED_SQLITE_H=/absolute/path/to/sqlite3.h
 cmake --build --preset benchmark --parallel 3 --target \
-  modern_sqlite_read_benchmark \
-  modern_sqlite_read_diagnostics \
+  modern_sqlite_index_benchmark \
+  modern_sqlite_index_diagnostics \
   modern_sqlite_benchmark_sqlite_shared
 ```
 
@@ -62,14 +73,14 @@ absent output directory:
 python3 tools/index_performance.py generate-baseline \
   --repository-root . \
   --workloads tests/performance/index-workloads-v1.json \
-  --timing-binary build/benchmark/modern_sqlite_read_benchmark \
-  --diagnostic-binary build/benchmark/modern_sqlite_read_diagnostics \
+  --timing-binary build/benchmark/modern_sqlite_index_benchmark \
+  --diagnostic-binary build/benchmark/modern_sqlite_index_diagnostics \
   --sqlite-c /absolute/path/to/sqlite3.c \
   --sqlite-h /absolute/path/to/sqlite3.h \
   --output benchmarks/index-baseline-v1
 ```
 
-The schedule contains 48 timing children and 16 diagnostic children. Exit
+The schedule contains 90 timing children and 30 diagnostic children. Exit
 code `2` means the complete baseline is structurally valid but one or more
 10x wall/CPU guards fail. Exit code `1` means a harness, provenance,
 correctness, timeout, process, or artifact failure.
@@ -83,11 +94,11 @@ python3 tools/index_performance.py validate-baseline \
   --baseline benchmarks/index-baseline-v1
 ```
 
-The baseline is regenerated only after the complete index-planning node is
-integrated. Workload SQL, fixture bytes, STAT1 contents, iteration counts,
-cache/page settings, result digests, and guard thresholds remain unchanged.
+After this final contract is accepted, workload SQL/templates, fixture bytes,
+STAT1 contents, iteration counts, cache/page settings, result digests, and
+guard thresholds remain pinned.
 
-## Canonical pre-feature result
+## Historical pre-feature result
 
 The committed `benchmarks/index-baseline-v1` run was generated from clean
 source revision `c9e8b4303314ac35f98294c5ffd2de8b4560dc04`.

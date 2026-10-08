@@ -2022,13 +2022,24 @@ class PlanLowerer final {
     if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
         column != nullptr) {
       if (!source_snapshot_registers_.empty()) {
-        if (column->column.value() >= source_snapshot_registers_.size()) {
+        if (column->column.value() >= source_snapshot_registers_.size() ||
+            column->column.value() >= source_field_real_affinity_.size()) {
           return std::unexpected(InternalFailure("bound column has no source snapshot field"));
         }
-        return Append(CopyInstruction{
-            .input = source_snapshot_registers_[column->column.value()],
-            .output = destination,
-        });
+        if (auto copied = Append(CopyInstruction{
+                .input = source_snapshot_registers_[column->column.value()],
+                .output = destination,
+            });
+            !copied.has_value()) {
+          return copied;
+        }
+        if (source_field_real_affinity_[column->column.value()]) {
+          return Append(RealAffinityInstruction{
+              .input = destination,
+              .output = destination,
+          });
+        }
+        return {};
       }
       if (!cursor_.has_value() || column->column.value() >= source_field_real_affinity_.size() ||
           column->column.value() >= source_cursor_fields_.size() ||
@@ -2534,9 +2545,11 @@ class PlanLowerer final {
           !copied.has_value()) {
         return copied;
       }
+      const TypeAffinity key_affinity =
+          affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : affinity;
       return Append(ApplyAffinityInstruction{
           .input = destination,
-          .affinity = affinity,
+          .affinity = key_affinity,
           .output = destination,
       });
     };
@@ -3254,15 +3267,6 @@ class PlanLowerer final {
           });
           !field.has_value()) {
         return field;
-      }
-      if (source_field_real_affinity_[index]) {
-        if (auto affinity = Append(RealAffinityInstruction{
-                .input = destination,
-                .output = destination,
-            });
-            !affinity.has_value()) {
-          return affinity;
-        }
       }
     }
     if (close_cursor) {

@@ -281,7 +281,36 @@ void VerifyCrashImageWithSqlite(void* raw_context, std::string_view scenario, st
       "SELECT group_concat(id||':'||Name,',') FROM (SELECT id,Name FROM Items ORDER BY id)");
   const bool temp_visible =
       QueryInteger(sqlite.get(), "SELECT count(*) FROM sqlite_schema WHERE name='Temp'") == 1;
-  if (rows != expected.rows || temp_visible != expected.temp_visible) {
+  const bool index_expected =
+      terminal && (scenario == "implicit-create-index" || scenario == "indexed-dml-commit");
+  const bool index_visible = QueryInteger(sqlite.get(),
+                                          "SELECT count(*) FROM sqlite_schema "
+                                          "WHERE type='index' AND name='items_name'") == 1;
+  std::string indexed_rows;
+  if (index_visible) {
+    indexed_rows =
+        QueryText(sqlite.get(),
+                  "SELECT group_concat(id||':'||Name,',') FROM "
+                  "(SELECT id,Name FROM Items INDEXED BY items_name ORDER BY Name DESC)");
+  }
+  const std::string_view expected_indexed_rows =
+      scenario == "indexed-dml-commit" ? "2:twox,3:three,4:four" : "2:two,3:three,1:one";
+
+  const bool stat1_expected = terminal && scenario == "implicit-analyze";
+  const bool stat1_visible = QueryInteger(sqlite.get(),
+                                          "SELECT count(*) FROM sqlite_schema "
+                                          "WHERE type='table' AND name='sqlite_stat1'") == 1;
+  std::string stat1_rows;
+  if (stat1_visible) {
+    stat1_rows = QueryText(sqlite.get(),
+                           "SELECT group_concat(tbl||':'||coalesce(idx,'NULL')||':'||stat,',') "
+                           "FROM (SELECT tbl,idx,stat FROM sqlite_stat1 ORDER BY tbl,idx)");
+  }
+
+  if (rows != expected.rows || temp_visible != expected.temp_visible ||
+      index_visible != index_expected ||
+      (index_expected && indexed_rows != expected_indexed_rows) ||
+      stat1_visible != stat1_expected || (stat1_expected && stat1_rows != "Items:NULL:3")) {
     throw std::runtime_error{std::string{scenario} + " cut=" + std::to_string(cut) +
                              " durability=" + (writes_are_durable ? "durable" : "volatile") +
                              " disagrees in pinned SQLite"};

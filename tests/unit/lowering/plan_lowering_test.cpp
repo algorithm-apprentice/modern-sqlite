@@ -1215,6 +1215,50 @@ TEST(IndexedMutationLowering, CollectsScanRowidsAndRollsBackPartialIndexWork) {
   }
 }
 
+TEST(IndexedMutationLowering, PreservesExactIntegerKeysForRealAffinity) {
+  constexpr std::int64_t kLargeInteger = INT64_C(9007199254740993);
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const std::array insert_parameters{
+      SqlValue::Integer(1),
+      SqlValue::Text("large"),
+      SqlValue::Integer(kLargeInteger),
+  };
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs, insert_parameters)).changes);
+
+  const BytecodeProgram select =
+      LowerOrThrow("SELECT id FROM Items WHERE Score=9007199254740993", catalog);
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const auto rows = ExecuteRows(select, *pager, catalog->version().generation);
+  RequireStatus(pager->EndRead());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+
+  const BytecodeProgram update =
+      LowerMutationOrThrow("UPDATE Items SET id=2,Name='updated' WHERE id=1", catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(update, vfs)).changes);
+  const std::array<IndexColumnOrder, 2> score_columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto score_rows = ReadIndexRows(vfs, PageNumber{4}, score_columns);
+  ASSERT_EQ(1U, score_rows.size());
+  EXPECT_EQ(kLargeInteger, score_rows[0][0].integer_value());
+  EXPECT_EQ(2, score_rows[0][1].integer_value());
+
+  const BytecodeProgram delete_program =
+      LowerMutationOrThrow("DELETE FROM Items WHERE id=2", catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(delete_program, vfs)).changes);
+  EXPECT_TRUE(ReadIndexRows(vfs, PageNumber{4}, score_columns).empty());
+}
+
 TEST(InsertLowering, RetainsLimitsAndRejectsMovedFromPlans) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   PhysicalMutationPlan plan = OptimizeMutationOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);

@@ -32,7 +32,23 @@ class IndexPerformanceValidationTest(unittest.TestCase):
     def test_canonical_manifest_is_valid(self) -> None:
         validated = self.validate(copy.deepcopy(self.manifest))
         self.assertEqual(
-            index_performance.CASE_IDS,
+            (
+                "index-equality-covering-hit",
+                "index-equality-covering-miss",
+                "index-equality-noncovering-hit",
+                "index-multi-equality-covering",
+                "index-range-covering",
+                "index-range-noncovering",
+                "index-range-lower-only-covering",
+                "index-range-upper-only-covering",
+                "index-unselective-noncovering",
+                "index-unselective-covering",
+                "index-insert",
+                "index-update",
+                "index-delete",
+                "index-create",
+                "index-analyze",
+            ),
             tuple(case["id"] for case in validated["cases"]),
         )
         self.assertEqual(
@@ -71,6 +87,14 @@ class IndexPerformanceValidationTest(unittest.TestCase):
         ):
             self.validate(value)
 
+        value = copy.deepcopy(self.manifest)
+        value["cases"][0] = None
+        with self.assertRaisesRegex(
+            index_performance.HarnessError,
+            r"cases\[0\]",
+        ):
+            self.validate(value)
+
     def test_common_harness_configuration_is_index_scoped(self) -> None:
         index_performance._configure_common()
         self.assertEqual(
@@ -81,7 +105,7 @@ class IndexPerformanceValidationTest(unittest.TestCase):
             index_performance.MINIMUM_WALL_NS,
             read_performance.MINIMUM_WALL_NS,
         )
-        self.assertEqual(132, read_performance.MAX_BASELINE_ARTIFACTS)
+        self.assertEqual(260, read_performance.MAX_BASELINE_ARTIFACTS)
         self.assertFalse(read_performance.ENFORCE_GUARD_ON_VALIDATION)
         case = self.manifest["cases"][0]
         self.assertEqual(

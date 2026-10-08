@@ -542,6 +542,14 @@ SQLite's selected index. The final baseline preserves the same corpus,
 statistics, page/cache configuration, result digest, and durability settings.
 Profiler or diagnostic builds cannot replace uninstrumented timing.
 
+The final version-1 baseline extends the original eight read cases with
+lower-only and upper-only ranges plus indexed INSERT, UPDATE, DELETE,
+CREATE INDEX population, and ANALYZE. Writable repetitions run against fresh
+copies of the same fixture and include real DELETE-journal,
+FULL-synchronous autocommit durability in the timed region. Every committed
+copy is checked by pinned SQLite before removal, while the source fixture
+remains byte-identical.
+
 Node completion requires:
 
 - every supported query and mutation result to match pinned SQLite;
