@@ -40,8 +40,9 @@
     "implement-transaction-coordinator",
     "implement-dml-ddl",
     "build-writable-mvp-harness",
-    "establish-write-performance-baseline"
+    "establish-write-performance-baseline",
+    "optimize-one-pass-mutations"
   ],
-  "activeNode": "optimize-one-pass-mutations",
+  "activeNode": "implement-index-planning",
   "activeNodeState": "in_progress"
 }
