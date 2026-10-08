@@ -211,6 +211,7 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                                     "completion",
                                     "effective_configuration",
                                     "engine",
+                                    "initial_database",
                                     "mode",
                                     "profile",
                                     "repetitions",
@@ -308,7 +309,10 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                             report = completed.report
                             self.assertEqual(
                                 case["expected"]["baseline"],
-                                report["work"],
+                                {
+                                    key: report["work"][key]
+                                    for key in case["expected"]["baseline"]
+                                },
                             )
                             if engine == "modern":
                                 self.assertTrue(report["counters"]["modern"])

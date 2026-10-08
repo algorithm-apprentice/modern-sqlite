@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -215,6 +216,16 @@ struct Verification {
   std::string digest;
 
   bool operator==(const Verification&) const = default;
+};
+
+struct DatabaseFingerprint {
+  std::string sha256;
+  std::uint64_t size_bytes = 0;
+  std::uint32_t page_count = 0;
+  std::uint32_t freelist_count = 0;
+  std::uint32_t schema_cookie = 0;
+
+  bool operator==(const DatabaseFingerprint&) const = default;
 };
 
 template <typename T>
@@ -606,6 +617,139 @@ class Digest final {
 
  private:
   std::uint64_t value_ = kFnvOffset;
+};
+
+class Sha256 final {
+ public:
+  void Update(modern_sqlite::ByteView bytes) {
+    if (bytes.size() > std::numeric_limits<std::uint64_t>::max() - total_bytes_) {
+      throw HarnessFailure{"SHA-256 input length overflow"};
+    }
+    total_bytes_ += static_cast<std::uint64_t>(bytes.size());
+    for (const std::byte byte : bytes) {
+      block_[block_size_++] = byte;
+      if (block_size_ == block_.size()) {
+        Transform();
+        block_size_ = 0;
+      }
+    }
+  }
+
+  [[nodiscard]] std::string Hex() const {
+    Sha256 finished = *this;
+    if (finished.total_bytes_ > std::numeric_limits<std::uint64_t>::max() / 8U) {
+      throw HarnessFailure{"SHA-256 bit length overflow"};
+    }
+    const std::uint64_t bit_length = finished.total_bytes_ * 8U;
+    finished.block_[finished.block_size_++] = std::byte{0x80};
+    if (finished.block_size_ > 56U) {
+      while (finished.block_size_ < finished.block_.size()) {
+        finished.block_[finished.block_size_++] = std::byte{0};
+      }
+      finished.Transform();
+      finished.block_size_ = 0;
+    }
+    while (finished.block_size_ < 56U) {
+      finished.block_[finished.block_size_++] = std::byte{0};
+    }
+    for (std::size_t index = 0; index < 8U; ++index) {
+      const std::size_t shift = (7U - index) * 8U;
+      finished.block_[finished.block_size_++] =
+          static_cast<std::byte>((bit_length >> shift) & 0xffU);
+    }
+    finished.Transform();
+
+    constexpr std::string_view hex = "0123456789abcdef";
+    std::string result;
+    result.reserve(64);
+    for (const std::uint32_t word : finished.state_) {
+      for (std::size_t index = 0; index < 4U; ++index) {
+        const std::size_t shift = (3U - index) * 8U;
+        const auto byte = static_cast<std::uint8_t>((word >> shift) & 0xffU);
+        result.push_back(hex[byte >> 4U]);
+        result.push_back(hex[byte & 0x0fU]);
+      }
+    }
+    return result;
+  }
+
+ private:
+  [[nodiscard]] static std::uint32_t LoadWord(std::span<const std::byte, 4> bytes) noexcept {
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[0])) << 24U) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 16U) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 8U) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3]));
+  }
+
+  void Transform() noexcept {
+    static constexpr std::array<std::uint32_t, 64> round_constants = {
+        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
+        0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU,
+        0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU,
+        0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U,
+        0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU,
+        0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU,
+        0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U, 0x19a4c116U,
+        0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+        0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U,
+        0xc67178f2U,
+    };
+    std::array<std::uint32_t, 64> schedule{};
+    const std::span<const std::byte> block{block_};
+    for (std::size_t index = 0; index < 16U; ++index) {
+      schedule[index] = LoadWord(std::span<const std::byte, 4>{block.subspan(index * 4U, 4U)});
+    }
+    for (std::size_t index = 16U; index < schedule.size(); ++index) {
+      const std::uint32_t first = std::rotr(schedule[index - 15U], 7) ^
+                                  std::rotr(schedule[index - 15U], 18) ^
+                                  (schedule[index - 15U] >> 3U);
+      const std::uint32_t second = std::rotr(schedule[index - 2U], 17) ^
+                                   std::rotr(schedule[index - 2U], 19) ^
+                                   (schedule[index - 2U] >> 10U);
+      schedule[index] = schedule[index - 16U] + first + schedule[index - 7U] + second;
+    }
+
+    std::uint32_t a = state_[0];
+    std::uint32_t b = state_[1];
+    std::uint32_t c = state_[2];
+    std::uint32_t d = state_[3];
+    std::uint32_t e = state_[4];
+    std::uint32_t f = state_[5];
+    std::uint32_t g = state_[6];
+    std::uint32_t h = state_[7];
+    for (std::size_t index = 0; index < schedule.size(); ++index) {
+      const std::uint32_t choose = (e & f) ^ (~e & g);
+      const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      const std::uint32_t sum0 = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
+      const std::uint32_t sum1 = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
+      const std::uint32_t temporary1 = h + sum1 + choose + round_constants[index] + schedule[index];
+      const std::uint32_t temporary2 = sum0 + majority;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temporary1;
+      d = c;
+      c = b;
+      b = a;
+      a = temporary1 + temporary2;
+    }
+    state_[0] += a;
+    state_[1] += b;
+    state_[2] += c;
+    state_[3] += d;
+    state_[4] += e;
+    state_[5] += f;
+    state_[6] += g;
+    state_[7] += h;
+  }
+
+  std::array<std::uint32_t, 8> state_ = {
+      0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+      0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
+  };
+  std::array<std::byte, 64> block_{};
+  std::size_t block_size_ = 0;
+  std::uint64_t total_bytes_ = 0;
 };
 
 [[nodiscard]] modern_sqlite::ByteBuffer ValueFor(std::int64_t seed) {
@@ -1973,6 +2117,39 @@ void CaptureSqliteDiagnosticCounters(sqlite3* database, SqliteCounterValues& cou
   return bytes;
 }
 
+[[nodiscard]] std::uint32_t ReadBigEndian32(std::span<const std::byte> bytes, std::size_t offset) {
+  if (offset > bytes.size() || bytes.size() - offset < 4U) {
+    throw HarnessFailure{"database header field is truncated"};
+  }
+  return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset])) << 24U) |
+         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 1U])) << 16U) |
+         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 2U])) << 8U) |
+         static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 3U]));
+}
+
+[[nodiscard]] DatabaseFingerprint FingerprintDatabase(const std::filesystem::path& path) {
+  const std::vector<std::byte> bytes = ReadFile(path);
+  Sha256 sha256;
+  sha256.Update(bytes);
+  DatabaseFingerprint fingerprint{
+      .sha256 = sha256.Hex(),
+      .size_bytes = static_cast<std::uint64_t>(bytes.size()),
+  };
+  if (bytes.empty()) {
+    return fingerprint;
+  }
+  constexpr std::string_view header{"SQLite format 3\0", 16};
+  if (bytes.size() < 100U ||
+      !std::ranges::equal(std::span<const std::byte>{bytes}.first(header.size()),
+                          modern_sqlite::AsBytes(header))) {
+    throw BenchmarkMismatch{"database fingerprint input has an invalid header"};
+  }
+  fingerprint.page_count = ReadBigEndian32(bytes, 28U);
+  fingerprint.freelist_count = ReadBigEndian32(bytes, 36U);
+  fingerprint.schema_cookie = ReadBigEndian32(bytes, 40U);
+  return fingerprint;
+}
+
 void EnsureNoSidecars(const std::filesystem::path& path) {
   for (const std::string_view suffix : {"-journal", "-wal", "-shm"}) {
     if (std::filesystem::exists(path.string() + std::string{suffix})) {
@@ -2045,16 +2222,19 @@ void RemoveFreshDatabase(const std::filesystem::path& path) {
 struct VerifiedWork {
   WorkResult work;
   Verification verification;
+  DatabaseFingerprint final_database;
 };
 
 struct VerifiedRepetition {
   TimedWork timed;
   Verification verification;
+  DatabaseFingerprint final_database;
 };
 
 struct TimingRun {
   WorkloadScale scale;
   EffectiveConfiguration configuration;
+  DatabaseFingerprint initial_database;
   VerifiedWork warmup;
   std::vector<VerifiedRepetition> repetitions;
 };
@@ -2110,6 +2290,7 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
                                                 const std::filesystem::path& input,
                                                 const std::filesystem::path& scratch) {
   VerifyInitialInput(engine, kind, input);
+  const DatabaseFingerprint initial_database = FingerprintDatabase(input);
   const WorkloadScale scale = ScaleFor(kind, run_kind);
   const std::vector<std::int64_t> key_order = GenerateKeyOrder();
   const std::vector<std::byte> rollback_input =
@@ -2143,6 +2324,7 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
 
   ValidateExecutedWork(kind, scale, warmup.timed.work);
   const Verification warmup_verification = VerifyFinalOutput(kind, scale, warmup_path, key_order);
+  const DatabaseFingerprint warmup_fingerprint = FingerprintDatabase(warmup_path);
   if (kind == CaseKind::kMixedRollback && rollback_input != ReadFile(warmup_path)) {
     throw BenchmarkMismatch{"write benchmark rollback changed warmup database bytes"};
   }
@@ -2153,14 +2335,18 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
     const Execution& execution = executions[index];
     ValidateExecutedWork(kind, scale, execution.timed.work);
     const Verification verification = VerifyFinalOutput(kind, scale, paths[index + 1U], key_order);
+    const DatabaseFingerprint fingerprint = FingerprintDatabase(paths[index + 1U]);
     if (verification != warmup_verification) {
       throw BenchmarkMismatch{"write benchmark repetition result differs from warmup"};
     }
     if (kind == CaseKind::kMixedRollback && rollback_input != ReadFile(paths[index + 1U])) {
       throw BenchmarkMismatch{"write benchmark rollback changed repetition database bytes"};
     }
-    repetitions.push_back(
-        VerifiedRepetition{.timed = execution.timed, .verification = verification});
+    repetitions.push_back(VerifiedRepetition{
+        .timed = execution.timed,
+        .verification = verification,
+        .final_database = fingerprint,
+    });
   }
 
   for (const std::filesystem::path& path : paths) {
@@ -2169,7 +2355,13 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
   return TimingRun{
       .scale = scale,
       .configuration = std::move(warmup.configuration),
-      .warmup = VerifiedWork{.work = warmup.timed.work, .verification = warmup_verification},
+      .initial_database = initial_database,
+      .warmup =
+          VerifiedWork{
+              .work = warmup.timed.work,
+              .verification = warmup_verification,
+              .final_database = warmup_fingerprint,
+          },
       .repetitions = std::move(repetitions),
   };
 }
@@ -2178,6 +2370,7 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
 struct DiagnosticRun {
   WorkloadScale scale;
   EffectiveConfiguration configuration;
+  DatabaseFingerprint initial_database;
   VerifiedWork work;
   std::optional<ModernCounterValues> modern;
   std::optional<SqliteCounterValues> sqlite;
@@ -2206,6 +2399,7 @@ struct DiagnosticRun {
                                           const std::filesystem::path& input,
                                           const std::filesystem::path& scratch) {
   VerifyInitialInput(engine, kind, input);
+  const DatabaseFingerprint initial_database = FingerprintDatabase(input);
   const WorkloadScale scale = ScaleFor(kind, RunKind::kBaseline);
   const std::vector<std::int64_t> key_order = GenerateKeyOrder();
   const std::vector<std::byte> rollback_input =
@@ -2244,6 +2438,7 @@ struct DiagnosticRun {
   const Verification warmup_verification = VerifyFinalOutput(kind, scale, warmup_path, key_order);
   const Verification diagnostic_verification =
       VerifyFinalOutput(kind, scale, diagnostic_path, key_order);
+  const DatabaseFingerprint diagnostic_fingerprint = FingerprintDatabase(diagnostic_path);
   if (warmup_verification != diagnostic_verification) {
     throw BenchmarkMismatch{"write diagnostic result differs from warmup"};
   }
@@ -2256,10 +2451,12 @@ struct DiagnosticRun {
   return DiagnosticRun{
       .scale = scale,
       .configuration = std::move(diagnostic.configuration),
+      .initial_database = initial_database,
       .work =
           VerifiedWork{
               .work = diagnostic.timed.work,
               .verification = diagnostic_verification,
+              .final_database = diagnostic_fingerprint,
           },
       .modern = modern,
       .sqlite = sqlite,
@@ -2414,14 +2611,24 @@ void PrintConfiguration(std::ostream& output, const EffectiveConfiguration& conf
   output << '}';
 }
 
+void PrintDatabaseFingerprint(std::ostream& output, const DatabaseFingerprint& fingerprint) {
+  output << R"({"freelist_count":)" << fingerprint.freelist_count << R"(,"page_count":)"
+         << fingerprint.page_count << R"(,"schema_cookie":)" << fingerprint.schema_cookie
+         << R"(,"sha256":)";
+  PrintJsonString(output, fingerprint.sha256);
+  output << R"(,"size_bytes":)" << fingerprint.size_bytes << '}';
+}
+
 void PrintWork(std::ostream& output, const WorkloadScale& scale, const WorkResult& work,
-               const Verification& verification) {
+               const Verification& verification, const DatabaseFingerprint& final_database) {
   output << R"("changed_rows":)" << work.changed_rows << R"(,"digest":)";
   PrintJsonString(output, verification.digest);
-  output << R"(,"dml_operations":)" << scale.dml_operations << R"(,"final_rows":)"
-         << verification.rows << R"(,"last_insert_rowid":)" << work.last_insert_rowid
-         << R"(,"row_mutations":)" << scale.row_mutations << R"(,"schema_objects":)"
-         << verification.schema_objects << R"(,"transactions":)" << scale.transactions;
+  output << R"(,"dml_operations":)" << scale.dml_operations << R"(,"final_database":)";
+  PrintDatabaseFingerprint(output, final_database);
+  output << R"(,"final_rows":)" << verification.rows << R"(,"last_insert_rowid":)"
+         << work.last_insert_rowid << R"(,"row_mutations":)" << scale.row_mutations
+         << R"(,"schema_objects":)" << verification.schema_objects << R"(,"transactions":)"
+         << scale.transactions;
 }
 
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
@@ -2511,12 +2718,14 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   PrintJsonString(std::cout, engine);
   std::cout << R"(,"mode":"diagnostic","profile":)";
   PrintJsonString(std::cout, ProfileName(profile));
+  std::cout << R"(,"initial_database":)";
+  PrintDatabaseFingerprint(std::cout, run.initial_database);
   std::cout << R"(,"schema_version":1,"source":)";
   PrintSourceIdentity(std::cout);
   std::cout << R"(,"sqlite":)";
   PrintSqliteIdentity(std::cout);
   std::cout << R"(,"work":{)";
-  PrintWork(std::cout, run.scale, run.work.work, run.work.verification);
+  PrintWork(std::cout, run.scale, run.work.work, run.work.verification, run.work.final_database);
   std::cout << R"(},"workload_semantics_version":1})" << '\n';
 }
 #endif
@@ -2538,6 +2747,8 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   PrintJsonString(std::cout, engine);
   std::cout << R"(,"mode":"timing","profile":)";
   PrintJsonString(std::cout, ProfileName(profile));
+  std::cout << R"(,"initial_database":)";
+  PrintDatabaseFingerprint(std::cout, run.initial_database);
   std::cout << R"(,"repetitions":[)";
   for (std::size_t index = 0; index < run.repetitions.size(); ++index) {
     if (index != 0U) {
@@ -2545,7 +2756,8 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
     }
     const VerifiedRepetition& repetition = run.repetitions[index];
     std::cout << '{';
-    PrintWork(std::cout, run.scale, repetition.timed.work, repetition.verification);
+    PrintWork(std::cout, run.scale, repetition.timed.work, repetition.verification,
+              repetition.final_database);
     std::cout << R"(,"cpu_ns":)" << repetition.timed.cpu_ns << R"(,"index":)"
               << repetition.timed.index << R"(,"wall_ns":)" << repetition.timed.wall_ns << '}';
   }
@@ -2557,7 +2769,8 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   PrintSqliteIdentity(std::cout);
   std::cout << R"(,"timer":{"cpu":"CLOCK_PROCESS_CPUTIME_ID",)"
                R"("wall":"steady_clock"},"warmup":{)";
-  PrintWork(std::cout, run.scale, run.warmup.work, run.warmup.verification);
+  PrintWork(std::cout, run.scale, run.warmup.work, run.warmup.verification,
+            run.warmup.final_database);
   std::cout << R"(},"workload_semantics_version":1})" << '\n';
 }
 
