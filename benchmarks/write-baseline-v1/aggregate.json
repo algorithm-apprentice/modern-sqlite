@@ -1,0 +1,1977 @@
+{
+  "guard": {
+    "maximum_cpu_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "maximum_wall_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "profile": "matched-durable"
+  },
+  "guard_passed": false,
+  "profiles": [
+    {
+      "cases": [
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "2.134179",
+              "denominator": 42309,
+              "numerator": 90295
+            },
+            "minimum_round_ratio": {
+              "decimal": "2.014435",
+              "denominator": 45377,
+              "numerator": 91409
+            },
+            "modern_median_ns": 91210000,
+            "ratio": {
+              "decimal": "2.070085",
+              "denominator": 44061,
+              "numerator": 91210
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 90295000,
+                "ratio": {
+                  "decimal": "2.134179",
+                  "denominator": 42309,
+                  "numerator": 90295
+                },
+                "round": 0,
+                "sqlite_median_ns": 42309000
+              },
+              {
+                "modern_median_ns": 91409000,
+                "ratio": {
+                  "decimal": "2.014435",
+                  "denominator": 45377,
+                  "numerator": 91409
+                },
+                "round": 1,
+                "sqlite_median_ns": 45377000
+              },
+              {
+                "modern_median_ns": 91210000,
+                "ratio": {
+                  "decimal": "2.070085",
+                  "denominator": 44061,
+                  "numerator": 91210
+                },
+                "round": 2,
+                "sqlite_median_ns": 44061000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 44061000
+          },
+          "guard_passed": null,
+          "id": "create-table-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.904693",
+              "denominator": 70016,
+              "numerator": 133359
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.814668",
+              "denominator": 14121479,
+              "numerator": 25625802
+            },
+            "modern_median_ns": 101547541,
+            "ratio": {
+              "decimal": "1.849895",
+              "denominator": 54893667,
+              "numerator": 101547541
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 100019250,
+                "ratio": {
+                  "decimal": "1.904693",
+                  "denominator": 70016,
+                  "numerator": 133359
+                },
+                "round": 0,
+                "sqlite_median_ns": 52512000
+              },
+              {
+                "modern_median_ns": 102503208,
+                "ratio": {
+                  "decimal": "1.814668",
+                  "denominator": 14121479,
+                  "numerator": 25625802
+                },
+                "round": 1,
+                "sqlite_median_ns": 56485916
+              },
+              {
+                "modern_median_ns": 101690000,
+                "ratio": {
+                  "decimal": "1.852491",
+                  "denominator": 54893667,
+                  "numerator": 101690000
+                },
+                "round": 2,
+                "sqlite_median_ns": 54893667
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 54893667
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.109580",
+              "denominator": 70953,
+              "numerator": 78728
+            },
+            "minimum_round_ratio": {
+              "decimal": "0.952047",
+              "denominator": 77096,
+              "numerator": 73399
+            },
+            "modern_median_ns": 74944000,
+            "ratio": {
+              "decimal": "1.052496",
+              "denominator": 35603,
+              "numerator": 37472
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 73399000,
+                "ratio": {
+                  "decimal": "0.952047",
+                  "denominator": 77096,
+                  "numerator": 73399
+                },
+                "round": 0,
+                "sqlite_median_ns": 77096000
+              },
+              {
+                "modern_median_ns": 78728000,
+                "ratio": {
+                  "decimal": "1.109580",
+                  "denominator": 70953,
+                  "numerator": 78728
+                },
+                "round": 1,
+                "sqlite_median_ns": 70953000
+              },
+              {
+                "modern_median_ns": 74944000,
+                "ratio": {
+                  "decimal": "1.058561",
+                  "denominator": 35399,
+                  "numerator": 37472
+                },
+                "round": 2,
+                "sqlite_median_ns": 70798000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 71206000
+          },
+          "guard_passed": null,
+          "id": "insert-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.081962",
+              "denominator": 89980916,
+              "numerator": 97355917
+            },
+            "minimum_round_ratio": {
+              "decimal": "0.909326",
+              "denominator": 99972125,
+              "numerator": 90907209
+            },
+            "modern_median_ns": 93618250,
+            "ratio": {
+              "decimal": "1.025661",
+              "denominator": 91276041,
+              "numerator": 93618250
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 90907209,
+                "ratio": {
+                  "decimal": "0.909326",
+                  "denominator": 99972125,
+                  "numerator": 90907209
+                },
+                "round": 0,
+                "sqlite_median_ns": 99972125
+              },
+              {
+                "modern_median_ns": 97355917,
+                "ratio": {
+                  "decimal": "1.081962",
+                  "denominator": 89980916,
+                  "numerator": 97355917
+                },
+                "round": 1,
+                "sqlite_median_ns": 89980916
+              },
+              {
+                "modern_median_ns": 93618250,
+                "ratio": {
+                  "decimal": "1.025661",
+                  "denominator": 91276041,
+                  "numerator": 93618250
+                },
+                "round": 2,
+                "sqlite_median_ns": 91276041
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 91276041
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "7.481325",
+              "denominator": 24418,
+              "numerator": 182679
+            },
+            "minimum_round_ratio": {
+              "decimal": "7.335786",
+              "denominator": 25147,
+              "numerator": 184473
+            },
+            "modern_median_ns": 184220000,
+            "ratio": {
+              "decimal": "7.401961",
+              "denominator": 102,
+              "numerator": 755
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 182679000,
+                "ratio": {
+                  "decimal": "7.481325",
+                  "denominator": 24418,
+                  "numerator": 182679
+                },
+                "round": 0,
+                "sqlite_median_ns": 24418000
+              },
+              {
+                "modern_median_ns": 184473000,
+                "ratio": {
+                  "decimal": "7.335786",
+                  "denominator": 25147,
+                  "numerator": 184473
+                },
+                "round": 1,
+                "sqlite_median_ns": 25147000
+              },
+              {
+                "modern_median_ns": 185710000,
+                "ratio": {
+                  "decimal": "7.461829",
+                  "denominator": 12444,
+                  "numerator": 92855
+                },
+                "round": 2,
+                "sqlite_median_ns": 24888000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 24888000
+          },
+          "guard_passed": null,
+          "id": "insert-batch-explicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "7.174462",
+              "denominator": 25578917,
+              "numerator": 183514958
+            },
+            "minimum_round_ratio": {
+              "decimal": "7.001933",
+              "denominator": 26467125,
+              "numerator": 185321042
+            },
+            "modern_median_ns": 185321042,
+            "ratio": {
+              "decimal": "7.082152",
+              "denominator": 26167333,
+              "numerator": 185321042
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 183514958,
+                "ratio": {
+                  "decimal": "7.174462",
+                  "denominator": 25578917,
+                  "numerator": 183514958
+                },
+                "round": 0,
+                "sqlite_median_ns": 25578917
+              },
+              {
+                "modern_median_ns": 185321042,
+                "ratio": {
+                  "decimal": "7.001933",
+                  "denominator": 26467125,
+                  "numerator": 185321042
+                },
+                "round": 1,
+                "sqlite_median_ns": 26467125
+              },
+              {
+                "modern_median_ns": 186530917,
+                "ratio": {
+                  "decimal": "7.070274",
+                  "denominator": 26382417,
+                  "numerator": 186530917
+                },
+                "round": 2,
+                "sqlite_median_ns": 26382417
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 26167333
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.110683",
+              "denominator": 68719,
+              "numerator": 76325
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.084524",
+              "denominator": 69223,
+              "numerator": 75074
+            },
+            "modern_median_ns": 76325000,
+            "ratio": {
+              "decimal": "1.106432",
+              "denominator": 68983,
+              "numerator": 76325
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 76325000,
+                "ratio": {
+                  "decimal": "1.110683",
+                  "denominator": 68719,
+                  "numerator": 76325
+                },
+                "round": 0,
+                "sqlite_median_ns": 68719000
+              },
+              {
+                "modern_median_ns": 75074000,
+                "ratio": {
+                  "decimal": "1.084524",
+                  "denominator": 69223,
+                  "numerator": 75074
+                },
+                "round": 1,
+                "sqlite_median_ns": 69223000
+              },
+              {
+                "modern_median_ns": 76510000,
+                "ratio": {
+                  "decimal": "1.109114",
+                  "denominator": 68983,
+                  "numerator": 76510
+                },
+                "round": 2,
+                "sqlite_median_ns": 68983000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 68983000
+          },
+          "guard_passed": null,
+          "id": "update-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.096125",
+              "denominator": 722311,
+              "numerator": 791743
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.070760",
+              "denominator": 90959750,
+              "numerator": 97396083
+            },
+            "modern_median_ns": 97894667,
+            "ratio": {
+              "decimal": "1.081296",
+              "denominator": 90534541,
+              "numerator": 97894667
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 97894667,
+                "ratio": {
+                  "decimal": "1.081296",
+                  "denominator": 90534541,
+                  "numerator": 97894667
+                },
+                "round": 0,
+                "sqlite_median_ns": 90534541
+              },
+              {
+                "modern_median_ns": 97396083,
+                "ratio": {
+                  "decimal": "1.070760",
+                  "denominator": 90959750,
+                  "numerator": 97396083
+                },
+                "round": 1,
+                "sqlite_median_ns": 90959750
+              },
+              {
+                "modern_median_ns": 98967875,
+                "ratio": {
+                  "decimal": "1.096125",
+                  "denominator": 722311,
+                  "numerator": 791743
+                },
+                "round": 2,
+                "sqlite_median_ns": 90288875
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 90534541
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "9.005879",
+              "denominator": 36401,
+              "numerator": 327823
+            },
+            "minimum_round_ratio": {
+              "decimal": "8.846435",
+              "denominator": 17797,
+              "numerator": 157440
+            },
+            "modern_median_ns": 317243000,
+            "ratio": {
+              "decimal": "8.849671",
+              "denominator": 35848,
+              "numerator": 317243
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 317243000,
+                "ratio": {
+                  "decimal": "8.849671",
+                  "denominator": 35848,
+                  "numerator": 317243
+                },
+                "round": 0,
+                "sqlite_median_ns": 35848000
+              },
+              {
+                "modern_median_ns": 314880000,
+                "ratio": {
+                  "decimal": "8.846435",
+                  "denominator": 17797,
+                  "numerator": 157440
+                },
+                "round": 1,
+                "sqlite_median_ns": 35594000
+              },
+              {
+                "modern_median_ns": 327823000,
+                "ratio": {
+                  "decimal": "9.005879",
+                  "denominator": 36401,
+                  "numerator": 327823
+                },
+                "round": 2,
+                "sqlite_median_ns": 36401000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 35848000
+          },
+          "guard_passed": null,
+          "id": "update-scan-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "10.075073",
+              "denominator": 39536209,
+              "numerator": 398330208
+            },
+            "minimum_round_ratio": {
+              "decimal": "9.895959",
+              "denominator": 156217,
+              "numerator": 1545917
+            },
+            "modern_median_ns": 388509666,
+            "ratio": {
+              "decimal": "9.947948",
+              "denominator": 19527125,
+              "numerator": 194254833
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 386479250,
+                "ratio": {
+                  "decimal": "9.895959",
+                  "denominator": 156217,
+                  "numerator": 1545917
+                },
+                "round": 0,
+                "sqlite_median_ns": 39054250
+              },
+              {
+                "modern_median_ns": 388836167,
+                "ratio": {
+                  "decimal": "10.027926",
+                  "denominator": 38775334,
+                  "numerator": 388836167
+                },
+                "round": 1,
+                "sqlite_median_ns": 38775334
+              },
+              {
+                "modern_median_ns": 398330208,
+                "ratio": {
+                  "decimal": "10.075073",
+                  "denominator": 39536209,
+                  "numerator": 398330208
+                },
+                "round": 2,
+                "sqlite_median_ns": 39536209
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 39054250
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.108822",
+              "denominator": 11505,
+              "numerator": 12757
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.050597",
+              "denominator": 70182,
+              "numerator": 73733
+            },
+            "modern_median_ns": 73733000,
+            "ratio": {
+              "decimal": "1.074042",
+              "denominator": 68650,
+              "numerator": 73733
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 72852000,
+                "ratio": {
+                  "decimal": "1.067961",
+                  "denominator": 17054,
+                  "numerator": 18213
+                },
+                "round": 0,
+                "sqlite_median_ns": 68216000
+              },
+              {
+                "modern_median_ns": 76542000,
+                "ratio": {
+                  "decimal": "1.108822",
+                  "denominator": 11505,
+                  "numerator": 12757
+                },
+                "round": 1,
+                "sqlite_median_ns": 69030000
+              },
+              {
+                "modern_median_ns": 73733000,
+                "ratio": {
+                  "decimal": "1.050597",
+                  "denominator": 70182,
+                  "numerator": 73733
+                },
+                "round": 2,
+                "sqlite_median_ns": 70182000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 68650000
+          },
+          "guard_passed": null,
+          "id": "delete-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.078784",
+              "denominator": 364083,
+              "numerator": 392767
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.013290",
+              "denominator": 46713646,
+              "numerator": 47334479
+            },
+            "modern_median_ns": 94668958,
+            "ratio": {
+              "decimal": "1.042934",
+              "denominator": 45385875,
+              "numerator": 47334479
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 92704167,
+                "ratio": {
+                  "decimal": "1.033540",
+                  "denominator": 89695792,
+                  "numerator": 92704167
+                },
+                "round": 0,
+                "sqlite_median_ns": 89695792
+              },
+              {
+                "modern_median_ns": 98191750,
+                "ratio": {
+                  "decimal": "1.078784",
+                  "denominator": 364083,
+                  "numerator": 392767
+                },
+                "round": 1,
+                "sqlite_median_ns": 91020750
+              },
+              {
+                "modern_median_ns": 94668958,
+                "ratio": {
+                  "decimal": "1.013290",
+                  "denominator": 46713646,
+                  "numerator": 47334479
+                },
+                "round": 2,
+                "sqlite_median_ns": 93427292
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 90771750
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "9.646271",
+              "denominator": 33356,
+              "numerator": 321761
+            },
+            "minimum_round_ratio": {
+              "decimal": "9.148868",
+              "denominator": 33822,
+              "numerator": 309433
+            },
+            "modern_median_ns": 309433000,
+            "ratio": {
+              "decimal": "9.217820",
+              "denominator": 33569,
+              "numerator": 309433
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 321761000,
+                "ratio": {
+                  "decimal": "9.646271",
+                  "denominator": 33356,
+                  "numerator": 321761
+                },
+                "round": 0,
+                "sqlite_median_ns": 33356000
+              },
+              {
+                "modern_median_ns": 303834000,
+                "ratio": {
+                  "decimal": "9.204302",
+                  "denominator": 16505,
+                  "numerator": 151917
+                },
+                "round": 1,
+                "sqlite_median_ns": 33010000
+              },
+              {
+                "modern_median_ns": 309433000,
+                "ratio": {
+                  "decimal": "9.148868",
+                  "denominator": 33822,
+                  "numerator": 309433
+                },
+                "round": 2,
+                "sqlite_median_ns": 33822000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 33569000
+          },
+          "guard_passed": null,
+          "id": "delete-scan-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "10.908499",
+              "denominator": 36700542,
+              "numerator": 400347833
+            },
+            "minimum_round_ratio": {
+              "decimal": "10.700821",
+              "denominator": 17527208,
+              "numerator": 187555521
+            },
+            "modern_median_ns": 382936666,
+            "ratio": {
+              "decimal": "10.665720",
+              "denominator": 17951750,
+              "numerator": 191468333
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 400347833,
+                "ratio": {
+                  "decimal": "10.908499",
+                  "denominator": 36700542,
+                  "numerator": 400347833
+                },
+                "round": 0,
+                "sqlite_median_ns": 36700542
+              },
+              {
+                "modern_median_ns": 375111042,
+                "ratio": {
+                  "decimal": "10.700821",
+                  "denominator": 17527208,
+                  "numerator": 187555521
+                },
+                "round": 1,
+                "sqlite_median_ns": 35054416
+              },
+              {
+                "modern_median_ns": 385693625,
+                "ratio": {
+                  "decimal": "10.742508",
+                  "denominator": 287228,
+                  "numerator": 3085549
+                },
+                "round": 2,
+                "sqlite_median_ns": 35903500
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 35903500
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "5.125442",
+              "denominator": 566,
+              "numerator": 2901
+            },
+            "minimum_round_ratio": {
+              "decimal": "4.982480",
+              "denominator": 40126,
+              "numerator": 199927
+            },
+            "modern_median_ns": 200686000,
+            "ratio": {
+              "decimal": "4.993928",
+              "denominator": 20093,
+              "numerator": 100343
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 205971000,
+                "ratio": {
+                  "decimal": "5.125442",
+                  "denominator": 566,
+                  "numerator": 2901
+                },
+                "round": 0,
+                "sqlite_median_ns": 40186000
+              },
+              {
+                "modern_median_ns": 199927000,
+                "ratio": {
+                  "decimal": "4.982480",
+                  "denominator": 40126,
+                  "numerator": 199927
+                },
+                "round": 1,
+                "sqlite_median_ns": 40126000
+              },
+              {
+                "modern_median_ns": 206163000,
+                "ratio": {
+                  "decimal": "5.082037",
+                  "denominator": 40567,
+                  "numerator": 206163
+                },
+                "round": 2,
+                "sqlite_median_ns": 40567000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 40186000
+          },
+          "guard_passed": null,
+          "id": "mixed-batch-commit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "5.937050",
+              "denominator": 45322292,
+              "numerator": 269080709
+            },
+            "minimum_round_ratio": {
+              "decimal": "5.766207",
+              "denominator": 11216146,
+              "numerator": 64674625
+            },
+            "modern_median_ns": 258855750,
+            "ratio": {
+              "decimal": "5.733779",
+              "denominator": 180583,
+              "numerator": 1035423
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 266408958,
+                "ratio": {
+                  "decimal": "5.901086",
+                  "denominator": 22572875,
+                  "numerator": 133204479
+                },
+                "round": 0,
+                "sqlite_median_ns": 45145750
+              },
+              {
+                "modern_median_ns": 258698500,
+                "ratio": {
+                  "decimal": "5.766207",
+                  "denominator": 11216146,
+                  "numerator": 64674625
+                },
+                "round": 1,
+                "sqlite_median_ns": 44864584
+              },
+              {
+                "modern_median_ns": 269080709,
+                "ratio": {
+                  "decimal": "5.937050",
+                  "denominator": 45322292,
+                  "numerator": 269080709
+                },
+                "round": 2,
+                "sqlite_median_ns": 45322292
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 45145750
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "4.362311",
+              "denominator": 47382,
+              "numerator": 206695
+            },
+            "minimum_round_ratio": {
+              "decimal": "4.307149",
+              "denominator": 47433,
+              "numerator": 204301
+            },
+            "modern_median_ns": 206695000,
+            "ratio": {
+              "decimal": "4.333410",
+              "denominator": 47698,
+              "numerator": 206695
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 206695000,
+                "ratio": {
+                  "decimal": "4.362311",
+                  "denominator": 47382,
+                  "numerator": 206695
+                },
+                "round": 0,
+                "sqlite_median_ns": 47382000
+              },
+              {
+                "modern_median_ns": 204301000,
+                "ratio": {
+                  "decimal": "4.307149",
+                  "denominator": 47433,
+                  "numerator": 204301
+                },
+                "round": 1,
+                "sqlite_median_ns": 47433000
+              },
+              {
+                "modern_median_ns": 209879000,
+                "ratio": {
+                  "decimal": "4.357319",
+                  "denominator": 48167,
+                  "numerator": 209879
+                },
+                "round": 2,
+                "sqlite_median_ns": 48167000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 47698000
+          },
+          "guard_passed": null,
+          "id": "mixed-batch-rollback",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "5.143609",
+              "denominator": 211999,
+              "numerator": 1090440
+            },
+            "minimum_round_ratio": {
+              "decimal": "5.032760",
+              "denominator": 424079,
+              "numerator": 2134288
+            },
+            "modern_median_ns": 265677000,
+            "ratio": {
+              "decimal": "5.012797",
+              "denominator": 211999,
+              "numerator": 1062708
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 266786000,
+                "ratio": {
+                  "decimal": "5.032760",
+                  "denominator": 424079,
+                  "numerator": 2134288
+                },
+                "round": 0,
+                "sqlite_median_ns": 53009875
+              },
+              {
+                "modern_median_ns": 261406333,
+                "ratio": {
+                  "decimal": "5.038721",
+                  "denominator": 51879500,
+                  "numerator": 261406333
+                },
+                "round": 1,
+                "sqlite_median_ns": 51879500
+              },
+              {
+                "modern_median_ns": 272610000,
+                "ratio": {
+                  "decimal": "5.143609",
+                  "denominator": 211999,
+                  "numerator": 1090440
+                },
+                "round": 2,
+                "sqlite_median_ns": 52999750
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 52999750
+          }
+        }
+      ],
+      "guard": false,
+      "id": "engine-default",
+      "status": "informational"
+    },
+    {
+      "cases": [
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "2.136763",
+              "denominator": 41539,
+              "numerator": 88759
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.952049",
+              "denominator": 11491,
+              "numerator": 22431
+            },
+            "modern_median_ns": 89724000,
+            "ratio": {
+              "decimal": "2.041595",
+              "denominator": 10987,
+              "numerator": 22431
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 88759000,
+                "ratio": {
+                  "decimal": "2.136763",
+                  "denominator": 41539,
+                  "numerator": 88759
+                },
+                "round": 0,
+                "sqlite_median_ns": 41539000
+              },
+              {
+                "modern_median_ns": 89724000,
+                "ratio": {
+                  "decimal": "1.952049",
+                  "denominator": 11491,
+                  "numerator": 22431
+                },
+                "round": 1,
+                "sqlite_median_ns": 45964000
+              },
+              {
+                "modern_median_ns": 93300000,
+                "ratio": {
+                  "decimal": "2.122964",
+                  "denominator": 10987,
+                  "numerator": 23325
+                },
+                "round": 2,
+                "sqlite_median_ns": 43948000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 43948000
+          },
+          "guard_passed": true,
+          "id": "create-table-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.940799",
+              "denominator": 55092041,
+              "numerator": 106922584
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.758470",
+              "denominator": 56713375,
+              "numerator": 99728792
+            },
+            "modern_median_ns": 99728792,
+            "ratio": {
+              "decimal": "1.810221",
+              "denominator": 55092041,
+              "numerator": 99728792
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 98395083,
+                "ratio": {
+                  "decimal": "1.875024",
+                  "denominator": 52476709,
+                  "numerator": 98395083
+                },
+                "round": 0,
+                "sqlite_median_ns": 52476709
+              },
+              {
+                "modern_median_ns": 99728792,
+                "ratio": {
+                  "decimal": "1.758470",
+                  "denominator": 56713375,
+                  "numerator": 99728792
+                },
+                "round": 1,
+                "sqlite_median_ns": 56713375
+              },
+              {
+                "modern_median_ns": 106922584,
+                "ratio": {
+                  "decimal": "1.940799",
+                  "denominator": 55092041,
+                  "numerator": 106922584
+                },
+                "round": 2,
+                "sqlite_median_ns": 55092041
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 55092041
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.092985",
+              "denominator": 17433,
+              "numerator": 19054
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.083464",
+              "denominator": 70941,
+              "numerator": 76862
+            },
+            "modern_median_ns": 76129000,
+            "ratio": {
+              "decimal": "1.083841",
+              "denominator": 70240,
+              "numerator": 76129
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 76862000,
+                "ratio": {
+                  "decimal": "1.083464",
+                  "denominator": 70941,
+                  "numerator": 76862
+                },
+                "round": 0,
+                "sqlite_median_ns": 70941000
+              },
+              {
+                "modern_median_ns": 76216000,
+                "ratio": {
+                  "decimal": "1.092985",
+                  "denominator": 17433,
+                  "numerator": 19054
+                },
+                "round": 1,
+                "sqlite_median_ns": 69732000
+              },
+              {
+                "modern_median_ns": 75192000,
+                "ratio": {
+                  "decimal": "1.090909",
+                  "denominator": 11,
+                  "numerator": 12
+                },
+                "round": 2,
+                "sqlite_median_ns": 68926000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 70240000
+          },
+          "guard_passed": true,
+          "id": "insert-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.071522",
+              "denominator": 21943271,
+              "numerator": 23512698
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.050150",
+              "denominator": 90408458,
+              "numerator": 94942417
+            },
+            "modern_median_ns": 94050792,
+            "ratio": {
+              "decimal": "1.063915",
+              "denominator": 29466889,
+              "numerator": 31350264
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 94942417,
+                "ratio": {
+                  "decimal": "1.050150",
+                  "denominator": 90408458,
+                  "numerator": 94942417
+                },
+                "round": 0,
+                "sqlite_median_ns": 90408458
+              },
+              {
+                "modern_median_ns": 94050792,
+                "ratio": {
+                  "decimal": "1.071522",
+                  "denominator": 21943271,
+                  "numerator": 23512698
+                },
+                "round": 1,
+                "sqlite_median_ns": 87773084
+              },
+              {
+                "modern_median_ns": 92814875,
+                "ratio": {
+                  "decimal": "1.054826",
+                  "denominator": 87990708,
+                  "numerator": 92814875
+                },
+                "round": 2,
+                "sqlite_median_ns": 87990708
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 88400667
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "7.429149",
+              "denominator": 12604,
+              "numerator": 93637
+            },
+            "minimum_round_ratio": {
+              "decimal": "7.303671",
+              "denominator": 26127,
+              "numerator": 190823
+            },
+            "modern_median_ns": 188655000,
+            "ratio": {
+              "decimal": "7.356979",
+              "denominator": 25643,
+              "numerator": 188655
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 187274000,
+                "ratio": {
+                  "decimal": "7.429149",
+                  "denominator": 12604,
+                  "numerator": 93637
+                },
+                "round": 0,
+                "sqlite_median_ns": 25208000
+              },
+              {
+                "modern_median_ns": 188655000,
+                "ratio": {
+                  "decimal": "7.334953",
+                  "denominator": 5144,
+                  "numerator": 37731
+                },
+                "round": 1,
+                "sqlite_median_ns": 25720000
+              },
+              {
+                "modern_median_ns": 190823000,
+                "ratio": {
+                  "decimal": "7.303671",
+                  "denominator": 26127,
+                  "numerator": 190823
+                },
+                "round": 2,
+                "sqlite_median_ns": 26127000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 25643000
+          },
+          "guard_passed": true,
+          "id": "insert-batch-explicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "7.125881",
+              "denominator": 26410834,
+              "numerator": 188200459
+            },
+            "minimum_round_ratio": {
+              "decimal": "7.043352",
+              "denominator": 13653625,
+              "numerator": 96167292
+            },
+            "modern_median_ns": 189691000,
+            "ratio": {
+              "decimal": "7.062551",
+              "denominator": 6714677,
+              "numerator": 47422750
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 188200459,
+                "ratio": {
+                  "decimal": "7.125881",
+                  "denominator": 26410834,
+                  "numerator": 188200459
+                },
+                "round": 0,
+                "sqlite_median_ns": 26410834
+              },
+              {
+                "modern_median_ns": 189691000,
+                "ratio": {
+                  "decimal": "7.052639",
+                  "denominator": 13448229,
+                  "numerator": 94845500
+                },
+                "round": 1,
+                "sqlite_median_ns": 26896458
+              },
+              {
+                "modern_median_ns": 192334584,
+                "ratio": {
+                  "decimal": "7.043352",
+                  "denominator": 13653625,
+                  "numerator": 96167292
+                },
+                "round": 2,
+                "sqlite_median_ns": 27307250
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 26858708
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.154827",
+              "denominator": 65925,
+              "numerator": 76132
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.070358",
+              "denominator": 70568,
+              "numerator": 75533
+            },
+            "modern_median_ns": 75533000,
+            "ratio": {
+              "decimal": "1.116757",
+              "denominator": 67636,
+              "numerator": 75533
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 76132000,
+                "ratio": {
+                  "decimal": "1.154827",
+                  "denominator": 65925,
+                  "numerator": 76132
+                },
+                "round": 0,
+                "sqlite_median_ns": 65925000
+              },
+              {
+                "modern_median_ns": 74063000,
+                "ratio": {
+                  "decimal": "1.132600",
+                  "denominator": 65392,
+                  "numerator": 74063
+                },
+                "round": 1,
+                "sqlite_median_ns": 65392000
+              },
+              {
+                "modern_median_ns": 75533000,
+                "ratio": {
+                  "decimal": "1.070358",
+                  "denominator": 70568,
+                  "numerator": 75533
+                },
+                "round": 2,
+                "sqlite_median_ns": 70568000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 67636000
+          },
+          "guard_passed": true,
+          "id": "update-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.103212",
+              "denominator": 14431257,
+              "numerator": 15920743
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.045986",
+              "denominator": 743657,
+              "numerator": 777855
+            },
+            "modern_median_ns": 97231875,
+            "ratio": {
+              "decimal": "1.090736",
+              "denominator": 713147,
+              "numerator": 777855
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 98093084,
+                "ratio": {
+                  "decimal": "1.100397",
+                  "denominator": 89143375,
+                  "numerator": 98093084
+                },
+                "round": 0,
+                "sqlite_median_ns": 89143375
+              },
+              {
+                "modern_median_ns": 95524458,
+                "ratio": {
+                  "decimal": "1.103212",
+                  "denominator": 14431257,
+                  "numerator": 15920743
+                },
+                "round": 1,
+                "sqlite_median_ns": 86587542
+              },
+              {
+                "modern_median_ns": 97231875,
+                "ratio": {
+                  "decimal": "1.045986",
+                  "denominator": 743657,
+                  "numerator": 777855
+                },
+                "round": 2,
+                "sqlite_median_ns": 92957125
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 89143375
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "8.928313",
+              "denominator": 17967,
+              "numerator": 160415
+            },
+            "minimum_round_ratio": {
+              "decimal": "8.576463",
+              "denominator": 37737,
+              "numerator": 323650
+            },
+            "modern_median_ns": 321345000,
+            "ratio": {
+              "decimal": "8.636913",
+              "denominator": 4134,
+              "numerator": 35705
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 320830000,
+                "ratio": {
+                  "decimal": "8.928313",
+                  "denominator": 17967,
+                  "numerator": 160415
+                },
+                "round": 0,
+                "sqlite_median_ns": 35934000
+              },
+              {
+                "modern_median_ns": 320713000,
+                "ratio": {
+                  "decimal": "8.626419",
+                  "denominator": 37178,
+                  "numerator": 320713
+                },
+                "round": 1,
+                "sqlite_median_ns": 37178000
+              },
+              {
+                "modern_median_ns": 323650000,
+                "ratio": {
+                  "decimal": "8.576463",
+                  "denominator": 37737,
+                  "numerator": 323650
+                },
+                "round": 2,
+                "sqlite_median_ns": 37737000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 37206000
+          },
+          "guard_passed": false,
+          "id": "update-scan-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "10.068601",
+              "denominator": 2298527,
+              "numerator": 23142951
+            },
+            "minimum_round_ratio": {
+              "decimal": "9.449128",
+              "denominator": 13727389,
+              "numerator": 129711861
+            },
+            "modern_median_ns": 389401625,
+            "ratio": {
+              "decimal": "9.540358",
+              "denominator": 326530,
+              "numerator": 3115213
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 393430167,
+                "ratio": {
+                  "decimal": "10.068601",
+                  "denominator": 2298527,
+                  "numerator": 23142951
+                },
+                "round": 0,
+                "sqlite_median_ns": 39074959
+              },
+              {
+                "modern_median_ns": 389135583,
+                "ratio": {
+                  "decimal": "9.449128",
+                  "denominator": 13727389,
+                  "numerator": 129711861
+                },
+                "round": 1,
+                "sqlite_median_ns": 41182167
+              },
+              {
+                "modern_median_ns": 389401625,
+                "ratio": {
+                  "decimal": "9.540358",
+                  "denominator": 326530,
+                  "numerator": 3115213
+                },
+                "round": 2,
+                "sqlite_median_ns": 40816250
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 40816250
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "1.126587",
+              "denominator": 68214,
+              "numerator": 76849
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.085898",
+              "denominator": 65624,
+              "numerator": 71261
+            },
+            "modern_median_ns": 73636000,
+            "ratio": {
+              "decimal": "1.089838",
+              "denominator": 33783,
+              "numerator": 36818
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 73585000,
+                "ratio": {
+                  "decimal": "1.089083",
+                  "denominator": 67566,
+                  "numerator": 73585
+                },
+                "round": 0,
+                "sqlite_median_ns": 67566000
+              },
+              {
+                "modern_median_ns": 76849000,
+                "ratio": {
+                  "decimal": "1.126587",
+                  "denominator": 68214,
+                  "numerator": 76849
+                },
+                "round": 1,
+                "sqlite_median_ns": 68214000
+              },
+              {
+                "modern_median_ns": 71261000,
+                "ratio": {
+                  "decimal": "1.085898",
+                  "denominator": 65624,
+                  "numerator": 71261
+                },
+                "round": 2,
+                "sqlite_median_ns": 65624000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 67566000
+          },
+          "guard_passed": true,
+          "id": "delete-point-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "1.092108",
+              "denominator": 90815041,
+              "numerator": 99179875
+            },
+            "minimum_round_ratio": {
+              "decimal": "1.050097",
+              "denominator": 43754854,
+              "numerator": 45946833
+            },
+            "modern_median_ns": 94710916,
+            "ratio": {
+              "decimal": "1.063243",
+              "denominator": 89077417,
+              "numerator": 94710916
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 94456750,
+                "ratio": {
+                  "decimal": "1.060389",
+                  "denominator": 89077417,
+                  "numerator": 94456750
+                },
+                "round": 0,
+                "sqlite_median_ns": 89077417
+              },
+              {
+                "modern_median_ns": 99179875,
+                "ratio": {
+                  "decimal": "1.092108",
+                  "denominator": 90815041,
+                  "numerator": 99179875
+                },
+                "round": 1,
+                "sqlite_median_ns": 90815041
+              },
+              {
+                "modern_median_ns": 91893666,
+                "ratio": {
+                  "decimal": "1.050097",
+                  "denominator": 43754854,
+                  "numerator": 45946833
+                },
+                "round": 2,
+                "sqlite_median_ns": 87509708
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 89077417
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "9.305266",
+              "denominator": 33764,
+              "numerator": 314183
+            },
+            "minimum_round_ratio": {
+              "decimal": "8.893750",
+              "denominator": 34306,
+              "numerator": 305109
+            },
+            "modern_median_ns": 305109000,
+            "ratio": {
+              "decimal": "9.015691",
+              "denominator": 33842,
+              "numerator": 305109
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 305109000,
+                "ratio": {
+                  "decimal": "8.893750",
+                  "denominator": 34306,
+                  "numerator": 305109
+                },
+                "round": 0,
+                "sqlite_median_ns": 34306000
+              },
+              {
+                "modern_median_ns": 303135000,
+                "ratio": {
+                  "decimal": "9.044486",
+                  "denominator": 1596,
+                  "numerator": 14435
+                },
+                "round": 1,
+                "sqlite_median_ns": 33516000
+              },
+              {
+                "modern_median_ns": 314183000,
+                "ratio": {
+                  "decimal": "9.305266",
+                  "denominator": 33764,
+                  "numerator": 314183
+                },
+                "round": 2,
+                "sqlite_median_ns": 33764000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 33842000
+          },
+          "guard_passed": false,
+          "id": "delete-scan-implicit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "10.868056",
+              "denominator": 286349,
+              "numerator": 3112057
+            },
+            "minimum_round_ratio": {
+              "decimal": "10.237324",
+              "denominator": 18161604,
+              "numerator": 185926229
+            },
+            "modern_median_ns": 374240416,
+            "ratio": {
+              "decimal": "10.435206",
+              "denominator": 17931625,
+              "numerator": 187120208
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 371852458,
+                "ratio": {
+                  "decimal": "10.237324",
+                  "denominator": 18161604,
+                  "numerator": 185926229
+                },
+                "round": 0,
+                "sqlite_median_ns": 36323208
+              },
+              {
+                "modern_median_ns": 372777666,
+                "ratio": {
+                  "decimal": "10.484155",
+                  "denominator": 11852097,
+                  "numerator": 124259222
+                },
+                "round": 1,
+                "sqlite_median_ns": 35556291
+              },
+              {
+                "modern_median_ns": 389007125,
+                "ratio": {
+                  "decimal": "10.868056",
+                  "denominator": 286349,
+                  "numerator": 3112057
+                },
+                "round": 2,
+                "sqlite_median_ns": 35793625
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 35863250
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "5.559662",
+              "denominator": 41023,
+              "numerator": 228074
+            },
+            "minimum_round_ratio": {
+              "decimal": "4.901920",
+              "denominator": 41609,
+              "numerator": 203964
+            },
+            "modern_median_ns": 203964000,
+            "ratio": {
+              "decimal": "4.964560",
+              "denominator": 10271,
+              "numerator": 50991
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 228074000,
+                "ratio": {
+                  "decimal": "5.559662",
+                  "denominator": 41023,
+                  "numerator": 228074
+                },
+                "round": 0,
+                "sqlite_median_ns": 41023000
+              },
+              {
+                "modern_median_ns": 201535000,
+                "ratio": {
+                  "decimal": "4.905438",
+                  "denominator": 41084,
+                  "numerator": 201535
+                },
+                "round": 1,
+                "sqlite_median_ns": 41084000
+              },
+              {
+                "modern_median_ns": 203964000,
+                "ratio": {
+                  "decimal": "4.901920",
+                  "denominator": 41609,
+                  "numerator": 203964
+                },
+                "round": 2,
+                "sqlite_median_ns": 41609000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 41084000
+          },
+          "guard_passed": true,
+          "id": "mixed-batch-commit",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "6.781004",
+              "denominator": 366335,
+              "numerator": 2484119
+            },
+            "minimum_round_ratio": {
+              "decimal": "5.698965",
+              "denominator": 23241125,
+              "numerator": 132450354
+            },
+            "modern_median_ns": 264900708,
+            "ratio": {
+              "decimal": "5.783227",
+              "denominator": 11451250,
+              "numerator": 66225177
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 310514875,
+                "ratio": {
+                  "decimal": "6.781004",
+                  "denominator": 366335,
+                  "numerator": 2484119
+                },
+                "round": 0,
+                "sqlite_median_ns": 45791875
+              },
+              {
+                "modern_median_ns": 261107416,
+                "ratio": {
+                  "decimal": "5.703625",
+                  "denominator": 5722401,
+                  "numerator": 32638427
+                },
+                "round": 1,
+                "sqlite_median_ns": 45779208
+              },
+              {
+                "modern_median_ns": 264900708,
+                "ratio": {
+                  "decimal": "5.698965",
+                  "denominator": 23241125,
+                  "numerator": 132450354
+                },
+                "round": 2,
+                "sqlite_median_ns": 46482250
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 45805000
+          }
+        },
+        {
+          "cpu": {
+            "maximum_round_ratio": {
+              "decimal": "4.845227",
+              "denominator": 48361,
+              "numerator": 234320
+            },
+            "minimum_round_ratio": {
+              "decimal": "3.873840",
+              "denominator": 54827,
+              "numerator": 212391
+            },
+            "modern_median_ns": 212391000,
+            "ratio": {
+              "decimal": "4.353077",
+              "denominator": 48791,
+              "numerator": 212391
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 206708000,
+                "ratio": {
+                  "decimal": "4.236601",
+                  "denominator": 48791,
+                  "numerator": 206708
+                },
+                "round": 0,
+                "sqlite_median_ns": 48791000
+              },
+              {
+                "modern_median_ns": 234320000,
+                "ratio": {
+                  "decimal": "4.845227",
+                  "denominator": 48361,
+                  "numerator": 234320
+                },
+                "round": 1,
+                "sqlite_median_ns": 48361000
+              },
+              {
+                "modern_median_ns": 212391000,
+                "ratio": {
+                  "decimal": "3.873840",
+                  "denominator": 54827,
+                  "numerator": 212391
+                },
+                "round": 2,
+                "sqlite_median_ns": 54827000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 48791000
+          },
+          "guard_passed": true,
+          "id": "mixed-batch-rollback",
+          "wall": {
+            "maximum_round_ratio": {
+              "decimal": "5.862353",
+              "denominator": 26618125,
+              "numerator": 156044854
+            },
+            "minimum_round_ratio": {
+              "decimal": "4.521991",
+              "denominator": 15113250,
+              "numerator": 68341979
+            },
+            "modern_median_ns": 273367916,
+            "ratio": {
+              "decimal": "5.107004",
+              "denominator": 26764021,
+              "numerator": 136683958
+            },
+            "round_ratios": [
+              {
+                "modern_median_ns": 267544792,
+                "ratio": {
+                  "decimal": "4.998217",
+                  "denominator": 26764021,
+                  "numerator": 133772396
+                },
+                "round": 0,
+                "sqlite_median_ns": 53528042
+              },
+              {
+                "modern_median_ns": 312089708,
+                "ratio": {
+                  "decimal": "5.862353",
+                  "denominator": 26618125,
+                  "numerator": 156044854
+                },
+                "round": 1,
+                "sqlite_median_ns": 53236250
+              },
+              {
+                "modern_median_ns": 273367916,
+                "ratio": {
+                  "decimal": "4.521991",
+                  "denominator": 15113250,
+                  "numerator": 68341979
+                },
+                "round": 2,
+                "sqlite_median_ns": 60453000
+              }
+            ],
+            "sample_count": 9,
+            "sqlite_median_ns": 53528042
+          }
+        }
+      ],
+      "guard": true,
+      "id": "matched-durable",
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "status": "complete",
+  "workload_semantics_version": 1
+}
