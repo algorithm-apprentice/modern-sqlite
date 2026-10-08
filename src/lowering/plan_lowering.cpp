@@ -1148,6 +1148,11 @@ class PlanLowerer final {
         .root_page = RootPageNumber(target.root_page.value),
         .columns = {},
         .rowid_alias = std::nullopt,
+        .index_columns = {},
+        .key_term_count = 0,
+        .unique = false,
+        .unique_not_null = false,
+        .storage = WriteCursorStorageKind::kRowIdTable,
     };
     descriptor.columns.reserve(target.columns.size());
     if (default_constants != nullptr) {
@@ -3464,6 +3469,11 @@ class PlanLowerer final {
                 },
             },
         .rowid_alias = std::nullopt,
+        .index_columns = {},
+        .key_term_count = 0,
+        .unique = false,
+        .unique_not_null = false,
+        .storage = WriteCursorStorageKind::kRowIdTable,
     };
     auto cursor = ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(descriptor)),
                                        "unable to add the sqlite_schema write cursor");

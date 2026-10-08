@@ -56,6 +56,11 @@ enum class CursorStorageKind : std::uint8_t {
   kIndex,
 };
 
+enum class WriteCursorStorageKind : std::uint8_t {
+  kRowIdTable,
+  kIndex,
+};
+
 enum class ProgramStatementKind : std::uint8_t {
   kSelect,
   kInsert,
@@ -153,6 +158,11 @@ struct WriteCursorDescriptor {
   RootPageNumber root_page;
   std::vector<WriteColumnDescriptor> columns;
   std::optional<std::uint32_t> rowid_alias{};
+  std::vector<IndexColumnMetadata> index_columns;
+  std::uint32_t key_term_count = 0;
+  bool unique = false;
+  bool unique_not_null = false;
+  WriteCursorStorageKind storage = WriteCursorStorageKind::kRowIdTable;
 };
 
 struct MutationResultMetadata {
@@ -350,6 +360,25 @@ struct BuildTableRecordInstruction {
   RegisterId output;
 };
 
+struct CheckUniqueIndexInstruction {
+  WriteCursorId cursor;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  std::optional<RegisterId> ignored_rowid{};
+};
+
+struct InsertIndexInstruction {
+  WriteCursorId cursor;
+  RegisterId first_value;
+  std::uint32_t value_count;
+};
+
+struct DeleteIndexInstruction {
+  WriteCursorId cursor;
+  RegisterId first_value;
+  std::uint32_t value_count;
+};
+
 struct InsertTableInstruction {
   WriteCursorId cursor;
   RegisterId rowid;
@@ -429,9 +458,10 @@ using Instruction = std::variant<
     AppendRowIdListInstruction, RewindRowIdListInstruction, NextRowIdListInstruction,
     SeekRowIdInstruction, SeekTableRowIdInstruction, SeekIndexInstruction,
     CheckIndexRangeInstruction, ReadFieldInstruction, ReadRowIdInstruction,
-    ResolveInsertRowIdInstruction, BuildTableRecordInstruction, InsertTableInstruction,
-    DeleteTableInstruction, DeleteCurrentTableInstruction, UpdateCurrentTableInstruction,
-    UpdateTableInstruction, EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
+    ResolveInsertRowIdInstruction, BuildTableRecordInstruction, CheckUniqueIndexInstruction,
+    InsertIndexInstruction, DeleteIndexInstruction, InsertTableInstruction, DeleteTableInstruction,
+    DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
+    EnsureDatabaseInitializedInstruction, CreateTableRootInstruction,
     IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
     JumpIfInstruction, ResultRowInstruction>;
 
@@ -467,6 +497,9 @@ enum class InstructionKind : std::uint8_t {
   kReadRowId,
   kResolveInsertRowId,
   kBuildTableRecord,
+  kCheckUniqueIndex,
+  kInsertIndex,
+  kDeleteIndex,
   kInsertTable,
   kDeleteTable,
   kDeleteCurrentTable,

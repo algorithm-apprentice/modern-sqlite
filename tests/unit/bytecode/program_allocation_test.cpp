@@ -54,6 +54,11 @@ int main() try {
               },
           },
       .rowid_alias = std::nullopt,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {HaltInstruction{}};
 

@@ -270,6 +270,11 @@ class TemporaryDatabase final {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
@@ -323,6 +328,11 @@ class TemporaryDatabase final {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
@@ -395,6 +405,11 @@ class TemporaryDatabase final {
               },
           },
       .rowid_alias = 0,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .storage = WriteCursorStorageKind::kRowIdTable,
   });
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
@@ -907,6 +922,168 @@ TEST(VmWriteTest, RejectsDuplicateRowidAndNotNullBeforePublishingChanges) {
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(1, rows[0].first);
   ExpectText(rows[0].second[1], "seed");
+}
+
+TEST(VmWriteTest, PreflightsMaintainsAndValidatesIndexEntries) {
+  test::WritePagerFixedVfs vfs{false};
+  PageNumber index_root{0};
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(statement.writer()->InitializeDatabase());
+    const std::array<IndexColumnOrder, 2> columns{
+        IndexColumnOrder{BinaryCollation()},
+        IndexColumnOrder{BinaryCollation()},
+    };
+    IndexBtreeWriter index = TakeValue(statement.writer()->CreateIndexBtree(columns));
+    index_root = index.root_page();
+    std::array<SqlValue, 2> seed{SqlValue::Text("key"), SqlValue::Integer(7)};
+    RequireStatus(index.Insert(seed));
+    RequireStatus(statement.Succeed());
+  }
+
+  enum class IndexAction : std::uint8_t {
+    kCheck,
+    kInsert,
+    kInsertUnchecked,
+    kDelete,
+  };
+  const auto program = [&](ProgramStatementKind statement_kind, SqlValue key, std::int64_t rowid,
+                           IndexAction action,
+                           std::optional<std::int64_t> ignored_rowid = std::nullopt) {
+    ProgramInput input;
+    input.schema_version = SchemaVersionRequirement{};
+    input.statement_kind = statement_kind;
+    input.transaction_access = ProgramTransactionAccess::kWrite;
+    input.rollback_mode = ProgramRollbackMode::kStatement;
+    input.mutation_result =
+        statement_kind == ProgramStatementKind::kInsert
+            ? MutationResultMetadata{
+                  .publishes_changes = true,
+                  .publishes_last_insert_rowid = true,
+              }
+            : MutationResultMetadata{
+                  .publishes_changes = true,
+                  .publishes_last_insert_rowid = false,
+              };
+    input.register_count = 2;
+    input.constants.push_back(std::move(key));
+    input.constants.push_back(SqlValue::Integer(rowid));
+    input.symbols.emplace_back("BINARY");
+    input.write_cursors.push_back(WriteCursorDescriptor{
+        .root_page = RootPageNumber(index_root.value()),
+        .columns = {},
+        .rowid_alias = std::nullopt,
+        .index_columns =
+            {
+                IndexColumnMetadata{
+                    .collation = Symbol(0),
+                    .order = BytecodeSortOrder::kAscending,
+                },
+                IndexColumnMetadata{
+                    .collation = Symbol(0),
+                    .order = BytecodeSortOrder::kAscending,
+                },
+            },
+        .key_term_count = 1,
+        .unique = true,
+        .unique_not_null = false,
+        .storage = WriteCursorStorageKind::kIndex,
+    });
+    input.instructions = {
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+        OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+    };
+    if (action != IndexAction::kDelete && action != IndexAction::kInsertUnchecked) {
+      input.instructions.emplace_back(CheckUniqueIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .ignored_rowid =
+              ignored_rowid.has_value() ? std::optional<RegisterId>{Reg(1)} : std::nullopt,
+      });
+    }
+    if (action == IndexAction::kInsert || action == IndexAction::kInsertUnchecked) {
+      input.instructions.emplace_back(InsertIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+      });
+    } else if (action == IndexAction::kDelete) {
+      input.instructions.emplace_back(DeleteIndexInstruction{
+          .cursor = WriteCursor(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+      });
+    }
+    input.instructions.emplace_back(CloseWriteCursorInstruction{.cursor = WriteCursor(0)});
+    input.instructions.emplace_back(HaltInstruction{});
+    return TakeProgramValue(BytecodeProgram::Create(input));
+  };
+
+  const auto execute = [&](const BytecodeProgram& bytecode) {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = StatementRollbackMode::kStatement,
+        }));
+    Vm vm = TakeValue(Vm::Create(bytecode, VmEnvironment::Core()));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    Result<VmStep> stepped = vm.Step();
+    RequireStatus(vm.DetachExecutionContext());
+    if (stepped.has_value()) {
+      RequireStatus(statement.Succeed());
+    } else {
+      RequireStatus(statement.Rollback());
+    }
+    return stepped;
+  };
+
+  const BytecodeProgram duplicate =
+      program(ProgramStatementKind::kInsert, SqlValue::Text("key"), 9, IndexAction::kInsert);
+  const auto duplicate_result = execute(duplicate);
+  ASSERT_FALSE(duplicate_result.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_result.error().code());
+  const BytecodeProgram unchecked_duplicate = program(
+      ProgramStatementKind::kInsert, SqlValue::Text("key"), 9, IndexAction::kInsertUnchecked);
+  const auto unchecked_result = execute(unchecked_duplicate);
+  ASSERT_FALSE(unchecked_result.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, unchecked_result.error().code());
+
+  const BytecodeProgram ignored =
+      program(ProgramStatementKind::kUpdate, SqlValue::Text("key"), 7, IndexAction::kCheck, 7);
+  EXPECT_EQ(VmStep::kDone, TakeValue(execute(ignored)));
+
+  const BytecodeProgram first_null =
+      program(ProgramStatementKind::kInsert, SqlValue{}, 8, IndexAction::kInsert);
+  const BytecodeProgram second_null =
+      program(ProgramStatementKind::kInsert, SqlValue{}, 9, IndexAction::kInsert);
+  EXPECT_EQ(VmStep::kDone, TakeValue(execute(first_null)));
+  EXPECT_EQ(VmStep::kDone, TakeValue(execute(second_null)));
+
+  const BytecodeProgram deletion =
+      program(ProgramStatementKind::kDelete, SqlValue::Text("key"), 7, IndexAction::kDelete);
+  EXPECT_EQ(VmStep::kDone, TakeValue(execute(deletion)));
+  const auto missing_delete = execute(deletion);
+  ASSERT_FALSE(missing_delete.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, missing_delete.error().code());
+
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeWriter index = TakeValue(statement.writer()->OpenIndexBtree(index_root, columns));
+  std::array<SqlValue, 1> key{SqlValue::Text("key")};
+  EXPECT_FALSE(TakeValue(index.FindPrefixRowId(key)).has_value());
+  std::array<SqlValue, 1> null_key{};
+  EXPECT_EQ(std::optional<std::int64_t>{8}, TakeValue(index.FindPrefixRowId(null_key)));
+  RequireStatus(statement.Succeed());
 }
 
 TEST(VmWriteTest, GeneratesRowidsAcrossNegativeAndRandomBoundaries) {

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -149,6 +150,7 @@ class IndexBtreeWriter final {
   [[nodiscard]] PageNumber root_page() const noexcept { return root_page_; }
   [[nodiscard]] bool requires_rollback() const noexcept;
 
+  [[nodiscard]] Result<std::optional<std::int64_t>> FindPrefixRowId(std::span<const SqlValue> key);
   [[nodiscard]] Status Insert(std::span<const SqlValue> values);
   [[nodiscard]] Result<bool> Delete(std::span<const SqlValue> values);
   [[nodiscard]] Result<std::uint64_t> Clear();

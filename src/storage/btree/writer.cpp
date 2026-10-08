@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -21,6 +22,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/database_format.hpp"
 #include "writer_internal.hpp"
@@ -812,6 +814,59 @@ Status TableBtreeWriter::Drop() {
 
 bool IndexBtreeWriter::requires_rollback() const noexcept {
   return core_ != nullptr && core_->requires_rollback();
+}
+
+Result<std::optional<std::int64_t>> IndexBtreeWriter::FindPrefixRowId(
+    std::span<const SqlValue> key) {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  if (key.empty() || key.size() >= columns_.size()) {
+    return std::unexpected(Misuse("index prefix does not match comparison metadata"));
+  }
+  auto cursor = IndexBtreeCursor::Open(core_->pager(), root_page_, columns_);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  auto found = cursor->Seek(key, BtreeSeekMode::kGreaterOrEqual);
+  if (!found.has_value()) {
+    return std::unexpected(std::move(found.error()));
+  }
+  if (!*found) {
+    return std::optional<std::int64_t>{};
+  }
+  auto comparison = cursor->CompareCurrent(key);
+  if (!comparison.has_value()) {
+    return std::unexpected(std::move(comparison.error()));
+  }
+  if (*comparison != std::weak_ordering::equivalent) {
+    return std::optional<std::int64_t>{};
+  }
+  auto payload = cursor->CopyPayload();
+  if (!payload.has_value()) {
+    return std::unexpected(std::move(payload.error()));
+  }
+  auto record = RecordView::Parse(payload->view(), core_->record_options());
+  if (!record.has_value()) {
+    return std::unexpected(std::move(record.error()));
+  }
+  if (record->field_count() != columns_.size()) {
+    return std::unexpected(Corruption("index record field count does not match metadata"));
+  }
+  auto field = record->field(record->field_count() - 1U);
+  if (!field.has_value()) {
+    return std::unexpected(std::move(field.error()));
+  }
+  const std::optional<std::int64_t> rowid = field->integer_value();
+  if (!rowid.has_value()) {
+    return std::unexpected(Corruption("index record rowid suffix is not an integer"));
+  }
+  return rowid;
 }
 
 Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
