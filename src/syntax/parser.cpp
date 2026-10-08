@@ -2154,6 +2154,22 @@ class Parser final {
     }};
   }
 
+  [[nodiscard]] StatementResult ParseAnalyze() {
+    const Token keyword = Consume();
+    std::optional<QualifiedName> target;
+    if (Peek().kind != TokenKind::kSemicolon && Peek().kind != TokenKind::kEndOfInput) {
+      NameResult name = ParseQualifiedName(2U, NameClass::kNm);
+      if (!name.has_value()) {
+        return std::unexpected(name.error());
+      }
+      target = std::move(*name);
+    }
+    return Statement{AnalyzeStatement{
+        .span = MakeSpan(keyword.span.begin(), last_consumed_end_),
+        .target = std::move(target),
+    }};
+  }
+
   [[nodiscard]] StatementResult ParseCreate() {
     const Token create_keyword = Consume();
     bool temporary = false;
@@ -2202,7 +2218,6 @@ class Parser final {
       case TokenKind::kDetach:
       case TokenKind::kVacuum:
       case TokenKind::kReindex:
-      case TokenKind::kAnalyze:
       case TokenKind::kAlter:
       case TokenKind::kDrop:
         return true;
@@ -2218,6 +2233,9 @@ class Parser final {
     }
     if (token.kind == TokenKind::kSelect) {
       return ParseSelect();
+    }
+    if (token.kind == TokenKind::kAnalyze) {
+      return ParseAnalyze();
     }
     if (token.kind == TokenKind::kCreate) {
       return ParseCreate();

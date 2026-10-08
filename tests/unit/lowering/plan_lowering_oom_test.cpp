@@ -302,6 +302,25 @@ bool inject_failure = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan AnalyzeFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound =
+      BindStatement(ParseTree("ANALYZE items_name"), catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind ANALYZE lowering OOM fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan ANALYZE lowering OOM fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize ANALYZE lowering OOM fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -339,6 +358,7 @@ int main() try {
   const PhysicalMutationPlan indexed_stable_update = StableUpdateFixture(indexed_catalog);
   const PhysicalMutationPlan create = CreateFixture(catalog);
   const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
+  const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
 
   const auto verify_oom = [](const auto& plan) {
     allocation_index.store(0, std::memory_order_relaxed);
@@ -374,7 +394,7 @@ int main() try {
                  verify_oom(mutation) && verify_oom(indexed_insert) && verify_oom(deletion) &&
                  verify_oom(indexed_deletion) && verify_oom(update) && verify_oom(indexed_update) &&
                  verify_oom(stable_update) && verify_oom(indexed_stable_update) &&
-                 verify_oom(create) && verify_oom(create_index)
+                 verify_oom(create) && verify_oom(create_index) && verify_oom(analyze)
              ? 0
              : 1;
 } catch (...) {

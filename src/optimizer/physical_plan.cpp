@@ -1954,12 +1954,18 @@ class PhysicalStatementPlanBuilder final {
           .atomicity =
               create->no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
       };
-    } else {
-      const auto& create_index = std::get<BoundCreateIndex>(statement);
+    } else if (const auto* create_index = std::get_if<BoundCreateIndex>(&statement);
+               create_index != nullptr) {
       payload = PhysicalCreateIndexMutation{
-          .no_op = create_index.no_op(),
-          .atomicity = create_index.no_op() ? MutationAtomicity::kTransaction
-                                            : MutationAtomicity::kStatement,
+          .no_op = create_index->no_op(),
+          .atomicity = create_index->no_op() ? MutationAtomicity::kTransaction
+                                             : MutationAtomicity::kStatement,
+      };
+    } else {
+      const auto& analyze = std::get<BoundAnalyze>(statement);
+      payload = PhysicalAnalyzeMutation{
+          .creates_stat1 = !analyze.stat1_root_page().has_value(),
+          .atomicity = MutationAtomicity::kStatement,
       };
     }
 

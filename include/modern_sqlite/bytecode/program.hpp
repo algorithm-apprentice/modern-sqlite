@@ -68,6 +68,7 @@ enum class ProgramStatementKind : std::uint8_t {
   kDelete,
   kCreateTable,
   kCreateIndex,
+  kAnalyze,
 };
 
 enum class ProgramTransactionAccess : std::uint8_t {
@@ -122,6 +123,12 @@ enum class JumpCondition : std::uint8_t {
   kIfFalse,
   kIfNull,
   kIfNotNull,
+};
+
+enum class Stat1ClearScope : std::uint8_t {
+  kDatabase,
+  kTable,
+  kIndex,
 };
 
 struct CursorFieldSource {
@@ -423,11 +430,30 @@ struct UpdateTableInstruction {
 struct EnsureDatabaseInitializedInstruction {};
 
 struct CreateTableRootInstruction {
+  std::optional<WriteCursorId> cursor{};
   RegisterId output;
 };
 
 struct CreateIndexRootInstruction {
   WriteCursorId cursor;
+  RegisterId output;
+};
+
+struct ClearStat1Instruction {
+  WriteCursorId cursor;
+  Stat1ClearScope scope = Stat1ClearScope::kDatabase;
+  std::optional<RegisterId> name{};
+};
+
+struct ComputeIndexStat1Instruction {
+  CursorId cursor;
+  std::uint32_t key_term_count;
+  bool emit_empty = false;
+  RegisterId output;
+};
+
+struct ComputeTableStat1Instruction {
+  CursorId cursor;
   RegisterId output;
 };
 
@@ -481,6 +507,7 @@ using Instruction = std::variant<
     DeleteIndexInstruction, InsertTableInstruction, DeleteTableInstruction,
     DeleteCurrentTableInstruction, UpdateCurrentTableInstruction, UpdateTableInstruction,
     EnsureDatabaseInitializedInstruction, CreateTableRootInstruction, CreateIndexRootInstruction,
+    ClearStat1Instruction, ComputeIndexStat1Instruction, ComputeTableStat1Instruction,
     IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
     JumpIfInstruction, ResultRowInstruction>;
 
@@ -529,6 +556,9 @@ enum class InstructionKind : std::uint8_t {
   kEnsureDatabaseInitialized,
   kCreateTableRoot,
   kCreateIndexRoot,
+  kClearStat1,
+  kComputeIndexStat1,
+  kComputeTableStat1,
   kIncrementSchemaCookie,
   kCompare,
   kCallScalar,

@@ -150,7 +150,7 @@ struct CompiledStatement {
   std::unique_ptr<StatementExecution> execution;
   std::optional<TransactionCommand> transaction;
   std::vector<std::optional<std::string>> parameter_names;
-  bool creates_schema = false;
+  bool refreshes_catalog = false;
 };
 
 template <typename Statement>
@@ -283,7 +283,7 @@ struct WriteSession::State final {
         .execution = nullptr,
         .transaction = std::nullopt,
         .parameter_names = std::move(parameter_names),
-        .creates_schema = false,
+        .refreshes_catalog = false,
     };
     if (const auto* read = std::get_if<PhysicalPlan>(&*physical); read != nullptr) {
       auto lowered = LowerPlan(*read);
@@ -301,11 +301,13 @@ struct WriteSession::State final {
     if (const auto* mutation = std::get_if<PhysicalMutationPlan>(&*physical); mutation != nullptr) {
       if (const auto* create = std::get_if<PhysicalCreateTableMutation>(&mutation->payload());
           create != nullptr) {
-        output.creates_schema = !create->no_op;
+        output.refreshes_catalog = !create->no_op;
       } else if (const auto* create_index =
                      std::get_if<PhysicalCreateIndexMutation>(&mutation->payload());
                  create_index != nullptr) {
-        output.creates_schema = !create_index->no_op;
+        output.refreshes_catalog = !create_index->no_op;
+      } else if (std::holds_alternative<PhysicalAnalyzeMutation>(mutation->payload())) {
+        output.refreshes_catalog = true;
       }
       auto lowered = LowerPlan(*mutation);
       if (!lowered.has_value()) {
@@ -351,7 +353,7 @@ struct WriteStatement::Impl final {
         parameter_names(std::move(compiled.parameter_names)),
         execution(std::move(compiled.execution)),
         transaction(std::move(compiled.transaction)),
-        creates_schema(compiled.creates_schema) {}
+        refreshes_catalog(compiled.refreshes_catalog) {}
 
   ~Impl() { FinalizeNoThrow(); }
 
@@ -389,7 +391,7 @@ struct WriteStatement::Impl final {
     }
     execution = std::move(compiled->execution);
     transaction = std::move(compiled->transaction);
-    creates_schema = compiled->creates_schema;
+    refreshes_catalog = compiled->refreshes_catalog;
     return {};
   }
 
@@ -537,7 +539,7 @@ struct WriteStatement::Impl final {
         return WriteStep::kDone;
       }
 
-      if (creates_schema) {
+      if (refreshes_catalog) {
         const auto next = session_detail::NextCatalogGeneration(state->catalog_generation);
         if (!next.has_value()) {
           return Fail(TooLarge("catalog generation is exhausted"));
@@ -584,7 +586,7 @@ struct WriteStatement::Impl final {
     if (!detached.has_value()) {
       return FailAndRollback(std::move(detached.error()));
     }
-    if (creates_schema) {
+    if (refreshes_catalog) {
       if (!candidate_generation.has_value()) {
         return FailAndRollback(Internal("schema candidate generation is missing"));
       }
@@ -754,7 +756,7 @@ struct WriteStatement::Impl final {
   std::optional<std::uint64_t> candidate_generation;
   std::optional<Error> last_error;
   StatementState lifecycle = StatementState::kReady;
-  bool creates_schema = false;
+  bool refreshes_catalog = false;
   bool success_pending = false;
 };
 

@@ -757,6 +757,66 @@ TEST(BytecodeProgramTest, VerifiesDynamicCreateIndexRootInstruction) {
   EXPECT_EQ(ProgramErrorCode::kInvalidCursorDescriptor, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedAnalyzeInstructions) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kAnalyze;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Text("Items"));
+  input.symbols.emplace_back("BINARY");
+  input.cursors.push_back(IndexCursorDescriptor());
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(0),
+      .columns =
+          {
+              WriteColumnDescriptor{.affinity = TypeAffinity::kBlob},
+              WriteColumnDescriptor{.affinity = TypeAffinity::kBlob},
+              WriteColumnDescriptor{.affinity = TypeAffinity::kBlob},
+          },
+      .rowid_alias = std::nullopt,
+      .index_columns = {},
+      .key_term_count = 0,
+      .unique = false,
+      .unique_not_null = false,
+      .pending_root = true,
+      .storage = WriteCursorStorageKind::kRowIdTable,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CreateTableRootInstruction{
+          .cursor = WriteCursor(0),
+          .output = Reg(1),
+      },
+      ClearStat1Instruction{
+          .cursor = WriteCursor(0),
+          .scope = Stat1ClearScope::kTable,
+          .name = Reg(0),
+      },
+      ComputeIndexStat1Instruction{
+          .cursor = Cursor(0),
+          .key_term_count = 1,
+          .emit_empty = false,
+          .output = Reg(2),
+      },
+      ComputeTableStat1Instruction{
+          .cursor = Cursor(1),
+          .output = Reg(2),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("clear_stat1", InstructionKindName(InstructionKindOf(input.instructions[2])));
+  EXPECT_EQ("compute_index_stat1", InstructionKindName(InstructionKindOf(input.instructions[3])));
+  EXPECT_EQ("compute_table_stat1", InstructionKindName(InstructionKindOf(input.instructions[4])));
+
+  std::get<ClearStat1Instruction>(input.instructions[2]).scope =
+      static_cast<Stat1ClearScope>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
@@ -871,6 +931,7 @@ TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatemen
                   .has_value());
   EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kCreateTable, {})).has_value());
   EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kCreateIndex, {})).has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kAnalyze, {})).has_value());
 
   EXPECT_EQ(
       ProgramErrorCode::kInvalidExecutionMetadata,
@@ -900,6 +961,12 @@ TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatemen
                                       .publishes_changes = true,
                                       .publishes_last_insert_rowid = false,
                                   })));
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
+            VerifyError(
+                input_for(ProgramStatementKind::kAnalyze, MutationResultMetadata{
+                                                              .publishes_changes = true,
+                                                              .publishes_last_insert_rowid = false,
+                                                          })));
 }
 
 TEST(BytecodeProgramTest, RejectsInstructionsOutsideTheirStatementFamily) {

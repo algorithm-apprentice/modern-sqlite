@@ -290,6 +290,11 @@ struct CreateIndexStatement {
   std::optional<ExpressionId> where{};
 };
 
+struct AnalyzeStatement {
+  SourceSpan span;
+  std::optional<QualifiedName> target{};
+};
+
 struct InsertValuesSource {
   SourceSpan span;
   std::vector<ExpressionId> values;
@@ -373,8 +378,8 @@ struct RollbackToSavepointStatement {
 };
 
 using Statement =
-    std::variant<SelectStatement, CreateTableStatement, CreateIndexStatement, InsertStatement,
-                 UpdateStatement, DeleteStatement, BeginTransactionStatement,
+    std::variant<SelectStatement, CreateTableStatement, CreateIndexStatement, AnalyzeStatement,
+                 InsertStatement, UpdateStatement, DeleteStatement, BeginTransactionStatement,
                  CommitTransactionStatement, RollbackTransactionStatement, SavepointStatement,
                  ReleaseSavepointStatement, RollbackToSavepointStatement>;
 

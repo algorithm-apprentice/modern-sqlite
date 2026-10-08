@@ -38,6 +38,7 @@ static_assert(!std::is_copy_constructible_v<BoundUpdate>);
 static_assert(!std::is_copy_constructible_v<BoundDelete>);
 static_assert(!std::is_copy_constructible_v<BoundCreateTable>);
 static_assert(!std::is_copy_constructible_v<BoundCreateIndex>);
+static_assert(!std::is_copy_constructible_v<BoundAnalyze>);
 static_assert(!std::is_copy_constructible_v<BoundStatement>);
 static_assert(std::is_nothrow_move_constructible_v<BoundStatement>);
 static_assert(std::is_nothrow_move_assignable_v<BoundStatement>);
@@ -809,6 +810,38 @@ TEST(StatementBinder, RejectsUnsupportedCreateIndexShapes) {
                            "already exists");
   ExpectStatementBindError("CREATE INDEX wr_index ON wr(key)", catalog,
                            BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric, "table shape");
+}
+
+TEST(StatementBinder, ResolvesAnalyzeDatabaseTableAndIndexScopes) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  BoundStatement database_statement = BindStatementOrThrow("ANALYZE main", catalog);
+  const auto& database = std::get<BoundAnalyze>(database_statement);
+  EXPECT_EQ(BoundAnalyzeScope::kDatabase, database.scope());
+  EXPECT_FALSE(database.stat1_root_page().has_value());
+  EXPECT_FALSE(database.indexes().empty());
+  EXPECT_FALSE(database.tables().empty());
+
+  BoundStatement table_statement = BindStatementOrThrow("ANALYZE IndexedItems", catalog);
+  const auto& table = std::get<BoundAnalyze>(table_statement);
+  EXPECT_EQ(BoundAnalyzeScope::kTable, table.scope());
+  EXPECT_EQ("IndexedItems", table.scope_name());
+  ASSERT_EQ(1U, table.indexes().size());
+  EXPECT_EQ("idx_items_value", table.indexes()[0].index_name);
+  EXPECT_TRUE(table.tables().empty());
+
+  BoundStatement index_statement = BindStatementOrThrow("ANALYZE main.idx_items_value", catalog);
+  const auto& index = std::get<BoundAnalyze>(index_statement);
+  EXPECT_EQ(BoundAnalyzeScope::kIndex, index.scope());
+  EXPECT_EQ("idx_items_value", index.scope_name());
+  ASSERT_EQ(1U, index.indexes().size());
+  EXPECT_EQ(1U, index.indexes()[0].key_term_count);
+  ASSERT_EQ(2U, index.indexes()[0].columns.size());
+
+  ExpectStatementBindError("ANALYZE missing", catalog, BindErrorCode::kNoSuchTable,
+                           ErrorCode::kGeneric, "no such table or index");
+  ExpectStatementBindError("ANALYZE temp.Items", catalog, BindErrorCode::kUnsupportedFeature,
+                           ErrorCode::kGeneric, "main schema");
 }
 
 TEST(StatementBinder, RejectsUnsupportedCreateTableShapes) {

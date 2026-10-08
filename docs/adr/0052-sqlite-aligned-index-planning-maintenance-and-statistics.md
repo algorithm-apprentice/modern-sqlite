@@ -445,6 +445,14 @@ generation and reloads the immutable catalog before statement success.
 Prepared statements therefore reprepare against the new statistics even when
 the on-disk schema cookie is unchanged.
 
+Typed ANALYZE bytecode clears the selected STAT1 scope, computes one STAT1
+string from an immutable index or table descriptor, and inserts ordinary
+`sqlite_stat1` records through the existing table-record path. When the
+statistics table is absent, a pending-root rowid-table descriptor lets
+`CreateTableRootInstruction` publish and open the new root before its schema
+row and statistics are written. Index statistics compare adjacent stored keys
+with the descriptor collations, treating two NULL values as the same prefix.
+
 ### 9. Preserve errors, ownership, and durability
 
 Expected SQL failures use typed results:

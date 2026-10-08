@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/catalog/catalog_loader.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -28,6 +29,14 @@ template <typename T>
     throw std::runtime_error(result.error().ToString());
   }
   return std::move(*result);
+}
+
+template <typename T>
+[[nodiscard]] T TakeOptional(std::optional<T> value, std::string_view message) {
+  if (!value.has_value()) {
+    throw std::runtime_error{std::string{message}};
+  }
+  return *value;
 }
 
 void RequireStatus(Status status) {
@@ -392,6 +401,90 @@ TEST(WriteSession, RollsBackFailedUniqueIndexPopulation) {
   ExecuteDone(session, "CREATE INDEX items_name ON Items(Name)");
   EXPECT_EQ(1U,
             QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='items_name'").size());
+}
+
+TEST(WriteSession, AnalyzesIndexPrefixesAndPublishesStatistics) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score INT)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'a',1)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'A',2)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(3,'b',3)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(4,NULL,4)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(5,NULL,5)");
+  ExecuteDone(session, "CREATE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)");
+
+  ExecuteDone(session, "ANALYZE items_name_score");
+  EXPECT_EQ(1U, session.changes());
+  const auto rows =
+      QueryRows(session, "SELECT tbl,idx,stat FROM sqlite_stat1 WHERE idx='items_name_score'");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("Items", Text(rows[0][0]));
+  EXPECT_EQ("items_name_score", Text(rows[0][1]));
+  EXPECT_EQ("5 2 1", Text(rows[0][2]));
+
+  ExecuteDone(session, "CREATE INDEX items_score ON Items(Score DESC)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(6,'b',4)");
+  ExecuteDone(session, "ANALYZE Items");
+  const auto table_rows = QueryRows(session, "SELECT idx,stat FROM sqlite_stat1 WHERE tbl='Items'");
+  ASSERT_EQ(2U, table_rows.size());
+  EXPECT_EQ("items_name_score", Text(table_rows[0][0]));
+  EXPECT_EQ("6 2 1", Text(table_rows[0][1]));
+  EXPECT_EQ("items_score", Text(table_rows[1][0]));
+  EXPECT_EQ("6 2", Text(table_rows[1][1]));
+
+  ExecuteDone(session, "CREATE TABLE Plain(id INTEGER PRIMARY KEY, Value TEXT)");
+  ExecuteDone(session, "CREATE TABLE Empty(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "CREATE INDEX empty_id ON Empty(id)");
+  ExecuteDone(session, "INSERT INTO Plain VALUES(1,'one')");
+  ExecuteDone(session, "INSERT INTO Plain VALUES(2,'two')");
+  ExecuteDone(session, "INSERT INTO Plain VALUES(3,'three')");
+  ExecuteDone(session, "ANALYZE main");
+  const auto plain = QueryRows(session, "SELECT idx,stat FROM sqlite_stat1 WHERE tbl='Plain'");
+  ASSERT_EQ(1U, plain.size());
+  EXPECT_EQ(SqlValueType::kNull, plain[0][0].type());
+  EXPECT_EQ("3", Text(plain[0][1]));
+  EXPECT_TRUE(QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE tbl='Empty'").empty());
+
+  ExecuteDone(session, "DELETE FROM Items WHERE id=6");
+  ExecuteDone(session, "ANALYZE main.items_score");
+  const auto score = QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_score'");
+  ASSERT_EQ(1U, score.size());
+  EXPECT_EQ("5 1", Text(score[0][0]));
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(*fixture.vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+  const IndexId name_index =
+      TakeOptional(catalog->FindIndex("items_name_score"), "missing analyzed name index");
+  const IndexId score_index =
+      TakeOptional(catalog->FindIndex("items_score"), "missing analyzed score index");
+  EXPECT_EQ((std::vector<std::uint64_t>{6, 2, 1}),
+            catalog->index(name_index).statistics.rows_per_prefix);
+  EXPECT_EQ((std::vector<std::uint64_t>{5, 1}),
+            catalog->index(score_index).statistics.rows_per_prefix);
+  const TableId plain_table =
+      TakeOptional(catalog->FindTable("Plain"), "missing analyzed plain table");
+  EXPECT_EQ(std::optional<std::uint64_t>{3}, catalog->table(plain_table).statistics.estimated_rows);
+  RequireStatus(pager->EndRead());
+}
+
+TEST(WriteSession, NormalizesNearUniqueAnalyzeEstimate) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Value INT)");
+  for (std::int64_t rowid = 1; rowid <= 11; ++rowid) {
+    const std::int64_t value = rowid == 11 ? 10 : rowid;
+    ExecuteDone(session, "INSERT INTO Items VALUES(" + std::to_string(rowid) + "," +
+                             std::to_string(value) + ")");
+  }
+  ExecuteDone(session, "CREATE INDEX items_value ON Items(Value)");
+  ExecuteDone(session, "ANALYZE items_value");
+  const auto rows = QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_value'");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("11 1", Text(rows[0][0]));
 }
 
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {

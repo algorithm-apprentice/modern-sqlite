@@ -76,6 +76,10 @@ static_assert(kMaximumParserRecursionDepth == 512U);
   return std::get<CreateIndexStatement>(tree.statement());
 }
 
+[[nodiscard]] const AnalyzeStatement& Analyze(const SyntaxTree& tree) {
+  return std::get<AnalyzeStatement>(tree.statement());
+}
+
 [[nodiscard]] const InsertStatement& Insert(const SyntaxTree& tree) {
   return std::get<InsertStatement>(tree.statement());
 }
@@ -976,6 +980,31 @@ TEST(Parser, ExtractsOnlyTheFinalIndexedTermCollation) {
   const auto& inner_collation =
       std::get<CollateExpression>(tree.expression(index.terms[1].expression).payload);
   EXPECT_EQ("nocase", SpanText(tree, inner_collation.collation));
+}
+
+TEST(Parser, ParsesAnalyzeDatabaseTableAndIndexForms) {
+  const ParseOutput database_output = ParseOrThrow("ANALYZE");
+  const AnalyzeStatement& database = Analyze(RequiredTree(database_output));
+  EXPECT_FALSE(database.target.has_value());
+
+  const ParseOutput table_output = ParseOrThrow("ANALYZE items");
+  const SyntaxTree& table_tree = RequiredTree(table_output);
+  const AnalyzeStatement& table = Analyze(table_tree);
+  ASSERT_TRUE(table.target.has_value());
+  ASSERT_EQ(1U, table.target->parts.size());
+  EXPECT_EQ("items", SpanText(table_tree, table.target->parts[0]));
+
+  const ParseOutput index_output = ParseOrThrow("ANALYZE main.items_name");
+  const SyntaxTree& index_tree = RequiredTree(index_output);
+  const AnalyzeStatement& index = Analyze(index_tree);
+  ASSERT_TRUE(index.target.has_value());
+  ASSERT_EQ(2U, index.target->parts.size());
+  EXPECT_EQ("main", SpanText(index_tree, index.target->parts[0]));
+  EXPECT_EQ("items_name", SpanText(index_tree, index.target->parts[1]));
+
+  const ParseResult invalid = ParseOne(Utf8View{"ANALYZE main.items.extra"});
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ParseErrorCode::kUnexpectedToken, invalid.error().code);
 }
 
 TEST(Parser, ReportsDeterministicLexicalAndSyntaxErrorsWithTails) {

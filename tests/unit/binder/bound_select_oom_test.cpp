@@ -115,6 +115,7 @@ int main() try {
       std::string_view{"DELETE FROM Items WHERE id=?1"},
       std::string_view{"CREATE TABLE NewItems(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x')"},
       std::string_view{"CREATE UNIQUE INDEX items_name ON Items(Name COLLATE NOCASE DESC)"},
+      std::string_view{"ANALYZE Items"},
   };
   const CatalogSnapshotPtr catalog = TestCatalog();
 

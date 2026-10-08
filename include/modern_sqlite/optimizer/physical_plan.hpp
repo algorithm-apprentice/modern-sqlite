@@ -258,9 +258,14 @@ struct PhysicalCreateIndexMutation {
   MutationAtomicity atomicity = MutationAtomicity::kStatement;
 };
 
+struct PhysicalAnalyzeMutation {
+  bool creates_stat1 = false;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
+};
+
 using PhysicalMutationPayload =
     std::variant<PhysicalInsertMutation, PhysicalUpdateMutation, PhysicalDeleteMutation,
-                 PhysicalCreateTableMutation, PhysicalCreateIndexMutation>;
+                 PhysicalCreateTableMutation, PhysicalCreateIndexMutation, PhysicalAnalyzeMutation>;
 
 class PhysicalMutationPlan final {
  public:

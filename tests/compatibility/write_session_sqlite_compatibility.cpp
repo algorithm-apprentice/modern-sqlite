@@ -222,6 +222,9 @@ struct CrashExpectedState {
   if (scenario == "implicit-create-index") {
     return kInitial;
   }
+  if (scenario == "implicit-analyze") {
+    return kInitial;
+  }
   if (scenario == "exact-rowid-move") {
     return CrashExpectedState{.rows = "2:two,3:three,10:moved", .temp_visible = false};
   }
@@ -582,6 +585,12 @@ void VerifyDifferentialTrace(const std::filesystem::path& modern_path,
                  "FROM sqlite_schema WHERE name='items_name_score'",
           .schema_cookie = 2,
       },
+      {.sql = "ANALYZE items_name_score", .schema_cookie = 3},
+      {
+          .sql = "SELECT tbl,idx,stat FROM sqlite_stat1 WHERE idx='items_name_score'",
+          .schema_cookie = 3,
+      },
+      {.sql = "ANALYZE main.items_name_score", .schema_cookie = 3},
       {.sql = "SELECT id,Name,Score,Payload FROM Items"},
       {.sql = "INSERT INTO Items VALUES(5,'duplicate',9,x'01')"},
       {.sql = "INSERT INTO Items VALUES(6,'FIVE',5,x'02')"},
@@ -627,15 +636,15 @@ void VerifyDifferentialTrace(const std::filesystem::path& modern_path,
       {.sql = "SELECT type,name,tbl_name,rootpage,sql FROM sqlite_schema WHERE name='Temp'"},
       {.sql = "INSERT INTO Temp DEFAULT VALUES"},
       {.sql = "SELECT id FROM Temp"},
-      {.sql = "ROLLBACK", .schema_cookie = 2},
+      {.sql = "ROLLBACK", .schema_cookie = 3},
       {
           .sql = "SELECT type,name,tbl_name,rootpage,sql FROM sqlite_schema WHERE name='Temp'",
-          .schema_cookie = 2,
+          .schema_cookie = 3,
       },
-      {.sql = "SELECT id,Name,Score,Payload FROM Items", .schema_cookie = 2},
+      {.sql = "SELECT id,Name,Score,Payload FROM Items", .schema_cookie = 3},
       {
           .sql = "SELECT type,name,tbl_name,rootpage,sql FROM sqlite_schema WHERE name='Items'",
-          .schema_cookie = 2,
+          .schema_cookie = 3,
       },
   };
 
@@ -684,6 +693,7 @@ void VerifyModernCreated(const std::filesystem::path& path) {
     ExecuteModern(session, "BEGIN");
     ExecuteModern(session, "INSERT INTO Items VALUES(20,'rollback',20)");
     ExecuteModern(session, "ROLLBACK");
+    ExecuteModern(session, "ANALYZE items_name");
     if (session.changes() != 1U || session.last_insert_rowid() != 20 || !session.autocommit()) {
       throw std::runtime_error{"Modern connection state disagrees after rollback"};
     }
@@ -699,7 +709,8 @@ void VerifyModernCreated(const std::filesystem::path& path) {
           "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT NOT NULL DEFAULT 'seed', Score "
           "REAL)" ||
       QueryText(sqlite.get(), "SELECT sql FROM sqlite_schema WHERE name='items_name'") !=
-          "CREATE UNIQUE INDEX items_name ON Items(Name DESC)") {
+          "CREATE UNIQUE INDEX items_name ON Items(Name DESC)" ||
+      QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_name'") != "1 1") {
     throw std::runtime_error{"SQLite disagrees with Modern-created database"};
   }
 }
@@ -832,6 +843,7 @@ void VerifyOnePageSize(const TemporaryDirectory& directory, int page_size) {
     InsertNamedRow(session, std::numeric_limits<std::int64_t>::min(), "minimum");
     InsertNamedRow(session, std::numeric_limits<std::int64_t>::max(), "maximum");
     InsertBoundValues(session);
+    ExecuteModern(session, "ANALYZE items_name");
     if (session.changes() != 1U || session.last_insert_rowid() != 30 || !session.autocommit()) {
       throw std::runtime_error{"Modern connection state differs in the page-size matrix"};
     }
@@ -856,7 +868,8 @@ void VerifyOnePageSize(const TemporaryDirectory& directory, int page_size) {
         QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE id IN(20,21)") != 0 ||
         QueryInteger(sqlite.get(), "SELECT count(*) FROM Items INDEXED BY items_name") != 6 ||
         QueryText(sqlite.get(), "SELECT sql FROM sqlite_schema WHERE name='items_name'") !=
-            "CREATE INDEX items_name ON Items(Name DESC)") {
+            "CREATE INDEX items_name ON Items(Name DESC)" ||
+        QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_name'") != "6 1") {
       throw std::runtime_error{"SQLite disagrees in the public page-size matrix"};
     }
   }
@@ -897,6 +910,7 @@ void VerifyAlternatingOwnership(const std::filesystem::path& path) {
     ExecuteModern(session, "ROLLBACK TO s");
     ExecuteModern(session, "RELEASE s");
     InsertBoundValues(session);
+    ExecuteModern(session, "ANALYZE main");
   }
   {
     const Database sqlite{path, kReadOnlyFlags};
@@ -910,7 +924,8 @@ void VerifyAlternatingOwnership(const std::filesystem::path& path) {
         QueryText(sqlite.get(),
                   "SELECT group_concat(id,',') "
                   "FROM (SELECT id FROM Items INDEXED BY items_name ORDER BY Name DESC)") !=
-            "13,1,30") {
+            "13,1,30" ||
+        QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_name'") != "3 1") {
       throw std::runtime_error{"alternating engine ownership produced the wrong final state"};
     }
   }
@@ -950,10 +965,45 @@ void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
   }
 }
 
-constexpr std::array<std::string_view, 13> kCrashCaseIds{
+void VerifyAnalyzeStoredIndexes(const std::filesystem::path& path) {
+  {
+    const Database sqlite{path, kCreateFlags};
+    ExecuteSqlite(sqlite.get(),
+                  "CREATE TABLE Items(a INTEGER,b INTEGER);"
+                  "INSERT INTO Items VALUES(1,1),(1,2),(2,1),(NULL,1),(NULL,2);"
+                  "CREATE INDEX items_expr ON Items((a+1),b DESC);"
+                  "CREATE INDEX items_partial ON Items(a DESC) WHERE b=1;"
+                  "CREATE INDEX items_empty_partial ON Items(a) WHERE b=99;"
+                  "CREATE TABLE Wr(a TEXT,b INT,PRIMARY KEY(a,b)) WITHOUT ROWID;"
+                  "INSERT INTO Wr VALUES('a',1),('a',2),('b',1);"
+                  "CREATE INDEX wr_b ON Wr(b DESC);");
+  }
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session, "ANALYZE items_expr");
+    ExecuteModern(session, "ANALYZE items_partial");
+    ExecuteModern(session, "ANALYZE items_empty_partial");
+    ExecuteModern(session, "ANALYZE Wr");
+  }
+  const Database sqlite{path, kReadOnlyFlags};
+  VerifyIntegrity(sqlite.get());
+  if (QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_expr'") != "5 2 1" ||
+      QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_partial'") != "3 1" ||
+      QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='items_empty_partial'") !=
+          "0 0" ||
+      QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE tbl='Wr' AND idx='Wr'") !=
+          "3 2 1" ||
+      QueryText(sqlite.get(), "SELECT stat FROM sqlite_stat1 WHERE idx='wr_b'") != "3 2") {
+    throw std::runtime_error{"Modern ANALYZE disagrees for stored expression/partial indexes"};
+  }
+}
+
+constexpr std::array<std::string_view, 14> kCrashCaseIds{
     "implicit-insert",
     "implicit-create",
     "implicit-create-index",
+    "implicit-analyze",
     "exact-rowid-move",
     "scan-rowid-move",
     "scan-delete",
@@ -970,37 +1020,21 @@ constexpr std::array<int, 8> kPageSizes{
     512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 };
 
-constexpr std::array<std::string_view, 5> kNonPageCaseIds{
-    "differential-trace",    "modern-created",         "sqlite-created",
-    "alternating-ownership", "unsupported-boundaries",
+constexpr std::array<std::string_view, 6> kNonPageCaseIds{
+    "analyze-stored-indexes", "differential-trace",    "modern-created",
+    "sqlite-created",         "alternating-ownership", "unsupported-boundaries",
 };
 
-constexpr std::array<std::string_view, 26> kAllCaseIds{
-    "alternating-ownership",
-    "constraint-then-commit",
-    "create-full-rollback",
-    "create-rollback-to",
-    "differential-trace",
-    "exact-rowid-move",
-    "explicit-commit",
-    "full-dml-rollback",
-    "implicit-create",
-    "implicit-create-index",
-    "implicit-insert",
-    "modern-created",
-    "named-rollback-then-commit",
-    "page-size-1024",
-    "page-size-16384",
-    "page-size-2048",
-    "page-size-32768",
-    "page-size-4096",
-    "page-size-512",
-    "page-size-65536",
-    "page-size-8192",
-    "scan-delete",
-    "scan-rowid-move",
-    "sqlite-created",
-    "transaction-savepoint-release",
+constexpr std::array<std::string_view, 28> kAllCaseIds{
+    "alternating-ownership",  "analyze-stored-indexes", "constraint-then-commit",
+    "create-full-rollback",   "create-rollback-to",     "differential-trace",
+    "exact-rowid-move",       "explicit-commit",        "full-dml-rollback",
+    "implicit-analyze",       "implicit-create",        "implicit-create-index",
+    "implicit-insert",        "modern-created",         "named-rollback-then-commit",
+    "page-size-1024",         "page-size-16384",        "page-size-2048",
+    "page-size-32768",        "page-size-4096",         "page-size-512",
+    "page-size-65536",        "page-size-8192",         "scan-delete",
+    "scan-rowid-move",        "sqlite-created",         "transaction-savepoint-release",
     "unsupported-boundaries",
 };
 
@@ -1127,6 +1161,8 @@ void RunNonCrashCase(std::string_view case_id, const TemporaryDirectory& directo
     VerifyAlternatingOwnership(directory.DatabasePath("alternating-ownership"));
   } else if (case_id == "unsupported-boundaries") {
     VerifyUnsupportedMutationBoundaries(directory.DatabasePath("unsupported-boundaries"));
+  } else if (case_id == "analyze-stored-indexes") {
+    VerifyAnalyzeStoredIndexes(directory.DatabasePath("analyze-stored-indexes"));
   } else {
     VerifyOnePageSize(
         directory, TakeOptional(PageSizeCase(case_id), "page-size compatibility case is invalid"));

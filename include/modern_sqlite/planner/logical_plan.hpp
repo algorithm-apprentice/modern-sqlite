@@ -136,9 +136,13 @@ struct LogicalCreateIndexMutation {
   bool no_op = false;
 };
 
+struct LogicalAnalyzeMutation {
+  bool creates_stat1 = false;
+};
+
 using LogicalMutationPayload =
     std::variant<LogicalInsertMutation, LogicalUpdateMutation, LogicalDeleteMutation,
-                 LogicalCreateTableMutation, LogicalCreateIndexMutation>;
+                 LogicalCreateTableMutation, LogicalCreateIndexMutation, LogicalAnalyzeMutation>;
 
 enum class LogicalMutationKind : std::uint8_t {
   kInsert,
@@ -146,6 +150,7 @@ enum class LogicalMutationKind : std::uint8_t {
   kDelete,
   kCreateTable,
   kCreateIndex,
+  kAnalyze,
 };
 
 [[nodiscard]] LogicalMutationKind LogicalMutationKindOf(

@@ -253,6 +253,60 @@ class BoundCreateIndex final {
   std::unique_ptr<Impl> impl_;
 };
 
+enum class BoundAnalyzeScope : std::uint8_t {
+  kDatabase,
+  kTable,
+  kIndex,
+};
+
+struct BoundAnalyzeIndexColumn {
+  std::string collation_name{};
+  SortOrder order = SortOrder::kAscending;
+};
+
+struct BoundAnalyzeIndex {
+  RootPageId root_page{};
+  std::string table_name{};
+  std::string index_name{};
+  std::uint32_t key_term_count = 0;
+  std::vector<BoundAnalyzeIndexColumn> columns{};
+  bool partial = false;
+};
+
+struct BoundAnalyzeTable {
+  RootPageId root_page{};
+  std::string table_name{};
+  std::uint32_t record_field_count = 0;
+};
+
+class BoundAnalyze final {
+ public:
+  BoundAnalyze(const BoundAnalyze&) = delete;
+  BoundAnalyze& operator=(const BoundAnalyze&) = delete;
+  BoundAnalyze(BoundAnalyze&&) noexcept;
+  BoundAnalyze& operator=(BoundAnalyze&&) noexcept;
+  ~BoundAnalyze();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] Utf8View source() const noexcept;
+  [[nodiscard]] const CatalogSnapshot* catalog() const noexcept;
+  [[nodiscard]] CatalogVersion required_catalog_version() const noexcept;
+  [[nodiscard]] BoundAnalyzeScope scope() const noexcept;
+  [[nodiscard]] std::string_view scope_name() const noexcept;
+  [[nodiscard]] std::optional<RootPageId> stat1_root_page() const noexcept;
+  [[nodiscard]] std::span<const BoundAnalyzeIndex> indexes() const noexcept;
+  [[nodiscard]] std::span<const BoundAnalyzeTable> tables() const noexcept;
+
+ private:
+  friend class binder_detail::StatementBinder;
+
+  struct Impl;
+
+  explicit BoundAnalyze(std::unique_ptr<Impl> impl) noexcept;
+
+  std::unique_ptr<Impl> impl_;
+};
+
 struct BoundBeginTransaction {
   BeginTransactionMode mode = BeginTransactionMode::kDeferred;
 };
@@ -277,7 +331,7 @@ struct BoundRollbackToSavepoint {
 
 using BoundStatement =
     std::variant<BoundSelect, BoundInsert, BoundUpdate, BoundDelete, BoundCreateTable,
-                 BoundCreateIndex, BoundBeginTransaction, BoundCommitTransaction,
+                 BoundCreateIndex, BoundAnalyze, BoundBeginTransaction, BoundCommitTransaction,
                  BoundRollbackTransaction, BoundSavepoint, BoundReleaseSavepoint,
                  BoundRollbackToSavepoint>;
 

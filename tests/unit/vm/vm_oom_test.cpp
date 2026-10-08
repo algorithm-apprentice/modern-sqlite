@@ -955,6 +955,65 @@ int main() try {
   if (!index_vm->DetachExecutionContext().has_value() || !index_statement->Rollback().has_value()) {
     return 1;
   }
+
+  ProgramInput analyze_input;
+  analyze_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  analyze_input.statement_kind = ProgramStatementKind::kAnalyze;
+  analyze_input.transaction_access = ProgramTransactionAccess::kWrite;
+  analyze_input.rollback_mode = ProgramRollbackMode::kStatement;
+  analyze_input.register_count = 1;
+  analyze_input.symbols.emplace_back("BINARY");
+  analyze_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(index_root.value()),
+      .storage = CursorStorageKind::kIndex,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns =
+          {
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+          },
+  });
+  analyze_input.instructions = {
+      ComputeIndexStat1Instruction{
+          .cursor = CursorId(0),
+          .key_term_count = 1,
+          .emit_empty = false,
+          .output = RegisterId(0),
+      },
+      HaltInstruction{},
+  };
+  auto analyze_program = BytecodeProgram::Create(analyze_input);
+  auto analyze_statement = index_coordinator->BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite,
+      .rollback = StatementRollbackMode::kStatement,
+  });
+  if (!analyze_program.has_value() || !analyze_statement.has_value() ||
+      analyze_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto analyze_vm = Vm::Create(*analyze_program, VmEnvironment::Core());
+  if (!analyze_vm.has_value() ||
+      !analyze_vm->AttachExecutionContext(VmExecutionContext{*analyze_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto analyze_failure = analyze_vm->Step();
+  fail_allocations = false;
+  if (analyze_failure.has_value() || analyze_failure.error().code() != ErrorCode::kOutOfMemory) {
+    return 1;
+  }
+  if (!analyze_vm->DetachExecutionContext().has_value() ||
+      !analyze_statement->Rollback().has_value()) {
+    return 1;
+  }
   return 0;
 } catch (...) {
   fail_allocations = false;
