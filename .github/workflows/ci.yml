@@ -251,6 +251,7 @@ jobs:
               modern_sqlite_read_benchmark \
               modern_sqlite_read_diagnostics \
               modern_sqlite_write_benchmark \
+              modern_sqlite_write_diagnostics \
               modern_sqlite_benchmark_sqlite_shared \
               modern_sqlite_btree_writer_sqlite_compatibility \
               modern_sqlite_transaction_sqlite_compatibility \
