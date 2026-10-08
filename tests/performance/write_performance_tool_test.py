@@ -1102,6 +1102,336 @@ class WritePerformanceToolTest(unittest.TestCase):
                         expected_case="insert-point-implicit",
                     )
 
+    def test_builds_the_paired_timing_and_diagnostic_schedules(self) -> None:
+        manifest = valid_manifest()
+        timing = write_performance.build_timing_schedule(manifest)
+        diagnostics = write_performance.build_diagnostic_schedule(manifest)
+        self.assertEqual(108, len(timing))
+        self.assertEqual(
+            {
+                "ordinal": 0,
+                "profile": "engine-default",
+                "round": 0,
+                "case": "create-table-implicit",
+                "engine": "modern",
+            },
+            timing[0],
+        )
+        self.assertEqual(
+            {
+                "ordinal": 107,
+                "profile": "matched-durable",
+                "round": 2,
+                "case": "mixed-batch-rollback",
+                "engine": "sqlite",
+            },
+            timing[-1],
+        )
+        self.assertEqual(36, len(diagnostics))
+        self.assertEqual(
+            {
+                "ordinal": 0,
+                "profile": "engine-default",
+                "case": "create-table-implicit",
+                "engine": "modern",
+            },
+            diagnostics[0],
+        )
+
+    def test_aggregates_nine_samples_and_applies_only_matched_guard(self) -> None:
+        manifest = valid_manifest()
+        reports = {}
+        for item in write_performance.build_timing_schedule(manifest):
+            report = valid_timing_report(
+                engine=item["engine"],
+                profile=item["profile"],
+                case_id=item["case"],
+                run_kind="baseline",
+            )
+            wall_ns = 40_000_000 if item["engine"] == "modern" else 20_000_000
+            cpu_ns = 200 if item["engine"] == "modern" else 100
+            for repetition in report["repetitions"]:
+                repetition["wall_ns"] = wall_ns
+                repetition["cpu_ns"] = cpu_ns
+            reports[
+                (
+                    item["profile"],
+                    item["round"],
+                    item["case"],
+                    item["engine"],
+                )
+            ] = report
+        aggregate = write_performance.aggregate_timing_reports(
+            manifest,
+            reports,
+        )
+        self.assertTrue(aggregate["guard_passed"])
+        self.assertEqual(2, len(aggregate["profiles"]))
+        for profile in aggregate["profiles"]:
+            self.assertEqual(9, len(profile["cases"]))
+            first = profile["cases"][0]
+            self.assertEqual(9, first["wall"]["sample_count"])
+            self.assertEqual(
+                {
+                    "numerator": 2,
+                    "denominator": 1,
+                    "decimal": "2.000000",
+                },
+                first["wall"]["ratio"],
+            )
+            self.assertEqual(3, len(first["wall"]["round_ratios"]))
+            self.assertEqual(
+                profile["id"] == "matched-durable",
+                profile["guard"],
+            )
+
+        matched_key = (
+            "matched-durable",
+            0,
+            "create-table-implicit",
+            "modern",
+        )
+        for repetition in reports[matched_key]["repetitions"]:
+            repetition["wall_ns"] = 220_000_000
+        failed = write_performance.aggregate_timing_reports(
+            manifest,
+            reports,
+        )
+        self.assertFalse(failed["guard_passed"])
+        engine_default = next(
+            item
+            for item in failed["profiles"]
+            if item["id"] == "engine-default"
+        )
+        self.assertEqual("informational", engine_default["status"])
+
+    def test_validates_a_complete_synthetic_baseline_directory(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "build") as temporary:
+            root = pathlib.Path(temporary)
+            baseline = root / "baseline"
+            baseline.mkdir()
+            (baseline / "raw" / "timing").mkdir(parents=True)
+            (baseline / "raw" / "diagnostic").mkdir(parents=True)
+            workload_path = root / "workloads.json"
+            manifest = valid_manifest()
+            workload_path.write_text(
+                json.dumps(manifest, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            def write_artifact(
+                relative: str,
+                data: bytes,
+            ) -> dict[str, object]:
+                path = baseline / relative
+                path.write_bytes(data)
+                return {
+                    "path": relative,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                }
+
+            timing_reports = {}
+            timing_runs = []
+            for item in write_performance.build_timing_schedule(manifest):
+                report = valid_timing_report(
+                    engine=item["engine"],
+                    profile=item["profile"],
+                    case_id=item["case"],
+                    run_kind="baseline",
+                )
+                for repetition in report["repetitions"]:
+                    repetition["cpu_ns"] = (
+                        200 if item["engine"] == "modern" else 100
+                    )
+                key = (
+                    item["profile"],
+                    item["round"],
+                    item["case"],
+                    item["engine"],
+                )
+                timing_reports[key] = report
+                stem = f"{item['ordinal']:03d}"
+                stdout = json.dumps(
+                    report,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                timing_runs.append(
+                    {
+                        **item,
+                        "command": ["binary"] * 8,
+                        "process": {
+                            "returncode": 0,
+                            "elapsed_ns": sum(
+                                row["wall_ns"]
+                                for row in report["repetitions"]
+                            )
+                            + 1,
+                        },
+                        "stdout": write_artifact(
+                            f"raw/timing/{stem}.json",
+                            stdout,
+                        ),
+                        "stderr": write_artifact(
+                            f"raw/timing/{stem}.stderr",
+                            b"",
+                        ),
+                    }
+                )
+
+            diagnostic_runs = []
+            for item in write_performance.build_diagnostic_schedule(manifest):
+                report = valid_diagnostic_report(
+                    engine=item["engine"],
+                    profile=item["profile"],
+                    case_id=item["case"],
+                )
+                stem = f"{item['ordinal']:03d}"
+                stdout = json.dumps(
+                    report,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                diagnostic_runs.append(
+                    {
+                        **item,
+                        "command": ["binary"] * 8,
+                        "process": {
+                            "returncode": 0,
+                            "elapsed_ns": 1,
+                        },
+                        "stdout": write_artifact(
+                            f"raw/diagnostic/{stem}.json",
+                            stdout,
+                        ),
+                        "stderr": write_artifact(
+                            f"raw/diagnostic/{stem}.stderr",
+                            b"",
+                        ),
+                    }
+                )
+
+            aggregate = write_performance.aggregate_timing_reports(
+                manifest,
+                timing_reports,
+            )
+            aggregate_bytes = json.dumps(
+                aggregate,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            aggregate_ref = write_artifact(
+                "aggregate.json",
+                aggregate_bytes,
+            )
+            identity_source = source_identity()
+            def input_reference(
+                role: str,
+                path: pathlib.Path,
+            ) -> dict[str, object]:
+                data = path.read_bytes()
+                return {
+                    "role": role,
+                    "path": path.relative_to(ROOT).as_posix(),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                }
+
+            run_manifest = {
+                "schema_version": 1,
+                "status": "complete",
+                "source": {
+                    **identity_source,
+                    "clean": True,
+                    "status_sha256": hashlib.sha256(b"").hexdigest(),
+                    "worktree_content_sha256": "c" * 64,
+                },
+                "host": {
+                    "os": "test",
+                    "kernel": "test",
+                    "architecture": "test",
+                    "cpu": "test",
+                    "logical_cpu_count": 1,
+                    "wall_timer": "steady_clock",
+                    "cpu_timer": "CLOCK_PROCESS_CPUTIME_ID",
+                },
+                "inputs": [
+                    input_reference("workload-manifest", workload_path),
+                    input_reference(
+                        "benchmark-source",
+                        ROOT / "benchmarks/write_performance.cpp",
+                    ),
+                    input_reference(
+                        "runner-source",
+                        ROOT / "tools/write_performance.py",
+                    ),
+                    input_reference(
+                        "fixture-schema",
+                        ROOT / "tests/fixtures/write_performance/schema.db",
+                    ),
+                    input_reference(
+                        "fixture-sql-schema",
+                        ROOT
+                        / "tests/fixtures/write_performance/schema.sql",
+                    ),
+                    input_reference(
+                        "fixture-populated",
+                        ROOT
+                        / "tests/fixtures/write_performance/populated.db",
+                    ),
+                    input_reference(
+                        "fixture-sql-populated",
+                        ROOT
+                        / "tests/fixtures/write_performance/populated.sql",
+                    ),
+                ],
+                "binaries": {
+                    "timing": {
+                        "path": "build/timing",
+                        "sha256": "d" * 64,
+                        "size_bytes": 1,
+                        "identity": {
+                            "build": build_identity(False),
+                            "mode": "identity",
+                            "schema_version": 1,
+                            "source": identity_source,
+                            "sqlite": sqlite_identity(),
+                        },
+                    },
+                    "diagnostic": {
+                        "path": "build/diagnostic",
+                        "sha256": "e" * 64,
+                        "size_bytes": 1,
+                        "identity": {
+                            "build": build_identity(True),
+                            "mode": "identity",
+                            "schema_version": 1,
+                            "source": identity_source,
+                            "sqlite": sqlite_identity(),
+                        },
+                    },
+                },
+                "timing_runs": timing_runs,
+                "diagnostic_runs": diagnostic_runs,
+                "aggregate": aggregate_ref,
+            }
+            (baseline / "run-manifest.json").write_text(
+                json.dumps(
+                    run_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            validated = write_performance.validate_baseline_directory(
+                baseline_path=baseline,
+                repository_root=ROOT,
+                workload_path=workload_path,
+                verify_current_source=False,
+            )
+            self.assertEqual(aggregate, validated)
+
     def test_usage_and_missing_file_are_harness_failures(self) -> None:
         completed = subprocess.run(
             [sys.executable, TOOL],
