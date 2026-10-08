@@ -2045,6 +2045,72 @@ TEST_F(VmTest, SeeksAndBoundsDuplicateIndexPrefixes) {
   }
 }
 
+TEST_F(VmTest, ReadsIndexRowidsAndRequiresMatchingTableRows) {
+  const BytecodeProgram lookup = BuildProgram(
+      *pager_, 2, 0, {}, {"BINARY"},
+      {
+          BinaryIndexDescriptor(),
+          TableDescriptor({
+              CursorFieldSource{
+                  .kind = CursorFieldSourceKind::kRowId,
+                  .record_field = 0,
+              },
+          }),
+      },
+      {ResultColumn("index_rowid"), ResultColumn("table_rowid")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(8)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(0)},
+          OpenReadCursorInstruction{.cursor = Cursor(1)},
+          SeekTableRowIdInstruction{.cursor = Cursor(1), .key = Reg(0)},
+          ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          HaltInstruction{},
+          HaltInstruction{},
+      });
+  Vm lookup_vm = CreateCoreVm(lookup);
+  ASSERT_EQ(VmStep::kRow, TakeValue(lookup_vm.Step()));
+  ASSERT_EQ(2U, lookup_vm.row().size());
+  ExpectInteger(lookup_vm.row()[0], 13);
+  ExpectInteger(lookup_vm.row()[1], 13);
+  EXPECT_EQ(VmStep::kDone, TakeValue(lookup_vm.Step()));
+
+  const auto failing_lookup = [&](SqlValue key) {
+    std::vector<SqlValue> constants;
+    constants.push_back(std::move(key));
+    return BuildProgram(*pager_, 1, 0, std::move(constants), {},
+                        {
+                            TableDescriptor({
+                                CursorFieldSource{
+                                    .kind = CursorFieldSourceKind::kRowId,
+                                    .record_field = 0,
+                                },
+                            }),
+                        },
+                        {},
+                        {
+                            LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                            OpenReadCursorInstruction{.cursor = Cursor(0)},
+                            SeekTableRowIdInstruction{.cursor = Cursor(0), .key = Reg(0)},
+                            HaltInstruction{},
+                        });
+  };
+
+  const BytecodeProgram invalid_type_program = failing_lookup(SqlValue::Text("42"));
+  Vm invalid_type = CreateCoreVm(invalid_type_program);
+  const auto invalid_type_step = invalid_type.Step();
+  ASSERT_FALSE(invalid_type_step.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid_type_step.error().code());
+
+  const BytecodeProgram missing_program =
+      failing_lookup(SqlValue::Integer(std::numeric_limits<std::int64_t>::max() - 1));
+  Vm missing = CreateCoreVm(missing_program);
+  const auto missing_step = missing.Step();
+  ASSERT_FALSE(missing_step.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, missing_step.error().code());
+}
+
 TEST_F(VmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {},

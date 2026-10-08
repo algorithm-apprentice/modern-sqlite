@@ -874,7 +874,7 @@ TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
       "WHERE Category=?1 AND Score>=?2 AND Score<?3",
       catalog);
 
-  ASSERT_EQ(2U, plan.candidates().size());
+  ASSERT_EQ(3U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ((AccessPathCost{
                 .estimated_input_rows = 4096,
@@ -934,7 +934,7 @@ TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
       ExplainPhysicalPlan(reversed));
 }
 
-TEST(PhysicalPlan, CostsFullUniqueAndUnselectiveCoveringIndexes) {
+TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
 
   const PhysicalPlan full = OptimizeOrThrow("SELECT Category, Score FROM Items", catalog);
@@ -970,10 +970,30 @@ TEST(PhysicalPlan, CostsFullUniqueAndUnselectiveCoveringIndexes) {
   EXPECT_EQ(4096U, unselective.selected_candidate().cost.estimated_output_rows);
   EXPECT_EQ(32'781U, unselective.selected_candidate().cost.work_units);
 
-  const PhysicalPlan noncovering =
+  const PhysicalPlan selective_noncovering =
+      OptimizeOrThrow("SELECT Payload FROM Items WHERE Category=?1", catalog);
+  ASSERT_EQ(2U, selective_noncovering.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, selective_noncovering.selected_candidate().kind);
+  EXPECT_EQ(IndexId{0}, selective_noncovering.selected_candidate().index);
+  EXPECT_FALSE(selective_noncovering.selected_candidate().covering);
+  EXPECT_EQ((AccessPathCost{
+                .estimated_input_rows = 4096,
+                .estimated_output_rows = 16,
+                .work_units = 8861,
+            }),
+            selective_noncovering.selected_candidate().cost);
+  const auto& selective_node =
+      std::get<PhysicalIndexScanNode>(selective_noncovering.nodes()[0].payload);
+  EXPECT_FALSE(selective_node.covering);
+  EXPECT_EQ("SEARCH \"Items\" USING INDEX \"items_category_score\" (\"Category\"=?)",
+            ExplainPhysicalPlan(selective_noncovering));
+
+  const PhysicalPlan unselective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Flag=?1", catalog);
-  ASSERT_EQ(1U, noncovering.candidates().size());
-  EXPECT_EQ(PhysicalAccessKind::kTableScan, noncovering.selected_candidate().kind);
+  ASSERT_EQ(2U, unselective_noncovering.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, unselective_noncovering.selected_candidate().kind);
+  EXPECT_EQ(IndexId{2}, unselective_noncovering.candidates()[1].index);
+  EXPECT_FALSE(unselective_noncovering.candidates()[1].covering);
 }
 
 TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
@@ -1016,8 +1036,19 @@ TEST(PhysicalPlan, AppliesDefaultNullAndRangeEstimates) {
 
 TEST(PhysicalPlan, KeepsIneligibleConstraintsAsCoveringScanResiduals) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
-  const std::array<std::string_view, 3> queries{
-      "SELECT Category, Score FROM Items WHERE Score=?1",
+  const PhysicalPlan alternate =
+      OptimizeOrThrow("SELECT Category, Score FROM Items WHERE Score=?1", catalog);
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, alternate.selected_candidate().kind);
+  EXPECT_EQ(IndexId{1}, alternate.selected_candidate().index);
+  EXPECT_FALSE(alternate.selected_candidate().covering);
+  EXPECT_EQ(1U, alternate.selected_candidate().equality_term_count);
+  EXPECT_FALSE(std::ranges::any_of(alternate.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalFilterNode>(node.payload);
+  }));
+  EXPECT_EQ("SEARCH \"Items\" USING INDEX \"items_score_desc\" (\"Score\"=?)",
+            ExplainPhysicalPlan(alternate));
+
+  const std::array<std::string_view, 2> queries{
       "SELECT Category, Score FROM Items WHERE Category COLLATE BINARY=?1",
       "SELECT Category, Score FROM Items WHERE +Category=?1",
   };

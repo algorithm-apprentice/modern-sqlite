@@ -1509,7 +1509,7 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   EXPECT_EQ("left", TextBytes(wr_rows[1][0]));
 }
 
-TEST(ReadLowering, LowersAndExecutesCoveringIndexRanges) {
+TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
   RequireStatus(pager->BeginRead());
@@ -1651,6 +1651,58 @@ TEST(ReadLowering, LowersAndExecutesCoveringIndexRanges) {
   const BytecodeProgram missing =
       LowerOrThrow("SELECT id FROM items WHERE category='missing'", catalog);
   EXPECT_TRUE(ExecuteRows(missing, *pager, catalog->version().generation).empty());
+
+  const BytecodeProgram noncovering =
+      LowerOrThrow("SELECT payload FROM items WHERE category='category-000a'", catalog);
+  ASSERT_EQ(2U, noncovering.cursors().size());
+  EXPECT_EQ(CursorStorageKind::kIndex, noncovering.cursors()[0].storage);
+  EXPECT_EQ(CursorStorageKind::kRowIdTable, noncovering.cursors()[1].storage);
+  const std::vector<InstructionKind> noncovering_kinds = InstructionKinds(noncovering);
+  EXPECT_EQ(2U, static_cast<std::size_t>(
+                    std::ranges::count(noncovering_kinds, InstructionKind::kOpenRead)));
+  EXPECT_NE(std::ranges::find(noncovering_kinds, InstructionKind::kReadField),
+            noncovering_kinds.end());
+  EXPECT_NE(std::ranges::find(noncovering_kinds, InstructionKind::kSeekTableRowId),
+            noncovering_kinds.end());
+  const auto noncovering_rows = ExecuteRows(noncovering, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, noncovering_rows.size());
+  EXPECT_EQ(128U, BlobBytes(noncovering_rows[0][0]).size());
+
+  const BytecodeProgram noncovering_range = LowerOrThrow(
+      "SELECT payload FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e'",
+      catalog);
+  const auto noncovering_range_rows =
+      ExecuteRows(noncovering_range, *pager, catalog->version().generation);
+  ASSERT_EQ(4U, noncovering_range_rows.size());
+  for (const auto& row : noncovering_range_rows) {
+    EXPECT_EQ(128U, BlobBytes(row[0]).size());
+  }
+
+  const BytecodeProgram upper_only =
+      LowerOrThrow("SELECT payload FROM items WHERE category<'category-0003'", catalog);
+  EXPECT_EQ(2U, ExecuteRows(upper_only, *pager, catalog->version().generation).size());
+
+  const BytecodeProgram descending_noncovering =
+      LowerOrThrow("SELECT payload FROM items WHERE score>=250", catalog);
+  EXPECT_EQ(96U, ExecuteRows(descending_noncovering, *pager, catalog->version().generation).size());
+
+  const BytecodeProgram noncovering_residual = LowerOrThrow(
+      "SELECT payload FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' AND flag=0",
+      catalog);
+  EXPECT_EQ(2U, ExecuteRows(noncovering_residual, *pager, catalog->version().generation).size());
+
+  const BytecodeProgram noncovering_limit = LowerOrThrow(
+      "SELECT payload FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' LIMIT 2 OFFSET 1",
+      catalog);
+  EXPECT_EQ(2U, ExecuteRows(noncovering_limit, *pager, catalog->version().generation).size());
+
+  const BytecodeProgram unselective_noncovering =
+      LowerOrThrow("SELECT payload FROM items WHERE flag=0", catalog);
+  ASSERT_EQ(1U, unselective_noncovering.cursors().size());
+  EXPECT_EQ(CursorStorageKind::kRowIdTable, unselective_noncovering.cursors()[0].storage);
 
   const CustomEnvironment custom;
   callback_count = 0;

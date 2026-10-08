@@ -65,7 +65,9 @@ bool fail_allocations = false;
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
-  input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  input.definitions.push_back(
+      ParseTree(indexed ? "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Payload BLOB)"
+                        : "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
   if (indexed) {
     input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
   }
@@ -87,6 +89,12 @@ bool fail_allocations = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.tables.back().columns.push_back(CatalogColumnInput{
+        .name = "Payload",
+        .declared_type = "BLOB",
+    });
+  }
   if (indexed) {
     input.indexes.push_back(CatalogIndexInput{
         .definition = SchemaDefinitionId{1},
@@ -253,14 +261,15 @@ int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
   const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
-  const std::array<PhysicalPlan, 5> physical_plans{
+  const std::array<PhysicalPlan, 6> physical_plans{
       PhysicalFixture(catalog, "SELECT 1"),
       PhysicalFixture(catalog, "SELECT Name FROM Items"),
       PhysicalFixture(catalog, "SELECT Name FROM Items WHERE rowid=?1"),
       PhysicalFixture(catalog, "SELECT Name FROM Items LIMIT ?1 OFFSET ?2"),
       PhysicalFixture(indexed_catalog, "SELECT id, Name FROM Items WHERE Name=?1"),
+      PhysicalFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1"),
   };
-  constexpr std::array<std::size_t, 5> kExpectedAllocations{17U, 28U, 27U, 34U, 34U};
+  constexpr std::array<std::size_t, 6> kExpectedAllocations{17U, 28U, 27U, 34U, 34U, 39U};
   std::unique_ptr<BytecodeProgram> published;
   for (std::size_t plan_index = 0; plan_index < physical_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
