@@ -412,30 +412,30 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   modern_sqlite_enable_clang_tidy(modern_sqlite_write_benchmark)
 
   add_library(
-    modern_sqlite_read_diagnostic_engine
+    modern_sqlite_diagnostic_engine
     STATIC
       ${MODERN_SQLITE_ENGINE_SOURCES}
   )
   target_include_directories(
-    modern_sqlite_read_diagnostic_engine
+    modern_sqlite_diagnostic_engine
     PUBLIC
       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
       "$<INSTALL_INTERFACE:include>"
   )
   target_compile_definitions(
-    modern_sqlite_read_diagnostic_engine
+    modern_sqlite_diagnostic_engine
     PUBLIC
       MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
   )
   target_link_libraries(
-    modern_sqlite_read_diagnostic_engine
+    modern_sqlite_diagnostic_engine
     PUBLIC
       modern_sqlite_project_options
     PRIVATE
       modern_sqlite_project_warnings
       modern_sqlite::instrumentation
   )
-  modern_sqlite_enable_clang_tidy(modern_sqlite_read_diagnostic_engine)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_diagnostic_engine)
 
   add_executable(
     modern_sqlite_read_diagnostics
@@ -455,12 +455,46 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   target_link_libraries(
     modern_sqlite_read_diagnostics
     PRIVATE
-      modern_sqlite_read_diagnostic_engine
+      modern_sqlite_diagnostic_engine
       modern_sqlite_benchmark_sqlite
       modern_sqlite::instrumentation
   )
   modern_sqlite_set_project_warnings(modern_sqlite_read_diagnostics PRIVATE)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      modern_sqlite_read_diagnostics
+      PRIVATE
+        -Wno-mismatched-new-delete
+    )
+  endif()
   modern_sqlite_enable_clang_tidy(modern_sqlite_read_diagnostics)
+
+  add_executable(
+    modern_sqlite_write_diagnostics
+    benchmarks/write_performance.cpp
+  )
+  target_compile_definitions(
+    modern_sqlite_write_diagnostics
+    PRIVATE
+      MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+      MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS=1
+  )
+  target_link_libraries(
+    modern_sqlite_write_diagnostics
+    PRIVATE
+      modern_sqlite_diagnostic_engine
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite::instrumentation
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_write_diagnostics PRIVATE)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      modern_sqlite_write_diagnostics
+      PRIVATE
+        -Wno-mismatched-new-delete
+    )
+  endif()
+  modern_sqlite_enable_clang_tidy(modern_sqlite_write_diagnostics)
 endif()
 
 add_executable(

@@ -1154,7 +1154,10 @@ if(TARGET modern_sqlite_benchmark_sqlite)
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endif()
-if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics)
+if(TARGET modern_sqlite_read_benchmark AND
+   TARGET modern_sqlite_read_diagnostics AND
+   TARGET modern_sqlite_write_benchmark AND
+   TARGET modern_sqlite_write_diagnostics)
   add_test(
     NAME performance.read_benchmark_cli
     COMMAND
@@ -1178,6 +1181,8 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
       "${Python3_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tests/performance/write_benchmark_cli_test.py"
       --binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_benchmark"
+      --diagnostic-binary
+        "${PROJECT_BINARY_DIR}/modern_sqlite_write_diagnostics"
       --schema-fixture
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
       --populated-fixture

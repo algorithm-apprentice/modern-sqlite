@@ -41,6 +41,7 @@ _TOP_KEYS = {
     "workload_semantics_version",
     "sqlite_profile",
     "configuration",
+    "diagnostic_work",
     "profiles",
     "rounds",
     "timing_repetitions",
@@ -138,6 +139,79 @@ _COMPLETION_KEYS = {
     "warmups",
 }
 _TIMER_KEYS = {"wall", "cpu"}
+_RAW_DIAGNOSTIC_KEYS = {
+    "case",
+    "completion",
+    "counters",
+    "diagnostic_schema_version",
+    "effective_configuration",
+    "engine",
+    "mode",
+    "profile",
+    "schema_version",
+    "work",
+    "workload_semantics_version",
+}
+_DIAGNOSTIC_COMPLETION_KEYS = {
+    "diagnostic_runs",
+    "fresh_databases",
+    "post_verifications",
+    "pre_verifications",
+    "status",
+    "warmups",
+}
+_COUNTER_GROUP_KEYS = {"modern", "sqlite", "vfs"}
+MODERN_COUNTER_NAMES = (
+    "allocations",
+    "bytes_copied",
+    "vfs_calls",
+    "pages_read",
+    "pages_written",
+    "cache_hits",
+    "cache_misses",
+    "btree_comparisons",
+    "vm_instructions",
+    "planner_work",
+)
+SQLITE_COUNTER_NAMES = (
+    "cache_bytes_current",
+    "cache_hits",
+    "cache_misses",
+    "cache_writes",
+    "changes",
+    "fullscan_steps",
+    "malloc_count_current",
+    "malloc_count_highwater",
+    "malloc_size_highwater",
+    "reprepares",
+    "statement_runs",
+    "total_changes",
+    "vm_steps",
+)
+VFS_FILE_COUNTER_NAMES = (
+    "open_calls",
+    "close_calls",
+    "read_calls",
+    "read_bytes",
+    "write_calls",
+    "write_bytes",
+    "sync_calls",
+    "truncate_calls",
+    "delete_calls",
+    "directory_sync_requests",
+    "lock_calls",
+    "unlock_calls",
+    "access_calls",
+    "full_path_calls",
+)
+_VFS_GROUP_KEYS = {
+    "global",
+    "main_database",
+    "main_journal",
+    "subjournal",
+    "write_ahead_log",
+}
+_VFS_GLOBAL_KEYS = {"random_byte_calls"}
 
 _EXPECTED_CONFIGURATION = {
     "page_size": 4096,
@@ -726,6 +800,9 @@ def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
     if value["sqlite_profile"] != SQLITE_PROFILE:
         raise HarnessError("sqlite_profile is invalid")
     _validate_configuration(value["configuration"])
+    _require_type(value["diagnostic_work"], str, "diagnostic_work")
+    if value["diagnostic_work"] != "baseline":
+        raise HarnessError("diagnostic_work must be baseline")
     _validate_profiles(value["profiles"])
     _validate_rounds(value["rounds"])
     _require_type(value["timing_repetitions"], int, "timing_repetitions")
@@ -944,8 +1021,191 @@ def validate_raw_timing_report(
     return value
 
 
+def _validate_counter_values(
+    value: Any,
+    *,
+    names: tuple[str, ...],
+    label: str,
+) -> dict[str, int]:
+    _require_type(value, dict, label)
+    if set(value) != set(names):
+        family = "Modern" if names == MODERN_COUNTER_NAMES else "SQLite"
+        raise HarnessError(f"{family} counter names are invalid")
+    for name in names:
+        _require_type(value[name], int, f"{label}.{name}")
+        if value[name] < 0:
+            raise HarnessError(f"{label}.{name} must be nonnegative")
+    return value
+
+
+def _validate_vfs_counters(value: Any) -> dict[str, Any]:
+    _require_type(value, dict, "diagnostic report.counters.vfs")
+    _require_keys(value, _VFS_GROUP_KEYS, "diagnostic report.counters.vfs")
+    global_counters = value["global"]
+    _require_type(
+        global_counters,
+        dict,
+        "diagnostic report.counters.vfs.global",
+    )
+    _require_keys(
+        global_counters,
+        _VFS_GLOBAL_KEYS,
+        "diagnostic report.counters.vfs.global",
+    )
+    _require_type(
+        global_counters["random_byte_calls"],
+        int,
+        "diagnostic report.counters.vfs.global.random_byte_calls",
+    )
+    if global_counters["random_byte_calls"] < 0:
+        raise HarnessError(
+            "diagnostic report.counters.vfs.global.random_byte_calls "
+            "must be nonnegative"
+        )
+    for group in (
+        "main_database",
+        "main_journal",
+        "subjournal",
+        "write_ahead_log",
+    ):
+        label = f"diagnostic report.counters.vfs.{group}"
+        counters = value[group]
+        _require_type(counters, dict, label)
+        if set(counters) != set(VFS_FILE_COUNTER_NAMES):
+            raise HarnessError(f"{label} counter names are invalid")
+        for name in VFS_FILE_COUNTER_NAMES:
+            _require_type(counters[name], int, f"{label}.{name}")
+            if counters[name] < 0:
+                raise HarnessError(f"{label}.{name} must be nonnegative")
+        if counters["open_calls"] != counters["close_calls"]:
+            raise HarnessError(f"{label} open and close counts differ")
+    if value["main_database"]["open_calls"] <= 0:
+        raise HarnessError(
+            "Modern diagnostic main-database open count must be positive"
+        )
+    return value
+
+
+def validate_raw_diagnostic_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_profile: str,
+    expected_case: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, "diagnostic report")
+    _require_keys(value, _RAW_DIAGNOSTIC_KEYS, "diagnostic report")
+    for key in (
+        "schema_version",
+        "diagnostic_schema_version",
+        "workload_semantics_version",
+    ):
+        _require_type(value[key], int, f"diagnostic report.{key}")
+        if value[key] != 1:
+            raise HarnessError(f"diagnostic report {key} must be 1")
+    if expected_engine not in {"modern", "sqlite"}:
+        raise HarnessError("expected engine must be modern or sqlite")
+    if expected_profile not in {"engine-default", "matched-durable"}:
+        raise HarnessError("expected profile is invalid")
+    _require_type(value["mode"], str, "diagnostic report.mode")
+    if value["mode"] != "diagnostic":
+        raise HarnessError("diagnostic report mode must be diagnostic")
+    for key, expected in (
+        ("engine", expected_engine),
+        ("profile", expected_profile),
+        ("case", expected_case),
+    ):
+        _require_type(value[key], str, f"diagnostic report.{key}")
+        if value[key] != expected:
+            raise HarnessError(
+                f"diagnostic report {key} does not match the invocation"
+            )
+
+    case = _case_by_id(workload_manifest, expected_case)
+    expected_work = case["expected"][workload_manifest["diagnostic_work"]]
+    work = _validate_work_object(value["work"], "diagnostic report.work")
+    if work != expected_work:
+        raise HarnessError(
+            "diagnostic report work does not match the workload manifest"
+        )
+    _validate_effective_configuration(
+        value["effective_configuration"],
+        engine=expected_engine,
+        profile=expected_profile,
+    )
+
+    completion = value["completion"]
+    _require_type(completion, dict, "diagnostic report.completion")
+    _require_keys(
+        completion,
+        _DIAGNOSTIC_COMPLETION_KEYS,
+        "diagnostic report.completion",
+    )
+    for key in _DIAGNOSTIC_COMPLETION_KEYS - {"status"}:
+        _require_type(
+            completion[key],
+            int,
+            f"diagnostic report.completion.{key}",
+        )
+    expected_completion = {
+        "diagnostic_runs": 1,
+        "fresh_databases": 2,
+        "post_verifications": 2,
+        "pre_verifications": 1,
+        "status": "complete",
+        "warmups": 1,
+    }
+    if completion != expected_completion:
+        raise HarnessError("diagnostic report completion is invalid")
+
+    counters = value["counters"]
+    _require_type(counters, dict, "diagnostic report.counters")
+    _require_keys(counters, _COUNTER_GROUP_KEYS, "diagnostic report.counters")
+    if expected_engine == "modern":
+        modern = _validate_counter_values(
+            counters["modern"],
+            names=MODERN_COUNTER_NAMES,
+            label="diagnostic report.counters.modern",
+        )
+        if modern["allocations"] <= 0:
+            raise HarnessError(
+                "Modern diagnostic allocations must be positive"
+            )
+        if modern["vfs_calls"] <= 0:
+            raise HarnessError("Modern diagnostic VFS calls must be positive")
+        if counters["sqlite"] != {}:
+            raise HarnessError("SQLite counters must be empty for Modern")
+        _validate_vfs_counters(counters["vfs"])
+    else:
+        if counters["modern"] != {}:
+            raise HarnessError("Modern counters must be empty for SQLite")
+        sqlite = _validate_counter_values(
+            counters["sqlite"],
+            names=SQLITE_COUNTER_NAMES,
+            label="diagnostic report.counters.sqlite",
+        )
+        if sqlite["vm_steps"] <= 0 or sqlite["statement_runs"] <= 0:
+            raise HarnessError(
+                "SQLite diagnostic execution counters must be positive"
+            )
+        if counters["vfs"] != {}:
+            raise HarnessError("VFS counters must be empty for SQLite")
+    return value
+
+
 @dataclasses.dataclass(frozen=True)
 class TimingChildResult:
+    command: tuple[str, ...]
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    elapsed_ns: int
+    report: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class DiagnosticChildResult:
     command: tuple[str, ...]
     returncode: int
     stdout: bytes
@@ -1046,6 +1306,107 @@ def run_timing_child(
     if remaining:
         raise BenchmarkMismatch("timing child left scratch database artifacts")
     return TimingChildResult(
+        command=command,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        elapsed_ns=result.elapsed_ns,
+        report=report,
+    )
+
+
+def run_diagnostic_child(
+    *,
+    binary_path: pathlib.Path,
+    repository_root: pathlib.Path,
+    workload_manifest: dict[str, Any],
+    engine: str,
+    profile: str,
+    case_id: str,
+    fixture_path: pathlib.Path,
+    scratch_path: pathlib.Path,
+    timeout_seconds: float = 600.0,
+) -> DiagnosticChildResult:
+    if engine not in {"modern", "sqlite"}:
+        raise HarnessError("diagnostic engine must be modern or sqlite")
+    if profile not in {"engine-default", "matched-durable"}:
+        raise HarnessError("diagnostic profile is invalid")
+    if not binary_path.is_file():
+        raise HarnessError(f"diagnostic binary does not exist: {binary_path}")
+    if not fixture_path.is_file():
+        raise HarnessError(
+            f"diagnostic fixture does not exist: {fixture_path}"
+        )
+    if not scratch_path.is_dir():
+        raise HarnessError(
+            f"diagnostic scratch path is not a directory: {scratch_path}"
+        )
+    try:
+        scratch_entries = list(scratch_path.iterdir())
+    except OSError as error:
+        raise HarnessError(
+            f"cannot inspect diagnostic scratch path: {error}"
+        ) from error
+    if scratch_entries:
+        raise HarnessError("diagnostic scratch path must be empty")
+    _case_by_id(workload_manifest, case_id)
+    command = (
+        str(binary_path),
+        "run",
+        engine,
+        profile,
+        case_id,
+        str(fixture_path),
+        str(scratch_path),
+        "diagnostic",
+    )
+    common = _read_performance_module()
+    try:
+        result = common.run_bounded(
+            list(command),
+            cwd=repository_root,
+            timeout_seconds=timeout_seconds,
+            stdout_limit=4 * 1024 * 1024,
+            stderr_limit=1024 * 1024,
+        )
+    except (common.HarnessError, common.ChildExecutionError) as error:
+        raise HarnessError(str(error)) from error
+    if result.returncode == 2:
+        raise BenchmarkMismatch(
+            f"diagnostic child reported a correctness mismatch for "
+            f"{engine} {profile} {case_id}"
+        )
+    if result.returncode != 0:
+        raise HarnessError(
+            f"diagnostic child failed for {engine} {profile} {case_id} "
+            f"with exit {result.returncode}"
+        )
+    if result.stderr:
+        raise HarnessError(
+            f"diagnostic child wrote stderr for {engine} {profile} {case_id}"
+        )
+    report = load_json_bytes_strict(
+        result.stdout,
+        f"diagnostic {engine} {profile} {case_id}",
+    )
+    validate_raw_diagnostic_report(
+        report,
+        workload_manifest=workload_manifest,
+        expected_engine=engine,
+        expected_profile=profile,
+        expected_case=case_id,
+    )
+    try:
+        remaining = list(scratch_path.iterdir())
+    except OSError as error:
+        raise HarnessError(
+            f"cannot inspect diagnostic scratch cleanup: {error}"
+        ) from error
+    if remaining:
+        raise BenchmarkMismatch(
+            "diagnostic child left scratch database artifacts"
+        )
+    return DiagnosticChildResult(
         command=command,
         returncode=result.returncode,
         stdout=result.stdout,

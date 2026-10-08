@@ -6,11 +6,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <new>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -22,6 +26,8 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
+#include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
@@ -44,6 +50,15 @@
     __has_feature(memory_sanitizer) || __has_feature(undefined_behavior_sanitizer)
 #error "The write performance benchmark forbids sanitizers"
 #endif
+#endif
+
+#ifndef MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+#define MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS 0
+#endif
+
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS != 0 && \
+    MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS != 1
+#error "MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS must be 0 or 1"
 #endif
 
 namespace {
@@ -133,6 +148,58 @@ struct EffectiveConfiguration {
   std::string thread_mode;
 
   bool operator==(const EffectiveConfiguration&) const = default;
+};
+
+enum class DiagnosticFileGroup : std::uint8_t {
+  kMainDatabase,
+  kMainJournal,
+  kSubjournal,
+  kWriteAheadLog,
+};
+
+constexpr std::size_t kDiagnosticFileGroupCount = 4;
+
+struct FileDiagnosticCounters {
+  std::uint64_t open_calls = 0;
+  std::uint64_t close_calls = 0;
+  std::uint64_t read_calls = 0;
+  std::uint64_t read_bytes = 0;
+  std::uint64_t write_calls = 0;
+  std::uint64_t write_bytes = 0;
+  std::uint64_t sync_calls = 0;
+  std::uint64_t truncate_calls = 0;
+  std::uint64_t delete_calls = 0;
+  std::uint64_t directory_sync_requests = 0;
+  std::uint64_t lock_calls = 0;
+  std::uint64_t unlock_calls = 0;
+  std::uint64_t access_calls = 0;
+  std::uint64_t full_path_calls = 0;
+};
+
+struct VfsDiagnosticCounters {
+  std::array<FileDiagnosticCounters, kDiagnosticFileGroupCount> files{};
+  std::uint64_t random_byte_calls = 0;
+  std::uint64_t delegated_vfs_calls = 0;
+};
+
+struct ModernCounterValues {
+  std::array<std::uint64_t, modern_sqlite::instrumentation::kCounterCount> values{};
+};
+
+struct SqliteCounterValues {
+  std::uint64_t cache_bytes_current = 0;
+  std::uint64_t cache_hits = 0;
+  std::uint64_t cache_misses = 0;
+  std::uint64_t cache_writes = 0;
+  std::uint64_t changes = 0;
+  std::uint64_t fullscan_steps = 0;
+  std::uint64_t malloc_count_current = 0;
+  std::uint64_t malloc_count_highwater = 0;
+  std::uint64_t malloc_size_highwater = 0;
+  std::uint64_t reprepares = 0;
+  std::uint64_t statement_runs = 0;
+  std::uint64_t total_changes = 0;
+  std::uint64_t vm_steps = 0;
 };
 
 struct ExpectedRecord {
@@ -245,6 +312,263 @@ class SqliteStatement final {
 
  private:
   sqlite3_stmt* statement_ = nullptr;
+};
+
+[[nodiscard]] constexpr std::size_t DiagnosticFileGroupIndex(DiagnosticFileGroup group) noexcept {
+  return static_cast<std::size_t>(group);
+}
+
+[[nodiscard]] std::optional<DiagnosticFileGroup> DiagnosticGroupFor(modern_sqlite::FileKind kind) {
+  switch (kind) {
+    case modern_sqlite::FileKind::kMainDatabase:
+      return DiagnosticFileGroup::kMainDatabase;
+    case modern_sqlite::FileKind::kMainJournal:
+      return DiagnosticFileGroup::kMainJournal;
+    case modern_sqlite::FileKind::kSubjournal:
+      return DiagnosticFileGroup::kSubjournal;
+    case modern_sqlite::FileKind::kWriteAheadLog:
+      return DiagnosticFileGroup::kWriteAheadLog;
+    case modern_sqlite::FileKind::kTemporaryDatabase:
+    case modern_sqlite::FileKind::kTransientDatabase:
+    case modern_sqlite::FileKind::kTemporaryJournal:
+    case modern_sqlite::FileKind::kSuperJournal:
+      return std::nullopt;
+  }
+  throw HarnessFailure{"invalid diagnostic file kind"};
+}
+
+[[nodiscard]] DiagnosticFileGroup DiagnosticGroupForPath(std::string_view path) noexcept {
+  if (path.ends_with("-journal")) {
+    return DiagnosticFileGroup::kMainJournal;
+  }
+  if (path.ends_with("-wal")) {
+    return DiagnosticFileGroup::kWriteAheadLog;
+  }
+  return DiagnosticFileGroup::kMainDatabase;
+}
+
+class CountingFile final : public modern_sqlite::File {
+ public:
+  CountingFile(std::unique_ptr<modern_sqlite::File> delegate, VfsDiagnosticCounters& counters,
+               FileDiagnosticCounters* file_counters, bool delete_on_close) noexcept
+      : delegate_(std::move(delegate)),
+        counters_(&counters),
+        file_counters_(file_counters),
+        delete_on_close_(delete_on_close) {}
+
+  ~CountingFile() override {
+    if (file_counters_ != nullptr) {
+      ++FileCounters().close_calls;
+      if (delete_on_close_) {
+        ++FileCounters().delete_calls;
+      }
+    }
+  }
+
+ protected:
+  [[nodiscard]] modern_sqlite::Result<modern_sqlite::ByteCount> DoReadAt(
+      modern_sqlite::MutableByteView destination, modern_sqlite::FileOffset offset) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().read_calls;
+    }
+    auto result = delegate_->ReadAt(destination, offset);
+    if (!result.has_value()) {
+      return std::unexpected(std::move(result.error()));
+    }
+    if (file_counters_ != nullptr) {
+      FileCounters().read_bytes += static_cast<std::uint64_t>(result->bytes_read().value());
+    }
+    return result->bytes_read();
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoWriteAt(modern_sqlite::ByteView source,
+                                                modern_sqlite::FileOffset offset) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().write_calls;
+      FileCounters().write_bytes += static_cast<std::uint64_t>(source.size());
+    }
+    return delegate_->WriteAt(source, offset);
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoTruncate(modern_sqlite::FileSize size) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().truncate_calls;
+    }
+    return delegate_->Truncate(size);
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoSync(modern_sqlite::SyncOptions options) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().sync_calls;
+    }
+    return delegate_->Sync(options);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<modern_sqlite::FileSize> DoSize() override {
+    CountDelegatedCall();
+    return delegate_->Size();
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoLock(modern_sqlite::DatabaseLock lock) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().lock_calls;
+    }
+    return delegate_->Lock(lock);
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoUnlock(modern_sqlite::DatabaseLock lock) override {
+    CountDelegatedCall();
+    if (file_counters_ != nullptr) {
+      ++FileCounters().unlock_calls;
+    }
+    return delegate_->Unlock(lock);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<bool> DoHasReservedLock() override {
+    CountDelegatedCall();
+    return delegate_->HasReservedLock();
+  }
+
+  [[nodiscard]] modern_sqlite::FileProperties DoProperties() const noexcept override {
+    CountDelegatedCall();
+    auto result = delegate_->Properties();
+    if (!result.has_value()) {
+      std::terminate();
+    }
+    return *result;
+  }
+
+  [[nodiscard]] modern_sqlite::Result<std::optional<modern_sqlite::MutableByteView>>
+  DoMapSharedMemory(modern_sqlite::SharedMemoryRegionIndex region,
+                    modern_sqlite::ByteCount region_size,
+                    modern_sqlite::SharedMemoryMapMode mode) override {
+    CountDelegatedCall();
+    return delegate_->MapSharedMemory(region, region_size, mode);
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoLockSharedMemory(
+      modern_sqlite::SharedMemoryLockRange range,
+      modern_sqlite::SharedMemoryLockOperation operation,
+      modern_sqlite::SharedMemoryLockMode mode) override {
+    CountDelegatedCall();
+    return delegate_->LockSharedMemory(range, operation, mode);
+  }
+
+  void DoSharedMemoryBarrier() noexcept override {
+    CountDelegatedCall();
+    delegate_->SharedMemoryBarrier();
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoUnmapSharedMemory(
+      modern_sqlite::SharedMemoryUnmapMode mode) override {
+    CountDelegatedCall();
+    return delegate_->UnmapSharedMemory(mode);
+  }
+
+ private:
+  [[nodiscard]] FileDiagnosticCounters& FileCounters() const noexcept { return *file_counters_; }
+
+  void CountDelegatedCall() const noexcept { ++counters_->delegated_vfs_calls; }
+
+  std::unique_ptr<modern_sqlite::File> delegate_;
+  VfsDiagnosticCounters* counters_;
+  FileDiagnosticCounters* file_counters_;
+  bool delete_on_close_;
+};
+
+class CountingVfs final : public modern_sqlite::Vfs {
+ public:
+  explicit CountingVfs(VfsDiagnosticCounters& counters)
+      : delegate_(std::make_unique<modern_sqlite::PosixVfs>()), counters_(&counters) {}
+
+ protected:
+  [[nodiscard]] modern_sqlite::Result<modern_sqlite::OpenedFile> DoOpen(
+      std::optional<std::string_view> path, modern_sqlite::FileOpenOptions options) override {
+    CountDelegatedCall();
+    auto opened = delegate_->Open(path, options);
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    const std::optional<DiagnosticFileGroup> group = DiagnosticGroupFor(options.kind);
+    if (group.has_value()) {
+      ++FileCounters(*group).open_calls;
+    }
+    FileDiagnosticCounters* file_counters = group.has_value() ? &FileCounters(*group) : nullptr;
+    try {
+      return modern_sqlite::OpenedFile{
+          .file = std::make_unique<CountingFile>(std::move(opened->file), *counters_, file_counters,
+                                                 options.delete_on_close),
+          .access = opened->access,
+      };
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(modern_sqlite::Error::OutOfMemory());
+    }
+  }
+
+  [[nodiscard]] modern_sqlite::Status DoDelete(
+      std::string_view path, modern_sqlite::DirectorySync directory_sync) override {
+    CountDelegatedCall();
+    FileDiagnosticCounters& counters = FileCounters(DiagnosticGroupForPath(path));
+    ++counters.delete_calls;
+    if (directory_sync == modern_sqlite::DirectorySync::kYes) {
+      ++counters.directory_sync_requests;
+    }
+    return delegate_->Delete(path, directory_sync);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<bool> DoAccess(
+      std::string_view path, modern_sqlite::FileAccessQuery query) override {
+    CountDelegatedCall();
+    ++FileCounters(DiagnosticGroupForPath(path)).access_calls;
+    return delegate_->Access(path, query);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<std::string> DoFullPath(std::string_view path) override {
+    CountDelegatedCall();
+    ++FileCounters(DiagnosticGroupForPath(path)).full_path_calls;
+    return delegate_->FullPath(path);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<modern_sqlite::ByteCount> DoRandomBytes(
+      modern_sqlite::MutableByteView output) override {
+    CountDelegatedCall();
+    ++counters_->random_byte_calls;
+    modern_sqlite::Status status = delegate_->RandomBytes(output);
+    if (!status.has_value()) {
+      return std::unexpected(std::move(status.error()));
+    }
+    return modern_sqlite::ByteCount{output.size()};
+  }
+
+  [[nodiscard]] modern_sqlite::Result<std::chrono::microseconds> DoSleepFor(
+      std::chrono::microseconds duration) override {
+    CountDelegatedCall();
+    return delegate_->SleepFor(duration);
+  }
+
+  [[nodiscard]] modern_sqlite::Result<modern_sqlite::WallClockTime> DoCurrentTime() override {
+    CountDelegatedCall();
+    return delegate_->CurrentTime();
+  }
+
+  [[nodiscard]] modern_sqlite::ByteCount DoMaximumPathLength() const noexcept override {
+    return delegate_->MaximumPathLength();
+  }
+
+ private:
+  [[nodiscard]] FileDiagnosticCounters& FileCounters(DiagnosticFileGroup group) const noexcept {
+    return counters_->files[DiagnosticFileGroupIndex(group)];
+  }
+
+  void CountDelegatedCall() const noexcept { ++counters_->delegated_vfs_calls; }
+
+  std::unique_ptr<modern_sqlite::Vfs> delegate_;
+  VfsDiagnosticCounters* counters_;
 };
 
 class Digest final {
@@ -879,7 +1203,7 @@ struct SqliteMixedStatements {
   return profile == ProfileKind::kEngineDefault ? "engine-default" : "matched-durable";
 }
 
-[[nodiscard]] RunKind ParseRunKind(std::string_view value) {
+[[maybe_unused, nodiscard]] RunKind ParseRunKind(std::string_view value) {
   if (value == "smoke") {
     return RunKind::kSmoke;
   }
@@ -889,7 +1213,7 @@ struct SqliteMixedStatements {
   throw HarnessFailure{"run kind must be smoke or baseline"};
 }
 
-[[nodiscard]] std::string_view RunKindName(RunKind kind) noexcept {
+[[maybe_unused, nodiscard]] std::string_view RunKindName(RunKind kind) noexcept {
   return kind == RunKind::kSmoke ? "smoke" : "baseline";
 }
 
@@ -1059,8 +1383,12 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
 [[nodiscard]] Execution ExecuteModernWork(CaseKind kind, const std::filesystem::path& path,
                                           const WorkloadScale& scale,
                                           std::span<const std::int64_t> key_order, bool measured,
-                                          std::size_t index) {
-  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+                                          std::size_t index, VfsDiagnosticCounters* vfs_counters) {
+  modern_sqlite::Result<modern_sqlite::WriteSession> opened =
+      vfs_counters == nullptr ? modern_sqlite::WriteSession::Open(path.string())
+                              : modern_sqlite::WriteSession::Open(
+                                    std::make_unique<CountingVfs>(*vfs_counters), path.string());
+  modern_sqlite::WriteSession session = TakeValue(std::move(opened));
   const EffectiveConfiguration configuration = ModernConfiguration();
   TimedWork timed;
   switch (kind) {
@@ -1186,13 +1514,85 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
   return Execution{.timed = timed, .configuration = configuration};
 }
 
+[[nodiscard]] std::pair<std::uint64_t, std::uint64_t> SqliteDbStatus(sqlite3* database,
+                                                                     int operation, bool reset) {
+  int current = 0;
+  int highwater = 0;
+  const int result = sqlite3_db_status(database, operation, &current, &highwater, reset ? 1 : 0);
+  if (result != SQLITE_OK || current < 0 || highwater < 0) {
+    throw BenchmarkMismatch{"SQLite diagnostic db status failed"};
+  }
+  return {
+      static_cast<std::uint64_t>(current),
+      static_cast<std::uint64_t>(highwater),
+  };
+}
+
+[[nodiscard]] std::pair<std::uint64_t, std::uint64_t> SqliteGlobalStatus(int operation,
+                                                                         bool reset) {
+  sqlite3_int64 current = 0;
+  sqlite3_int64 highwater = 0;
+  const int result = sqlite3_status64(operation, &current, &highwater, reset ? 1 : 0);
+  if (result != SQLITE_OK || current < 0 || highwater < 0) {
+    throw BenchmarkMismatch{"SQLite diagnostic global status failed"};
+  }
+  return {
+      static_cast<std::uint64_t>(current),
+      static_cast<std::uint64_t>(highwater),
+  };
+}
+
+void ResetSqliteDiagnosticCounters(sqlite3* database) {
+  static_cast<void>(SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_HIT, true));
+  static_cast<void>(SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_MISS, true));
+  static_cast<void>(SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_WRITE, true));
+  static_cast<void>(SqliteGlobalStatus(SQLITE_STATUS_MALLOC_COUNT, true));
+  static_cast<void>(SqliteGlobalStatus(SQLITE_STATUS_MALLOC_SIZE, true));
+}
+
+void AccumulateSqliteStatementCounters(const SqliteStatement& statement,
+                                       SqliteCounterValues& counters) {
+  const auto read = [&statement](int operation) {
+    const int value = sqlite3_stmt_status(statement.get(), operation, 0);
+    if (value < 0) {
+      throw BenchmarkMismatch{"SQLite diagnostic statement status failed"};
+    }
+    return static_cast<std::uint64_t>(value);
+  };
+  counters.vm_steps += read(SQLITE_STMTSTATUS_VM_STEP);
+  counters.fullscan_steps += read(SQLITE_STMTSTATUS_FULLSCAN_STEP);
+  counters.statement_runs += read(SQLITE_STMTSTATUS_RUN);
+  counters.reprepares += read(SQLITE_STMTSTATUS_REPREPARE);
+}
+
+void CaptureSqliteDiagnosticCounters(sqlite3* database, SqliteCounterValues& counters) {
+  counters.cache_hits = SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_HIT, false).first;
+  counters.cache_misses = SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_MISS, false).first;
+  counters.cache_writes = SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_WRITE, false).first;
+  counters.cache_bytes_current = SqliteDbStatus(database, SQLITE_DBSTATUS_CACHE_USED, false).first;
+  const auto malloc_count = SqliteGlobalStatus(SQLITE_STATUS_MALLOC_COUNT, false);
+  counters.malloc_count_current = malloc_count.first;
+  counters.malloc_count_highwater = malloc_count.second;
+  counters.malloc_size_highwater = SqliteGlobalStatus(SQLITE_STATUS_MALLOC_SIZE, false).second;
+  const sqlite3_int64 changes = sqlite3_changes64(database);
+  const sqlite3_int64 total_changes = sqlite3_total_changes64(database);
+  if (changes < 0 || total_changes < 0) {
+    throw BenchmarkMismatch{"SQLite diagnostic change count is negative"};
+  }
+  counters.changes = static_cast<std::uint64_t>(changes);
+  counters.total_changes = static_cast<std::uint64_t>(total_changes);
+}
+
 [[nodiscard]] Execution ExecuteSqliteWork(CaseKind kind, ProfileKind profile,
                                           const std::filesystem::path& path,
                                           const WorkloadScale& scale,
                                           std::span<const std::int64_t> key_order, bool measured,
-                                          std::size_t index) {
+                                          std::size_t index, SqliteCounterValues* sqlite_counters) {
   SqliteDatabase database{path};
   const EffectiveConfiguration configuration = ConfigureSqlite(database.get(), profile);
+  if (sqlite_counters != nullptr) {
+    ResetSqliteDiagnosticCounters(database.get());
+  }
   TimedWork timed;
   switch (kind) {
     case CaseKind::kCreate: {
@@ -1205,6 +1605,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
         };
       });
       for (SqliteStatement& statement : completed) {
+        if (sqlite_counters != nullptr) {
+          AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+        }
         statement.Finalize();
       }
       break;
@@ -1227,8 +1630,15 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = static_cast<std::int64_t>(scale.operations),
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+      }
       statement.Finalize();
       if (begin.has_value() && commit.has_value()) {
+        if (sqlite_counters != nullptr) {
+          AccumulateSqliteStatementCounters(*begin, *sqlite_counters);
+          AccumulateSqliteStatementCounters(*commit, *sqlite_counters);
+        }
         begin->Finalize();
         commit->Finalize();
       }
@@ -1243,6 +1653,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = 0,
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+      }
       statement.Finalize();
       break;
     }
@@ -1255,6 +1668,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = 0,
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+      }
       statement.Finalize();
       break;
     }
@@ -1267,6 +1683,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = 0,
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+      }
       statement.Finalize();
       break;
     }
@@ -1279,6 +1698,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = 0,
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(statement, *sqlite_counters);
+      }
       statement.Finalize();
       break;
     }
@@ -1305,6 +1727,13 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
             .last_insert_rowid = kPopulatedRows + static_cast<std::int64_t>(counts.inserts),
         };
       });
+      if (sqlite_counters != nullptr) {
+        AccumulateSqliteStatementCounters(begin, *sqlite_counters);
+        AccumulateSqliteStatementCounters(update, *sqlite_counters);
+        AccumulateSqliteStatementCounters(remove, *sqlite_counters);
+        AccumulateSqliteStatementCounters(insert, *sqlite_counters);
+        AccumulateSqliteStatementCounters(terminal, *sqlite_counters);
+      }
       update.Finalize();
       remove.Finalize();
       insert.Finalize();
@@ -1312,6 +1741,9 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
       terminal.Finalize();
       break;
     }
+  }
+  if (sqlite_counters != nullptr) {
+    CaptureSqliteDiagnosticCounters(database.get(), *sqlite_counters);
   }
   database.Close();
   return Execution{.timed = timed, .configuration = configuration};
@@ -1629,10 +2061,13 @@ struct TimingRun {
 [[nodiscard]] Execution ExecuteWork(EngineKind engine, ProfileKind profile, CaseKind kind,
                                     const std::filesystem::path& path, const WorkloadScale& scale,
                                     std::span<const std::int64_t> key_order, bool measured,
-                                    std::size_t index) {
+                                    std::size_t index,
+                                    VfsDiagnosticCounters* vfs_counters = nullptr,
+                                    SqliteCounterValues* sqlite_counters = nullptr) {
   return engine == EngineKind::kModern
-             ? ExecuteModernWork(kind, path, scale, key_order, measured, index)
-             : ExecuteSqliteWork(kind, profile, path, scale, key_order, measured, index);
+             ? ExecuteModernWork(kind, path, scale, key_order, measured, index, vfs_counters)
+             : ExecuteSqliteWork(kind, profile, path, scale, key_order, measured, index,
+                                 sqlite_counters);
 }
 
 [[nodiscard]] std::int64_t ExpectedLastInsertRowid(CaseKind kind, const WorkloadScale& scale) {
@@ -1669,9 +2104,10 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
   }
 }
 
-[[nodiscard]] TimingRun RunTiming(EngineKind engine, ProfileKind profile, CaseKind kind,
-                                  RunKind run_kind, const std::filesystem::path& input,
-                                  const std::filesystem::path& scratch) {
+[[maybe_unused, nodiscard]] TimingRun RunTiming(EngineKind engine, ProfileKind profile,
+                                                CaseKind kind, RunKind run_kind,
+                                                const std::filesystem::path& input,
+                                                const std::filesystem::path& scratch) {
   VerifyInitialInput(engine, kind, input);
   const WorkloadScale scale = ScaleFor(kind, run_kind);
   const std::vector<std::int64_t> key_order = GenerateKeyOrder();
@@ -1737,6 +2173,100 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
   };
 }
 
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+struct DiagnosticRun {
+  WorkloadScale scale;
+  EffectiveConfiguration configuration;
+  VerifiedWork work;
+  std::optional<ModernCounterValues> modern;
+  std::optional<SqliteCounterValues> sqlite;
+  std::optional<VfsDiagnosticCounters> vfs;
+};
+
+[[nodiscard]] ModernCounterValues ReadModernCounters(
+    const modern_sqlite::instrumentation::CounterCollection& collection,
+    const VfsDiagnosticCounters& vfs) {
+  ModernCounterValues result;
+  for (std::size_t index = 0; index < result.values.size(); ++index) {
+    result.values[index] =
+        collection.Value(static_cast<modern_sqlite::instrumentation::Counter>(index));
+  }
+  const auto vfs_index =
+      static_cast<std::size_t>(modern_sqlite::instrumentation::Counter::kVfsCalls);
+  if (vfs.delegated_vfs_calls > std::numeric_limits<std::uint64_t>::max() / 2U ||
+      result.values[vfs_index] != vfs.delegated_vfs_calls * 2U) {
+    throw BenchmarkMismatch{"Modern diagnostic VFS delegation count differs"};
+  }
+  result.values[vfs_index] -= vfs.delegated_vfs_calls;
+  return result;
+}
+
+[[nodiscard]] DiagnosticRun RunDiagnostic(EngineKind engine, ProfileKind profile, CaseKind kind,
+                                          const std::filesystem::path& input,
+                                          const std::filesystem::path& scratch) {
+  VerifyInitialInput(engine, kind, input);
+  const WorkloadScale scale = ScaleFor(kind, RunKind::kBaseline);
+  const std::vector<std::int64_t> key_order = GenerateKeyOrder();
+  const std::vector<std::byte> rollback_input =
+      kind == CaseKind::kMixedRollback ? ReadFile(input) : std::vector<std::byte>{};
+  const std::filesystem::path warmup_path = FreshDatabasePath(
+      FreshDatabaseRequest{.input = input, .scratch = scratch, .name = "warmup.db"});
+  const std::filesystem::path diagnostic_path = FreshDatabasePath(
+      FreshDatabaseRequest{.input = input, .scratch = scratch, .name = "diagnostic.db"});
+
+  const Execution warmup =
+      ExecuteWork(engine, profile, kind, warmup_path, scale, key_order, false, 0);
+  Execution diagnostic;
+  std::optional<ModernCounterValues> modern;
+  std::optional<SqliteCounterValues> sqlite;
+  std::optional<VfsDiagnosticCounters> vfs;
+  if (engine == EngineKind::kModern) {
+    modern_sqlite::instrumentation::CounterCollection collection;
+    vfs.emplace();
+    {
+      const modern_sqlite::instrumentation::ScopedCounterCollection scope{collection};
+      diagnostic =
+          ExecuteWork(engine, profile, kind, diagnostic_path, scale, key_order, false, 0, &*vfs);
+    }
+    modern = ReadModernCounters(collection, *vfs);
+  } else {
+    sqlite.emplace();
+    diagnostic = ExecuteWork(engine, profile, kind, diagnostic_path, scale, key_order, false, 0,
+                             nullptr, &*sqlite);
+  }
+  if (diagnostic.configuration != warmup.configuration) {
+    throw HarnessFailure{"effective write configuration changed for diagnostics"};
+  }
+
+  ValidateExecutedWork(kind, scale, warmup.timed.work);
+  ValidateExecutedWork(kind, scale, diagnostic.timed.work);
+  const Verification warmup_verification = VerifyFinalOutput(kind, scale, warmup_path, key_order);
+  const Verification diagnostic_verification =
+      VerifyFinalOutput(kind, scale, diagnostic_path, key_order);
+  if (warmup_verification != diagnostic_verification) {
+    throw BenchmarkMismatch{"write diagnostic result differs from warmup"};
+  }
+  if (kind == CaseKind::kMixedRollback &&
+      (rollback_input != ReadFile(warmup_path) || rollback_input != ReadFile(diagnostic_path))) {
+    throw BenchmarkMismatch{"write diagnostic rollback changed database bytes"};
+  }
+  RemoveFreshDatabase(warmup_path);
+  RemoveFreshDatabase(diagnostic_path);
+  return DiagnosticRun{
+      .scale = scale,
+      .configuration = std::move(diagnostic.configuration),
+      .work =
+          VerifiedWork{
+              .work = diagnostic.timed.work,
+              .verification = diagnostic_verification,
+          },
+      .modern = modern,
+      .sqlite = sqlite,
+      .vfs = vfs,
+  };
+}
+#endif
+
 void PrintJsonString(std::ostream& output, std::string_view value) {
   output << '"';
   for (const char character : value) {
@@ -1789,8 +2319,100 @@ void PrintWork(std::ostream& output, const WorkloadScale& scale, const WorkResul
          << verification.schema_objects << R"(,"transactions":)" << scale.transactions;
 }
 
-void PrintReport(std::string_view engine, ProfileKind profile, std::string_view case_id,
-                 RunKind run_kind, const TimingRun& run) {
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+void PrintModernCounters(std::ostream& output, const ModernCounterValues& counters) {
+  output << '{';
+  for (std::size_t index = 0; index < counters.values.size(); ++index) {
+    if (index != 0U) {
+      output << ',';
+    }
+    const auto counter = static_cast<modern_sqlite::instrumentation::Counter>(index);
+    PrintJsonString(output, modern_sqlite::instrumentation::CounterName(counter));
+    output << ':' << counters.values[index];
+  }
+  output << '}';
+}
+
+void PrintSqliteCounters(std::ostream& output, const SqliteCounterValues& counters) {
+  output << R"({"cache_bytes_current":)" << counters.cache_bytes_current << R"(,"cache_hits":)"
+         << counters.cache_hits << R"(,"cache_misses":)" << counters.cache_misses
+         << R"(,"cache_writes":)" << counters.cache_writes << R"(,"changes":)" << counters.changes
+         << R"(,"fullscan_steps":)" << counters.fullscan_steps << R"(,"malloc_count_current":)"
+         << counters.malloc_count_current << R"(,"malloc_count_highwater":)"
+         << counters.malloc_count_highwater << R"(,"malloc_size_highwater":)"
+         << counters.malloc_size_highwater << R"(,"reprepares":)" << counters.reprepares
+         << R"(,"statement_runs":)" << counters.statement_runs << R"(,"total_changes":)"
+         << counters.total_changes << R"(,"vm_steps":)" << counters.vm_steps << '}';
+}
+
+void PrintFileCounters(std::ostream& output, const FileDiagnosticCounters& counters) {
+  output << R"({"access_calls":)" << counters.access_calls << R"(,"close_calls":)"
+         << counters.close_calls << R"(,"delete_calls":)" << counters.delete_calls
+         << R"(,"directory_sync_requests":)" << counters.directory_sync_requests
+         << R"(,"full_path_calls":)" << counters.full_path_calls << R"(,"lock_calls":)"
+         << counters.lock_calls << R"(,"open_calls":)" << counters.open_calls << R"(,"read_bytes":)"
+         << counters.read_bytes << R"(,"read_calls":)" << counters.read_calls << R"(,"sync_calls":)"
+         << counters.sync_calls << R"(,"truncate_calls":)" << counters.truncate_calls
+         << R"(,"unlock_calls":)" << counters.unlock_calls << R"(,"write_bytes":)"
+         << counters.write_bytes << R"(,"write_calls":)" << counters.write_calls << '}';
+}
+
+void PrintVfsCounters(std::ostream& output, const VfsDiagnosticCounters& counters) {
+  output << R"({"global":{"random_byte_calls":)" << counters.random_byte_calls
+         << R"(},"main_database":)";
+  PrintFileCounters(output,
+                    counters.files[DiagnosticFileGroupIndex(DiagnosticFileGroup::kMainDatabase)]);
+  output << R"(,"main_journal":)";
+  PrintFileCounters(output,
+                    counters.files[DiagnosticFileGroupIndex(DiagnosticFileGroup::kMainJournal)]);
+  output << R"(,"subjournal":)";
+  PrintFileCounters(output,
+                    counters.files[DiagnosticFileGroupIndex(DiagnosticFileGroup::kSubjournal)]);
+  output << R"(,"write_ahead_log":)";
+  PrintFileCounters(output,
+                    counters.files[DiagnosticFileGroupIndex(DiagnosticFileGroup::kWriteAheadLog)]);
+  output << '}';
+}
+
+void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::string_view case_id,
+                           const DiagnosticRun& run) {
+  std::cout << R"({"case":)";
+  PrintJsonString(std::cout, case_id);
+  std::cout << R"(,"completion":{"diagnostic_runs":1,"fresh_databases":2,)"
+               R"("post_verifications":2,"pre_verifications":1,"status":"complete",)"
+               R"("warmups":1},"counters":{"modern":)";
+  if (run.modern.has_value()) {
+    PrintModernCounters(std::cout, *run.modern);
+  } else {
+    std::cout << "{}";
+  }
+  std::cout << R"(,"sqlite":)";
+  if (run.sqlite.has_value()) {
+    PrintSqliteCounters(std::cout, *run.sqlite);
+  } else {
+    std::cout << "{}";
+  }
+  std::cout << R"(,"vfs":)";
+  if (run.vfs.has_value()) {
+    PrintVfsCounters(std::cout, *run.vfs);
+  } else {
+    std::cout << "{}";
+  }
+  std::cout << R"(},"diagnostic_schema_version":1,"effective_configuration":)";
+  PrintConfiguration(std::cout, run.configuration);
+  std::cout << R"(,"engine":)";
+  PrintJsonString(std::cout, engine);
+  std::cout << R"(,"mode":"diagnostic","profile":)";
+  PrintJsonString(std::cout, ProfileName(profile));
+  std::cout << R"(,"schema_version":1,"work":{)";
+  PrintWork(std::cout, run.scale, run.work.work, run.work.verification);
+  std::cout << R"(},"workload_semantics_version":1})" << '\n';
+}
+#endif
+
+[[maybe_unused]] void PrintReport(std::string_view engine, ProfileKind profile,
+                                  std::string_view case_id, RunKind run_kind,
+                                  const TimingRun& run) {
   std::cout << R"({"case":)";
   PrintJsonString(std::cout, case_id);
   std::cout << R"(,"completion":{"fresh_databases":)" << run.repetitions.size() + 1U
@@ -1824,27 +2446,79 @@ void PrintReport(std::string_view engine, ProfileKind profile, std::string_view 
 
 int Run(int argument_count, char* const* arguments) {
   if (argument_count != 8 || std::string_view{arguments[1]} != "run") {
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+    throw HarnessFailure{
+        "usage: write diagnostics run ENGINE PROFILE CASE INPUT SCRATCH diagnostic"};
+#else
     throw HarnessFailure{
         "usage: write benchmark run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline>"};
+#endif
   }
   const EngineKind engine = ParseEngine(arguments[2]);
   const ProfileKind profile = ParseProfile(arguments[3]);
   const CaseKind benchmark_case = ParseCase(arguments[4]);
   const std::filesystem::path input = arguments[5];
   const std::filesystem::path scratch = arguments[6];
-  const RunKind run_kind = ParseRunKind(arguments[7]);
   if (!std::filesystem::is_regular_file(input)) {
     throw HarnessFailure{"write benchmark input is not a file"};
   }
   if (!std::filesystem::is_directory(scratch)) {
     throw HarnessFailure{"write benchmark scratch path is not a directory"};
   }
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+  if (std::string_view{arguments[7]} != "diagnostic") {
+    throw HarnessFailure{"write diagnostic binary accepts only diagnostic runs"};
+  }
+  const DiagnosticRun run = RunDiagnostic(engine, profile, benchmark_case, input, scratch);
+  PrintDiagnosticReport(arguments[2], profile, arguments[4], run);
+#else
+  const RunKind run_kind = ParseRunKind(arguments[7]);
   const TimingRun run = RunTiming(engine, profile, benchmark_case, run_kind, input, scratch);
   PrintReport(arguments[2], profile, arguments[4], run_kind, run);
+#endif
   return 0;
 }
 
 }  // namespace
+
+#if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+void* operator new(std::size_t size) {
+  MODERN_SQLITE_RECORD_COUNTER(modern_sqlite::instrumentation::Counter::kAllocations, 1U);
+  if (void* allocation = std::malloc(size == 0 ? 1U : size); allocation != nullptr) {
+    return allocation;
+  }
+  throw std::bad_alloc{};
+}
+
+void* operator new[](std::size_t size) { return ::operator new(size); }
+
+void* operator new(std::size_t size, std::align_val_t alignment) {
+  MODERN_SQLITE_RECORD_COUNTER(modern_sqlite::instrumentation::Counter::kAllocations, 1U);
+  void* allocation = nullptr;
+  const std::size_t aligned_size = size == 0 ? static_cast<std::size_t>(alignment) : size;
+  if (posix_memalign(&allocation, static_cast<std::size_t>(alignment), aligned_size) == 0) {
+    return allocation;
+  }
+  throw std::bad_alloc{};
+}
+
+void* operator new[](std::size_t size, std::align_val_t alignment) {
+  return ::operator new(size, alignment);
+}
+
+void operator delete(void* allocation) noexcept { std::free(allocation); }
+void operator delete[](void* allocation) noexcept { std::free(allocation); }
+void operator delete(void* allocation, std::size_t) noexcept { std::free(allocation); }
+void operator delete[](void* allocation, std::size_t) noexcept { std::free(allocation); }
+void operator delete(void* allocation, std::align_val_t) noexcept { std::free(allocation); }
+void operator delete[](void* allocation, std::align_val_t) noexcept { std::free(allocation); }
+void operator delete(void* allocation, std::size_t, std::align_val_t) noexcept {
+  std::free(allocation);
+}
+void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept {
+  std::free(allocation);
+}
+#endif
 
 int main(int argument_count, char* const* arguments) {
   try {

@@ -327,6 +327,7 @@
     "temp_store": "memory",
     "thread_mode": "single"
   },
+  "diagnostic_work": "baseline",
   "fixtures": [
     {
       "content_digest": "cbf29ce484222325",
