@@ -580,7 +580,7 @@ Smoke elapsed values are never admitted as baseline evidence.
 The timing binary supports:
 
 ```text
-profile ENGINE PROFILE CASE DATABASE WORK
+profile ENGINE PROFILE CASE INPUT SCRATCH WORK
 ```
 
 The replay:

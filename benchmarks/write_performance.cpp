@@ -1426,6 +1426,58 @@ struct SqliteMixedStatements {
   throw HarnessFailure{"invalid write benchmark case"};
 }
 
+[[maybe_unused, nodiscard]] std::size_t ParseProfileWork(std::string_view value) {
+  std::size_t result = 0;
+  const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+  if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || result == 0U ||
+      result > 65'536U) {
+    throw HarnessFailure{"profile work must be from 1 through 65536"};
+  }
+  return result;
+}
+
+[[nodiscard]] WorkloadScale ProfileScale(CaseKind kind, std::size_t work) {
+  switch (kind) {
+    case CaseKind::kCreate:
+      if (work > 256U) {
+        throw HarnessFailure{"CREATE profile work cannot exceed 256"};
+      }
+      return WorkloadScale{
+          .operations = work,
+          .transactions = work,
+          .dml_operations = work,
+          .row_mutations = 0,
+      };
+    case CaseKind::kInsertPoint:
+    case CaseKind::kUpdatePoint:
+    case CaseKind::kDeletePoint:
+      return WorkloadScale{
+          .operations = work,
+          .transactions = work,
+          .dml_operations = work,
+          .row_mutations = work,
+      };
+    case CaseKind::kInsertBatch:
+    case CaseKind::kMixedCommit:
+    case CaseKind::kMixedRollback:
+      return WorkloadScale{
+          .operations = work,
+          .transactions = 1,
+          .dml_operations = work,
+          .row_mutations = work,
+      };
+    case CaseKind::kUpdateScan:
+    case CaseKind::kDeleteScan:
+      return WorkloadScale{
+          .operations = work,
+          .transactions = 1,
+          .dml_operations = 1,
+          .row_mutations = work,
+      };
+  }
+  throw HarnessFailure{"invalid write profile case"};
+}
+
 [[nodiscard]] std::vector<std::int64_t> GenerateKeyOrder() {
   std::vector<std::int64_t> result(static_cast<std::size_t>(kPopulatedRows));
   for (std::size_t index = 0; index < result.size(); ++index) {
@@ -2366,6 +2418,67 @@ void ValidateExecutedWork(CaseKind kind, const WorkloadScale& scale, const WorkR
   };
 }
 
+struct ProfileRun {
+  WorkloadScale scale;
+  EffectiveConfiguration configuration;
+  DatabaseFingerprint initial_database;
+  VerifiedWork result;
+};
+
+[[maybe_unused, nodiscard]] ProfileRun RunProfile(EngineKind engine, ProfileKind profile,
+                                                  CaseKind kind, std::size_t requested_work,
+                                                  const std::filesystem::path& input,
+                                                  const std::filesystem::path& scratch) {
+  VerifyInitialInput(engine, kind, input);
+  const DatabaseFingerprint initial_database = FingerprintDatabase(input);
+  const WorkloadScale scale = ProfileScale(kind, requested_work);
+  const std::vector<std::int64_t> key_order = GenerateKeyOrder();
+  const std::vector<std::byte> rollback_input =
+      kind == CaseKind::kMixedRollback ? ReadFile(input) : std::vector<std::byte>{};
+  const std::filesystem::path warmup_path = FreshDatabasePath(FreshDatabaseRequest{
+      .input = input,
+      .scratch = scratch,
+      .name = "warmup.db",
+  });
+  const std::filesystem::path profile_path = FreshDatabasePath(FreshDatabaseRequest{
+      .input = input,
+      .scratch = scratch,
+      .name = "profile.db",
+  });
+  const Execution warmup =
+      ExecuteWork(engine, profile, kind, warmup_path, scale, key_order, false, 0);
+  const Execution replay =
+      ExecuteWork(engine, profile, kind, profile_path, scale, key_order, false, 0);
+  if (warmup.configuration != replay.configuration) {
+    throw HarnessFailure{"effective write configuration changed for profile replay"};
+  }
+  ValidateExecutedWork(kind, scale, warmup.timed.work);
+  ValidateExecutedWork(kind, scale, replay.timed.work);
+  const Verification warmup_verification = VerifyFinalOutput(kind, scale, warmup_path, key_order);
+  const Verification replay_verification = VerifyFinalOutput(kind, scale, profile_path, key_order);
+  if (warmup_verification != replay_verification) {
+    throw BenchmarkMismatch{"write profile replay result differs from warmup"};
+  }
+  const DatabaseFingerprint replay_fingerprint = FingerprintDatabase(profile_path);
+  if (kind == CaseKind::kMixedRollback &&
+      (rollback_input != ReadFile(warmup_path) || rollback_input != ReadFile(profile_path))) {
+    throw BenchmarkMismatch{"write profile rollback changed database bytes"};
+  }
+  RemoveFreshDatabase(warmup_path);
+  RemoveFreshDatabase(profile_path);
+  return ProfileRun{
+      .scale = scale,
+      .configuration = replay.configuration,
+      .initial_database = initial_database,
+      .result =
+          VerifiedWork{
+              .work = replay.timed.work,
+              .verification = replay_verification,
+              .final_database = replay_fingerprint,
+          },
+  };
+}
+
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
 struct DiagnosticRun {
   WorkloadScale scale;
@@ -2631,6 +2744,33 @@ void PrintWork(std::ostream& output, const WorkloadScale& scale, const WorkResul
          << scale.transactions;
 }
 
+[[maybe_unused]] void PrintProfileReport(std::string_view engine, ProfileKind profile,
+                                         std::string_view case_id, std::size_t requested_work,
+                                         const ProfileRun& run) {
+  std::cout << R"({"build":)";
+  PrintBuildIdentity(std::cout);
+  std::cout << R"(,"case":)";
+  PrintJsonString(std::cout, case_id);
+  std::cout << R"(,"completion":{"fresh_databases":2,"post_verifications":2,)"
+               R"("pre_verifications":1,"profile_runs":1,"status":"complete",)"
+               R"("warmups":1},"effective_configuration":)";
+  PrintConfiguration(std::cout, run.configuration);
+  std::cout << R"(,"engine":)";
+  PrintJsonString(std::cout, engine);
+  std::cout << R"(,"initial_database":)";
+  PrintDatabaseFingerprint(std::cout, run.initial_database);
+  std::cout << R"(,"mode":"profile","profile":)";
+  PrintJsonString(std::cout, ProfileName(profile));
+  std::cout << R"(,"requested_work":)" << requested_work << R"(,"result":{)";
+  PrintWork(std::cout, run.scale, run.result.work, run.result.verification,
+            run.result.final_database);
+  std::cout << R"(},"schema_version":1,"source":)";
+  PrintSourceIdentity(std::cout);
+  std::cout << R"(,"sqlite":)";
+  PrintSqliteIdentity(std::cout);
+  std::cout << R"(,"workload_semantics_version":1})" << '\n';
+}
+
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
 void PrintModernCounters(std::ostream& output, const ModernCounterValues& counters) {
   output << '{';
@@ -2780,7 +2920,7 @@ int Run(int argument_count, char* const* arguments) {
     PrintIdentityReport();
     return 0;
   }
-  if (argument_count != 8 || std::string_view{arguments[1]} != "run") {
+  if (argument_count != 8) {
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
     throw HarnessFailure{
         "usage: write diagnostics identity | "
@@ -2788,9 +2928,11 @@ int Run(int argument_count, char* const* arguments) {
 #else
     throw HarnessFailure{
         "usage: write benchmark identity | "
-        "run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline>"};
+        "run ENGINE PROFILE CASE INPUT SCRATCH <smoke|baseline> | "
+        "profile ENGINE PROFILE CASE INPUT SCRATCH WORK"};
 #endif
   }
+  const std::string_view command = arguments[1];
   const EngineKind engine = ParseEngine(arguments[2]);
   const ProfileKind profile = ParseProfile(arguments[3]);
   const CaseKind benchmark_case = ParseCase(arguments[4]);
@@ -2803,15 +2945,31 @@ int Run(int argument_count, char* const* arguments) {
     throw HarnessFailure{"write benchmark scratch path is not a directory"};
   }
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
+  if (command == "profile") {
+    throw HarnessFailure{"diagnostic binary does not provide profile replay"};
+  }
+  if (command != "run") {
+    throw HarnessFailure{"unsupported write diagnostic command"};
+  }
   if (std::string_view{arguments[7]} != "diagnostic") {
     throw HarnessFailure{"write diagnostic binary accepts only diagnostic runs"};
   }
   const DiagnosticRun run = RunDiagnostic(engine, profile, benchmark_case, input, scratch);
   PrintDiagnosticReport(arguments[2], profile, arguments[4], run);
 #else
-  const RunKind run_kind = ParseRunKind(arguments[7]);
-  const TimingRun run = RunTiming(engine, profile, benchmark_case, run_kind, input, scratch);
-  PrintReport(arguments[2], profile, arguments[4], run_kind, run);
+  if (command == "profile") {
+    const std::size_t requested_work = ParseProfileWork(arguments[7]);
+    const ProfileRun run =
+        RunProfile(engine, profile, benchmark_case, requested_work, input, scratch);
+    PrintProfileReport(arguments[2], profile, arguments[4], requested_work, run);
+  } else {
+    if (command != "run") {
+      throw HarnessFailure{"unsupported write benchmark command"};
+    }
+    const RunKind run_kind = ParseRunKind(arguments[7]);
+    const TimingRun run = RunTiming(engine, profile, benchmark_case, run_kind, input, scratch);
+    PrintReport(arguments[2], profile, arguments[4], run_kind, run);
+  }
 #endif
   return 0;
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import subprocess
 import sys
@@ -384,6 +385,82 @@ class WriteBenchmarkCliTest(unittest.TestCase):
             self.assertEqual(2, mismatch.returncode)
             self.assertEqual("", mismatch.stdout)
             self.assertIn("row count differs", mismatch.stderr)
+
+    def test_profile_replay_uses_fixed_work_and_cleans_scratch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            reports = {}
+            before = self.arguments.schema_fixture.read_bytes()
+            for engine in ("modern", "sqlite"):
+                scratch = root / engine
+                scratch.mkdir()
+                completed = subprocess.run(
+                    [
+                        self.arguments.binary,
+                        "profile",
+                        engine,
+                        "matched-durable",
+                        "insert-batch-explicit",
+                        self.arguments.schema_fixture,
+                        scratch,
+                        "8",
+                    ],
+                    cwd=REPOSITORY_ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertEqual("", completed.stderr)
+                report = json.loads(completed.stdout)
+                write_performance.validate_profile_report(
+                    report,
+                    workload_manifest=self.workloads,
+                    expected_engine=engine,
+                    expected_profile="matched-durable",
+                    expected_case="insert-batch-explicit",
+                    expected_work=8,
+                )
+                self.assertEqual("profile", report["mode"])
+                self.assertEqual(8, report["requested_work"])
+                self.assert_work(
+                    report["result"],
+                    (1, 8, 8, 8, 8, 8, 1),
+                )
+                self.assertEqual([], list(scratch.iterdir()))
+                reports[engine] = report
+            self.assertEqual(
+                reports["modern"]["result"]["digest"],
+                reports["sqlite"]["result"]["digest"],
+            )
+            self.assertEqual(before, self.arguments.schema_fixture.read_bytes())
+
+            scratch = root / "diagnostic"
+            scratch.mkdir()
+            rejected = subprocess.run(
+                [
+                    self.arguments.diagnostic_binary,
+                    "profile",
+                    "modern",
+                    "matched-durable",
+                    "insert-batch-explicit",
+                    self.arguments.schema_fixture,
+                    scratch,
+                    "8",
+                ],
+                cwd=REPOSITORY_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(1, rejected.returncode)
+            self.assertEqual("", rejected.stdout)
+            self.assertIn(
+                "diagnostic binary does not provide profile replay",
+                rejected.stderr,
+            )
 
 
 if __name__ == "__main__":

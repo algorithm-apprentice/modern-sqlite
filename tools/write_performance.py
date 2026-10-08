@@ -193,6 +193,30 @@ _RAW_DIAGNOSTIC_KEYS = {
     "work",
     "workload_semantics_version",
 }
+_RAW_PROFILE_KEYS = {
+    "build",
+    "case",
+    "completion",
+    "effective_configuration",
+    "engine",
+    "initial_database",
+    "mode",
+    "profile",
+    "requested_work",
+    "result",
+    "schema_version",
+    "source",
+    "sqlite",
+    "workload_semantics_version",
+}
+_PROFILE_COMPLETION_KEYS = {
+    "fresh_databases",
+    "post_verifications",
+    "pre_verifications",
+    "profile_runs",
+    "status",
+    "warmups",
+}
 _DIAGNOSTIC_COMPLETION_KEYS = {
     "diagnostic_runs",
     "fresh_databases",
@@ -835,6 +859,54 @@ def _canonical_work(case_id: str, run_kind: str) -> dict[str, Any]:
         "last_insert_rowid": last_insert_rowid,
         "schema_objects": schema_objects,
         "digest": _EXPECTED_DIGESTS[case_id][run_kind],
+    }
+
+
+def _profile_expected_semantics(
+    case_id: str,
+    requested_work: int,
+) -> dict[str, int]:
+    case = _EXPECTED_CASES[case_id]
+    kind = case["kind"]
+    if requested_work <= 0 or requested_work > 65_536:
+        raise HarnessError("profile requested_work is out of range")
+    if kind == "create" and requested_work > 256:
+        raise HarnessError("CREATE profile requested_work is out of range")
+    transactions = (
+        requested_work
+        if kind in {"create", "insert_point", "update_point", "delete_point"}
+        else 1
+    )
+    dml_operations = (
+        1 if kind in {"update_scan", "delete_scan"} else requested_work
+    )
+    row_mutations = 0 if kind == "create" else requested_work
+    final_rows = 65_536
+    last_insert_rowid = 0
+    schema_objects = 1
+    if kind == "create":
+        final_rows = 0
+        schema_objects = requested_work
+    elif kind in {"insert_point", "insert_batch"}:
+        final_rows = requested_work
+        last_insert_rowid = requested_work
+    elif kind in {"delete_point", "delete_scan"}:
+        final_rows -= requested_work
+    elif kind in {"mixed_commit", "mixed_rollback"}:
+        updates = requested_work // 3
+        deletes = requested_work // 3
+        inserts = requested_work - updates - deletes
+        last_insert_rowid = 65_536 + inserts
+        if kind == "mixed_commit":
+            final_rows = final_rows - deletes + inserts
+    return {
+        "transactions": transactions,
+        "dml_operations": dml_operations,
+        "row_mutations": row_mutations,
+        "changed_rows": 0 if kind == "create" else requested_work,
+        "final_rows": final_rows,
+        "last_insert_rowid": last_insert_rowid,
+        "schema_objects": schema_objects,
     }
 
 
@@ -1626,6 +1698,97 @@ def validate_raw_diagnostic_report(
             )
         if counters["vfs"] != {}:
             raise HarnessError("VFS counters must be empty for SQLite")
+    return value
+
+
+def validate_profile_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_profile: str,
+    expected_case: str,
+    expected_work: int,
+) -> dict[str, Any]:
+    _require_type(value, dict, "profile report")
+    _require_keys(value, _RAW_PROFILE_KEYS, "profile report")
+    for key in ("schema_version", "workload_semantics_version"):
+        _require_type(value[key], int, f"profile report.{key}")
+        if value[key] != 1:
+            raise HarnessError(f"profile report {key} must be 1")
+    if value["mode"] != "profile":
+        raise HarnessError("profile report mode must be profile")
+    for key, expected in (
+        ("engine", expected_engine),
+        ("profile", expected_profile),
+        ("case", expected_case),
+        ("requested_work", expected_work),
+    ):
+        if value[key] != expected:
+            raise HarnessError(
+                f"profile report {key} does not match the invocation"
+            )
+    _validate_build_identity(
+        value["build"],
+        instrumentation=False,
+        label="profile report.build",
+    )
+    _validate_source_identity(value["source"], "profile report.source")
+    _validate_sqlite_identity(value["sqlite"], "profile report.sqlite")
+    _validate_effective_configuration(
+        value["effective_configuration"],
+        engine=expected_engine,
+        profile=expected_profile,
+    )
+    case = _case_by_id(workload_manifest, expected_case)
+    initial = _validate_database_fingerprint(
+        value["initial_database"],
+        "profile report.initial_database",
+    )
+    if initial != _expected_initial_database(workload_manifest, case):
+        raise HarnessError(
+            "profile report initial database does not match the fixture"
+        )
+    result = value["result"]
+    _require_type(result, dict, "profile report.result")
+    _require_keys(result, _REPORT_WORK_KEYS, "profile report.result")
+    semantic = {key: result[key] for key in _WORK_KEYS}
+    _validate_work_object(semantic, "profile report.result semantic work")
+    expected_semantics = _profile_expected_semantics(
+        expected_case,
+        expected_work,
+    )
+    for key, expected in expected_semantics.items():
+        if semantic[key] != expected:
+            raise HarnessError(
+                "profile report result does not match requested work"
+            )
+    _validate_database_fingerprint(
+        result["final_database"],
+        "profile report.result.final_database",
+    )
+    _validate_final_database_state(
+        case=case,
+        work=result,
+        initial=initial,
+        label="profile report.result",
+    )
+    completion = value["completion"]
+    _require_type(completion, dict, "profile report.completion")
+    _require_keys(
+        completion,
+        _PROFILE_COMPLETION_KEYS,
+        "profile report.completion",
+    )
+    if completion != {
+        "fresh_databases": 2,
+        "post_verifications": 2,
+        "pre_verifications": 1,
+        "profile_runs": 1,
+        "status": "complete",
+        "warmups": 1,
+    }:
+        raise HarnessError("profile report completion is invalid")
     return value
 
 
