@@ -1016,6 +1016,9 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
       break;
     }
     const auto* column = std::get_if<ColumnId>(&term.target);
+    if (column == nullptr || column->value >= table.columns.size()) {
+      return std::nullopt;
+    }
     candidate.selected_terms[*selected] = true;
     candidate.node.equalities.push_back(PhysicalIndexEquality{
         .column = *column,
@@ -1057,6 +1060,11 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     }
     if (lower.has_value() || upper.has_value()) {
       const auto* column = std::get_if<ColumnId>(&term.target);
+      if (column == nullptr || column->value >= table.columns.size() ||
+          (lower.has_value() && !lower_index.has_value()) ||
+          (upper.has_value() && !upper_index.has_value())) {
+        return std::nullopt;
+      }
       PhysicalIndexRange range{
           .column = *column,
           .affinity = table.columns[column->value].affinity,
