@@ -17,7 +17,8 @@ _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=pathlib.Path, required=True)
-    parser.add_argument("--fixture", type=pathlib.Path, required=True)
+    parser.add_argument("--schema-fixture", type=pathlib.Path, required=True)
+    parser.add_argument("--populated-fixture", type=pathlib.Path, required=True)
     return parser.parse_args()
 
 
@@ -29,17 +30,22 @@ class WriteBenchmarkCliTest(unittest.TestCase):
         cls.arguments = _COMMAND_LINE_ARGUMENTS
 
     def run_case(
-        self, engine: str, database: pathlib.Path
+        self,
+        engine: str,
+        profile: str,
+        case: str,
+        database: pathlib.Path,
+        operations: int = 8,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 self.arguments.binary,
                 "smoke",
                 engine,
-                "matched-durable",
-                "insert-point-implicit",
+                profile,
+                case,
                 database,
-                "8",
+                str(operations),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -47,64 +53,158 @@ class WriteBenchmarkCliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_matched_insert_smoke_completes_for_both_engines(self) -> None:
+    def initial_database(
+        self, root: pathlib.Path, engine: str, case: str
+    ) -> pathlib.Path:
+        database = root / f"{engine}-{case}.db"
+        if case == "create-table-implicit":
+            database.write_bytes(b"")
+        elif case.startswith("insert-"):
+            shutil.copyfile(self.arguments.schema_fixture, database)
+        else:
+            shutil.copyfile(self.arguments.populated_fixture, database)
+        return database
+
+    def test_matched_smoke_completes_for_every_case_and_engine(self) -> None:
+        cases = (
+            "create-table-implicit",
+            "insert-point-implicit",
+            "insert-batch-explicit",
+            "update-point-implicit",
+            "update-scan-implicit",
+            "delete-point-implicit",
+            "delete-scan-implicit",
+            "mixed-batch-commit",
+            "mixed-batch-rollback",
+        )
+        expected = {
+            "create-table-implicit": (0, 0, 0, 8),
+            "insert-point-implicit": (8, 8, 8, 1),
+            "insert-batch-explicit": (8, 8, 8, 1),
+            "update-point-implicit": (8, 65_536, 0, 1),
+            "update-scan-implicit": (8, 65_536, 0, 1),
+            "delete-point-implicit": (8, 65_528, 0, 1),
+            "delete-scan-implicit": (8, 65_528, 0, 1),
+            "mixed-batch-commit": (8, 65_538, 65_540, 1),
+            "mixed-batch-rollback": (8, 65_536, 65_540, 1),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for case in cases:
+                reports: dict[str, dict[str, object]] = {}
+                for engine in ("modern", "sqlite"):
+                    database = self.initial_database(root, engine, case)
+                    before = database.read_bytes()
+                    with self.subTest(case=case, engine=engine):
+                        completed = self.run_case(
+                            engine,
+                            "matched-durable",
+                            case,
+                            database,
+                        )
+                        self.assertEqual(
+                            0, completed.returncode, completed.stderr
+                        )
+                        self.assertEqual("", completed.stderr)
+                        report = json.loads(completed.stdout)
+                        self.assertEqual(case, report["case"])
+                        self.assertEqual(engine, report["engine"])
+                        self.assertEqual(
+                            "matched-durable", report["profile"]
+                        )
+                        self.assertEqual("smoke", report["mode"])
+                        self.assertEqual("complete", report["status"])
+                        self.assertEqual(1, report["schema_version"])
+                        self.assertEqual(8, report["operations"])
+                        (
+                            changed_rows,
+                            final_rows,
+                            last_insert_rowid,
+                            schema_objects,
+                        ) = expected[case]
+                        self.assertEqual(changed_rows, report["changed_rows"])
+                        self.assertEqual(final_rows, report["final_rows"])
+                        self.assertEqual(
+                            last_insert_rowid,
+                            report["last_insert_rowid"],
+                        )
+                        self.assertEqual(
+                            schema_objects, report["schema_objects"]
+                        )
+                        self.assertRegex(report["digest"], r"^[0-9a-f]{16}$")
+                        if case == "mixed-batch-rollback":
+                            self.assertEqual(before, database.read_bytes())
+                        else:
+                            self.assertNotEqual(before, database.read_bytes())
+                        for suffix in ("-journal", "-wal", "-shm"):
+                            self.assertFalse(
+                                pathlib.Path(f"{database}{suffix}").exists()
+                            )
+                        reports[engine] = report
+                self.assertEqual(
+                    reports["modern"]["digest"],
+                    reports["sqlite"]["digest"],
+                )
+                self.assertEqual(
+                    reports["modern"]["final_rows"],
+                    reports["sqlite"]["final_rows"],
+                )
+                self.assertEqual(
+                    reports["modern"]["changed_rows"],
+                    reports["sqlite"]["changed_rows"],
+                )
+
+    def test_mixed_workload_splits_updates_deletes_and_inserts_evenly(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             reports: dict[str, dict[str, object]] = {}
             for engine in ("modern", "sqlite"):
                 with self.subTest(engine=engine):
-                    database = root / f"{engine}.db"
-                    shutil.copyfile(self.arguments.fixture, database)
-                    before = database.read_bytes()
-                    completed = self.run_case(engine, database)
-                    self.assertEqual(0, completed.returncode, completed.stderr)
-                    self.assertEqual("", completed.stderr)
-                    report = json.loads(completed.stdout)
-                    self.assertEqual(
-                        {
-                            "case": "insert-point-implicit",
-                            "changed_rows": 8,
-                            "engine": engine,
-                            "final_rows": 8,
-                            "last_insert_rowid": 8,
-                            "mode": "smoke",
-                            "operations": 8,
-                            "profile": "matched-durable",
-                            "schema_version": 1,
-                            "status": "complete",
-                        },
-                        {
-                            key: report[key]
-                            for key in (
-                                "case",
-                                "changed_rows",
-                                "engine",
-                                "final_rows",
-                                "last_insert_rowid",
-                                "mode",
-                                "operations",
-                                "profile",
-                                "schema_version",
-                                "status",
-                            )
-                        },
+                    database = self.initial_database(
+                        root, engine, "mixed-batch-commit"
                     )
-                    self.assertRegex(report["digest"], r"^[0-9a-f]{16}$")
-                    self.assertNotEqual(before, database.read_bytes())
-                    for suffix in ("-journal", "-wal", "-shm"):
-                        self.assertFalse(
-                            pathlib.Path(f"{database}{suffix}").exists()
-                        )
+                    completed = self.run_case(
+                        engine,
+                        "matched-durable",
+                        "mixed-batch-commit",
+                        database,
+                        operations=12,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    report = json.loads(completed.stdout)
+                    self.assertEqual(12, report["changed_rows"])
+                    self.assertEqual(65_536, report["final_rows"])
+                    self.assertEqual(65_540, report["last_insert_rowid"])
                     reports[engine] = report
             self.assertEqual(
                 reports["modern"]["digest"],
                 reports["sqlite"]["digest"],
             )
 
+    def test_engine_default_profile_is_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for engine in ("modern", "sqlite"):
+                with self.subTest(engine=engine):
+                    database = self.initial_database(
+                        root, engine, "insert-point-implicit"
+                    )
+                    completed = self.run_case(
+                        engine,
+                        "engine-default",
+                        "insert-point-implicit",
+                        database,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    report = json.loads(completed.stdout)
+                    self.assertEqual("engine-default", report["profile"])
+
     def test_invalid_case_is_a_usage_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = pathlib.Path(temporary) / "input.db"
-            shutil.copyfile(self.arguments.fixture, database)
+            shutil.copyfile(self.arguments.schema_fixture, database)
             completed = subprocess.run(
                 [
                     self.arguments.binary,

@@ -1178,8 +1178,10 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
       "${Python3_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tests/performance/write_benchmark_cli_test.py"
       --binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_benchmark"
-      --fixture
+      --schema-fixture
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
+      --populated-fixture
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
   )
   set_tests_properties(
     performance.write_benchmark_cli
