@@ -327,7 +327,11 @@ Index-key construction reads the physical table storage value before
 result-facing REAL affinity is applied. This mirrors pinned
 `sqlite3GenerateIndexKey()`, which removes the preceding REAL-affinity opcode
 so an integral value stored compactly in the table remains integral in the
-index record.
+index record. A newly assigned REAL-affinity value first undergoes SQLite's
+REAL conversion, including IEEE-754 rounding, and an exactly integral rounded
+result is then stored compactly in both the table and index record. Physical
+key preservation therefore retains the rounded storage value, not the
+pre-affinity input integer.
 
 For a UNIQUE index, a key containing NULL never conflicts. Otherwise the VM
 performs a prefix seek over `key_term_count` fields. INSERT conflicts on any

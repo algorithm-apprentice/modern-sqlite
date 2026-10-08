@@ -138,7 +138,7 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   static_assert(!std::is_convertible_v<RegisterId, CursorId>);
   static_assert(sizeof(Instruction) <= 32);
 
-  const std::array<Instruction, 22> instructions = {
+  const std::array<Instruction, 23> instructions = {
       HaltInstruction{},
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
@@ -161,6 +161,7 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
       },
       MustBeIntegerInstruction{.input = Reg(0), .output = Reg(1)},
       RealAffinityInstruction{.input = Reg(0), .output = Reg(1)},
+      RealStorageAffinityInstruction{.input = Reg(0), .output = Reg(1)},
       CastInstruction{
           .input = Reg(0),
           .target = CastTarget::kText,
@@ -204,12 +205,12 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
       },
       ResultRowInstruction{.first = Reg(0), .count = 1},
   };
-  const std::array<std::string_view, 22> names = {
+  const std::array<std::string_view, 23> names = {
       "halt",       "load_constant",  "load_parameter",  "copy",          "unary",
-      "binary",     "apply_affinity", "must_be_integer", "real_affinity", "cast",
-      "open_read",  "close",          "rewind",          "next",          "seek_rowid",
-      "read_field", "read_rowid",     "compare",         "call_scalar",   "jump",
-      "jump_if",    "result_row",
+      "binary",     "apply_affinity", "must_be_integer", "real_affinity", "real_storage_affinity",
+      "cast",       "open_read",      "close",           "rewind",        "next",
+      "seek_rowid", "read_field",     "read_rowid",      "compare",       "call_scalar",
+      "jump",       "jump_if",        "result_row",
   };
 
   for (std::size_t index = 0; index < instructions.size(); ++index) {

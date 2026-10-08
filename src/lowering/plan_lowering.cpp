@@ -4397,6 +4397,7 @@ class PlanLowerer final {
                                    static_cast<std::uint32_t>(term_index)};
       RegisterId source = registers.rowid;
       std::optional<TypeAffinity> affinity;
+      bool normalize_real = false;
       if (term.column.has_value()) {
         const std::optional<std::uint32_t> column_index = TargetColumnIndex(target, *term.column);
         if (!column_index.has_value()) {
@@ -4415,6 +4416,8 @@ class PlanLowerer final {
           source = *source_register;
         }
         const TypeAffinity column_affinity = target.columns[*column_index].affinity;
+        normalize_real =
+            column_affinity == TypeAffinity::kReal && registers.first_values.has_value();
         affinity =
             column_affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : column_affinity;
       } else if (!term.rowid) {
@@ -4426,6 +4429,15 @@ class PlanLowerer final {
           });
           !copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
+      }
+      if (normalize_real) {
+        if (auto applied = Append(RealStorageAffinityInstruction{
+                .input = destination,
+                .output = destination,
+            });
+            !applied.has_value()) {
+          return std::unexpected(std::move(applied.error()));
+        }
       }
       if (affinity.has_value()) {
         if (auto applied = Append(ApplyAffinityInstruction{

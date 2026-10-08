@@ -1724,6 +1724,31 @@ TEST_F(VmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
   EXPECT_EQ(ErrorCode::kTypeMismatch, nan_failed.error().code());
 }
 
+TEST_F(VmTest, CompactsRoundedRealStorageAffinity) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(INT64_C(9007199254740993)));
+  constants.push_back(SqlValue::Real(1.5));
+  constants.push_back(SqlValue::Text("9007199254740993"));
+  const BytecodeProgram conversion =
+      BuildProgram(*pager_, 6, 0, std::move(constants), {}, {},
+                   {ResultColumn("integer"), ResultColumn("fractional"), ResultColumn("text")},
+                   {
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       RealStorageAffinityInstruction{.input = Reg(0), .output = Reg(3)},
+                       LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+                       RealStorageAffinityInstruction{.input = Reg(1), .output = Reg(4)},
+                       LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+                       RealStorageAffinityInstruction{.input = Reg(2), .output = Reg(5)},
+                       ResultRowInstruction{.first = Reg(3), .count = 3},
+                       HaltInstruction{},
+                   });
+  Vm vm = CreateCoreVm(conversion);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
+  ExpectInteger(vm.row()[0], INT64_C(9007199254740992));
+  ExpectReal(vm.row()[1], 1.5);
+  ExpectInteger(vm.row()[2], INT64_C(9007199254740992));
+}
+
 TEST_F(VmTest, AppliesComparisonAndScalarCallsWithAliasedOutputs) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(2));

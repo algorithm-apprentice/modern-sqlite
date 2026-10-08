@@ -209,8 +209,17 @@ struct ShiftArguments {
   return converted;
 }
 
-[[nodiscard]] TypeAffinity StorageAffinity(TypeAffinity affinity) noexcept {
-  return affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : affinity;
+[[nodiscard]] SqlValue ApplyStorageAffinity(SqlValue value, TypeAffinity affinity) {
+  if (affinity == TypeAffinity::kReal) {
+    value = ApplyAffinity(std::move(value), TypeAffinity::kReal);
+    if (value.type() == SqlValueType::kReal) {
+      if (const std::optional<std::int64_t> integer = LosslessRowId(value); integer.has_value()) {
+        return SqlValue::Integer(*integer);
+      }
+    }
+    return value;
+  }
+  return ApplyAffinity(std::move(value), affinity);
 }
 
 struct ResolvedCall {
@@ -846,6 +855,12 @@ struct Vm::Impl {
     return SetRegister(operation.output, std::move(output));
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const RealStorageAffinityInstruction& operation) {
+    return SetRegister(operation.output, ApplyStorageAffinity(Register(operation.input).Clone(),
+                                                              TypeAffinity::kReal));
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CastInstruction& operation) {
     SqlValue output = CastValue(Register(operation.input).Clone(), operation.target);
     return SetRegister(operation.output, std::move(output));
@@ -1128,12 +1143,13 @@ struct Vm::Impl {
     values.reserve(descriptor.columns.size());
     for (std::size_t index = 0; index < descriptor.columns.size(); ++index) {
       const WriteColumnDescriptor& column = descriptor.columns[index];
-      SqlValue value = column.rowid_alias
-                           ? SqlValue{}
-                           : ApplyAffinity(Register(RegisterId(operation.first_value.value() +
-                                                               static_cast<std::uint32_t>(index)))
-                                               .Clone(),
-                                           StorageAffinity(column.affinity));
+      SqlValue value =
+          column.rowid_alias
+              ? SqlValue{}
+              : ApplyStorageAffinity(Register(RegisterId(operation.first_value.value() +
+                                                         static_cast<std::uint32_t>(index)))
+                                         .Clone(),
+                                     column.affinity);
       if (!column.rowid_alias && column.not_null && value.type() == SqlValueType::kNull) {
         return std::unexpected(VmError(ErrorCode::kConstraint, "NOT NULL constraint failed"));
       }
