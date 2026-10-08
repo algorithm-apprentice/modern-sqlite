@@ -2,13 +2,16 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -71,6 +74,29 @@ void ExecuteDone(WriteSession& session, std::string_view sql) {
   }
   return text->bytes();
 }
+
+class TemporaryDirectory final {
+ public:
+  TemporaryDirectory() {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("modern-sqlite-write-session-test-" + std::to_string(suffix));
+    std::filesystem::create_directories(path_);
+  }
+
+  TemporaryDirectory(const TemporaryDirectory&) = delete;
+  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+
+  ~TemporaryDirectory() noexcept {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+
+  [[nodiscard]] std::filesystem::path DatabasePath() const { return path_ / "test.sqlite"; }
+
+ private:
+  std::filesystem::path path_;
+};
 
 struct SessionFixture {
   SessionFixture() {
@@ -279,6 +305,22 @@ TEST(WriteSession, RetriesTransactionControlCleanupBeforeCatalogRefresh) {
   const auto rows = QueryRows(session, "SELECT id FROM Items");
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
+}
+
+TEST(WriteSession, RollsBackAbandonedTransactionWhenTheFinalOwnerIsDestroyed) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  {
+    WriteSession session = TakeValue(WriteSession::Open(path.string()));
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    EXPECT_FALSE(session.autocommit());
+  }
+
+  WriteSession reopened = TakeValue(WriteSession::Open(path.string()));
+  EXPECT_TRUE(reopened.autocommit());
+  EXPECT_TRUE(QueryRows(reopened, "SELECT id FROM Items").empty());
 }
 
 }  // namespace

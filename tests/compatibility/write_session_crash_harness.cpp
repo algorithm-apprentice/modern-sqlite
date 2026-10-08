@@ -64,6 +64,19 @@ struct RecoveryImages {
   bool terminal_is_distinct;
 };
 
+[[nodiscard]] std::string ShellQuote(std::string_view value) {
+  std::string quoted{"'"};
+  for (const char character : value) {
+    if (character == '\'') {
+      quoted.append("'\\''");
+    } else {
+      quoted.push_back(character);
+    }
+  }
+  quoted.push_back('\'');
+  return quoted;
+}
+
 template <typename T>
 [[nodiscard]] T TakeValue(Result<T> result) {
   if (!result.has_value()) {
@@ -491,7 +504,12 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool 
         .terminal = baseline.terminal_image.view(),
         .terminal_is_distinct = baseline.terminal_is_distinct,
     };
-    for (std::size_t cut = 1U; cut <= baseline.mutation_count; ++cut) {
+    const std::size_t first_cut = verification.cut_filter.value_or(1U);
+    const std::size_t final_cut = verification.cut_filter.value_or(baseline.mutation_count);
+    if (first_cut == 0U || final_cut > baseline.mutation_count) {
+      throw std::runtime_error{"requested crash cut is outside the scenario mutation range"};
+    }
+    for (std::size_t cut = first_cut; cut <= final_cut; ++cut) {
       try {
         const CrashSnapshot crashed = RunCut(scenario, initial_image, writes_are_durable, cut);
         const RecoveryResult first = Recover(crashed, images, scenario.terminal);
@@ -509,9 +527,20 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool 
           throw std::runtime_error{"recovery is not idempotent"};
         }
       } catch (const std::exception& error) {
-        throw std::runtime_error{
-            std::string{scenario.id} + " cut=" + std::to_string(cut) +
-            " durability=" + (writes_are_durable ? "durable: " : "volatile: ") + error.what()};
+        std::string message = std::string{scenario.id} + " cut=" + std::to_string(cut) +
+                              " durability=" + (writes_are_durable ? "durable: " : "volatile: ") +
+                              error.what();
+        if (!verification.executable.empty()) {
+          message.append("\nreproduce: ");
+          message.append(ShellQuote(verification.executable));
+          message.append(" --case ");
+          message.append(std::string{scenario.id});
+          message.append(" --cut ");
+          message.append(std::to_string(cut));
+          message.append(" --durability ");
+          message.append(writes_are_durable ? "durable" : "volatile");
+        }
+        throw std::runtime_error{message};
       }
     }
   } catch (const std::exception& error) {
@@ -525,8 +554,15 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool 
 
 void VerifyScenarioBothDurabilities(const CrashScenario& scenario, ByteView initial_image,
                                     WriteSessionCrashVerification verification) {
-  VerifyScenario(scenario, initial_image, false, verification);
-  VerifyScenario(scenario, initial_image, true, verification);
+  if (!verification.scenario_filter.empty() && verification.scenario_filter != scenario.id) {
+    return;
+  }
+  if (!verification.durability_filter.has_value() || !verification.durability_filter.value()) {
+    VerifyScenario(scenario, initial_image, false, verification);
+  }
+  if (!verification.durability_filter.has_value() || verification.durability_filter.value()) {
+    VerifyScenario(scenario, initial_image, true, verification);
+  }
 }
 
 }  // namespace

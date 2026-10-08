@@ -38,8 +38,9 @@
     "implement-write-pager",
     "implement-btree-write",
     "implement-transaction-coordinator",
-    "implement-dml-ddl"
+    "implement-dml-ddl",
+    "build-writable-mvp-harness"
   ],
-  "activeNode": "build-writable-mvp-harness",
-  "activeNodeState": "in_progress"
+  "activeNode": "establish-write-performance-baseline",
+  "activeNodeState": "review_pending"
 }

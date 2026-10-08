@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": {
     "name": "modern-sqlite",
-    "status": "writable-mvp-harness",
+    "status": "write-performance-baseline-review",
     "implementationLanguage": "C++23",
     "artifactLanguage": "English"
   },
@@ -50,6 +50,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "build-writable-mvp-harness",
-  "currentNodeState": "in_progress"
+  "currentNode": "establish-write-performance-baseline",
+  "currentNodeState": "review_pending"
 }

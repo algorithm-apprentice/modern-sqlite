@@ -1065,6 +1065,50 @@ if(TARGET modern_sqlite_benchmark_sqlite)
       LABELS compatibility
       TIMEOUT 30
   )
+  add_test(
+    NAME compatibility.write_session_sqlite_invalid_case
+    COMMAND
+      modern_sqlite_write_session_sqlite_compatibility
+      --case
+      missing-case
+  )
+  set_tests_properties(
+    compatibility.write_session_sqlite_invalid_case
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+      WILL_FAIL TRUE
+  )
+  add_test(
+    NAME compatibility.write_session_sqlite_page_case
+    COMMAND
+      modern_sqlite_write_session_sqlite_compatibility
+      --case
+      page-size-512
+  )
+  set_tests_properties(
+    compatibility.write_session_sqlite_page_case
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
+  add_test(
+    NAME compatibility.write_session_sqlite_crash_case
+    COMMAND
+      modern_sqlite_write_session_sqlite_compatibility
+      --case
+      implicit-insert
+      --cut
+      1
+      --durability
+      volatile
+  )
+  set_tests_properties(
+    compatibility.write_session_sqlite_crash_case
+    PROPERTIES
+      LABELS compatibility
+      TIMEOUT 30
+  )
 
   add_executable(
     modern_sqlite_rollback_journal_fixture
