@@ -681,6 +681,11 @@ int main() try {
       LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
       LoadConstantInstruction{.constant = ConstantId(2), .output = RegisterId(2)},
       OpenWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      CheckUpdateRowIdInstruction{
+          .cursor = WriteCursorId(0),
+          .old_rowid = RegisterId(0),
+          .new_rowid = RegisterId(1),
+      },
       UpdateTableInstruction{
           .cursor = WriteCursorId(0),
           .old_rowid = RegisterId(0),
@@ -690,7 +695,15 @@ int main() try {
       HaltInstruction{},
   };
   auto update_program = BytecodeProgram::Create(update_input);
-  auto update_statement = delete_coordinator->BeginStatement(TransactionStatementOptions{
+  std::unique_ptr<Pager> update_pager = test::OpenWritePager(delete_vfs, 64U);
+  if (update_pager == nullptr) {
+    return 1;
+  }
+  auto update_coordinator = TransactionCoordinator::Open(std::move(update_pager));
+  if (!update_coordinator.has_value()) {
+    return 1;
+  }
+  auto update_statement = update_coordinator->BeginStatement(TransactionStatementOptions{
       .access = StatementAccess::kWrite,
       .rollback = StatementRollbackMode::kStatement,
   });

@@ -312,8 +312,11 @@ int main() try {
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
+  const PhysicalMutationPlan indexed_deletion = DeleteFixture(indexed_catalog);
   const PhysicalMutationPlan update = UpdateFixture(catalog);
+  const PhysicalMutationPlan indexed_update = UpdateFixture(indexed_catalog);
   const PhysicalMutationPlan stable_update = StableUpdateFixture(catalog);
+  const PhysicalMutationPlan indexed_stable_update = StableUpdateFixture(indexed_catalog);
   const PhysicalMutationPlan create = CreateFixture(catalog);
 
   const auto verify_oom = [](const auto& plan) {
@@ -348,7 +351,9 @@ int main() try {
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
                  verify_oom(mutation) && verify_oom(indexed_insert) && verify_oom(deletion) &&
-                 verify_oom(update) && verify_oom(stable_update) && verify_oom(create)
+                 verify_oom(indexed_deletion) && verify_oom(update) && verify_oom(indexed_update) &&
+                 verify_oom(stable_update) && verify_oom(indexed_stable_update) &&
+                 verify_oom(create)
              ? 0
              : 1;
 } catch (...) {

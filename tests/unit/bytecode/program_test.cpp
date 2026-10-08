@@ -432,6 +432,11 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
       LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
       LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
       OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+      CheckUpdateRowIdInstruction{
+          .cursor = WriteCursor(0),
+          .old_rowid = Reg(0),
+          .new_rowid = Reg(1),
+      },
       UpdateTableInstruction{
           .cursor = WriteCursor(0),
           .old_rowid = Reg(0),
@@ -442,7 +447,8 @@ TEST(BytecodeProgramTest, VerifiesTypedTableUpdateInstruction) {
       HaltInstruction{},
   };
   EXPECT_TRUE(VerifyProgram(input).has_value());
-  EXPECT_EQ("update_table", InstructionKindName(InstructionKindOf(input.instructions[4])));
+  EXPECT_EQ("check_update_rowid", InstructionKindName(InstructionKindOf(input.instructions[4])));
+  EXPECT_EQ("update_table", InstructionKindName(InstructionKindOf(input.instructions[5])));
 
   input.instructions.erase(input.instructions.begin() + 3);
   EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, VerifyError(input));
@@ -881,6 +887,12 @@ TEST(BytecodeProgramTest, RejectsInstructionsOutsideTheirStatementFamily) {
                       .cursor = WriteCursor(0),
                       .input = Reg(0),
                       .output = Reg(1),
+                  });
+  expect_rejected(ProgramStatementKind::kDelete, kMutationResults,
+                  CheckUpdateRowIdInstruction{
+                      .cursor = WriteCursor(0),
+                      .old_rowid = Reg(0),
+                      .new_rowid = Reg(1),
                   });
   expect_rejected(ProgramStatementKind::kSelect, {},
                   BuildTableRecordInstruction{

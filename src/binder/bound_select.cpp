@@ -562,7 +562,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(insert.table, true);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(insert.table);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -622,7 +622,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(update.table, false);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(update.table);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -670,7 +670,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(delete_statement.table, false);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(delete_statement.table);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -880,8 +880,7 @@ class StatementBinder final {
         std::move(static_cast<BoundExpressionState&>(*impl_));
   }
 
-  [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name,
-                                                                        bool allow_indexes) {
+  [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name) {
     BindExpected<DecodedNameParts> parts = NameParts(name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -945,10 +944,6 @@ class StatementBinder final {
       });
     }
     const std::span<const IndexId> table_indexes = catalog_->table_indexes(*table_id);
-    if (!allow_indexes && !table_indexes.empty()) {
-      return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
-                                         "table mutation with indexes is not supported"));
-    }
     target.indexes.reserve(table_indexes.size());
     for (const IndexId index_id : table_indexes) {
       const CatalogIndex& index = catalog_->index(index_id);
@@ -986,7 +981,11 @@ class StatementBinder final {
             return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
                                                "index expression is not supported for mutation"));
           }
-          bound_term.column = *column;
+          if (target.rowid_alias == *column) {
+            bound_term.rowid = true;
+          } else {
+            bound_term.column = *column;
+          }
         } else {
           bound_term.rowid = true;
         }

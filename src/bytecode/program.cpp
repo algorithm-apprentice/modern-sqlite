@@ -883,6 +883,22 @@ template <typename T>
                                              operation.cursor.value()));
             }
             return check_register(operation.rowid, index);
+          } else if constexpr (std::is_same_v<Operation, CheckUpdateRowIdInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kUpdate) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.write_cursors[operation.cursor.value()].storage !=
+                WriteCursorStorageKind::kRowIdTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
+            if (auto result = check_register(operation.old_rowid, index); !result) {
+              return result;
+            }
+            return check_register(operation.new_rowid, index);
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
                 input.statement_kind != ProgramStatementKind::kUpdate &&
@@ -1528,6 +1544,17 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CheckUpdateRowIdInstruction>) {
+            if (auto result = require_write_open(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.old_rowid); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.new_rowid); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
             if (auto result = require_write_open(operation.cursor); !result) {
               return result;
@@ -1768,6 +1795,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "resolve_insert_rowid";
     case InstructionKind::kCheckInsertRowId:
       return "check_insert_rowid";
+    case InstructionKind::kCheckUpdateRowId:
+      return "check_update_rowid";
     case InstructionKind::kBuildTableRecord:
       return "build_table_record";
     case InstructionKind::kCheckUniqueIndex:

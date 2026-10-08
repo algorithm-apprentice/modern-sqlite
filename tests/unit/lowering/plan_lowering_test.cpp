@@ -207,7 +207,7 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
-[[nodiscard]] CatalogSnapshotPtr IndexedInsertCatalog() {
+[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog() {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 0, .generation = 17},
@@ -216,6 +216,7 @@ void RequireStatus(Status status) {
       ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)"));
   input.definitions.push_back(ParseTree("CREATE UNIQUE INDEX items_name ON Items(Name)"));
   input.definitions.push_back(ParseTree("CREATE INDEX items_score ON Items(Score DESC)"));
+  input.definitions.push_back(ParseTree("CREATE INDEX items_id ON Items(id)"));
   input.tables.push_back(CatalogTableInput{
       .definition = SchemaDefinitionId{0},
       .name = "Items",
@@ -274,6 +275,27 @@ void RequireStatus(Status status) {
                   .target = ColumnId{2},
                   .collation_name = "BINARY",
                   .order = SortOrder::kDescending,
+              },
+              CatalogIndexTerm{
+                  .target = RowIdIndexTerm{},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{3},
+      .name = "items_id",
+      .table = TableId{0},
+      .root_page = RootPageId{5},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              CatalogIndexTerm{
+                  .target = ColumnId{0},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
               },
               CatalogIndexTerm{
                   .target = RowIdIndexTerm{},
@@ -428,14 +450,14 @@ void InitializeMutationDatabase(test::WritePagerFixedVfs& vfs) {
   RequireStatus(statement.Succeed());
 }
 
-void InitializeIndexedInsertDatabase(test::WritePagerFixedVfs& vfs) {
+void InitializeIndexedMutationDatabase(test::WritePagerFixedVfs& vfs) {
   TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
   TransactionStatement statement = TakeValue(
       coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
   RequireStatus(statement.writer()->InitializeDatabase());
   const TableBtreeWriter table = TakeValue(statement.writer()->CreateTableBtree());
   if (table.root_page() != PageNumber{2}) {
-    throw std::runtime_error{"indexed INSERT table root is not page 2"};
+    throw std::runtime_error{"indexed mutation table root is not page 2"};
   }
   const std::array<IndexColumnOrder, 2> name_columns{
       IndexColumnOrder{BinaryCollation()},
@@ -443,7 +465,7 @@ void InitializeIndexedInsertDatabase(test::WritePagerFixedVfs& vfs) {
   };
   const IndexBtreeWriter name = TakeValue(statement.writer()->CreateIndexBtree(name_columns));
   if (name.root_page() != PageNumber{3}) {
-    throw std::runtime_error{"indexed INSERT name root is not page 3"};
+    throw std::runtime_error{"indexed mutation name root is not page 3"};
   }
   const std::array<IndexColumnOrder, 2> score_columns{
       IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
@@ -452,7 +474,15 @@ void InitializeIndexedInsertDatabase(test::WritePagerFixedVfs& vfs) {
   };
   const IndexBtreeWriter score = TakeValue(statement.writer()->CreateIndexBtree(score_columns));
   if (score.root_page() != PageNumber{4}) {
-    throw std::runtime_error{"indexed INSERT score root is not page 4"};
+    throw std::runtime_error{"indexed mutation score root is not page 4"};
+  }
+  const std::array<IndexColumnOrder, 2> id_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const IndexBtreeWriter id = TakeValue(statement.writer()->CreateIndexBtree(id_columns));
+  if (id.root_page() != PageNumber{5}) {
+    throw std::runtime_error{"indexed mutation id root is not page 5"};
   }
   RequireStatus(statement.Succeed());
 }
@@ -795,15 +825,15 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
 }
 
 TEST(InsertLowering, MaintainsIndexesAndEnforcesUniquePrefixes) {
-  const CatalogSnapshotPtr catalog = IndexedInsertCatalog();
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
   test::WritePagerFixedVfs vfs{false};
-  InitializeIndexedInsertDatabase(vfs);
+  InitializeIndexedMutationDatabase(vfs);
   const BytecodeProgram insert =
       LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
   const std::vector<InstructionKind> kinds = InstructionKinds(insert);
   EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCheckInsertRowId), kinds.end());
   EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCheckUniqueIndex), kinds.end());
-  EXPECT_EQ(2U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kInsertIndex)));
+  EXPECT_EQ(3U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kInsertIndex)));
   const auto table_insert = std::ranges::find(kinds, InstructionKind::kInsertTable);
   const auto first_index_insert = std::ranges::find(kinds, InstructionKind::kInsertIndex);
   ASSERT_NE(kinds.end(), table_insert);
@@ -851,6 +881,302 @@ TEST(InsertLowering, MaintainsIndexesAndEnforcesUniquePrefixes) {
   EXPECT_EQ(9, score_rows[0][0].integer_value());
   EXPECT_EQ(8, score_rows[1][0].integer_value());
   EXPECT_EQ(7, score_rows[2][0].integer_value());
+
+  const std::array<IndexColumnOrder, 2> id_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto id_rows = ReadIndexRows(vfs, PageNumber{5}, id_columns);
+  ASSERT_EQ(3U, id_rows.size());
+  EXPECT_EQ(1, id_rows[0][0].integer_value());
+  EXPECT_EQ(1, id_rows[0][1].integer_value());
+  EXPECT_EQ(2, id_rows[1][0].integer_value());
+  EXPECT_EQ(2, id_rows[1][1].integer_value());
+  EXPECT_EQ(3, id_rows[2][0].integer_value());
+  EXPECT_EQ(3, id_rows[2][1].integer_value());
+}
+
+TEST(IndexedMutationLowering, MaintainsIndexesForExactUpdateAndDelete) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto execute_insert = [&](std::int64_t rowid, std::string name, std::int64_t score) {
+    const std::array parameters{
+        SqlValue::Integer(rowid),
+        SqlValue::Text(std::move(name)),
+        SqlValue::Integer(score),
+    };
+    return ExecuteMutationProgram(insert, vfs, parameters);
+  };
+  EXPECT_EQ(1U, TakeValue(execute_insert(1, "alpha", 7)).changes);
+  EXPECT_EQ(1U, TakeValue(execute_insert(2, "beta", 8)).changes);
+
+  const BytecodeProgram update =
+      LowerMutationOrThrow("UPDATE Items SET id=?1,Name=?2,Score=?3 WHERE id=?4", catalog);
+  const std::vector<InstructionKind> update_kinds = InstructionKinds(update);
+  EXPECT_EQ(3U, static_cast<std::size_t>(
+                    std::ranges::count(update_kinds, InstructionKind::kDeleteIndex)));
+  EXPECT_EQ(3U, static_cast<std::size_t>(
+                    std::ranges::count(update_kinds, InstructionKind::kInsertIndex)));
+  const auto rowid_check = std::ranges::find(update_kinds, InstructionKind::kCheckUpdateRowId);
+  const auto first_index_delete = std::ranges::find(update_kinds, InstructionKind::kDeleteIndex);
+  const auto last_unique_check = std::ranges::find(update_kinds.rbegin(), update_kinds.rend(),
+                                                   InstructionKind::kCheckUniqueIndex);
+  ASSERT_NE(update_kinds.end(), rowid_check);
+  ASSERT_NE(update_kinds.end(), first_index_delete);
+  ASSERT_NE(update_kinds.rend(), last_unique_check);
+  EXPECT_LT(rowid_check, first_index_delete);
+  EXPECT_LT(std::prev(last_unique_check.base()), first_index_delete);
+  const auto table_update = std::ranges::find(update_kinds, InstructionKind::kUpdateTable);
+  const auto last_index_insert =
+      std::ranges::find(update_kinds.rbegin(), update_kinds.rend(), InstructionKind::kInsertIndex);
+  ASSERT_NE(update_kinds.end(), table_update);
+  ASSERT_NE(update_kinds.rend(), last_index_insert);
+  EXPECT_LT(std::distance(update_kinds.begin(), std::prev(last_index_insert.base())),
+            std::distance(update_kinds.begin(), table_update));
+
+  const std::array rowid_conflict_parameters{
+      SqlValue::Integer(2),
+      SqlValue::Text("zeta"),
+      SqlValue::Integer(12),
+      SqlValue::Integer(1),
+  };
+  const Result<MutationOutcome> rowid_conflict =
+      ExecuteMutationProgram(update, vfs, rowid_conflict_parameters);
+  ASSERT_FALSE(rowid_conflict.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, rowid_conflict.error().code());
+
+  const std::array update_parameters{
+      SqlValue::Integer(4),
+      SqlValue::Text("delta"),
+      SqlValue::Integer(11),
+      SqlValue::Integer(1),
+  };
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(update, vfs, update_parameters)).changes);
+
+  const BytecodeProgram duplicate =
+      LowerMutationOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
+  const std::array duplicate_parameters{
+      SqlValue::Text("delta"),
+      SqlValue::Integer(2),
+  };
+  const Result<MutationOutcome> duplicate_result =
+      ExecuteMutationProgram(duplicate, vfs, duplicate_parameters);
+  ASSERT_FALSE(duplicate_result.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_result.error().code());
+
+  auto table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(2U, table_rows.size());
+  EXPECT_EQ(2, table_rows[0].first);
+  EXPECT_EQ("beta", TextBytes(table_rows[0].second[1]));
+  EXPECT_EQ(8, table_rows[0].second[2].integer_value());
+  EXPECT_EQ(4, table_rows[1].first);
+  EXPECT_EQ("delta", TextBytes(table_rows[1].second[1]));
+  EXPECT_EQ(11, table_rows[1].second[2].integer_value());
+
+  const std::array<IndexColumnOrder, 2> name_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto name_rows = ReadIndexRows(vfs, PageNumber{3}, name_columns);
+  ASSERT_EQ(2U, name_rows.size());
+  EXPECT_EQ("beta", TextBytes(name_rows[0][0]));
+  EXPECT_EQ(2, name_rows[0][1].integer_value());
+  EXPECT_EQ("delta", TextBytes(name_rows[1][0]));
+  EXPECT_EQ(4, name_rows[1][1].integer_value());
+
+  const std::array<IndexColumnOrder, 2> score_columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto score_rows = ReadIndexRows(vfs, PageNumber{4}, score_columns);
+  ASSERT_EQ(2U, score_rows.size());
+  EXPECT_EQ(11, score_rows[0][0].integer_value());
+  EXPECT_EQ(4, score_rows[0][1].integer_value());
+  EXPECT_EQ(8, score_rows[1][0].integer_value());
+  EXPECT_EQ(2, score_rows[1][1].integer_value());
+
+  const std::array<IndexColumnOrder, 2> id_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto id_rows = ReadIndexRows(vfs, PageNumber{5}, id_columns);
+  ASSERT_EQ(2U, id_rows.size());
+  EXPECT_EQ(2, id_rows[0][0].integer_value());
+  EXPECT_EQ(2, id_rows[0][1].integer_value());
+  EXPECT_EQ(4, id_rows[1][0].integer_value());
+  EXPECT_EQ(4, id_rows[1][1].integer_value());
+
+  const BytecodeProgram delete_program =
+      LowerMutationOrThrow("DELETE FROM Items WHERE id=?1", catalog);
+  const std::vector<InstructionKind> delete_kinds = InstructionKinds(delete_program);
+  EXPECT_EQ(3U, static_cast<std::size_t>(
+                    std::ranges::count(delete_kinds, InstructionKind::kDeleteIndex)));
+  const auto table_delete = std::ranges::find(delete_kinds, InstructionKind::kDeleteTable);
+  const auto last_index_delete =
+      std::ranges::find(delete_kinds.rbegin(), delete_kinds.rend(), InstructionKind::kDeleteIndex);
+  ASSERT_NE(delete_kinds.end(), table_delete);
+  ASSERT_NE(delete_kinds.rend(), last_index_delete);
+  EXPECT_LT(std::distance(delete_kinds.begin(), std::prev(last_index_delete.base())),
+            std::distance(delete_kinds.begin(), table_delete));
+
+  const std::array delete_parameters{SqlValue::Integer(4)};
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(delete_program, vfs, delete_parameters)).changes);
+  table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(1U, table_rows.size());
+  EXPECT_EQ(2, table_rows[0].first);
+  EXPECT_EQ("beta", TextBytes(table_rows[0].second[1]));
+
+  name_rows = ReadIndexRows(vfs, PageNumber{3}, name_columns);
+  ASSERT_EQ(1U, name_rows.size());
+  EXPECT_EQ("beta", TextBytes(name_rows[0][0]));
+  EXPECT_EQ(2, name_rows[0][1].integer_value());
+  score_rows = ReadIndexRows(vfs, PageNumber{4}, score_columns);
+  ASSERT_EQ(1U, score_rows.size());
+  EXPECT_EQ(8, score_rows[0][0].integer_value());
+  EXPECT_EQ(2, score_rows[0][1].integer_value());
+  id_rows = ReadIndexRows(vfs, PageNumber{5}, id_columns);
+  ASSERT_EQ(1U, id_rows.size());
+  EXPECT_EQ(2, id_rows[0][0].integer_value());
+  EXPECT_EQ(2, id_rows[0][1].integer_value());
+}
+
+TEST(IndexedMutationLowering, CollectsScanRowidsAndRollsBackPartialIndexWork) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto execute_insert = [&](std::int64_t rowid, SqlValue name, std::int64_t score) {
+    const std::array parameters{
+        SqlValue::Integer(rowid),
+        std::move(name),
+        SqlValue::Integer(score),
+    };
+    return ExecuteMutationProgram(insert, vfs, parameters);
+  };
+  EXPECT_EQ(1U, TakeValue(execute_insert(1, SqlValue::Text("alpha"), 7)).changes);
+  EXPECT_EQ(1U, TakeValue(execute_insert(2, SqlValue::Text("beta"), 8)).changes);
+  EXPECT_EQ(1U, TakeValue(execute_insert(3, SqlValue::Text("gamma"), 9)).changes);
+  EXPECT_EQ(1U, TakeValue(execute_insert(4, SqlValue{}, 10)).changes);
+  EXPECT_EQ(1U, TakeValue(execute_insert(5, SqlValue{}, 11)).changes);
+
+  const BytecodeProgram conflicting =
+      LowerMutationOrThrow("UPDATE Items SET Name='same' WHERE Score>=7", catalog);
+  const Result<MutationOutcome> conflict = ExecuteMutationProgram(conflicting, vfs);
+  ASSERT_FALSE(conflict.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, conflict.error().code());
+  auto table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(5U, table_rows.size());
+  EXPECT_EQ("alpha", TextBytes(table_rows[0].second[1]));
+  EXPECT_EQ("beta", TextBytes(table_rows[1].second[1]));
+
+  const BytecodeProgram stable_scan =
+      LowerMutationOrThrow("UPDATE Items SET Score=Score+10 WHERE Score>=9", catalog);
+  const std::vector<InstructionKind> update_kinds = InstructionKinds(stable_scan);
+  EXPECT_NE(std::ranges::find(update_kinds, InstructionKind::kClearRowIdList), update_kinds.end());
+  EXPECT_NE(std::ranges::find(update_kinds, InstructionKind::kAppendRowIdList), update_kinds.end());
+  EXPECT_NE(std::ranges::find(update_kinds, InstructionKind::kUpdateTable), update_kinds.end());
+  EXPECT_EQ(std::ranges::find(update_kinds, InstructionKind::kOpenMutation), update_kinds.end());
+  EXPECT_EQ(std::ranges::find(update_kinds, InstructionKind::kUpdateCurrentTable),
+            update_kinds.end());
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(stable_scan, vfs)).changes);
+
+  const BytecodeProgram moving_scan =
+      LowerMutationOrThrow("UPDATE Items SET id=id+10 WHERE Score>=20", catalog);
+  EXPECT_EQ(2U, TakeValue(ExecuteMutationProgram(moving_scan, vfs)).changes);
+  table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(5U, table_rows.size());
+  EXPECT_EQ(1, table_rows[0].first);
+  EXPECT_EQ(2, table_rows[1].first);
+  EXPECT_EQ(3, table_rows[2].first);
+  EXPECT_EQ(14, table_rows[3].first);
+  EXPECT_EQ(15, table_rows[4].first);
+
+  const std::array<IndexColumnOrder, 2> name_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto name_rows = ReadIndexRows(vfs, PageNumber{3}, name_columns);
+  ASSERT_EQ(5U, name_rows.size());
+  EXPECT_EQ(SqlValueType::kNull, name_rows[0][0].type());
+  EXPECT_EQ(14, name_rows[0][1].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, name_rows[1][0].type());
+  EXPECT_EQ(15, name_rows[1][1].integer_value());
+
+  const std::array<IndexColumnOrder, 2> id_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  auto id_rows = ReadIndexRows(vfs, PageNumber{5}, id_columns);
+  ASSERT_EQ(5U, id_rows.size());
+  EXPECT_EQ(1, id_rows[0][0].integer_value());
+  EXPECT_EQ(2, id_rows[1][0].integer_value());
+  EXPECT_EQ(3, id_rows[2][0].integer_value());
+  EXPECT_EQ(14, id_rows[3][0].integer_value());
+  EXPECT_EQ(15, id_rows[4][0].integer_value());
+  for (const auto& row : id_rows) {
+    EXPECT_EQ(row[0].integer_value(), row[1].integer_value());
+  }
+
+  const BytecodeProgram delete_scan =
+      LowerMutationOrThrow("DELETE FROM Items WHERE Score>=20", catalog);
+  const std::vector<InstructionKind> delete_kinds = InstructionKinds(delete_scan);
+  EXPECT_NE(std::ranges::find(delete_kinds, InstructionKind::kClearRowIdList), delete_kinds.end());
+  EXPECT_NE(std::ranges::find(delete_kinds, InstructionKind::kAppendRowIdList), delete_kinds.end());
+  EXPECT_NE(std::ranges::find(delete_kinds, InstructionKind::kDeleteTable), delete_kinds.end());
+  EXPECT_EQ(std::ranges::find(delete_kinds, InstructionKind::kOpenMutation), delete_kinds.end());
+  EXPECT_EQ(std::ranges::find(delete_kinds, InstructionKind::kDeleteCurrentTable),
+            delete_kinds.end());
+  EXPECT_EQ(2U, TakeValue(ExecuteMutationProgram(delete_scan, vfs)).changes);
+
+  table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(3U, table_rows.size());
+  EXPECT_EQ(1, table_rows[0].first);
+  EXPECT_EQ("alpha", TextBytes(table_rows[0].second[1]));
+  EXPECT_EQ(7, table_rows[0].second[2].integer_value());
+  EXPECT_EQ(2, table_rows[1].first);
+  EXPECT_EQ("beta", TextBytes(table_rows[1].second[1]));
+  EXPECT_EQ(8, table_rows[1].second[2].integer_value());
+  EXPECT_EQ(3, table_rows[2].first);
+  EXPECT_EQ("gamma", TextBytes(table_rows[2].second[1]));
+  EXPECT_EQ(19, table_rows[2].second[2].integer_value());
+
+  name_rows = ReadIndexRows(vfs, PageNumber{3}, name_columns);
+  ASSERT_EQ(3U, name_rows.size());
+  EXPECT_EQ("alpha", TextBytes(name_rows[0][0]));
+  EXPECT_EQ(1, name_rows[0][1].integer_value());
+  EXPECT_EQ("beta", TextBytes(name_rows[1][0]));
+  EXPECT_EQ(2, name_rows[1][1].integer_value());
+  EXPECT_EQ("gamma", TextBytes(name_rows[2][0]));
+  EXPECT_EQ(3, name_rows[2][1].integer_value());
+
+  const std::array<IndexColumnOrder, 2> score_columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto score_rows = ReadIndexRows(vfs, PageNumber{4}, score_columns);
+  ASSERT_EQ(3U, score_rows.size());
+  EXPECT_EQ(19, score_rows[0][0].integer_value());
+  EXPECT_EQ(3, score_rows[0][1].integer_value());
+  EXPECT_EQ(8, score_rows[1][0].integer_value());
+  EXPECT_EQ(2, score_rows[1][1].integer_value());
+  EXPECT_EQ(7, score_rows[2][0].integer_value());
+  EXPECT_EQ(1, score_rows[2][1].integer_value());
+  id_rows = ReadIndexRows(vfs, PageNumber{5}, id_columns);
+  ASSERT_EQ(3U, id_rows.size());
+  EXPECT_EQ(1, id_rows[0][0].integer_value());
+  EXPECT_EQ(2, id_rows[1][0].integer_value());
+  EXPECT_EQ(3, id_rows[2][0].integer_value());
+  for (const auto& row : id_rows) {
+    EXPECT_EQ(row[0].integer_value(), row[1].integer_value());
+  }
 }
 
 TEST(InsertLowering, RetainsLimitsAndRejectsMovedFromPlans) {

@@ -166,6 +166,56 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 31, .generation = 17},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Value INT)"));
+  input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Name",
+                  .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Value",
+                  .declared_type = "INT",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "items_name",
+      .table = TableId{0},
+      .root_page = RootPageId{3},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              ColumnTerm(1),
+              RowIdTerm(),
+          },
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] CatalogSnapshotPtr IndexedCatalog() {
   CatalogInput input{
       .schema_name = "main",
@@ -609,6 +659,39 @@ TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {
       std::get<PhysicalMutationPlan>(scan_delete_statement).payload());
   EXPECT_EQ(MutationAccessKind::kTableScan, scan_delete.access.kind);
   EXPECT_EQ(MutationAtomicity::kStatement, scan_delete.atomicity);
+  EXPECT_FALSE(scan_delete.collect_original_rowids);
+}
+
+TEST(PhysicalMutationPlan, CollectsIndexedTableScansBeforeMutation) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+
+  PhysicalStatementPlan exact_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);
+  const auto& exact_update = std::get<PhysicalUpdateMutation>(
+      std::get<PhysicalMutationPlan>(exact_update_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_update.access.kind);
+  EXPECT_FALSE(exact_update.collect_original_rowids);
+
+  PhysicalStatementPlan scan_update_statement =
+      OptimizeStatementOrThrow("UPDATE Items SET Value=Value+1 WHERE Name>=?1", catalog);
+  const auto& scan_update = std::get<PhysicalUpdateMutation>(
+      std::get<PhysicalMutationPlan>(scan_update_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kTableScan, scan_update.access.kind);
+  EXPECT_TRUE(scan_update.collect_original_rowids);
+
+  PhysicalStatementPlan exact_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE id=?1", catalog);
+  const auto& exact_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(exact_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, exact_delete.access.kind);
+  EXPECT_FALSE(exact_delete.collect_original_rowids);
+
+  PhysicalStatementPlan scan_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE Name>=?1", catalog);
+  const auto& scan_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(scan_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kTableScan, scan_delete.access.kind);
+  EXPECT_TRUE(scan_delete.collect_original_rowids);
 }
 
 TEST(PhysicalMutationPlan, PreservesGuardsResidualsAndEmptyPredicates) {
