@@ -180,6 +180,7 @@ class Validator final {
             [this](const SelectStatement& select) { return ValidateSelect(select); },
             [this](const CreateTableStatement& table) { return ValidateCreateTable(table); },
             [this](const CreateIndexStatement& index) { return ValidateCreateIndex(index); },
+            [this](const AnalyzeStatement& analyze) { return ValidateAnalyze(analyze); },
             [this](const InsertStatement& insert) { return ValidateInsert(insert); },
             [this](const UpdateStatement& update) { return ValidateUpdate(update); },
             [this](const DeleteStatement& delete_statement) {
@@ -831,6 +832,17 @@ class Validator final {
       return ReferenceExpression(*index.where, index.span, std::nullopt);
     }
     return {};
+  }
+
+  [[nodiscard]] Status ValidateAnalyze(const AnalyzeStatement& analyze) {
+    const Status root_status = ValidateRootSpan(analyze.span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    if (!analyze.target.has_value()) {
+      return {};
+    }
+    return ValidateName(*analyze.target, analyze.span, 2U);
   }
 
   [[nodiscard]] Status ValidateInsert(const InsertStatement& insert) {

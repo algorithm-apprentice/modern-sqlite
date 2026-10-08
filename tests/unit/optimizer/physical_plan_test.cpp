@@ -751,6 +751,12 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   EXPECT_TRUE(no_op_index.no_op);
   EXPECT_EQ(MutationAtomicity::kTransaction, no_op_index.atomicity);
 
+  PhysicalStatementPlan analyze_statement = OptimizeStatementOrThrow("ANALYZE Items", catalog);
+  const auto& analyze = std::get<PhysicalAnalyzeMutation>(
+      std::get<PhysicalMutationPlan>(analyze_statement).payload());
+  EXPECT_TRUE(analyze.creates_stat1);
+  EXPECT_EQ(MutationAtomicity::kStatement, analyze.atomicity);
+
   EXPECT_TRUE(std::holds_alternative<PhysicalPlan>(
       OptimizeStatementOrThrow("SELECT Name FROM Items", catalog)));
   EXPECT_TRUE(std::holds_alternative<BoundBeginTransaction>(

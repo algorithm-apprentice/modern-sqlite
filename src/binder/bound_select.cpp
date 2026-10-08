@@ -414,6 +414,16 @@ struct BoundCreateIndex::Impl final {
   std::vector<BoundCreateIndexTerm> terms;
 };
 
+struct BoundAnalyze::Impl final {
+  std::string source;
+  CatalogSnapshotPtr catalog;
+  BoundAnalyzeScope scope = BoundAnalyzeScope::kDatabase;
+  std::string scope_name;
+  std::optional<RootPageId> stat1_root_page;
+  std::vector<BoundAnalyzeIndex> indexes;
+  std::vector<BoundAnalyzeTable> tables;
+};
+
 namespace binder_detail {
 
 class StatementBinder final {
@@ -532,6 +542,13 @@ class StatementBinder final {
         return std::unexpected(std::move(create.error()));
       }
       return BoundStatement{std::in_place_type<BoundCreateIndex>, std::move(*create)};
+    }
+    if (std::holds_alternative<AnalyzeStatement>(tree_.statement())) {
+      BindExpected<BoundAnalyze> analyze = RunAnalyze();
+      if (!analyze.has_value()) {
+        return std::unexpected(std::move(analyze.error()));
+      }
+      return BoundStatement{std::in_place_type<BoundAnalyze>, std::move(*analyze)};
     }
     BindExpected<void> environment = ValidateEnvironment();
     if (!environment.has_value()) {
@@ -929,6 +946,7 @@ class StatementBinder final {
       output->no_op = true;
       return BoundCreateIndex(std::move(output));
     }
+
     if (index.where.has_value()) {
       return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, index.span,
                                          "partial indexes are not supported"));
@@ -1009,6 +1027,145 @@ class StatementBinder final {
     output->canonical_sql.append(
         tree_.source().bytes().substr(retained_begin, retained_end - retained_begin));
     return BoundCreateIndex(std::move(output));
+  }
+
+  [[nodiscard]] BindExpected<BoundAnalyze> RunAnalyze() {
+    const auto& analyze = std::get<AnalyzeStatement>(tree_.statement());
+    BindExpected<void> environment = ValidateEnvironment();
+    if (!environment.has_value()) {
+      return std::unexpected(std::move(environment.error()));
+    }
+
+    auto output = std::make_unique<BoundAnalyze::Impl>();
+    output->source.assign(tree_.source().bytes());
+    output->catalog = catalog_;
+    if (const std::optional<TableId> stat1 = catalog_->FindTable("sqlite_stat1");
+        stat1.has_value()) {
+      const CatalogTable& table = catalog_->table(*stat1);
+      if (table.without_rowid || table.root_page.value == 0U) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, analyze.span,
+                                           "sqlite_stat1 has an unsupported table shape"));
+      }
+      output->stat1_root_page = table.root_page;
+    }
+
+    std::optional<TableId> selected_table;
+    std::optional<IndexId> selected_index;
+    if (analyze.target.has_value()) {
+      BindExpected<DecodedNameParts> parts = NameParts(*analyze.target);
+      if (!parts.has_value()) {
+        return std::unexpected(std::move(parts.error()));
+      }
+      if (parts->empty() || parts->size() > 2U ||
+          (parts->size() == 2U && !NamesEqual(parts->front(), catalog_->schema_name()))) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, analyze.target->span,
+                                           "only the main schema can be analyzed"));
+      }
+      if (parts->size() == 1U && NamesEqual(parts->front(), catalog_->schema_name())) {
+        output->scope = BoundAnalyzeScope::kDatabase;
+      } else {
+        const std::string_view object_name = parts->back();
+        selected_index = catalog_->FindIndex(object_name);
+        if (selected_index.has_value()) {
+          output->scope = BoundAnalyzeScope::kIndex;
+          output->scope_name = catalog_->index(*selected_index).name;
+        } else {
+          selected_table = catalog_->FindTable(object_name);
+          if (!selected_table.has_value() ||
+              HasSqlitePrefix(catalog_->table(*selected_table).name)) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kNoSuchTable, analyze.target->span,
+                            "no such table or index: " + std::string{object_name}));
+          }
+          output->scope = BoundAnalyzeScope::kTable;
+          output->scope_name = catalog_->table(*selected_table).name;
+        }
+      }
+    }
+
+    const auto append_index = [&](IndexId index_id) -> BindExpected<void> {
+      const CatalogIndex& index = catalog_->index(index_id);
+      const CatalogTable& table = catalog_->table(index.table);
+      if (index.root_page.value == 0U || index.key_term_count == 0U ||
+          index.key_term_count > std::numeric_limits<std::uint32_t>::max() ||
+          index.terms.size() < index.key_term_count ||
+          index.terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, analyze.span,
+                                           "catalog index metadata is invalid for ANALYZE"));
+      }
+      BoundAnalyzeIndex bound{
+          .root_page = index.root_page,
+          .table_name = table.name,
+          .index_name = table.without_rowid && index.origin == IndexOrigin::kPrimaryKey
+                            ? table.name
+                            : index.name,
+          .key_term_count = static_cast<std::uint32_t>(index.key_term_count),
+          .columns = {},
+          .partial = index.partial_predicate.has_value(),
+      };
+      bound.columns.reserve(index.terms.size());
+      for (const CatalogIndexTerm& term : index.terms) {
+        if (FindRegisteredCollation(term.collation_name) == nullptr) {
+          return std::unexpected(BinderError(BindErrorCode::kNoSuchCollation, analyze.span,
+                                             "no such collation sequence: " + term.collation_name));
+        }
+        bound.columns.push_back(BoundAnalyzeIndexColumn{
+            .collation_name = term.collation_name,
+            .order = term.order,
+        });
+      }
+      output->indexes.push_back(std::move(bound));
+      return {};
+    };
+
+    if (selected_index.has_value()) {
+      if (auto appended = append_index(*selected_index); !appended.has_value()) {
+        return std::unexpected(std::move(appended.error()));
+      }
+      return BoundAnalyze(std::move(output));
+    }
+
+    const auto append_table = [&](TableId table_id) -> BindExpected<void> {
+      const CatalogTable& table = catalog_->table(table_id);
+      if (HasSqlitePrefix(table.name)) {
+        return {};
+      }
+      bool has_nonpartial_index = false;
+      for (const IndexId index_id : catalog_->table_indexes(table_id)) {
+        const CatalogIndex& index = catalog_->index(index_id);
+        has_nonpartial_index = has_nonpartial_index || !index.partial_predicate.has_value();
+        if (auto appended = append_index(index_id); !appended.has_value()) {
+          return appended;
+        }
+      }
+      if (!has_nonpartial_index && !table.without_rowid) {
+        if (table.columns.empty() ||
+            table.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, analyze.span,
+                                             "catalog table metadata is invalid for ANALYZE"));
+        }
+        output->tables.push_back(BoundAnalyzeTable{
+            .root_page = table.root_page,
+            .table_name = table.name,
+            .record_field_count = static_cast<std::uint32_t>(table.columns.size()),
+        });
+      }
+      return {};
+    };
+
+    if (selected_table.has_value()) {
+      if (auto appended = append_table(*selected_table); !appended.has_value()) {
+        return std::unexpected(std::move(appended.error()));
+      }
+      return BoundAnalyze(std::move(output));
+    }
+
+    for (std::size_t table = 0; table < catalog_->tables().size(); ++table) {
+      if (auto appended = append_table(TableId{table}); !appended.has_value()) {
+        return std::unexpected(std::move(appended.error()));
+      }
+    }
+    return BoundAnalyze(std::move(output));
   }
 
  private:
@@ -3317,6 +3474,51 @@ std::string_view BoundCreateIndex::canonical_sql() const noexcept {
 std::span<const BoundCreateIndexTerm> BoundCreateIndex::terms() const noexcept {
   return impl_ != nullptr ? std::span<const BoundCreateIndexTerm>{impl_->terms}
                           : std::span<const BoundCreateIndexTerm>{};
+}
+
+BoundAnalyze::BoundAnalyze(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundAnalyze::BoundAnalyze(BoundAnalyze&&) noexcept = default;
+
+BoundAnalyze& BoundAnalyze::operator=(BoundAnalyze&&) noexcept = default;
+
+BoundAnalyze::~BoundAnalyze() = default;
+
+bool BoundAnalyze::valid() const noexcept { return impl_ != nullptr; }
+
+Utf8View BoundAnalyze::source() const noexcept {
+  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+}
+
+const CatalogSnapshot* BoundAnalyze::catalog() const noexcept {
+  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+}
+
+CatalogVersion BoundAnalyze::required_catalog_version() const noexcept {
+  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
+                                                       : CatalogVersion{};
+}
+
+BoundAnalyzeScope BoundAnalyze::scope() const noexcept {
+  return impl_ != nullptr ? impl_->scope : BoundAnalyzeScope::kDatabase;
+}
+
+std::string_view BoundAnalyze::scope_name() const noexcept {
+  return impl_ != nullptr ? std::string_view{impl_->scope_name} : std::string_view{};
+}
+
+std::optional<RootPageId> BoundAnalyze::stat1_root_page() const noexcept {
+  return impl_ != nullptr ? impl_->stat1_root_page : std::nullopt;
+}
+
+std::span<const BoundAnalyzeIndex> BoundAnalyze::indexes() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundAnalyzeIndex>{impl_->indexes}
+                          : std::span<const BoundAnalyzeIndex>{};
+}
+
+std::span<const BoundAnalyzeTable> BoundAnalyze::tables() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundAnalyzeTable>{impl_->tables}
+                          : std::span<const BoundAnalyzeTable>{};
 }
 
 BindStatementResult BindStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,

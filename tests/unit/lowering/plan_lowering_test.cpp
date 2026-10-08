@@ -2063,6 +2063,45 @@ TEST(CreateIndexLowering, RetainsResourceLimitsAndMoveSafety) {
   EXPECT_TRUE(LowerPlan(moved).has_value());
 }
 
+TEST(AnalyzeLowering, CreatesStat1AndComputesIndexPrefixes) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  const BytecodeProgram program = LowerMutationOrThrow("ANALYZE items_name", catalog);
+  EXPECT_EQ(ProgramStatementKind::kAnalyze, program.statement_kind());
+  const std::vector<InstructionKind> kinds = InstructionKinds(program);
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCreateTableRoot), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kClearStat1), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kComputeIndexStat1), kinds.end());
+
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedMutationDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto insert_row = [&](std::int64_t rowid, SqlValue name, std::int64_t score) {
+    const std::array parameters{
+        SqlValue::Integer(rowid),
+        std::move(name),
+        SqlValue::Integer(score),
+    };
+    return ExecuteMutationProgram(insert, vfs, parameters);
+  };
+  EXPECT_EQ(1U, TakeValue(insert_row(1, SqlValue::Text("alpha"), 7)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(2, SqlValue::Text("beta"), 8)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(3, SqlValue{}, 9)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(4, SqlValue{}, 10)).changes);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(program, vfs)).changes);
+
+  const auto schema_rows = ReadMutationRows(vfs, PageNumber{1});
+  ASSERT_EQ(1U, schema_rows.size());
+  EXPECT_EQ("sqlite_stat1", TextBytes(schema_rows[0].second[1]));
+  EXPECT_EQ(6, schema_rows[0].second[3].integer_value());
+  EXPECT_EQ("CREATE TABLE sqlite_stat1(tbl,idx,stat)", TextBytes(schema_rows[0].second[4]));
+  const auto stat_rows = ReadMutationRows(vfs, PageNumber{6});
+  ASSERT_EQ(1U, stat_rows.size());
+  EXPECT_EQ("Items", TextBytes(stat_rows[0].second[0]));
+  EXPECT_EQ("items_name", TextBytes(stat_rows[0].second[1]));
+  EXPECT_EQ("4 2", TextBytes(stat_rows[0].second[2]));
+}
+
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 

@@ -118,6 +118,7 @@ class PlanLowerer final {
     }
     bound_create_ = std::get_if<BoundCreateTable>(&plan.logical_plan().bound_statement());
     bound_create_index_ = std::get_if<BoundCreateIndex>(&plan.logical_plan().bound_statement());
+    bound_analyze_ = std::get_if<BoundAnalyze>(&plan.logical_plan().bound_statement());
   }
 
   [[nodiscard]] LowerPlanResult Run() {
@@ -215,6 +216,10 @@ class PlanLowerer final {
     const auto* create_index = std::get_if<PhysicalCreateIndexMutation>(&mutation_plan_->payload());
     if (create_index != nullptr) {
       return RunCreateIndex(*create_index);
+    }
+    const auto* analyze = std::get_if<PhysicalAnalyzeMutation>(&mutation_plan_->payload());
+    if (analyze != nullptr) {
+      return RunAnalyze(*analyze);
     }
     return std::unexpected(UnsupportedFailure("physical mutation plan is not implemented"));
   }
@@ -570,6 +575,62 @@ class PlanLowerer final {
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
                                       "lowered CREATE INDEX bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
+  [[nodiscard]] LowerPlanResult RunAnalyze(const PhysicalAnalyzeMutation& analyze) {
+    if (bound_analyze_ == nullptr ||
+        !std::holds_alternative<LogicalAnalyzeMutation>(mutation_plan_->logical_plan().payload())) {
+      return std::unexpected(InternalFailure("physical ANALYZE plan has inconsistent ownership"));
+    }
+    if (bound_analyze_->catalog() == nullptr) {
+      return std::unexpected(InternalFailure("bound ANALYZE does not retain a catalog"));
+    }
+    constexpr std::uint32_t kAnalyzeRegisterCount = 8;
+    const CatalogVersion version = bound_analyze_->required_catalog_version();
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = kAnalyzeRegisterCount,
+                                                .parameters = 0,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    builder_.emplace(std::move(*created));
+
+    const ProgramRollbackMode rollback_mode = analyze.atomicity == MutationAtomicity::kStatement
+                                                  ? ProgramRollbackMode::kStatement
+                                                  : ProgramRollbackMode::kTransaction;
+    auto metadata = ConvertProgramResult(
+        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kAnalyze,
+                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        "unable to set ANALYZE execution metadata");
+    if (!metadata.has_value()) {
+      return std::unexpected(std::move(metadata.error()));
+    }
+    auto snapshot = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
+                                         "unable to require a database snapshot");
+    if (!snapshot.has_value()) {
+      return std::unexpected(std::move(snapshot.error()));
+    }
+    if (auto descriptors = AddAnalyzeDescriptors(analyze); !descriptors.has_value()) {
+      return std::unexpected(std::move(descriptors.error()));
+    }
+    if (auto emitted = EmitAnalyze(analyze); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+
+    auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
+                                      "lowered ANALYZE bytecode failed verification");
     if (!built.has_value()) {
       return std::unexpected(std::move(built.error()));
     }
@@ -1499,6 +1560,108 @@ class PlanLowerer final {
       return std::unexpected(std::move(index_cursor.error()));
     }
     create_index_write_cursor_ = *index_cursor;
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddAnalyzeDescriptors(const PhysicalAnalyzeMutation& analyze) {
+    RootPageNumber stat1_root{0};
+    if (!analyze.creates_stat1) {
+      const std::optional<RootPageId> bound_root = bound_analyze_->stat1_root_page();
+      if (!bound_root.has_value()) {
+        return std::unexpected(InternalFailure("ANALYZE sqlite_stat1 root is missing"));
+      }
+      stat1_root = RootPageNumber(AssumeValue(bound_root).value);
+    }
+    WriteCursorDescriptor stat1_descriptor{
+        .root_page = stat1_root,
+        .columns =
+            {
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kBlob,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kBlob,
+                },
+                WriteColumnDescriptor{
+                    .affinity = TypeAffinity::kBlob,
+                },
+            },
+        .rowid_alias = std::nullopt,
+        .index_columns = {},
+        .key_term_count = 0,
+        .unique = false,
+        .unique_not_null = false,
+        .pending_root = analyze.creates_stat1,
+        .storage = WriteCursorStorageKind::kRowIdTable,
+    };
+    auto stat1_cursor =
+        ConvertProgramResult(AssumeValue(builder_).AddWriteCursor(std::move(stat1_descriptor)),
+                             "unable to add the sqlite_stat1 write cursor");
+    if (!stat1_cursor.has_value()) {
+      return std::unexpected(std::move(stat1_cursor.error()));
+    }
+    stat1_write_cursor_ = *stat1_cursor;
+
+    if (analyze.creates_stat1) {
+      auto schema_cursor = AddSchemaWriteCursorDescriptor();
+      if (!schema_cursor.has_value()) {
+        return std::unexpected(std::move(schema_cursor.error()));
+      }
+      schema_write_cursor_ = *schema_cursor;
+    }
+
+    analyze_index_cursors_.reserve(bound_analyze_->indexes().size());
+    for (const BoundAnalyzeIndex& index : bound_analyze_->indexes()) {
+      if (index.columns.size() > std::numeric_limits<std::uint32_t>::max() ||
+          index.key_term_count == 0U || index.key_term_count > index.columns.size()) {
+        return std::unexpected(InternalFailure("bound ANALYZE index metadata is invalid"));
+      }
+      ReadCursorDescriptor descriptor{
+          .root_page = RootPageNumber(index.root_page.value),
+          .storage = CursorStorageKind::kIndex,
+          .record_field_count = static_cast<std::uint32_t>(index.columns.size()),
+          .fields = {},
+          .index_columns = {},
+      };
+      descriptor.index_columns.reserve(index.columns.size());
+      for (const BoundAnalyzeIndexColumn& column : index.columns) {
+        auto collation = SymbolForName(column.collation_name);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+        descriptor.index_columns.push_back(IndexColumnMetadata{
+            .collation = *collation,
+            .order = column.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                            : BytecodeSortOrder::kAscending,
+        });
+      }
+      auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
+                                         "unable to add an ANALYZE index cursor");
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      analyze_index_cursors_.push_back(*cursor);
+    }
+
+    analyze_table_cursors_.reserve(bound_analyze_->tables().size());
+    for (const BoundAnalyzeTable& table : bound_analyze_->tables()) {
+      if (table.record_field_count == 0U) {
+        return std::unexpected(InternalFailure("bound ANALYZE table metadata is invalid"));
+      }
+      ReadCursorDescriptor descriptor{
+          .root_page = RootPageNumber(table.root_page.value),
+          .storage = CursorStorageKind::kRowIdTable,
+          .record_field_count = table.record_field_count,
+          .fields = {},
+          .index_columns = {},
+      };
+      auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
+                                         "unable to add an ANALYZE table cursor");
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      analyze_table_cursors_.push_back(*cursor);
+    }
     return {};
   }
 
@@ -4046,6 +4209,172 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitStat1Record(std::string_view table_name,
+                                                     std::optional<std::string_view> index_name) {
+    if (!stat1_write_cursor_.has_value() || table_name.empty()) {
+      return std::unexpected(InternalFailure("sqlite_stat1 record metadata is incomplete"));
+    }
+    auto table = AddConstant(SqlValue::Text(std::string{table_name}));
+    if (!table.has_value()) {
+      return std::unexpected(std::move(table.error()));
+    }
+    LoweringResult<ConstantId> index = index_name.has_value()
+                                           ? AddConstant(SqlValue::Text(std::string{*index_name}))
+                                           : EnsureNullConstant();
+    if (!index.has_value()) {
+      return std::unexpected(std::move(index.error()));
+    }
+    auto null_rowid = EnsureNullConstant();
+    if (!null_rowid.has_value()) {
+      return std::unexpected(std::move(null_rowid.error()));
+    }
+    auto skip = CreateLabel();
+    if (!skip.has_value()) {
+      return std::unexpected(std::move(skip.error()));
+    }
+    if (auto jumped = EmitJumpIf(RegisterId{2}, JumpCondition::kIfNull, *skip);
+        !jumped.has_value()) {
+      return jumped;
+    }
+    const std::array loads{
+        LoadConstantInstruction{.constant = *table, .output = RegisterId{0}},
+        LoadConstantInstruction{.constant = *index, .output = RegisterId{1}},
+        LoadConstantInstruction{.constant = *null_rowid, .output = RegisterId{3}},
+    };
+    for (const LoadConstantInstruction& load : loads) {
+      if (auto loaded = Append(load); !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    const WriteCursorId cursor = AssumeValue(stat1_write_cursor_);
+    if (auto rowid = Append(ResolveInsertRowIdInstruction{
+            .cursor = cursor,
+            .input = RegisterId{3},
+            .output = RegisterId{3},
+        });
+        !rowid.has_value()) {
+      return rowid;
+    }
+    if (auto record = Append(BuildTableRecordInstruction{
+            .cursor = cursor,
+            .first_value = RegisterId{0},
+            .value_count = 3,
+            .output = RegisterId{4},
+        });
+        !record.has_value()) {
+      return record;
+    }
+    if (auto inserted = Append(InsertTableInstruction{
+            .cursor = cursor,
+            .rowid = RegisterId{3},
+            .record = RegisterId{4},
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    return BindLabel(*skip);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitAnalyze(const PhysicalAnalyzeMutation& analyze) {
+    if (!stat1_write_cursor_.has_value() ||
+        analyze_index_cursors_.size() != bound_analyze_->indexes().size() ||
+        analyze_table_cursors_.size() != bound_analyze_->tables().size()) {
+      return std::unexpected(InternalFailure("ANALYZE lowering resources are incomplete"));
+    }
+    const WriteCursorId stat1_cursor = AssumeValue(stat1_write_cursor_);
+    if (analyze.creates_stat1) {
+      if (!schema_write_cursor_.has_value()) {
+        return std::unexpected(InternalFailure("ANALYZE schema cursor is missing"));
+      }
+      if (auto root = Append(CreateTableRootInstruction{
+              .cursor = stat1_cursor,
+              .output = RegisterId{3},
+          });
+          !root.has_value()) {
+        return root;
+      }
+      if (auto schema = EmitSchemaRecord("table", "sqlite_stat1", "sqlite_stat1",
+                                         "CREATE TABLE sqlite_stat1(tbl,idx,stat)");
+          !schema.has_value()) {
+        return schema;
+      }
+    } else {
+      if (auto opened = Append(OpenWriteCursorInstruction{.cursor = stat1_cursor});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+
+    Stat1ClearScope clear_scope = Stat1ClearScope::kDatabase;
+    std::optional<RegisterId> clear_name;
+    if (bound_analyze_->scope() != BoundAnalyzeScope::kDatabase) {
+      auto name = AddConstant(SqlValue::Text(std::string{bound_analyze_->scope_name()}));
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = *name,
+              .output = RegisterId{0},
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+      clear_name = RegisterId{0};
+      clear_scope = bound_analyze_->scope() == BoundAnalyzeScope::kTable ? Stat1ClearScope::kTable
+                                                                         : Stat1ClearScope::kIndex;
+    }
+    if (auto cleared = Append(ClearStat1Instruction{
+            .cursor = stat1_cursor,
+            .scope = clear_scope,
+            .name = clear_name,
+        });
+        !cleared.has_value()) {
+      return cleared;
+    }
+
+    for (std::size_t index = 0; index < bound_analyze_->indexes().size(); ++index) {
+      const BoundAnalyzeIndex& metadata = bound_analyze_->indexes()[index];
+      if (auto computed = Append(ComputeIndexStat1Instruction{
+              .cursor = analyze_index_cursors_[index],
+              .key_term_count = metadata.key_term_count,
+              .emit_empty = metadata.partial,
+              .output = RegisterId{2},
+          });
+          !computed.has_value()) {
+        return computed;
+      }
+      if (auto inserted = EmitStat1Record(metadata.table_name, metadata.index_name);
+          !inserted.has_value()) {
+        return inserted;
+      }
+    }
+    for (std::size_t table = 0; table < bound_analyze_->tables().size(); ++table) {
+      const BoundAnalyzeTable& metadata = bound_analyze_->tables()[table];
+      if (auto computed = Append(ComputeTableStat1Instruction{
+              .cursor = analyze_table_cursors_[table],
+              .output = RegisterId{2},
+          });
+          !computed.has_value()) {
+        return computed;
+      }
+      if (auto inserted = EmitStat1Record(metadata.table_name, std::nullopt);
+          !inserted.has_value()) {
+        return inserted;
+      }
+    }
+    if (auto closed = Append(CloseWriteCursorInstruction{.cursor = stat1_cursor});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (analyze.creates_stat1) {
+      if (auto cookie = Append(IncrementSchemaCookieInstruction{.output = RegisterId{7}});
+          !cookie.has_value()) {
+        return cookie;
+      }
+    }
+    return Append(HaltInstruction{});
+  }
+
   struct MutationIndexValueRegisters {
     std::optional<RegisterId> first_values{};
     RegisterId rowid;
@@ -4305,6 +4634,7 @@ class PlanLowerer final {
   const BoundUpdate* bound_update_ = nullptr;
   const BoundCreateTable* bound_create_ = nullptr;
   const BoundCreateIndex* bound_create_index_ = nullptr;
+  const BoundAnalyze* bound_analyze_ = nullptr;
   std::span<const BoundExpression> expressions_;
   std::span<const BoundParameter> parameters_;
   std::span<const BoundCollation> collations_;
@@ -4366,6 +4696,9 @@ class PlanLowerer final {
   std::optional<CursorId> create_index_table_cursor_;
   std::optional<WriteCursorId> schema_write_cursor_;
   std::optional<WriteCursorId> create_index_write_cursor_;
+  std::optional<WriteCursorId> stat1_write_cursor_;
+  std::vector<CursorId> analyze_index_cursors_;
+  std::vector<CursorId> analyze_table_cursors_;
 };
 
 }  // namespace

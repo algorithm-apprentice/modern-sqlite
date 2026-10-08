@@ -167,9 +167,10 @@ int main() try {
       "CREATE TABLE NewItems(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x')", catalog);
   const std::size_t create_index_allocations = BindStatementAllocationCount(
       "CREATE UNIQUE INDEX items_name ON Items(Name COLLATE NOCASE DESC)", catalog);
+  const std::size_t analyze_allocations = BindStatementAllocationCount("ANALYZE Items", catalog);
   if (update_allocations == 0 || update_allocations > 256U || create_allocations == 0 ||
       create_allocations > 256U || create_index_allocations == 0 ||
-      create_index_allocations > 256U) {
+      create_index_allocations > 256U || analyze_allocations == 0 || analyze_allocations > 256U) {
     return 1;
   }
 

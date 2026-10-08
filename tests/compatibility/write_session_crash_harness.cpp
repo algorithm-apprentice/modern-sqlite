@@ -218,6 +218,10 @@ template <typename T>
   return ExecuteDone(session, "CREATE UNIQUE INDEX items_name ON Items(Name DESC)");
 }
 
+[[nodiscard]] bool ImplicitAnalyze(WriteSession& session) {
+  return ExecuteDone(session, "ANALYZE Items");
+}
+
 [[nodiscard]] bool ExactRowIdMove(WriteSession& session) {
   return ExecuteDone(session, "UPDATE Items SET id=10,Name='moved' WHERE id=1");
 }
@@ -311,6 +315,11 @@ template <typename T>
       CrashScenario{
           .id = "implicit-create-index",
           .execute = ImplicitCreateIndex,
+          .terminal = InitialState(),
+      },
+      CrashScenario{
+          .id = "implicit-analyze",
+          .execute = ImplicitAnalyze,
           .terminal = InitialState(),
       },
       CrashScenario{
