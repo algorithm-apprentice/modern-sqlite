@@ -722,6 +722,41 @@ TEST(BytecodeProgramTest, VerifiesCreateTableStorageInstructions) {
   EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesDynamicCreateIndexRootInstruction) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kCreateIndex;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.register_count = 1;
+  input.symbols.emplace_back("BINARY");
+  auto descriptor = IndexWriteCursorDescriptor();
+  descriptor.root_page = RootPageNumber(0);
+  descriptor.pending_root = true;
+  input.write_cursors.push_back(std::move(descriptor));
+  input.instructions = {
+      CreateIndexRootInstruction{
+          .cursor = WriteCursor(0),
+          .output = Reg(0),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      HaltInstruction{},
+  };
+  auto created = BytecodeProgram::Create(input);
+  ASSERT_TRUE(created.has_value());
+  EXPECT_EQ("create_index_root",
+            InstructionKindName(InstructionKindOf(created->instructions()[0])));
+  EXPECT_TRUE(created->write_cursor(WriteCursor(0)).pending_root);
+
+  input.write_cursors[0].pending_root = false;
+  EXPECT_EQ(ProgramErrorCode::kInvalidRootPage, VerifyError(input));
+  input.write_cursors[0].pending_root = true;
+  input.write_cursors[0].root_page = RootPageNumber(3);
+  EXPECT_EQ(ProgramErrorCode::kInvalidRootPage, VerifyError(input));
+  input.write_cursors[0].root_page = RootPageNumber(0);
+  input.instructions[0] = OpenWriteCursorInstruction{.cursor = WriteCursor(0)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidCursorDescriptor, VerifyError(input));
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
@@ -835,6 +870,7 @@ TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatemen
                                       }))
                   .has_value());
   EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kCreateTable, {})).has_value());
+  EXPECT_TRUE(VerifyProgram(input_for(ProgramStatementKind::kCreateIndex, {})).has_value());
 
   EXPECT_EQ(
       ProgramErrorCode::kInvalidExecutionMetadata,
@@ -854,6 +890,12 @@ TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatemen
             VerifyError(input_for(ProgramStatementKind::kDelete, {})));
   EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
             VerifyError(input_for(ProgramStatementKind::kCreateTable,
+                                  MutationResultMetadata{
+                                      .publishes_changes = true,
+                                      .publishes_last_insert_rowid = false,
+                                  })));
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata,
+            VerifyError(input_for(ProgramStatementKind::kCreateIndex,
                                   MutationResultMetadata{
                                       .publishes_changes = true,
                                       .publishes_last_insert_rowid = false,
@@ -893,6 +935,11 @@ TEST(BytecodeProgramTest, RejectsInstructionsOutsideTheirStatementFamily) {
                       .cursor = WriteCursor(0),
                       .old_rowid = Reg(0),
                       .new_rowid = Reg(1),
+                  });
+  expect_rejected(ProgramStatementKind::kCreateTable, {},
+                  CreateIndexRootInstruction{
+                      .cursor = WriteCursor(0),
+                      .output = Reg(0),
                   });
   expect_rejected(ProgramStatementKind::kSelect, {},
                   BuildTableRecordInstruction{

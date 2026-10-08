@@ -256,6 +256,7 @@ enum class BindErrorCode : std::uint8_t {
   kColumnCountMismatch,
   kDuplicateColumn,
   kTableAlreadyExists,
+  kIndexAlreadyExists,
   kObjectNameReserved,
   kIndexedTableUnsupported,
   kInternalInvariant,

@@ -214,6 +214,10 @@ template <typename T>
   return ExecuteDone(session, "CREATE TABLE Temp(id INTEGER PRIMARY KEY)");
 }
 
+[[nodiscard]] bool ImplicitCreateIndex(WriteSession& session) {
+  return ExecuteDone(session, "CREATE UNIQUE INDEX items_name ON Items(Name DESC)");
+}
+
 [[nodiscard]] bool ExactRowIdMove(WriteSession& session) {
   return ExecuteDone(session, "UPDATE Items SET id=10,Name='moved' WHERE id=1");
 }
@@ -303,6 +307,11 @@ template <typename T>
                   .rows = InitialState().rows,
                   .temp_visible = true,
               },
+      },
+      CrashScenario{
+          .id = "implicit-create-index",
+          .execute = ImplicitCreateIndex,
+          .terminal = InitialState(),
       },
       CrashScenario{
           .id = "exact-rowid-move",

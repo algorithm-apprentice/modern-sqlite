@@ -212,6 +212,47 @@ class BoundCreateTable final {
   std::unique_ptr<Impl> impl_;
 };
 
+struct BoundCreateIndexTerm {
+  ColumnId column{};
+  TypeAffinity affinity = TypeAffinity::kNone;
+  std::string collation_name{};
+  SortOrder order = SortOrder::kAscending;
+  bool rowid = false;
+};
+
+class BoundCreateIndex final {
+ public:
+  BoundCreateIndex(const BoundCreateIndex&) = delete;
+  BoundCreateIndex& operator=(const BoundCreateIndex&) = delete;
+  BoundCreateIndex(BoundCreateIndex&&) noexcept;
+  BoundCreateIndex& operator=(BoundCreateIndex&&) noexcept;
+  ~BoundCreateIndex();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] Utf8View source() const noexcept;
+  [[nodiscard]] const CatalogSnapshot* catalog() const noexcept;
+  [[nodiscard]] CatalogVersion required_catalog_version() const noexcept;
+  [[nodiscard]] TableId table() const noexcept;
+  [[nodiscard]] RootPageId table_root_page() const noexcept;
+  [[nodiscard]] std::string_view index_name() const noexcept;
+  [[nodiscard]] std::string_view table_name() const noexcept;
+  [[nodiscard]] bool unique() const noexcept;
+  [[nodiscard]] bool unique_not_null() const noexcept;
+  [[nodiscard]] bool if_not_exists() const noexcept;
+  [[nodiscard]] bool no_op() const noexcept;
+  [[nodiscard]] std::string_view canonical_sql() const noexcept;
+  [[nodiscard]] std::span<const BoundCreateIndexTerm> terms() const noexcept;
+
+ private:
+  friend class binder_detail::StatementBinder;
+
+  struct Impl;
+
+  explicit BoundCreateIndex(std::unique_ptr<Impl> impl) noexcept;
+
+  std::unique_ptr<Impl> impl_;
+};
+
 struct BoundBeginTransaction {
   BeginTransactionMode mode = BeginTransactionMode::kDeferred;
 };
@@ -236,8 +277,9 @@ struct BoundRollbackToSavepoint {
 
 using BoundStatement =
     std::variant<BoundSelect, BoundInsert, BoundUpdate, BoundDelete, BoundCreateTable,
-                 BoundBeginTransaction, BoundCommitTransaction, BoundRollbackTransaction,
-                 BoundSavepoint, BoundReleaseSavepoint, BoundRollbackToSavepoint>;
+                 BoundCreateIndex, BoundBeginTransaction, BoundCommitTransaction,
+                 BoundRollbackTransaction, BoundSavepoint, BoundReleaseSavepoint,
+                 BoundRollbackToSavepoint>;
 
 using BindStatementResult = std::expected<BoundStatement, BindError>;
 

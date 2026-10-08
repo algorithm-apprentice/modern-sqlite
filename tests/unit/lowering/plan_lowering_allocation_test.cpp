@@ -238,6 +238,25 @@ bool fail_allocations = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] modern_sqlite::PhysicalMutationPlan CreateIndexFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindStatementResult bound =
+      BindStatement(ParseTree("CREATE UNIQUE INDEX items_name ON Items(Name DESC)"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind CREATE INDEX lowering allocation fixture"};
+  }
+  BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan CREATE INDEX lowering allocation fixture"};
+  }
+  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  if (!physical.has_value() || !std::holds_alternative<PhysicalMutationPlan>(*physical)) {
+    throw std::runtime_error{"failed to optimize CREATE INDEX lowering allocation fixture"};
+  }
+  return std::get<PhysicalMutationPlan>(std::move(*physical));
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -408,6 +427,19 @@ int main() try {
     }
     const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
     if (allocations != kExpectedCreateAllocations) {
+      return 1;
+    }
+  }
+
+  const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
+  constexpr std::size_t kExpectedCreateIndexAllocations = 36U;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    const LowerPlanResult lowered = LowerPlan(create_index);
+    count_allocations = false;
+    if (!lowered.has_value() ||
+        allocation_count.load(std::memory_order_relaxed) != kExpectedCreateIndexAllocations) {
       return 1;
     }
   }

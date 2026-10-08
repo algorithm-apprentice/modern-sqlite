@@ -311,6 +311,42 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr CreateIndexCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 0, .generation = 19},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Name",
+                  .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Score",
+                  .declared_type = "REAL",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] CatalogSnapshotPtr EmptyCatalog() {
   CatalogInput input{
       .schema_name = "main",
@@ -1803,6 +1839,228 @@ TEST(CreateTableLowering, WritesLoadableCanonicalSchema) {
   expect_catalog(candidate);
   expect_catalog(durable);
   RequireStatus(pager->EndRead());
+}
+
+TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
+  const CatalogSnapshotPtr catalog = CreateIndexCatalog();
+  const BytecodeProgram program = LowerMutationOrThrow(
+      "CREATE UNIQUE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)", catalog);
+  EXPECT_EQ(ProgramStatementKind::kCreateIndex, program.statement_kind());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, program.rollback_mode());
+  EXPECT_TRUE(program.requires_database_snapshot());
+  EXPECT_FALSE(program.mutation_result().publishes_changes);
+  EXPECT_EQ(11U, program.register_count());
+  ASSERT_EQ(1U, program.cursors().size());
+  ASSERT_EQ(2U, program.write_cursors().size());
+  EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[0].storage);
+  EXPECT_EQ(WriteCursorStorageKind::kRowIdTable, program.write_cursors()[0].storage);
+  EXPECT_EQ(WriteCursorStorageKind::kIndex, program.write_cursors()[1].storage);
+  EXPECT_TRUE(program.write_cursors()[1].pending_root);
+  EXPECT_EQ(RootPageNumber{0}, program.write_cursors()[1].root_page);
+  EXPECT_EQ(2U, program.write_cursors()[1].key_term_count);
+  EXPECT_TRUE(program.write_cursors()[1].unique);
+  ASSERT_EQ(3U, program.write_cursors()[1].index_columns.size());
+  EXPECT_EQ(BytecodeSortOrder::kDescending, program.write_cursors()[1].index_columns[0].order);
+
+  const std::vector<InstructionKind> kinds = InstructionKinds(program);
+  const auto create_root = std::ranges::find(kinds, InstructionKind::kCreateIndexRoot);
+  const auto schema_insert = std::ranges::find(kinds, InstructionKind::kInsertTable);
+  const auto index_insert = std::ranges::find(kinds, InstructionKind::kInsertIndex);
+  const auto cookie = std::ranges::find(kinds, InstructionKind::kIncrementSchemaCookie);
+  ASSERT_NE(kinds.end(), create_root);
+  ASSERT_NE(kinds.end(), schema_insert);
+  ASSERT_NE(kinds.end(), index_insert);
+  ASSERT_NE(kinds.end(), cookie);
+  EXPECT_LT(create_root, schema_insert);
+  EXPECT_LT(schema_insert, index_insert);
+  EXPECT_LT(index_insert, cookie);
+
+  const CatalogSnapshotPtr indexed = IndexedMutationCatalog();
+  const BytecodeProgram no_op = LowerMutationOrThrow(
+      "CREATE INDEX IF NOT EXISTS items_name ON Items(no_such_column)", indexed);
+  EXPECT_EQ(ProgramRollbackMode::kTransaction, no_op.rollback_mode());
+  EXPECT_EQ(0U, no_op.register_count());
+  EXPECT_TRUE(no_op.cursors().empty());
+  EXPECT_TRUE(no_op.write_cursors().empty());
+  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(no_op));
+}
+
+TEST(CreateIndexLowering, PopulatesPhysicalRecordsAndRollsBackUniqueFailure) {
+  const CatalogSnapshotPtr catalog = CreateIndexCatalog();
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const BytecodeProgram create = LowerMutationOrThrow(
+      "CREATE UNIQUE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)", catalog);
+  const auto insert_row = [&](test::WritePagerFixedVfs& vfs, std::int64_t rowid, SqlValue name,
+                              std::int64_t score) {
+    const std::array parameters{
+        SqlValue::Integer(rowid),
+        std::move(name),
+        SqlValue::Integer(score),
+    };
+    return ExecuteMutationProgram(insert, vfs, parameters);
+  };
+
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  EXPECT_EQ(1U, TakeValue(insert_row(vfs, 1, SqlValue::Text("alpha"), 7)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(vfs, 2, SqlValue::Text("beta"), 8)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(vfs, 3, SqlValue{}, 9)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(vfs, 4, SqlValue{}, 9)).changes);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(create, vfs)).changes);
+
+  const auto schema_rows = ReadMutationRows(vfs, PageNumber{1});
+  ASSERT_EQ(1U, schema_rows.size());
+  ASSERT_EQ(5U, schema_rows[0].second.size());
+  EXPECT_EQ("index", TextBytes(schema_rows[0].second[0]));
+  EXPECT_EQ("items_name_score", TextBytes(schema_rows[0].second[1]));
+  EXPECT_EQ("Items", TextBytes(schema_rows[0].second[2]));
+  EXPECT_EQ(4, schema_rows[0].second[3].integer_value());
+  EXPECT_EQ("CREATE UNIQUE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)",
+            TextBytes(schema_rows[0].second[4]));
+
+  const std::array<IndexColumnOrder, 3> columns{
+      IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto index_rows = ReadIndexRows(vfs, PageNumber{4}, columns);
+  ASSERT_EQ(4U, index_rows.size());
+  EXPECT_EQ("beta", TextBytes(index_rows[0][0]));
+  EXPECT_EQ(8, index_rows[0][1].integer_value());
+  EXPECT_EQ(2, index_rows[0][2].integer_value());
+  EXPECT_EQ("alpha", TextBytes(index_rows[1][0]));
+  EXPECT_EQ(7, index_rows[1][1].integer_value());
+  EXPECT_EQ(1, index_rows[1][2].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, index_rows[2][0].type());
+  EXPECT_EQ(3, index_rows[2][2].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, index_rows[3][0].type());
+  EXPECT_EQ(4, index_rows[3][2].integer_value());
+
+  {
+    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    ASSERT_NE(nullptr, pager->header());
+    EXPECT_EQ(1U, pager->header()->schema_cookie());
+    RequireStatus(pager->EndRead());
+  }
+
+  test::WritePagerFixedVfs conflict_vfs{false};
+  InitializeMutationDatabase(conflict_vfs);
+  EXPECT_EQ(1U, TakeValue(insert_row(conflict_vfs, 1, SqlValue::Text("alpha"), 7)).changes);
+  EXPECT_EQ(1U, TakeValue(insert_row(conflict_vfs, 2, SqlValue::Text("ALPHA"), 7)).changes);
+  const Result<MutationOutcome> conflict = ExecuteMutationProgram(create, conflict_vfs);
+  ASSERT_FALSE(conflict.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, conflict.error().code());
+  EXPECT_TRUE(ReadMutationRows(conflict_vfs, PageNumber{1}).empty());
+
+  const BytecodeProgram nonunique = LowerMutationOrThrow(
+      "CREATE INDEX items_name_score_nonunique "
+      "ON Items(Name COLLATE NOCASE DESC,Score)",
+      catalog);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(nonunique, conflict_vfs)).changes);
+  const auto restored_schema = ReadMutationRows(conflict_vfs, PageNumber{1});
+  ASSERT_EQ(1U, restored_schema.size());
+  EXPECT_EQ(4, restored_schema[0].second[3].integer_value());
+
+  test::WritePagerFixedVfs empty_vfs{false};
+  InitializeMutationDatabase(empty_vfs);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(nonunique, empty_vfs)).changes);
+  EXPECT_TRUE(ReadIndexRows(empty_vfs, PageNumber{4}, columns).empty());
+}
+
+TEST(CreateIndexLowering, PreservesTableScanAcrossIndexPageSplits) {
+  const CatalogSnapshotPtr catalog = CreateIndexCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  for (std::int64_t index = 0; index < 96; ++index) {
+    const std::array parameters{
+        SqlValue::Integer(index + 1),
+        SqlValue::Text("name-" + std::to_string(196 - index)),
+        SqlValue::Integer(index),
+    };
+    EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs, parameters)).changes);
+  }
+
+  const BytecodeProgram create =
+      LowerMutationOrThrow("CREATE INDEX items_name ON Items(Name)", catalog);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(create, vfs)).changes);
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto schema_rows = ReadMutationRows(vfs, PageNumber{1});
+  ASSERT_EQ(1U, schema_rows.size());
+  const std::optional<std::int64_t> root_page = schema_rows[0].second[3].integer_value();
+  ASSERT_TRUE(root_page.has_value());
+  ASSERT_GT(*root_page, 0);
+  const auto rows = ReadIndexRows(vfs, PageNumber{static_cast<std::uint32_t>(*root_page)}, columns);
+  ASSERT_EQ(96U, rows.size());
+  EXPECT_EQ("name-101", TextBytes(rows.front()[0]));
+  EXPECT_EQ("name-196", TextBytes(rows.back()[0]));
+  for (std::size_t index = 1; index < rows.size(); ++index) {
+    EXPECT_LT(TextBytes(rows[index - 1U][0]), TextBytes(rows[index][0]));
+  }
+}
+
+TEST(CreateIndexLowering, PopulatesIntegerPrimaryKeyTermsFromRowids) {
+  const CatalogSnapshotPtr catalog = CreateIndexCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  for (const std::int64_t rowid : std::array<std::int64_t, 3>{1, 3, 2}) {
+    const std::array parameters{
+        SqlValue::Integer(rowid),
+        SqlValue::Text("row"),
+        SqlValue::Integer(rowid),
+    };
+    EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs, parameters)).changes);
+  }
+
+  const BytecodeProgram create =
+      LowerMutationOrThrow("CREATE INDEX items_id ON Items(id DESC)", catalog);
+  EXPECT_EQ(0U, TakeValue(ExecuteMutationProgram(create, vfs)).changes);
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto rows = ReadIndexRows(vfs, PageNumber{4}, columns);
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ(3, rows[0][1].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+  EXPECT_EQ(2, rows[1][1].integer_value());
+  EXPECT_EQ(1, rows[2][0].integer_value());
+  EXPECT_EQ(1, rows[2][1].integer_value());
+}
+
+TEST(CreateIndexLowering, RetainsResourceLimitsAndMoveSafety) {
+  const CatalogSnapshotPtr catalog = CreateIndexCatalog();
+  PhysicalMutationPlan plan =
+      OptimizeMutationOrThrow("CREATE INDEX items_name ON Items(Name)", catalog);
+
+  ProgramLimits limits;
+  limits.maximum_cursors = 2;
+  LowerPlanResult limited = LowerPlan(plan, limits);
+  ASSERT_FALSE(limited.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
+  ASSERT_TRUE(limited.error().program_error.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded,
+            TakeOptional(limited.error().program_error, "missing CREATE INDEX cursor limit").code);
+
+  const PhysicalMutationPlan moved = std::move(plan);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  LowerPlanResult invalid = LowerPlan(plan);
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kInvalidInput, invalid.error().code);
+  EXPECT_TRUE(LowerPlan(moved).has_value());
 }
 
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {

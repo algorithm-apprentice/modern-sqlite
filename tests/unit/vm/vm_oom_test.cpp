@@ -777,6 +777,81 @@ int main() try {
     return 1;
   }
 
+  test::WritePagerFixedVfs create_index_vfs{false};
+  std::unique_ptr<Pager> create_index_pager = test::OpenWritePager(create_index_vfs, 64U);
+  if (create_index_pager == nullptr) {
+    return 1;
+  }
+  auto create_index_coordinator = TransactionCoordinator::Open(std::move(create_index_pager));
+  if (!create_index_coordinator.has_value()) {
+    return 1;
+  }
+  ProgramInput create_index_input;
+  create_index_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+  create_index_input.statement_kind = ProgramStatementKind::kCreateIndex;
+  create_index_input.transaction_access = ProgramTransactionAccess::kWrite;
+  create_index_input.rollback_mode = ProgramRollbackMode::kStatement;
+  create_index_input.register_count = 1;
+  create_index_input.symbols.emplace_back("BINARY");
+  create_index_input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(0),
+      .columns = {},
+      .rowid_alias = std::nullopt,
+      .index_columns =
+          {
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+              IndexColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+              },
+          },
+      .key_term_count = 1,
+      .unique = false,
+      .unique_not_null = false,
+      .pending_root = true,
+      .storage = WriteCursorStorageKind::kIndex,
+  });
+  create_index_input.instructions = {
+      CreateIndexRootInstruction{
+          .cursor = WriteCursorId(0),
+          .output = RegisterId(0),
+      },
+      CloseWriteCursorInstruction{.cursor = WriteCursorId(0)},
+      HaltInstruction{},
+  };
+  auto create_index_program = BytecodeProgram::Create(create_index_input);
+  auto create_index_statement =
+      create_index_coordinator->BeginStatement(TransactionStatementOptions{
+          .access = StatementAccess::kWrite,
+          .rollback = StatementRollbackMode::kStatement,
+      });
+  if (!create_index_program.has_value() || !create_index_statement.has_value() ||
+      create_index_statement->writer() == nullptr) {
+    return 1;
+  }
+  auto create_index_vm = Vm::Create(*create_index_program, VmEnvironment::Core());
+  if (!create_index_vm.has_value() ||
+      !create_index_vm
+           ->AttachExecutionContext(VmExecutionContext{*create_index_statement->writer(), 0})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto create_index_failure = create_index_vm->Step();
+  fail_allocations = false;
+  if (create_index_failure.has_value() ||
+      create_index_failure.error().code() != ErrorCode::kOutOfMemory) {
+    return 1;
+  }
+  if (!create_index_vm->DetachExecutionContext().has_value() ||
+      !create_index_statement->Rollback().has_value() ||
+      !create_index_vfs.database_bytes().empty()) {
+    return 1;
+  }
+
   test::WritePagerFixedVfs index_vfs{false};
   std::unique_ptr<Pager> index_pager = test::OpenWritePager(index_vfs, 64U);
   if (index_pager == nullptr) {

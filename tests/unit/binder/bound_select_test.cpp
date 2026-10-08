@@ -37,6 +37,7 @@ static_assert(std::is_nothrow_move_assignable_v<BoundInsert>);
 static_assert(!std::is_copy_constructible_v<BoundUpdate>);
 static_assert(!std::is_copy_constructible_v<BoundDelete>);
 static_assert(!std::is_copy_constructible_v<BoundCreateTable>);
+static_assert(!std::is_copy_constructible_v<BoundCreateIndex>);
 static_assert(!std::is_copy_constructible_v<BoundStatement>);
 static_assert(std::is_nothrow_move_constructible_v<BoundStatement>);
 static_assert(std::is_nothrow_move_assignable_v<BoundStatement>);
@@ -408,6 +409,7 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("invalid_variable_number", BindErrorCodeName(BindErrorCode::kInvalidVariableNumber));
   EXPECT_EQ("indexed_table_unsupported",
             BindErrorCodeName(BindErrorCode::kIndexedTableUnsupported));
+  EXPECT_EQ("index_already_exists", BindErrorCodeName(BindErrorCode::kIndexAlreadyExists));
   EXPECT_EQ("unknown", BindErrorCodeName(static_cast<BindErrorCode>(255)));  // NOLINT
 
   EXPECT_EQ(ErrorCode::kGeneric, BindError{.code = BindErrorCode::kNoSuchColumn}.base_error_code());
@@ -730,6 +732,44 @@ TEST(StatementBinder, MaterializesSupportedCreateDefaultsWithColumnAffinity) {
   EXPECT_EQ(1, RequiredOptional(create.columns()[4].default_value->integer_value()));
 }
 
+TEST(StatementBinder, BindsSimpleCreateIndexMetadata) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  BoundStatement statement = BindStatementOrThrow(
+      "CREATE UNIQUE INDEX IF NOT EXISTS main.items_name_score "
+      "ON Items((Name COLLATE NOCASE) DESC,Score,id)",
+      catalog);
+  const auto& create = std::get<BoundCreateIndex>(statement);
+  EXPECT_EQ(catalog.get(), create.catalog());
+  EXPECT_EQ(TableId{0}, create.table());
+  EXPECT_EQ(RootPageId{2}, create.table_root_page());
+  EXPECT_EQ("items_name_score", create.index_name());
+  EXPECT_EQ("Items", create.table_name());
+  EXPECT_TRUE(create.unique());
+  EXPECT_FALSE(create.unique_not_null());
+  EXPECT_TRUE(create.if_not_exists());
+  EXPECT_FALSE(create.no_op());
+  EXPECT_EQ("CREATE UNIQUE INDEX items_name_score ON Items((Name COLLATE NOCASE) DESC,Score,id)",
+            create.canonical_sql());
+  ASSERT_EQ(3U, create.terms().size());
+  EXPECT_EQ(ColumnId{1}, create.terms()[0].column);
+  EXPECT_EQ("NOCASE", create.terms()[0].collation_name);
+  EXPECT_EQ(SortOrder::kDescending, create.terms()[0].order);
+  EXPECT_FALSE(create.terms()[0].rowid);
+  EXPECT_EQ(TypeAffinity::kReal, create.terms()[1].affinity);
+  EXPECT_TRUE(create.terms()[2].rowid);
+
+  BoundStatement no_op_statement = BindStatementOrThrow(
+      "CREATE INDEX IF NOT EXISTS idx_items_value ON IndexedItems(no_such_column)", catalog);
+  EXPECT_TRUE(std::get<BoundCreateIndex>(no_op_statement).no_op());
+
+  const CatalogSnapshotPtr collated_catalog = TestCatalog();
+  BoundStatement derived_statement =
+      BindStatementOrThrow("CREATE INDEX items_name ON Items(Name)", collated_catalog);
+  const auto& derived = std::get<BoundCreateIndex>(derived_statement);
+  ASSERT_EQ(1U, derived.terms().size());
+  EXPECT_EQ("NOCASE", derived.terms()[0].collation_name);
+}
+
 TEST(StatementBinder, DispatchesSelectAndValidatesTransactionBindingInputs) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
 
@@ -742,10 +782,33 @@ TEST(StatementBinder, DispatchesSelectAndValidatesTransactionBindingInputs) {
   ASSERT_FALSE(null_catalog.has_value());
   EXPECT_EQ(BindErrorCode::kInvalidInput, null_catalog.error().code);
 
-  const BindStatementResult create_index =
-      BindStatement(ParseTree("CREATE INDEX new_index ON Items(Name)"), catalog);
-  ASSERT_FALSE(create_index.has_value());
-  EXPECT_EQ(BindErrorCode::kUnsupportedFeature, create_index.error().code);
+  EXPECT_TRUE(std::holds_alternative<BoundCreateIndex>(
+      BindStatementOrThrow("CREATE INDEX new_index ON Items(Name)", catalog)));
+}
+
+TEST(StatementBinder, RejectsUnsupportedCreateIndexShapes) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+
+  ExpectStatementBindError("CREATE INDEX missing_table ON nope(value)", catalog,
+                           BindErrorCode::kNoSuchTable, ErrorCode::kGeneric, "no such table");
+  ExpectStatementBindError("CREATE INDEX missing_column ON Items(nope)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "no such column");
+  ExpectStatementBindError("CREATE INDEX expression_index ON Items(Name||'x')", catalog,
+                           BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric, "expressions");
+  ExpectStatementBindError("CREATE INDEX partial_index ON Items(Name) WHERE Score>0", catalog,
+                           BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric, "partial");
+  ExpectStatementBindError("CREATE INDEX bad_collation ON Items(Name COLLATE missing)", catalog,
+                           BindErrorCode::kNoSuchCollation, ErrorCode::kGeneric, "missing");
+  ExpectStatementBindError("CREATE INDEX sqlite_private ON Items(Name)", catalog,
+                           BindErrorCode::kObjectNameReserved, ErrorCode::kGeneric, "reserved");
+  ExpectStatementBindError("CREATE INDEX Items ON Items(Name)", catalog,
+                           BindErrorCode::kTableAlreadyExists, ErrorCode::kGeneric,
+                           "already a table");
+  ExpectStatementBindError("CREATE INDEX idx_items_value ON IndexedItems(Value)", catalog,
+                           BindErrorCode::kIndexAlreadyExists, ErrorCode::kGeneric,
+                           "already exists");
+  ExpectStatementBindError("CREATE INDEX wr_index ON wr(key)", catalog,
+                           BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric, "table shape");
 }
 
 TEST(StatementBinder, RejectsUnsupportedCreateTableShapes) {

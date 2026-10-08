@@ -132,6 +132,7 @@ template <typename T>
     case ProgramStatementKind::kUpdate:
     case ProgramStatementKind::kDelete:
     case ProgramStatementKind::kCreateTable:
+    case ProgramStatementKind::kCreateIndex:
       return true;
   }
   return false;
@@ -408,6 +409,7 @@ template <typename T>
         .key_term_count = cursor.key_term_count,
         .unique = cursor.unique,
         .unique_not_null = cursor.unique_not_null,
+        .pending_root = cursor.pending_root,
         .storage = cursor.storage,
     });
   }
@@ -471,7 +473,8 @@ template <typename T>
   const bool is_insert = input.statement_kind == ProgramStatementKind::kInsert;
   const bool is_update = input.statement_kind == ProgramStatementKind::kUpdate;
   const bool is_delete = input.statement_kind == ProgramStatementKind::kDelete;
-  const bool is_create = input.statement_kind == ProgramStatementKind::kCreateTable;
+  const bool is_create_table = input.statement_kind == ProgramStatementKind::kCreateTable;
+  const bool is_create_index = input.statement_kind == ProgramStatementKind::kCreateIndex;
   const bool mutation_results_valid =
       (is_select && !input.mutation_result.publishes_changes &&
        !input.mutation_result.publishes_last_insert_rowid) ||
@@ -479,7 +482,7 @@ template <typename T>
        input.mutation_result.publishes_last_insert_rowid) ||
       ((is_update || is_delete) && input.mutation_result.publishes_changes &&
        !input.mutation_result.publishes_last_insert_rowid) ||
-      (is_create && !input.mutation_result.publishes_changes &&
+      ((is_create_table || is_create_index) && !input.mutation_result.publishes_changes &&
        !input.mutation_result.publishes_last_insert_rowid);
   if ((is_select && input.transaction_access != ProgramTransactionAccess::kRead) ||
       (!is_select && input.transaction_access != ProgramTransactionAccess::kWrite) ||
@@ -550,7 +553,11 @@ template <typename T>
   }
   for (std::size_t cursor_index = 0; cursor_index < input.write_cursors.size(); ++cursor_index) {
     const WriteCursorDescriptor& cursor = input.write_cursors[cursor_index];
-    if (cursor.root_page.value() == 0) {
+    const bool root_is_valid =
+        cursor.pending_root
+            ? cursor.root_page.value() == 0 && cursor.storage == WriteCursorStorageKind::kIndex
+            : cursor.root_page.value() != 0;
+    if (!root_is_valid) {
       return std::unexpected(
           ErrorAt(ProgramErrorCode::kInvalidRootPage, ProgramError::kNoInstruction, cursor_index));
     }
@@ -563,7 +570,7 @@ template <typename T>
           cursor.columns.size() > std::numeric_limits<std::uint32_t>::max() ||
           (cursor.rowid_alias.has_value() && *cursor.rowid_alias >= cursor.columns.size()) ||
           !cursor.index_columns.empty() || cursor.key_term_count != 0U || cursor.unique ||
-          cursor.unique_not_null) {
+          cursor.unique_not_null || cursor.pending_root) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                        ProgramError::kNoInstruction, cursor_index));
       }
@@ -757,8 +764,16 @@ template <typename T>
                                              index, operation.cursor.value()));
             }
             return ProgramResult<void>{};
-          } else if constexpr (std::is_same_v<Operation, OpenWriteCursorInstruction> ||
-                               std::is_same_v<Operation, CloseWriteCursorInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, OpenWriteCursorInstruction>) {
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.write_cursors[operation.cursor.value()].pending_root) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
+            return ProgramResult<void>{};
+          } else if constexpr (std::is_same_v<Operation, CloseWriteCursorInstruction>) {
             return check_write_cursor(operation.cursor, index);
           } else if constexpr (std::is_same_v<Operation, RewindInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
@@ -855,7 +870,8 @@ template <typename T>
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, ResolveInsertRowIdInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
-                input.statement_kind != ProgramStatementKind::kCreateTable) {
+                input.statement_kind != ProgramStatementKind::kCreateTable &&
+                input.statement_kind != ProgramStatementKind::kCreateIndex) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
@@ -902,7 +918,8 @@ template <typename T>
           } else if constexpr (std::is_same_v<Operation, BuildTableRecordInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
                 input.statement_kind != ProgramStatementKind::kUpdate &&
-                input.statement_kind != ProgramStatementKind::kCreateTable) {
+                input.statement_kind != ProgramStatementKind::kCreateTable &&
+                input.statement_kind != ProgramStatementKind::kCreateIndex) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
@@ -926,7 +943,8 @@ template <typename T>
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, CheckUniqueIndexInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
-                input.statement_kind != ProgramStatementKind::kUpdate) {
+                input.statement_kind != ProgramStatementKind::kUpdate &&
+                input.statement_kind != ProgramStatementKind::kCreateIndex) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
@@ -954,7 +972,8 @@ template <typename T>
                                std::is_same_v<Operation, DeleteIndexInstruction>) {
             const bool insert = std::is_same_v<Operation, InsertIndexInstruction>;
             if ((insert && input.statement_kind != ProgramStatementKind::kInsert &&
-                 input.statement_kind != ProgramStatementKind::kUpdate) ||
+                 input.statement_kind != ProgramStatementKind::kUpdate &&
+                 input.statement_kind != ProgramStatementKind::kCreateIndex) ||
                 (!insert && input.statement_kind != ProgramStatementKind::kDelete &&
                  input.statement_kind != ProgramStatementKind::kUpdate)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
@@ -972,7 +991,8 @@ template <typename T>
                                InstructionAddress(static_cast<std::uint32_t>(index)));
           } else if constexpr (std::is_same_v<Operation, InsertTableInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
-                input.statement_kind != ProgramStatementKind::kCreateTable) {
+                input.statement_kind != ProgramStatementKind::kCreateTable &&
+                input.statement_kind != ProgramStatementKind::kCreateIndex) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
@@ -1049,9 +1069,29 @@ template <typename T>
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             return ProgramResult<void>{};
-          } else if constexpr (std::is_same_v<Operation, CreateTableRootInstruction> ||
-                               std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, CreateTableRootInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kCreateTable ||
+                input.transaction_access != ProgramTransactionAccess::kWrite) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, CreateIndexRootInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kCreateIndex ||
+                input.transaction_access != ProgramTransactionAccess::kWrite) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_write_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            const WriteCursorDescriptor& cursor = input.write_cursors[operation.cursor.value()];
+            if (cursor.storage != WriteCursorStorageKind::kIndex || !cursor.pending_root) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
+            if ((input.statement_kind != ProgramStatementKind::kCreateTable &&
+                 input.statement_kind != ProgramStatementKind::kCreateIndex) ||
                 input.transaction_access != ProgramTransactionAccess::kWrite) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
@@ -1352,6 +1392,14 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
                                std::is_same_v<Operation, LoadParameterInstruction> ||
                                std::is_same_v<Operation, CreateTableRootInstruction> ||
                                std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CreateIndexRootInstruction>) {
+            if (write_cursor_state(operation.cursor) != CursorState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyOpen,
+                                             instruction_index, operation.cursor.value()));
+            }
+            set_write_cursor_state(operation.cursor, CursorState::kUnpositioned);
             initialize(operation.output);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CopyInstruction> ||
@@ -1819,6 +1867,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "ensure_database_initialized";
     case InstructionKind::kCreateTableRoot:
       return "create_table_root";
+    case InstructionKind::kCreateIndexRoot:
+      return "create_index_root";
     case InstructionKind::kIncrementSchemaCookie:
       return "increment_schema_cookie";
     case InstructionKind::kCompare:

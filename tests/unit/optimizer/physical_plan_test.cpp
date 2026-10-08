@@ -736,6 +736,21 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   EXPECT_TRUE(no_op.no_op);
   EXPECT_EQ(MutationAtomicity::kTransaction, no_op.atomicity);
 
+  PhysicalStatementPlan create_index_statement =
+      OptimizeStatementOrThrow("CREATE UNIQUE INDEX items_value ON Items(Value DESC)", catalog);
+  const auto& create_index = std::get<PhysicalCreateIndexMutation>(
+      std::get<PhysicalMutationPlan>(create_index_statement).payload());
+  EXPECT_FALSE(create_index.no_op);
+  EXPECT_EQ(MutationAtomicity::kStatement, create_index.atomicity);
+
+  const CatalogSnapshotPtr indexed = IndexedMutationCatalog();
+  PhysicalStatementPlan no_op_index_statement =
+      OptimizeStatementOrThrow("CREATE INDEX IF NOT EXISTS items_name ON Items(nope)", indexed);
+  const auto& no_op_index = std::get<PhysicalCreateIndexMutation>(
+      std::get<PhysicalMutationPlan>(no_op_index_statement).payload());
+  EXPECT_TRUE(no_op_index.no_op);
+  EXPECT_EQ(MutationAtomicity::kTransaction, no_op_index.atomicity);
+
   EXPECT_TRUE(std::holds_alternative<PhysicalPlan>(
       OptimizeStatementOrThrow("SELECT Name FROM Items", catalog)));
   EXPECT_TRUE(std::holds_alternative<BoundBeginTransaction>(
