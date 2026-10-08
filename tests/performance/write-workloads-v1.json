@@ -1,0 +1,214 @@
+{
+  "cases": [
+    {
+      "dml_operations": 256,
+      "fixture": "zero",
+      "id": "create-table-implicit",
+      "kind": "create",
+      "primary_unit": "statement",
+      "row_mutations": 0,
+      "sql": [
+        "CREATE TABLE tNNN(id INTEGER PRIMARY KEY,v BLOB NOT NULL DEFAULT x'')"
+      ],
+      "transactions": 256
+    },
+    {
+      "dml_operations": 512,
+      "fixture": "schema",
+      "id": "insert-point-implicit",
+      "kind": "insert_point",
+      "primary_unit": "row",
+      "row_mutations": 512,
+      "sql": [
+        "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)"
+      ],
+      "transactions": 512
+    },
+    {
+      "dml_operations": 65536,
+      "fixture": "schema",
+      "id": "insert-batch-explicit",
+      "kind": "insert_batch",
+      "primary_unit": "row",
+      "row_mutations": 65536,
+      "sql": [
+        "BEGIN",
+        "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)",
+        "COMMIT"
+      ],
+      "transactions": 1
+    },
+    {
+      "dml_operations": 512,
+      "fixture": "populated",
+      "id": "update-point-implicit",
+      "kind": "update_point",
+      "primary_unit": "row",
+      "row_mutations": 512,
+      "sql": [
+        "UPDATE kv SET v=?1,version=version+1 WHERE k=?2"
+      ],
+      "transactions": 512
+    },
+    {
+      "dml_operations": 1,
+      "fixture": "populated",
+      "id": "update-scan-implicit",
+      "kind": "update_scan",
+      "primary_unit": "row",
+      "row_mutations": 65536,
+      "sql": [
+        "UPDATE kv SET v=?1,version=version+1 WHERE k>=1"
+      ],
+      "transactions": 1
+    },
+    {
+      "dml_operations": 512,
+      "fixture": "populated",
+      "id": "delete-point-implicit",
+      "kind": "delete_point",
+      "primary_unit": "row",
+      "row_mutations": 512,
+      "sql": [
+        "DELETE FROM kv WHERE k=?1"
+      ],
+      "transactions": 512
+    },
+    {
+      "dml_operations": 1,
+      "fixture": "populated",
+      "id": "delete-scan-implicit",
+      "kind": "delete_scan",
+      "primary_unit": "row",
+      "row_mutations": 65536,
+      "sql": [
+        "DELETE FROM kv WHERE k>=1"
+      ],
+      "transactions": 1
+    },
+    {
+      "dml_operations": 12288,
+      "fixture": "populated",
+      "id": "mixed-batch-commit",
+      "kind": "mixed_commit",
+      "primary_unit": "row_mutation",
+      "row_mutations": 12288,
+      "sql": [
+        "BEGIN",
+        "UPDATE kv SET v=?1,version=version+1 WHERE k=?2",
+        "DELETE FROM kv WHERE k=?1",
+        "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)",
+        "COMMIT"
+      ],
+      "transactions": 1
+    },
+    {
+      "dml_operations": 12288,
+      "fixture": "populated",
+      "id": "mixed-batch-rollback",
+      "kind": "mixed_rollback",
+      "primary_unit": "row_mutation",
+      "row_mutations": 12288,
+      "sql": [
+        "BEGIN",
+        "UPDATE kv SET v=?1,version=version+1 WHERE k=?2",
+        "DELETE FROM kv WHERE k=?1",
+        "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)",
+        "ROLLBACK"
+      ],
+      "transactions": 1
+    }
+  ],
+  "configuration": {
+    "cache_pages": 512,
+    "journal_mode": "delete",
+    "locking_mode": "normal",
+    "matched_synchronous": "full",
+    "mmap_bytes": 0,
+    "page_size": 4096,
+    "temp_store": "memory",
+    "thread_mode": "single"
+  },
+  "fixtures": [
+    {
+      "content_digest": "cbf29ce484222325",
+      "id": "schema",
+      "page_count": 2,
+      "page_size": 4096,
+      "path": "tests/fixtures/write_performance/schema.db",
+      "row_count": 0,
+      "sha256": "26c59e7c83f4ee09a8a341a54abefb88f381e7fc110e8e63c8df661643eee3fa",
+      "size_bytes": 8192,
+      "sql_path": "tests/fixtures/write_performance/schema.sql",
+      "sql_sha256": "c22a5e309a27d04810ebbe9ad26a0e8d66c39f1b544aeb3ad6407be7083fcce0",
+      "value_size": 256
+    },
+    {
+      "content_digest": "32312236c967f3ff",
+      "id": "populated",
+      "page_count": 4383,
+      "page_size": 4096,
+      "path": "tests/fixtures/write_performance/populated.db",
+      "row_count": 65536,
+      "sha256": "81fa90c6ac9c3ab20f24f3d08823c564d6203e09f316a397290cdcd546eb0091",
+      "size_bytes": 17952768,
+      "sql_path": "tests/fixtures/write_performance/populated.sql",
+      "sql_sha256": "e495713f888ebb010b9b5cab12565014fbe5e9dba0cdf0e56f7114ae7da8caf1",
+      "value_size": 256
+    }
+  ],
+  "guard": {
+    "maximum_cpu_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "maximum_wall_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "profile": "matched-durable"
+  },
+  "minimum_wall_ns": 200000000,
+  "profiles": [
+    {
+      "guard": false,
+      "id": "engine-default",
+      "sqlite_configuration": "default"
+    },
+    {
+      "guard": true,
+      "id": "matched-durable",
+      "sqlite_configuration": "explicit"
+    }
+  ],
+  "rounds": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "sqlite_profile": "sqlite-oracle-profile-v1",
+  "timing_repetitions": 3,
+  "workload_semantics_version": 1
+}

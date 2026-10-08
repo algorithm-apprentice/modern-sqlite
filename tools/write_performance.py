@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
@@ -59,6 +62,7 @@ _FIXTURE_KEYS = {
     "sql_path",
     "sha256",
     "sql_sha256",
+    "size_bytes",
     "page_size",
     "page_count",
     "row_count",
@@ -236,6 +240,13 @@ _EXPECTED_CASES = {
     },
 }
 
+_FNV_OFFSET = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+_SQLITE_OPEN_READONLY = 0x00000001
+_SQLITE_OK = 0
+_SQLITE_ROW = 100
+_SQLITE_DONE = 101
+
 
 def _duplicate_rejecting_object(
     pairs: list[tuple[str, Any]],
@@ -286,6 +297,15 @@ def _load_json(path: pathlib.Path) -> dict[str, Any]:
         raise HarnessError(f"could not parse workload manifest: {error}") from error
     _require_type(value, dict, "workload manifest")
     return value
+
+
+def _read_performance_module() -> Any:
+    if __package__:
+        from tools import read_performance
+    else:
+        import read_performance
+
+    return read_performance
 
 
 def _validate_configuration(value: Any) -> None:
@@ -376,6 +396,7 @@ def _validate_fixture(value: Any, index: int) -> str:
     _require_type(value["content_digest"], str, f"{label}.content_digest")
     if _DIGEST.fullmatch(value["content_digest"]) is None:
         raise HarnessError(f"{label}.content_digest is invalid")
+    _require_positive_integer(value["size_bytes"], f"{label}.size_bytes")
     _require_type(value["page_size"], int, f"{label}.page_size")
     if value["page_size"] != 4096:
         raise HarnessError(f"{label}.page_size must be 4096")
@@ -459,7 +480,7 @@ def _validate_guard(value: Any) -> None:
     _validate_ratio(value["maximum_cpu_ratio"], "guard.maximum_cpu_ratio")
 
 
-def validate_workloads(path: pathlib.Path) -> tuple[int, int]:
+def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
     value = _load_json(path)
     _require_keys(value, _TOP_KEYS, "workload manifest")
     _require_type(value["schema_version"], int, "schema_version")
@@ -487,7 +508,289 @@ def validate_workloads(path: pathlib.Path) -> tuple[int, int]:
     _validate_fixtures(value["fixtures"])
     _validate_cases(value["cases"])
     _validate_guard(value["guard"])
+    return value
+
+
+def validate_workloads(path: pathlib.Path) -> tuple[int, int]:
+    value = load_and_validate_workloads(path)
     return len(value["cases"]), len(value["profiles"])
+
+
+def _sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as input_file:
+            while chunk := input_file.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as error:
+        raise HarnessError(f"cannot hash {path}: {error}") from error
+    return digest.hexdigest()
+
+
+def _fnv1a64(data: bytes, state: int) -> int:
+    for byte in data:
+        state ^= byte
+        state = (state * _FNV_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    return state
+
+
+def _expected_value(rowid: int) -> bytes:
+    return f"{rowid:08x}".encode("ascii") + (b"0" * 248)
+
+
+def _fixture_content_digest(
+    common: Any,
+    oracle: Any,
+    database: Any,
+    expected_rows: int,
+) -> str:
+    statement = common._sqlite_prepare(
+        oracle,
+        database,
+        "SELECT k,v,version FROM kv",
+    )
+    state = _FNV_OFFSET
+    rowid = 1
+    try:
+        while True:
+            result = oracle.library.sqlite3_step(statement)
+            if result == _SQLITE_DONE:
+                break
+            if result != _SQLITE_ROW:
+                raise HarnessError(
+                    f"write fixture scan failed with SQLite code {result}"
+                )
+            actual_rowid = int(
+                oracle.library.sqlite3_column_int64(statement, 0)
+            )
+            pointer = oracle.library.sqlite3_column_blob(statement, 1)
+            length = oracle.library.sqlite3_column_bytes(statement, 1)
+            version = int(oracle.library.sqlite3_column_int64(statement, 2))
+            if pointer is None or length != 256:
+                raise HarnessError("write fixture row contains an invalid BLOB")
+            value = ctypes.string_at(pointer, length)
+            if (
+                actual_rowid != rowid
+                or value != _expected_value(rowid)
+                or version != 0
+            ):
+                raise HarnessError(
+                    f"write fixture row {rowid} is not canonical"
+                )
+            state = _fnv1a64(actual_rowid.to_bytes(8, "little"), state)
+            state = _fnv1a64(value, state)
+            state = _fnv1a64(version.to_bytes(8, "little"), state)
+            rowid += 1
+    finally:
+        common._sqlite_finalize(oracle, statement)
+    if rowid - 1 != expected_rows:
+        raise HarnessError(
+            "write fixture row count mismatch: "
+            f"expected {expected_rows}, got {rowid - 1}"
+        )
+    return f"{state:016x}"
+
+
+def create_fixture(
+    *,
+    profile_path: pathlib.Path,
+    sqlite_library_path: pathlib.Path,
+    sqlite_c_path: pathlib.Path,
+    sqlite_h_path: pathlib.Path,
+    sql_path: pathlib.Path,
+    fixture_id: str,
+    output_path: pathlib.Path,
+) -> dict[str, Any]:
+    if fixture_id not in {"schema", "populated"}:
+        raise HarnessError("fixture ID must be schema or populated")
+    common = _read_performance_module()
+    inputs = [
+        profile_path,
+        sqlite_library_path,
+        sqlite_c_path,
+        sqlite_h_path,
+        sql_path,
+        pathlib.Path(__file__),
+        pathlib.Path(common.__file__),
+    ]
+    for path in inputs:
+        if not path.is_file():
+            raise HarnessError(f"fixture input is not a file: {path}")
+    common.validate_new_output_path(output_path, protected_paths=inputs)
+    profile = common._validate_profile(
+        common.load_json_strict(profile_path),
+        label="SQLite profile",
+    )
+    try:
+        sql = sql_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise HarnessError(f"cannot read fixture SQL {sql_path}: {error}") from error
+    if not sql or "\0" in sql:
+        raise HarnessError("fixture SQL must be nonempty UTF-8 without NUL bytes")
+
+    sidecars = [
+        pathlib.Path(f"{output_path}-journal"),
+        pathlib.Path(f"{output_path}-wal"),
+        pathlib.Path(f"{output_path}-shm"),
+    ]
+    if any(os.path.lexists(path) for path in sidecars):
+        raise HarnessError("fixture sidecar paths already exist")
+
+    oracle = common._load_pinned_sqlite(
+        library_path=sqlite_library_path,
+        profile=profile,
+        sqlite_c_path=sqlite_c_path,
+        sqlite_h_path=sqlite_h_path,
+    )
+    try:
+        oracle.create_database(output_path, sql)
+    except Exception as error:
+        if isinstance(error, common.HarnessError):
+            raise HarnessError(str(error)) from error
+        raise
+    if any(os.path.lexists(path) for path in sidecars):
+        raise HarnessError("fixture generation left a sidecar")
+
+    try:
+        header = output_path.read_bytes()[:100]
+        size_bytes = output_path.stat().st_size
+    except OSError as error:
+        raise HarnessError(f"cannot inspect generated fixture: {error}") from error
+    if len(header) != 100 or header[:16] != b"SQLite format 3\0":
+        raise HarnessError("generated fixture does not have a SQLite header")
+    encoded_page_size = int.from_bytes(header[16:18], "big")
+    page_size = 65_536 if encoded_page_size == 1 else encoded_page_size
+    if page_size != 4096 or size_bytes % page_size != 0:
+        raise HarnessError("generated fixture has an invalid page layout")
+    page_count = size_bytes // page_size
+    if int.from_bytes(header[28:32], "big") != page_count:
+        raise HarnessError("generated fixture header page count is invalid")
+
+    database, result = oracle._open(output_path, _SQLITE_OPEN_READONLY)
+    if result != _SQLITE_OK:
+        try:
+            oracle._close(database)
+        finally:
+            raise HarnessError(
+                f"cannot reopen generated write fixture: SQLite code {result}"
+            )
+    try:
+        oracle._configure_connection(database)
+        integrity = common._sqlite_single_text(
+            oracle,
+            database,
+            "PRAGMA integrity_check",
+        )
+        schema_sql = common._sqlite_single_text(
+            oracle,
+            database,
+            "SELECT sql FROM sqlite_schema "
+            "WHERE type='table' AND name='kv'",
+        )
+        column_signature = common._sqlite_single_text(
+            oracle,
+            database,
+            "SELECT group_concat(signature, '|') FROM ("
+            "SELECT cid||':'||name||':'||type||':'||\"notnull\"||':'||"
+            "coalesce(dflt_value,'NULL')||':'||pk||':'||hidden AS signature "
+            "FROM pragma_table_xinfo('kv') ORDER BY cid)",
+        )
+        row_count = common._sqlite_single_integer(
+            oracle,
+            database,
+            "SELECT count(*) FROM kv",
+        )
+        expected_rows = 0 if fixture_id == "schema" else 65_536
+        if (
+            integrity != "ok"
+            or schema_sql
+            != "CREATE TABLE kv(\n"
+            "  k INTEGER PRIMARY KEY,\n"
+            "  v BLOB NOT NULL,\n"
+            "  version INTEGER NOT NULL\n"
+            ")"
+            or column_signature
+            != "0:k:INTEGER:0:NULL:1:0|"
+            "1:v:BLOB:1:NULL:0:0|"
+            "2:version:INTEGER:1:NULL:0:0"
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "SELECT count(*) FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%'",
+            )
+            != 1
+            or common._sqlite_single_text(
+                oracle,
+                database,
+                "PRAGMA encoding",
+            )
+            != "UTF-8"
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "PRAGMA auto_vacuum",
+            )
+            != 0
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "PRAGMA application_id",
+            )
+            != 0
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "PRAGMA user_version",
+            )
+            != 1
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "PRAGMA page_size",
+            )
+            != page_size
+            or common._sqlite_single_integer(
+                oracle,
+                database,
+                "PRAGMA page_count",
+            )
+            != page_count
+            or common._sqlite_single_text(
+                oracle,
+                database,
+                "PRAGMA journal_mode",
+            ).lower()
+            != "delete"
+            or row_count != expected_rows
+        ):
+            raise HarnessError("generated write fixture contract is not canonical")
+        content_digest = _fixture_content_digest(
+            common,
+            oracle,
+            database,
+            expected_rows,
+        )
+    finally:
+        oracle._close(database)
+
+    if fixture_id == "schema" and page_count >= 512:
+        raise HarnessError("schema fixture does not fit in the 512-page cache")
+    if fixture_id == "populated" and page_count <= 512:
+        raise HarnessError("populated fixture does not exceed the 512-page cache")
+    return {
+        "id": fixture_id,
+        "path": output_path.name,
+        "sql_path": sql_path.name,
+        "sha256": _sha256(output_path),
+        "sql_sha256": _sha256(sql_path),
+        "size_bytes": size_bytes,
+        "page_size": page_size,
+        "page_count": page_count,
+        "row_count": row_count,
+        "value_size": 256,
+        "content_digest": content_digest,
+    }
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -495,6 +798,20 @@ def _parse_arguments() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate-workloads")
     validate.add_argument("--workloads", required=True, type=pathlib.Path)
+    regenerate = subparsers.add_parser("regenerate-fixture")
+    regenerate.add_argument("--profile", required=True, type=pathlib.Path)
+    regenerate.add_argument(
+        "--sqlite-library", required=True, type=pathlib.Path
+    )
+    regenerate.add_argument("--sqlite-c", required=True, type=pathlib.Path)
+    regenerate.add_argument("--sqlite-h", required=True, type=pathlib.Path)
+    regenerate.add_argument("--sql", required=True, type=pathlib.Path)
+    regenerate.add_argument(
+        "--fixture-id",
+        required=True,
+        choices=("schema", "populated"),
+    )
+    regenerate.add_argument("--output", required=True, type=pathlib.Path)
     return parser.parse_args()
 
 
@@ -502,12 +819,24 @@ def main() -> int:
     try:
         arguments = _parse_arguments()
         if arguments.command != "validate-workloads":
-            raise HarnessError("unknown command")
-        cases, profiles = validate_workloads(arguments.workloads)
-        print(
-            f"validated {cases} write performance cases and "
-            f"{profiles} profiles"
-        )
+            if arguments.command != "regenerate-fixture":
+                raise HarnessError("unknown command")
+            metadata = create_fixture(
+                profile_path=arguments.profile.resolve(),
+                sqlite_library_path=arguments.sqlite_library.resolve(),
+                sqlite_c_path=arguments.sqlite_c.resolve(),
+                sqlite_h_path=arguments.sqlite_h.resolve(),
+                sql_path=arguments.sql.resolve(),
+                fixture_id=arguments.fixture_id,
+                output_path=arguments.output.resolve(),
+            )
+            print(json.dumps(metadata, sort_keys=True))
+        else:
+            cases, profiles = validate_workloads(arguments.workloads)
+            print(
+                f"validated {cases} write performance cases and "
+                f"{profiles} profiles"
+            )
         return 0
     except HarnessError as error:
         print(error, file=sys.stderr)

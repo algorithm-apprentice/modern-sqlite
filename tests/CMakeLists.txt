@@ -1192,6 +1192,26 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
       TIMEOUT 300
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
+  add_test(
+    NAME performance.write_fixture_regeneration
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/performance/write_fixture_regeneration_test.py"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+      --profile
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/sqlite-oracle-profile-v1.json"
+      --sqlite-library "$<TARGET_FILE:modern_sqlite_benchmark_sqlite_shared>"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    performance.write_fixture_regeneration
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 300
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
 endif()
 
 add_test(
