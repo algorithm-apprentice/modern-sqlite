@@ -2,6 +2,28 @@
   "cases": [
     {
       "dml_operations": 256,
+      "expected": {
+        "baseline": {
+          "changed_rows": 0,
+          "digest": "67829c991b8509a9",
+          "dml_operations": 256,
+          "final_rows": 0,
+          "last_insert_rowid": 0,
+          "row_mutations": 0,
+          "schema_objects": 256,
+          "transactions": 256
+        },
+        "smoke": {
+          "changed_rows": 0,
+          "digest": "424687ee21154511",
+          "dml_operations": 1,
+          "final_rows": 0,
+          "last_insert_rowid": 0,
+          "row_mutations": 0,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "zero",
       "id": "create-table-implicit",
       "kind": "create",
@@ -14,6 +36,28 @@
     },
     {
       "dml_operations": 512,
+      "expected": {
+        "baseline": {
+          "changed_rows": 512,
+          "digest": "2138add81b82284d",
+          "dml_operations": 512,
+          "final_rows": 512,
+          "last_insert_rowid": 512,
+          "row_mutations": 512,
+          "schema_objects": 1,
+          "transactions": 512
+        },
+        "smoke": {
+          "changed_rows": 1,
+          "digest": "e0552c11f499c717",
+          "dml_operations": 1,
+          "final_rows": 1,
+          "last_insert_rowid": 1,
+          "row_mutations": 1,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "schema",
       "id": "insert-point-implicit",
       "kind": "insert_point",
@@ -26,6 +70,28 @@
     },
     {
       "dml_operations": 65536,
+      "expected": {
+        "baseline": {
+          "changed_rows": 65536,
+          "digest": "32312236c967f3ff",
+          "dml_operations": 65536,
+          "final_rows": 65536,
+          "last_insert_rowid": 65536,
+          "row_mutations": 65536,
+          "schema_objects": 1,
+          "transactions": 1
+        },
+        "smoke": {
+          "changed_rows": 8,
+          "digest": "d0bea8480021ad75",
+          "dml_operations": 8,
+          "final_rows": 8,
+          "last_insert_rowid": 8,
+          "row_mutations": 8,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "schema",
       "id": "insert-batch-explicit",
       "kind": "insert_batch",
@@ -40,6 +106,28 @@
     },
     {
       "dml_operations": 512,
+      "expected": {
+        "baseline": {
+          "changed_rows": 512,
+          "digest": "518e297c1461308c",
+          "dml_operations": 512,
+          "final_rows": 65536,
+          "last_insert_rowid": 0,
+          "row_mutations": 512,
+          "schema_objects": 1,
+          "transactions": 512
+        },
+        "smoke": {
+          "changed_rows": 1,
+          "digest": "0a45750b4534b536",
+          "dml_operations": 1,
+          "final_rows": 65536,
+          "last_insert_rowid": 0,
+          "row_mutations": 1,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "update-point-implicit",
       "kind": "update_point",
@@ -52,6 +140,28 @@
     },
     {
       "dml_operations": 1,
+      "expected": {
+        "baseline": {
+          "changed_rows": 65536,
+          "digest": "2821e47c2a7bca80",
+          "dml_operations": 1,
+          "final_rows": 65536,
+          "last_insert_rowid": 0,
+          "row_mutations": 65536,
+          "schema_objects": 1,
+          "transactions": 1
+        },
+        "smoke": {
+          "changed_rows": 8,
+          "digest": "dc2ea3dddf5856ff",
+          "dml_operations": 1,
+          "final_rows": 65536,
+          "last_insert_rowid": 0,
+          "row_mutations": 8,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "update-scan-implicit",
       "kind": "update_scan",
@@ -64,6 +174,28 @@
     },
     {
       "dml_operations": 512,
+      "expected": {
+        "baseline": {
+          "changed_rows": 512,
+          "digest": "6de42b7c34551b32",
+          "dml_operations": 512,
+          "final_rows": 65024,
+          "last_insert_rowid": 0,
+          "row_mutations": 512,
+          "schema_objects": 1,
+          "transactions": 512
+        },
+        "smoke": {
+          "changed_rows": 1,
+          "digest": "7839b461492409a8",
+          "dml_operations": 1,
+          "final_rows": 65535,
+          "last_insert_rowid": 0,
+          "row_mutations": 1,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "delete-point-implicit",
       "kind": "delete_point",
@@ -76,6 +208,28 @@
     },
     {
       "dml_operations": 1,
+      "expected": {
+        "baseline": {
+          "changed_rows": 65536,
+          "digest": "cbf29ce484222325",
+          "dml_operations": 1,
+          "final_rows": 0,
+          "last_insert_rowid": 0,
+          "row_mutations": 65536,
+          "schema_objects": 1,
+          "transactions": 1
+        },
+        "smoke": {
+          "changed_rows": 8,
+          "digest": "ff71062fc55ae92f",
+          "dml_operations": 1,
+          "final_rows": 65528,
+          "last_insert_rowid": 0,
+          "row_mutations": 8,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "delete-scan-implicit",
       "kind": "delete_scan",
@@ -88,6 +242,28 @@
     },
     {
       "dml_operations": 12288,
+      "expected": {
+        "baseline": {
+          "changed_rows": 12288,
+          "digest": "43efe28707af1ec6",
+          "dml_operations": 12288,
+          "final_rows": 65536,
+          "last_insert_rowid": 69632,
+          "row_mutations": 12288,
+          "schema_objects": 1,
+          "transactions": 1
+        },
+        "smoke": {
+          "changed_rows": 8,
+          "digest": "132249e7b75e8215",
+          "dml_operations": 8,
+          "final_rows": 65538,
+          "last_insert_rowid": 65540,
+          "row_mutations": 8,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "mixed-batch-commit",
       "kind": "mixed_commit",
@@ -104,6 +280,28 @@
     },
     {
       "dml_operations": 12288,
+      "expected": {
+        "baseline": {
+          "changed_rows": 12288,
+          "digest": "32312236c967f3ff",
+          "dml_operations": 12288,
+          "final_rows": 65536,
+          "last_insert_rowid": 69632,
+          "row_mutations": 12288,
+          "schema_objects": 1,
+          "transactions": 1
+        },
+        "smoke": {
+          "changed_rows": 8,
+          "digest": "32312236c967f3ff",
+          "dml_operations": 8,
+          "final_rows": 65536,
+          "last_insert_rowid": 65540,
+          "row_mutations": 8,
+          "schema_objects": 1,
+          "transactions": 1
+        }
+      },
       "fixture": "populated",
       "id": "mixed-batch-rollback",
       "kind": "mixed_rollback",

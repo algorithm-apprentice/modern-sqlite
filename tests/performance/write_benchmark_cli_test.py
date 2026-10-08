@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
+
+
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from tools import write_performance
 
 
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
@@ -18,6 +25,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--binary", type=pathlib.Path, required=True)
     parser.add_argument("--schema-fixture", type=pathlib.Path, required=True)
     parser.add_argument("--populated-fixture", type=pathlib.Path, required=True)
+    parser.add_argument("--workloads", type=pathlib.Path, required=True)
     return parser.parse_args()
 
 
@@ -27,6 +35,9 @@ class WriteBenchmarkCliTest(unittest.TestCase):
         if _COMMAND_LINE_ARGUMENTS is None:
             raise unittest.SkipTest("write benchmark inputs were not supplied")
         cls.arguments = _COMMAND_LINE_ARGUMENTS
+        cls.workloads = write_performance.load_and_validate_workloads(
+            cls.arguments.workloads
+        )
 
     def fixture_for(self, case: str, zero_fixture: pathlib.Path) -> pathlib.Path:
         if case == "create-table-implicit":
@@ -59,6 +70,26 @@ class WriteBenchmarkCliTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+        )
+
+    def run_validated_case(
+        self,
+        engine: str,
+        profile: str,
+        case: str,
+        fixture: pathlib.Path,
+        scratch: pathlib.Path,
+    ) -> write_performance.TimingChildResult:
+        return write_performance.run_timing_child(
+            binary_path=self.arguments.binary.resolve(),
+            repository_root=REPOSITORY_ROOT,
+            workload_manifest=self.workloads,
+            engine=engine,
+            profile=profile,
+            case_id=case,
+            fixture_path=fixture.resolve(),
+            scratch_path=scratch.resolve(),
+            run_kind="smoke",
         )
 
     def assert_work(
@@ -120,7 +151,7 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                             case=case,
                             engine=engine,
                         ):
-                            completed = self.run_case(
+                            completed = self.run_validated_case(
                                 engine,
                                 profile,
                                 case,
@@ -130,8 +161,8 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                             self.assertEqual(
                                 0, completed.returncode, completed.stderr
                             )
-                            self.assertEqual("", completed.stderr)
-                            report = json.loads(completed.stdout)
+                            self.assertEqual(b"", completed.stderr)
+                            report = completed.report
                             self.assertEqual(
                                 {
                                     "case",
