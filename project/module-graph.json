@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "implement-index-planning",
+  "currentNode": "implement-advanced-sql",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

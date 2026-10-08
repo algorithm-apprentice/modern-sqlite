@@ -554,6 +554,13 @@ FULL-synchronous autocommit durability in the timed region. Every committed
 copy is checked by pinned SQLite before removal, while the source fixture
 remains byte-identical.
 
+The committed baseline was generated from clean source revision
+`22b22429af2bb48a782ead8fc88037dfe665375b`. All fifteen workloads pass the
+matched 10x CPU and wall-time guard in aggregate and in every paired round.
+The largest observed paired-round ratios are `7.353395` CPU and `6.834338`
+wall for CREATE INDEX population, consistent with the accepted first-version
+point-insertion strategy rather than SQLite's sorter-based refill.
+
 Node completion requires:
 
 - every supported query and mutation result to match pinned SQLite;

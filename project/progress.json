@@ -41,8 +41,9 @@
     "implement-dml-ddl",
     "build-writable-mvp-harness",
     "establish-write-performance-baseline",
-    "optimize-one-pass-mutations"
+    "optimize-one-pass-mutations",
+    "implement-index-planning"
   ],
-  "activeNode": "implement-index-planning",
+  "activeNode": "implement-advanced-sql",
   "activeNodeState": "in_progress"
 }

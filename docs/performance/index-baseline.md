@@ -98,6 +98,43 @@ After this final contract is accepted, workload SQL/templates, fixture bytes,
 STAT1 contents, iteration counts, cache/page settings, result digests, and
 guard thresholds remain pinned.
 
+## Canonical final result
+
+The committed `benchmarks/index-baseline-v1` run was generated from clean
+source revision `22b22429af2bb48a782ead8fc88037dfe665375b` with tree
+`b757363f8f35a77174bb3d7624d17bd63d1e1650`.
+
+All fifteen cases pass the matched 10x wall and CPU guards in aggregate and
+in every paired round:
+
+| Case | Wall ratio | CPU ratio | Maximum round wall |
+|---|---:|---:|---:|
+| covering equality hit | 1.50x | 1.50x | 1.57x |
+| covering equality miss | 1.45x | 1.45x | 1.46x |
+| noncovering equality hit | 1.63x | 1.63x | 1.63x |
+| two-column covering equality | 1.50x | 1.50x | 1.56x |
+| covering two-sided range | 2.92x | 2.92x | 2.92x |
+| noncovering two-sided range | 3.67x | 3.67x | 3.75x |
+| covering lower-only range | 2.48x | 2.48x | 2.52x |
+| covering upper-only range | 2.81x | 2.81x | 2.82x |
+| unselective noncovering control | 2.99x | 2.99x | 3.07x |
+| unselective covering control | 5.40x | 5.40x | 5.46x |
+| indexed INSERT | 1.10x | 1.14x | 1.19x |
+| indexed UPDATE | 1.21x | 1.19x | 1.22x |
+| indexed DELETE | 1.08x | 1.12x | 1.11x |
+| CREATE INDEX population | 6.41x | 6.99x | 6.83x |
+| ANALYZE | 2.84x | 3.00x | 2.90x |
+
+The largest paired-round ratios are `7.353395x` CPU and `6.834338x` wall for
+CREATE INDEX. This is the expected first-version gap from point insertion
+versus SQLite's sorter-based refill; it remains within the accepted bound
+without weakening corruption detection, transaction semantics, or
+interoperability checks.
+
+All 90 timing children and 30 diagnostic children completed with exact
+logical work, committed-state verification, source/build/host provenance,
+and empty stderr artifacts.
+
 ## Historical pre-feature result
 
 The committed `benchmarks/index-baseline-v1` run was generated from clean
