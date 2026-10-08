@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import dataclasses
 import hashlib
 import json
 import os
@@ -14,6 +15,10 @@ from typing import Any
 
 
 class HarnessError(RuntimeError):
+    pass
+
+
+class BenchmarkMismatch(HarnessError):
     pass
 
 
@@ -76,6 +81,7 @@ _CASE_KEYS = {
     "fixture",
     "primary_unit",
     "sql",
+    "expected",
     "transactions",
     "dml_operations",
     "row_mutations",
@@ -87,6 +93,51 @@ _GUARD_KEYS = {
 }
 _RATIO_KEYS = {"numerator", "denominator"}
 _KEY_ORDER_KEYS = {"algorithm", "seed"}
+_EXPECTED_GROUP_KEYS = {"smoke", "baseline"}
+_WORK_KEYS = {
+    "transactions",
+    "dml_operations",
+    "row_mutations",
+    "changed_rows",
+    "final_rows",
+    "last_insert_rowid",
+    "schema_objects",
+    "digest",
+}
+_RAW_TIMING_KEYS = {
+    "case",
+    "completion",
+    "effective_configuration",
+    "engine",
+    "mode",
+    "profile",
+    "repetitions",
+    "run_kind",
+    "schema_version",
+    "timer",
+    "warmup",
+    "workload_semantics_version",
+}
+_EFFECTIVE_CONFIGURATION_KEYS = {
+    "page_size",
+    "cache_size",
+    "mmap_bytes",
+    "temp_store",
+    "journal_mode",
+    "synchronous",
+    "locking_mode",
+    "thread_mode",
+}
+_REPETITION_KEYS = _WORK_KEYS | {"index", "wall_ns", "cpu_ns"}
+_COMPLETION_KEYS = {
+    "fresh_databases",
+    "measured_repetitions",
+    "post_verifications",
+    "pre_verifications",
+    "status",
+    "warmups",
+}
+_TIMER_KEYS = {"wall", "cpu"}
 
 _EXPECTED_CONFIGURATION = {
     "page_size": 4096,
@@ -130,6 +181,59 @@ _EXPECTED_ROUNDS = (
 _EXPECTED_KEY_ORDER = {
     "algorithm": "splitmix64-rejection-fisher-yates-v1",
     "seed": "d1b54a32d192ed03",
+}
+_EXPECTED_DIGESTS = {
+    "create-table-implicit": {
+        "smoke": "424687ee21154511",
+        "baseline": "67829c991b8509a9",
+    },
+    "insert-point-implicit": {
+        "smoke": "e0552c11f499c717",
+        "baseline": "2138add81b82284d",
+    },
+    "insert-batch-explicit": {
+        "smoke": "d0bea8480021ad75",
+        "baseline": "32312236c967f3ff",
+    },
+    "update-point-implicit": {
+        "smoke": "0a45750b4534b536",
+        "baseline": "518e297c1461308c",
+    },
+    "update-scan-implicit": {
+        "smoke": "dc2ea3dddf5856ff",
+        "baseline": "2821e47c2a7bca80",
+    },
+    "delete-point-implicit": {
+        "smoke": "7839b461492409a8",
+        "baseline": "6de42b7c34551b32",
+    },
+    "delete-scan-implicit": {
+        "smoke": "ff71062fc55ae92f",
+        "baseline": "cbf29ce484222325",
+    },
+    "mixed-batch-commit": {
+        "smoke": "132249e7b75e8215",
+        "baseline": "43efe28707af1ec6",
+    },
+    "mixed-batch-rollback": {
+        "smoke": "32312236c967f3ff",
+        "baseline": "32312236c967f3ff",
+    },
+}
+_MATCHED_CONFIGURATION = {
+    "page_size": 4096,
+    "cache_size": 512,
+    "mmap_bytes": 0,
+    "temp_store": "memory",
+    "journal_mode": "delete",
+    "synchronous": "full",
+    "locking_mode": "normal",
+    "thread_mode": "single",
+}
+_SQLITE_DEFAULT_CONFIGURATION = {
+    **_MATCHED_CONFIGURATION,
+    "cache_size": -2000,
+    "temp_store": "default",
 }
 _EXPECTED_FIXTURES = {
     "schema": {
@@ -265,6 +369,10 @@ def _duplicate_rejecting_object(
     return value
 
 
+def _reject_nonfinite(token: str) -> None:
+    raise HarnessError(f"non-finite JSON number is not allowed: {token}")
+
+
 def _require_type(value: Any, expected: type, label: str) -> None:
     if expected is int:
         if isinstance(value, bool) or not isinstance(value, int):
@@ -295,14 +403,31 @@ def _load_json(path: pathlib.Path) -> dict[str, Any]:
         value = json.loads(
             path.read_text(encoding="utf-8"),
             object_pairs_hook=_duplicate_rejecting_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                HarnessError(f"non-finite JSON number is not allowed: {token}")
-            ),
+            parse_constant=_reject_nonfinite,
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise HarnessError(f"could not parse workload manifest: {error}") from error
     _require_type(value, dict, "workload manifest")
     return value
+
+
+def load_json_bytes_strict(data: bytes, label: str) -> Any:
+    if len(data) > 4 * 1024 * 1024:
+        raise HarnessError(f"{label} exceeds the byte limit")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise HarnessError(f"{label} is not UTF-8") from error
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_duplicate_rejecting_object,
+            parse_constant=_reject_nonfinite,
+        )
+    except HarnessError:
+        raise
+    except json.JSONDecodeError as error:
+        raise HarnessError(f"invalid JSON from {label}: {error}") from error
 
 
 def _read_performance_module() -> Any:
@@ -429,6 +554,94 @@ def _validate_fixtures(value: Any) -> None:
         raise HarnessError("populated fixture must exceed the 512-page cache")
 
 
+def _canonical_work(case_id: str, run_kind: str) -> dict[str, Any]:
+    case = _EXPECTED_CASES[case_id]
+    kind = case["kind"]
+    if run_kind == "baseline":
+        transactions = case["transactions"]
+        dml_operations = case["dml_operations"]
+        row_mutations = case["row_mutations"]
+    elif run_kind == "smoke":
+        transactions = 1
+        dml_operations = {
+            "create": 1,
+            "insert_point": 1,
+            "insert_batch": 8,
+            "update_point": 1,
+            "update_scan": 1,
+            "delete_point": 1,
+            "delete_scan": 1,
+            "mixed_commit": 8,
+            "mixed_rollback": 8,
+        }[kind]
+        row_mutations = {
+            "create": 0,
+            "insert_point": 1,
+            "insert_batch": 8,
+            "update_point": 1,
+            "update_scan": 8,
+            "delete_point": 1,
+            "delete_scan": 8,
+            "mixed_commit": 8,
+            "mixed_rollback": 8,
+        }[kind]
+    else:
+        raise HarnessError("run kind must be smoke or baseline")
+
+    final_rows = 65_536
+    last_insert_rowid = 0
+    schema_objects = 1
+    if kind == "create":
+        final_rows = 0
+        schema_objects = dml_operations
+    elif kind in {"insert_point", "insert_batch"}:
+        final_rows = row_mutations
+        last_insert_rowid = row_mutations
+    elif kind in {"delete_point", "delete_scan"}:
+        final_rows -= row_mutations
+    elif kind in {"mixed_commit", "mixed_rollback"}:
+        updates = row_mutations // 3
+        deletes = row_mutations // 3
+        inserts = row_mutations - updates - deletes
+        last_insert_rowid = 65_536 + inserts
+        if kind == "mixed_commit":
+            final_rows = final_rows - deletes + inserts
+
+    return {
+        "transactions": transactions,
+        "dml_operations": dml_operations,
+        "row_mutations": row_mutations,
+        "changed_rows": 0 if kind == "create" else row_mutations,
+        "final_rows": final_rows,
+        "last_insert_rowid": last_insert_rowid,
+        "schema_objects": schema_objects,
+        "digest": _EXPECTED_DIGESTS[case_id][run_kind],
+    }
+
+
+def _validate_work_object(value: Any, label: str) -> dict[str, Any]:
+    _require_type(value, dict, label)
+    _require_keys(value, _WORK_KEYS, label)
+    for key in _WORK_KEYS - {"digest"}:
+        _require_type(value[key], int, f"{label}.{key}")
+        if value[key] < 0:
+            raise HarnessError(f"{label}.{key} must be nonnegative")
+    _require_type(value["digest"], str, f"{label}.digest")
+    if _DIGEST.fullmatch(value["digest"]) is None:
+        raise HarnessError(f"{label}.digest is invalid")
+    return value
+
+
+def _validate_expected_work(value: Any, case_id: str) -> None:
+    _require_type(value, dict, f"case {case_id}.expected")
+    _require_keys(value, _EXPECTED_GROUP_KEYS, f"case {case_id}.expected")
+    for run_kind in ("smoke", "baseline"):
+        label = f"case {case_id}.expected.{run_kind}"
+        work = _validate_work_object(value[run_kind], label)
+        if work != _canonical_work(case_id, run_kind):
+            raise HarnessError(f"{label} is not canonical")
+
+
 def _validate_case(value: Any, index: int) -> str:
     label = f"cases[{index}]"
     _require_type(value, dict, label)
@@ -453,6 +666,7 @@ def _validate_case(value: Any, index: int) -> str:
         _require_type(value[key], int, f"case {case_id}.{key}")
         if value[key] != expected[key]:
             raise HarnessError(f"case {case_id}.{key} is not canonical")
+    _validate_expected_work(value["expected"], case_id)
     return case_id
 
 
@@ -530,6 +744,315 @@ def load_and_validate_workloads(path: pathlib.Path) -> dict[str, Any]:
 def validate_workloads(path: pathlib.Path) -> tuple[int, int]:
     value = load_and_validate_workloads(path)
     return len(value["cases"]), len(value["profiles"])
+
+
+def _case_by_id(
+    workload_manifest: dict[str, Any],
+    case_id: str,
+) -> dict[str, Any]:
+    for case in workload_manifest["cases"]:
+        if case["id"] == case_id:
+            return case
+    raise HarnessError(f"unknown write performance case: {case_id}")
+
+
+def _validate_effective_configuration(
+    value: Any,
+    *,
+    engine: str,
+    profile: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, "timing report.effective_configuration")
+    _require_keys(
+        value,
+        _EFFECTIVE_CONFIGURATION_KEYS,
+        "timing report.effective_configuration",
+    )
+    for key in ("page_size", "cache_size", "mmap_bytes"):
+        _require_type(
+            value[key],
+            int,
+            f"timing report.effective_configuration.{key}",
+        )
+    for key in _EFFECTIVE_CONFIGURATION_KEYS - {
+        "page_size",
+        "cache_size",
+        "mmap_bytes",
+    }:
+        _require_type(
+            value[key],
+            str,
+            f"timing report.effective_configuration.{key}",
+        )
+    expected = (
+        _SQLITE_DEFAULT_CONFIGURATION
+        if engine == "sqlite" and profile == "engine-default"
+        else _MATCHED_CONFIGURATION
+    )
+    if value != expected:
+        raise HarnessError(
+            "timing report effective configuration does not match "
+            "the engine and profile"
+        )
+    return value
+
+
+def validate_raw_timing_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_profile: str,
+    expected_case: str,
+    expected_run_kind: str,
+) -> dict[str, Any]:
+    _require_type(value, dict, "timing report")
+    _require_keys(value, _RAW_TIMING_KEYS, "timing report")
+    _require_type(
+        value["schema_version"],
+        int,
+        "timing report.schema_version",
+    )
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise HarnessError("timing report schema_version must be 1")
+    _require_type(
+        value["workload_semantics_version"],
+        int,
+        "timing report.workload_semantics_version",
+    )
+    if value["workload_semantics_version"] != WORKLOAD_SEMANTICS_VERSION:
+        raise HarnessError(
+            "timing report workload_semantics_version must be 1"
+        )
+    if expected_engine not in {"modern", "sqlite"}:
+        raise HarnessError("expected engine must be modern or sqlite")
+    if expected_profile not in {"engine-default", "matched-durable"}:
+        raise HarnessError("expected profile is invalid")
+    if expected_run_kind not in {"smoke", "baseline"}:
+        raise HarnessError("expected run kind must be smoke or baseline")
+    _require_type(value["mode"], str, "timing report.mode")
+    if value["mode"] != "timing":
+        raise HarnessError("timing report mode must be timing")
+    for key, expected in (
+        ("engine", expected_engine),
+        ("profile", expected_profile),
+        ("case", expected_case),
+        ("run_kind", expected_run_kind),
+    ):
+        _require_type(value[key], str, f"timing report.{key}")
+        if value[key] != expected:
+            raise HarnessError(
+                f"timing report {key} does not match the invocation"
+            )
+
+    case = _case_by_id(workload_manifest, expected_case)
+    expected_work = case["expected"][expected_run_kind]
+    _validate_effective_configuration(
+        value["effective_configuration"],
+        engine=expected_engine,
+        profile=expected_profile,
+    )
+    timer = value["timer"]
+    _require_type(timer, dict, "timing report.timer")
+    _require_keys(timer, _TIMER_KEYS, "timing report.timer")
+    if timer != {
+        "wall": "steady_clock",
+        "cpu": "CLOCK_PROCESS_CPUTIME_ID",
+    }:
+        raise HarnessError("timing report timer identities are invalid")
+
+    warmup = _validate_work_object(value["warmup"], "timing report.warmup")
+    if warmup != expected_work:
+        raise HarnessError(
+            "timing report warmup does not match the workload manifest"
+        )
+
+    repetition_count = 1 if expected_run_kind == "smoke" else 3
+    repetitions = value["repetitions"]
+    _require_type(repetitions, list, "timing report.repetitions")
+    if len(repetitions) != repetition_count:
+        raise HarnessError(
+            "timing report repetitions have the wrong count"
+        )
+    indexes = []
+    for position, repetition in enumerate(repetitions):
+        label = f"timing report.repetitions[{position}]"
+        _require_type(repetition, dict, label)
+        _require_keys(repetition, _REPETITION_KEYS, label)
+        index = repetition["index"]
+        wall_ns = repetition["wall_ns"]
+        cpu_ns = repetition["cpu_ns"]
+        _require_type(index, int, f"{label}.index")
+        _require_type(wall_ns, int, f"{label}.wall_ns")
+        _require_type(cpu_ns, int, f"{label}.cpu_ns")
+        if index < 0:
+            raise HarnessError(f"{label}.index must be nonnegative")
+        if wall_ns <= 0:
+            raise HarnessError(f"{label}.wall_ns must be positive")
+        if cpu_ns < 0:
+            raise HarnessError(f"{label}.cpu_ns must be nonnegative")
+        if (
+            expected_run_kind == "baseline"
+            and wall_ns < workload_manifest["minimum_wall_ns"]
+        ):
+            raise HarnessError(
+                f"{label} is below the "
+                f"{workload_manifest['minimum_wall_ns']} minimum wall time"
+            )
+        work = {key: repetition[key] for key in _WORK_KEYS}
+        _validate_work_object(work, f"{label} work")
+        if work != expected_work:
+            raise HarnessError(
+                f"{label} does not match the workload manifest"
+            )
+        indexes.append(index)
+    if indexes != list(range(repetition_count)):
+        raise HarnessError(
+            "timing report repetition indexes are incomplete or duplicated"
+        )
+
+    completion = value["completion"]
+    _require_type(completion, dict, "timing report.completion")
+    _require_keys(completion, _COMPLETION_KEYS, "timing report.completion")
+    for key in _COMPLETION_KEYS - {"status"}:
+        _require_type(
+            completion[key],
+            int,
+            f"timing report.completion.{key}",
+        )
+        if completion[key] < 0:
+            raise HarnessError(
+                f"timing report.completion.{key} must be nonnegative"
+            )
+    _require_type(
+        completion["status"],
+        str,
+        "timing report.completion.status",
+    )
+    expected_completion = {
+        "fresh_databases": repetition_count + 1,
+        "measured_repetitions": repetition_count,
+        "post_verifications": repetition_count + 1,
+        "pre_verifications": 1,
+        "status": "complete",
+        "warmups": 1,
+    }
+    if completion != expected_completion:
+        raise HarnessError(
+            "timing report completion does not match the run kind"
+        )
+    return value
+
+
+@dataclasses.dataclass(frozen=True)
+class TimingChildResult:
+    command: tuple[str, ...]
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    elapsed_ns: int
+    report: dict[str, Any]
+
+
+def run_timing_child(
+    *,
+    binary_path: pathlib.Path,
+    repository_root: pathlib.Path,
+    workload_manifest: dict[str, Any],
+    engine: str,
+    profile: str,
+    case_id: str,
+    fixture_path: pathlib.Path,
+    scratch_path: pathlib.Path,
+    run_kind: str,
+    timeout_seconds: float | None = None,
+) -> TimingChildResult:
+    if engine not in {"modern", "sqlite"}:
+        raise HarnessError("timing engine must be modern or sqlite")
+    if profile not in {"engine-default", "matched-durable"}:
+        raise HarnessError("timing profile is invalid")
+    if run_kind not in {"smoke", "baseline"}:
+        raise HarnessError("timing run kind must be smoke or baseline")
+    if not binary_path.is_file():
+        raise HarnessError(f"timing binary does not exist: {binary_path}")
+    if not fixture_path.is_file():
+        raise HarnessError(f"timing fixture does not exist: {fixture_path}")
+    if not scratch_path.is_dir():
+        raise HarnessError(
+            f"timing scratch path is not a directory: {scratch_path}"
+        )
+    try:
+        scratch_entries = list(scratch_path.iterdir())
+    except OSError as error:
+        raise HarnessError(f"cannot inspect timing scratch path: {error}") from error
+    if scratch_entries:
+        raise HarnessError("timing scratch path must be empty")
+    _case_by_id(workload_manifest, case_id)
+    command = (
+        str(binary_path),
+        "run",
+        engine,
+        profile,
+        case_id,
+        str(fixture_path),
+        str(scratch_path),
+        run_kind,
+    )
+    common = _read_performance_module()
+    try:
+        result = common.run_bounded(
+            list(command),
+            cwd=repository_root,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else (600.0 if run_kind == "baseline" else 120.0)
+            ),
+            stdout_limit=4 * 1024 * 1024,
+            stderr_limit=1024 * 1024,
+        )
+    except (common.HarnessError, common.ChildExecutionError) as error:
+        raise HarnessError(str(error)) from error
+    if result.returncode == 2:
+        raise BenchmarkMismatch(
+            f"timing child reported a correctness mismatch for "
+            f"{engine} {profile} {case_id}"
+        )
+    if result.returncode != 0:
+        raise HarnessError(
+            f"timing child failed for {engine} {profile} {case_id} "
+            f"with exit {result.returncode}"
+        )
+    if result.stderr:
+        raise HarnessError(
+            f"timing child wrote stderr for {engine} {profile} {case_id}"
+        )
+    report = load_json_bytes_strict(
+        result.stdout,
+        f"timing {engine} {profile} {case_id}",
+    )
+    validate_raw_timing_report(
+        report,
+        workload_manifest=workload_manifest,
+        expected_engine=engine,
+        expected_profile=profile,
+        expected_case=case_id,
+        expected_run_kind=run_kind,
+    )
+    try:
+        remaining = list(scratch_path.iterdir())
+    except OSError as error:
+        raise HarnessError(f"cannot inspect timing scratch cleanup: {error}") from error
+    if remaining:
+        raise BenchmarkMismatch("timing child left scratch database artifacts")
+    return TimingChildResult(
+        command=command,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        elapsed_ns=result.elapsed_ns,
+        report=report,
+    )
 
 
 def _sha256(path: pathlib.Path) -> str:

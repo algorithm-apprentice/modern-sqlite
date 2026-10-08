@@ -1182,6 +1182,8 @@ if(TARGET modern_sqlite_read_benchmark AND TARGET modern_sqlite_read_diagnostics
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
       --populated-fixture
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
+      --workloads
+        "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
   )
   set_tests_properties(
     performance.write_benchmark_cli
