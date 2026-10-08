@@ -292,6 +292,11 @@ void RequireStatus(Status status) {
          "catalog_loader" / "sqlite-3.54.0-catalog.db";
 }
 
+[[nodiscard]] std::filesystem::path IndexFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "index_performance" / "indexed.db";
+}
+
 [[nodiscard]] std::filesystem::path AlterDefaultsFixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "lowering" / "sqlite-3.54.0-alter-defaults.db";
@@ -1502,6 +1507,179 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   EXPECT_EQ(2, wr_rows[0][1].integer_value());
   EXPECT_EQ("second", TextBytes(wr_rows[0][2]));
   EXPECT_EQ("left", TextBytes(wr_rows[1][0]));
+}
+
+TEST(ReadLowering, LowersAndExecutesCoveringIndexRanges) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 97}));
+
+  const BytecodeProgram equality =
+      LowerOrThrow("SELECT id, score FROM items WHERE category='category-000a'", catalog);
+  ASSERT_EQ(1U, equality.cursors().size());
+  const ReadCursorDescriptor& equality_cursor = equality.cursors()[0];
+  EXPECT_EQ(CursorStorageKind::kIndex, equality_cursor.storage);
+  const IndexId category_index =
+      TakeOptional(catalog->FindIndex("items_category_score"), "missing category index");
+  EXPECT_EQ(catalog->index(category_index).root_page.value, equality_cursor.root_page.value());
+  EXPECT_EQ(3U, equality_cursor.record_field_count);
+  ASSERT_EQ(3U, equality_cursor.fields.size());
+  ASSERT_EQ(3U, equality_cursor.index_columns.size());
+  const std::vector<InstructionKind> equality_kinds = InstructionKinds(equality);
+  EXPECT_NE(std::ranges::find(equality_kinds, InstructionKind::kApplyAffinity),
+            equality_kinds.end());
+  EXPECT_NE(std::ranges::find(equality_kinds, InstructionKind::kSeekIndex), equality_kinds.end());
+  EXPECT_NE(std::ranges::find(equality_kinds, InstructionKind::kCheckIndexRange),
+            equality_kinds.end());
+
+  const auto equality_rows = ExecuteRows(equality, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, equality_rows.size());
+  EXPECT_EQ(10, equality_rows[0][0].integer_value());
+  EXPECT_EQ(10, equality_rows[0][1].integer_value());
+
+  const BytecodeProgram is_equality =
+      LowerOrThrow("SELECT id, score FROM items WHERE category IS 'category-000a'", catalog);
+  const auto is_rows = ExecuteRows(is_equality, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, is_rows.size());
+  EXPECT_EQ(10, is_rows[0][0].integer_value());
+
+  const BytecodeProgram is_null =
+      LowerOrThrow("SELECT id FROM items WHERE category IS NULL", catalog);
+  EXPECT_TRUE(ExecuteRows(is_null, *pager, catalog->version().generation).empty());
+
+  const BytecodeProgram range = LowerOrThrow(
+      "SELECT id, score FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e'",
+      catalog);
+  const auto range_rows = ExecuteRows(range, *pager, catalog->version().generation);
+  ASSERT_EQ(4U, range_rows.size());
+  for (std::size_t index = 0; index < range_rows.size(); ++index) {
+    const auto expected = static_cast<std::int64_t>(index) + 10;
+    EXPECT_EQ(expected, range_rows[index][0].integer_value());
+    EXPECT_EQ(expected, range_rows[index][1].integer_value());
+  }
+
+  const BytecodeProgram reordered =
+      LowerOrThrow("SELECT id FROM items WHERE score=?2 AND category=?1", catalog);
+  std::vector<std::uint32_t> key_parameter_order;
+  for (const Instruction& instruction : reordered.instructions()) {
+    if (std::holds_alternative<OpenReadCursorInstruction>(instruction)) {
+      break;
+    }
+    if (const auto* parameter = std::get_if<LoadParameterInstruction>(&instruction);
+        parameter != nullptr) {
+      key_parameter_order.push_back(parameter->parameter.value());
+    }
+  }
+  EXPECT_EQ((std::vector<std::uint32_t>{1, 0}), key_parameter_order);
+  const auto reordered_seek = std::ranges::find_if(
+      reordered.instructions(),
+      [](const Instruction& value) { return std::holds_alternative<SeekIndexInstruction>(value); });
+  ASSERT_NE(reordered.instructions().end(), reordered_seek);
+  EXPECT_EQ(2U, std::get<SeekIndexInstruction>(*reordered_seek).key_count);
+
+  const BytecodeProgram descending =
+      LowerOrThrow("SELECT id, score FROM items WHERE score>=250 AND score<252", catalog);
+  const auto seek = std::ranges::find_if(descending.instructions(), [](const Instruction& value) {
+    return std::holds_alternative<SeekIndexInstruction>(value);
+  });
+  ASSERT_NE(descending.instructions().end(), seek);
+  EXPECT_EQ(IndexSeekMode::kGreater, std::get<SeekIndexInstruction>(*seek).mode);
+  const auto end = std::ranges::find_if(descending.instructions(), [](const Instruction& value) {
+    return std::holds_alternative<CheckIndexRangeInstruction>(value);
+  });
+  ASSERT_NE(descending.instructions().end(), end);
+  EXPECT_EQ(IndexRangeEndMode::kInclusive, std::get<CheckIndexRangeInstruction>(*end).mode);
+
+  const auto descending_rows = ExecuteRows(descending, *pager, catalog->version().generation);
+  ASSERT_EQ(32U, descending_rows.size());
+  EXPECT_EQ(251, descending_rows.front()[1].integer_value());
+  EXPECT_EQ(251, descending_rows[15][1].integer_value());
+  EXPECT_EQ(250, descending_rows[16][1].integer_value());
+  EXPECT_EQ(250, descending_rows.back()[1].integer_value());
+
+  const BytecodeProgram reversed =
+      LowerOrThrow("SELECT id, score FROM items WHERE 249<score AND 251>=score", catalog);
+  const auto reversed_rows = ExecuteRows(reversed, *pager, catalog->version().generation);
+  ASSERT_EQ(32U, reversed_rows.size());
+  EXPECT_EQ(251, reversed_rows.front()[1].integer_value());
+  EXPECT_EQ(250, reversed_rows.back()[1].integer_value());
+
+  const BytecodeProgram affinity = LowerOrThrow("SELECT id FROM items WHERE score='250'", catalog);
+  const auto affinity_rows = ExecuteRows(affinity, *pager, catalog->version().generation);
+  ASSERT_EQ(16U, affinity_rows.size());
+  EXPECT_EQ(250, affinity_rows.front()[0].integer_value());
+
+  const BytecodeProgram residual =
+      LowerOrThrow("SELECT id FROM items WHERE flag=0 AND id>10", catalog);
+  const auto residual_rows = ExecuteRows(residual, *pager, catalog->version().generation);
+  ASSERT_EQ(2043U, residual_rows.size());
+  EXPECT_EQ(12, residual_rows.front()[0].integer_value());
+  EXPECT_EQ(4096, residual_rows.back()[0].integer_value());
+
+  const BytecodeProgram limited =
+      LowerOrThrow("SELECT id FROM items WHERE flag=0 LIMIT 2 OFFSET 1", catalog);
+  const auto limited_rows = ExecuteRows(limited, *pager, catalog->version().generation);
+  ASSERT_EQ(2U, limited_rows.size());
+  EXPECT_EQ(4, limited_rows[0][0].integer_value());
+  EXPECT_EQ(6, limited_rows[1][0].integer_value());
+
+  const BytecodeProgram hidden_rowid =
+      LowerOrThrow("SELECT rowid FROM items WHERE flag=0 LIMIT 2", catalog);
+  const auto hidden_rowid_rows = ExecuteRows(hidden_rowid, *pager, catalog->version().generation);
+  ASSERT_EQ(2U, hidden_rowid_rows.size());
+  EXPECT_EQ(2, hidden_rowid_rows[0][0].integer_value());
+  EXPECT_EQ(4, hidden_rowid_rows[1][0].integer_value());
+
+  const BytecodeProgram full = LowerOrThrow("SELECT id, score FROM items LIMIT 3", catalog);
+  const auto full_rows = ExecuteRows(full, *pager, catalog->version().generation);
+  ASSERT_EQ(3U, full_rows.size());
+  EXPECT_EQ(255, full_rows[0][0].integer_value());
+  EXPECT_EQ(255, full_rows[0][1].integer_value());
+  EXPECT_EQ(511, full_rows[1][0].integer_value());
+  EXPECT_EQ(767, full_rows[2][0].integer_value());
+
+  const BytecodeProgram nullable = LowerOrThrow("SELECT id FROM items WHERE category=?1", catalog);
+  Vm null_vm = TakeValue(Vm::Create(nullable, VmEnvironment::Core()));
+  RequireStatus(
+      null_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(null_vm.Bind(ParameterId{0}, SqlValue{}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(null_vm.Step()));
+
+  const BytecodeProgram missing =
+      LowerOrThrow("SELECT id FROM items WHERE category='missing'", catalog);
+  EXPECT_TRUE(ExecuteRows(missing, *pager, catalog->version().generation).empty());
+
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const BytecodeProgram ordered_keys = LowerOrThrow(
+      "SELECT id, score FROM items "
+      "WHERE score>=volatile_counter() AND score<volatile_counter()",
+      catalog, custom.Binder());
+  const auto ordered_rows =
+      ExecuteRows(ordered_keys, *pager, catalog->version().generation, custom.Vm());
+  EXPECT_EQ(2U, callback_count);
+  ASSERT_EQ(16U, ordered_rows.size());
+  for (const auto& row : ordered_rows) {
+    EXPECT_EQ(1, row[1].integer_value());
+  }
+
+  callback_count = 0;
+  const BytecodeProgram zero_limit = LowerOrThrow(
+      "SELECT id FROM items WHERE score=volatile_counter() LIMIT 0", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(zero_limit, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram rejected_guard = LowerOrThrow(
+      "SELECT id FROM items "
+      "WHERE stable_guard(1)=0 AND score=volatile_counter()",
+      catalog, custom.Binder());
+  EXPECT_TRUE(
+      ExecuteRows(rejected_guard, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
 }
 
 TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {

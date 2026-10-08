@@ -315,6 +315,7 @@ class BoundSelect final {
   [[nodiscard]] std::uint64_t registration_generation() const noexcept;
   [[nodiscard]] const BoundTableSource* table_source() const noexcept;
   [[nodiscard]] std::span<const BoundSourceColumn> source_columns() const noexcept;
+  [[nodiscard]] std::span<const std::string> registered_collations() const noexcept;
   [[nodiscard]] std::span<const BoundCollation> collations() const noexcept;
   [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept;
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;

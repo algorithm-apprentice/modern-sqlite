@@ -54,13 +54,16 @@ bool inject_failure = false;
   return std::move(*parsed->tree);
 }
 
-[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog() {
+[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog(bool indexed = false) {
   using namespace modern_sqlite;
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
   input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  if (indexed) {
+    input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
+  }
   input.tables.push_back(CatalogTableInput{
       .definition = SchemaDefinitionId{0},
       .name = "Items",
@@ -79,6 +82,29 @@ bool inject_failure = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.indexes.push_back(CatalogIndexInput{
+        .definition = SchemaDefinitionId{1},
+        .name = "items_name",
+        .table = TableId{0},
+        .root_page = RootPageId{3},
+        .origin = IndexOrigin::kCreateIndex,
+        .key_term_count = 1,
+        .terms =
+            {
+                CatalogIndexTerm{
+                    .target = ColumnId{1},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+                CatalogIndexTerm{
+                    .target = RowIdIndexTerm{},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+            },
+    });
+  }
   CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
   if (!created.has_value()) {
     throw std::runtime_error{"failed to create optimizer OOM catalog"};
@@ -118,6 +144,21 @@ bool inject_failure = false;
   BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
   if (!logical.has_value()) {
     throw std::runtime_error{"failed to build optimizer OOM fixture"};
+  }
+  return std::move(*logical);
+}
+
+[[nodiscard]] modern_sqlite::LogicalPlan LogicalIndexFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindSelectResult bound =
+      BindSelectStatement(ParseTree("SELECT id, Name FROM Items WHERE Name=?1"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind optimizer index OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to build optimizer index OOM fixture"};
   }
   return std::move(*logical);
 }
@@ -169,7 +210,7 @@ int main() try {
     return 1;
   }
   const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
-  if (allocation_count != 4U) {
+  if (allocation_count != 9U) {
     return 1;
   }
 
@@ -195,6 +236,37 @@ int main() try {
   const OptimizeLogicalPlanResult recovered = OptimizeLogicalPlan(std::move(recovered_logical));
   if (!recovered.has_value()) {
     return 1;
+  }
+
+  const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
+  LogicalPlan index_baseline_logical = LogicalIndexFixture(indexed_catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const OptimizeLogicalPlanResult index_baseline =
+      OptimizeLogicalPlan(std::move(index_baseline_logical));
+  if (!index_baseline.has_value() ||
+      index_baseline->selected_candidate().kind != PhysicalAccessKind::kIndexScan) {
+    return 1;
+  }
+  const std::size_t index_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (index_allocation_count == 0U || index_allocation_count > 64U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < index_allocation_count; ++failure) {
+    LogicalPlan logical = LogicalIndexFixture(indexed_catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+          OptimizeLogicalPlan(std::move(logical));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
   }
 
   LogicalStatementPlan mutation_baseline = LogicalMutationFixture(catalog);

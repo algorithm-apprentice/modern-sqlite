@@ -59,13 +59,16 @@ bool fail_allocations = false;
   return std::move(*parsed->tree);
 }
 
-[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog() {
+[[nodiscard]] modern_sqlite::CatalogSnapshotPtr TestCatalog(bool indexed = false) {
   using namespace modern_sqlite;
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 1, .generation = 1},
   };
   input.definitions.push_back(ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)"));
+  if (indexed) {
+    input.definitions.push_back(ParseTree("CREATE INDEX items_name ON Items(Name)"));
+  }
   input.tables.push_back(CatalogTableInput{
       .definition = SchemaDefinitionId{0},
       .name = "Items",
@@ -84,6 +87,29 @@ bool fail_allocations = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  if (indexed) {
+    input.indexes.push_back(CatalogIndexInput{
+        .definition = SchemaDefinitionId{1},
+        .name = "items_name",
+        .table = TableId{0},
+        .root_page = RootPageId{3},
+        .origin = IndexOrigin::kCreateIndex,
+        .key_term_count = 1,
+        .terms =
+            {
+                CatalogIndexTerm{
+                    .target = ColumnId{1},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+                CatalogIndexTerm{
+                    .target = RowIdIndexTerm{},
+                    .collation_name = "BINARY",
+                    .order = SortOrder::kAscending,
+                },
+            },
+    });
+  }
   CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
   if (!created.has_value()) {
     throw std::runtime_error{"failed to create lowering allocation catalog"};
@@ -226,13 +252,15 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
-  const std::array<PhysicalPlan, 4> physical_plans{
+  const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
+  const std::array<PhysicalPlan, 5> physical_plans{
       PhysicalFixture(catalog, "SELECT 1"),
       PhysicalFixture(catalog, "SELECT Name FROM Items"),
       PhysicalFixture(catalog, "SELECT Name FROM Items WHERE rowid=?1"),
       PhysicalFixture(catalog, "SELECT Name FROM Items LIMIT ?1 OFFSET ?2"),
+      PhysicalFixture(indexed_catalog, "SELECT id, Name FROM Items WHERE Name=?1"),
   };
-  constexpr std::array<std::size_t, 4> kExpectedAllocations{17U, 27U, 26U, 33U};
+  constexpr std::array<std::size_t, 5> kExpectedAllocations{17U, 28U, 27U, 34U, 34U};
   std::unique_ptr<BytecodeProgram> published;
   for (std::size_t plan_index = 0; plan_index < physical_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {

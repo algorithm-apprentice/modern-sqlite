@@ -363,6 +363,7 @@ struct BoundExpressionState {
 };
 
 struct BoundSelect::Impl final : BoundExpressionState {
+  std::vector<std::string> registered_collations;
   std::vector<BoundResultColumn> result_columns;
   std::optional<BoundExpressionId> where;
   std::optional<BoundLimit> limit;
@@ -432,6 +433,15 @@ class StatementBinder final {
     BindExpected<void> source = BindSource(select);
     if (!source.has_value()) {
       return std::unexpected(std::move(source.error()));
+    }
+    if (impl_->table_source.has_value() &&
+        impl_->table_source->kind == BoundSourceKind::kCatalogTable &&
+        impl_->table_source->table.has_value() &&
+        !catalog_->table_indexes(*impl_->table_source->table).empty()) {
+      impl_->registered_collations.reserve(environment_.collations().size());
+      for (const Collation* collation : environment_.collations()) {
+        impl_->registered_collations.emplace_back(collation->name());
+      }
     }
     ReserveOutputStorage(select);
     BindExpected<void> results = BindResults(select);
@@ -2734,6 +2744,11 @@ const BoundTableSource* BoundSelect::table_source() const noexcept {
 std::span<const BoundSourceColumn> BoundSelect::source_columns() const noexcept {
   return impl_ != nullptr ? std::span<const BoundSourceColumn>{impl_->source_columns}
                           : std::span<const BoundSourceColumn>{};
+}
+
+std::span<const std::string> BoundSelect::registered_collations() const noexcept {
+  return impl_ != nullptr ? std::span<const std::string>{impl_->registered_collations}
+                          : std::span<const std::string>{};
 }
 
 std::span<const BoundCollation> BoundSelect::collations() const noexcept {
