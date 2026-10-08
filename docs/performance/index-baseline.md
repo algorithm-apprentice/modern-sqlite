@@ -86,3 +86,32 @@ python3 tools/index_performance.py validate-baseline \
 The baseline is regenerated only after the complete index-planning node is
 integrated. Workload SQL, fixture bytes, STAT1 contents, iteration counts,
 cache/page settings, result digests, and guard thresholds remain unchanged.
+
+## Canonical pre-feature result
+
+The committed `benchmarks/index-baseline-v1` run was generated from clean
+source revision `c9e8b4303314ac35f98294c5ffd2de8b4560dc04`.
+
+It records:
+
+| Case | Wall ratio | CPU ratio | Maximum round wall |
+|---|---:|---:|---:|
+| covering equality hit | 226.84x | 226.84x | 233.61x |
+| covering equality miss | 231.15x | 231.10x | 236.42x |
+| noncovering equality hit | 203.10x | 203.07x | 204.28x |
+| two-column covering equality | 222.45x | 222.44x | 224.92x |
+| covering range | 155.11x | 155.10x | 158.47x |
+| noncovering range | 60.44x | 60.44x | 61.15x |
+| unselective noncovering control | 3.00x | 3.00x | 3.09x |
+| unselective covering control | 13.92x | 13.91x | 14.28x |
+
+The result is a validated guard failure, not a threshold change. It confirms
+three distinct acceptance targets:
+
+- bounded equality and range seeks must replace full table scans;
+- noncovering access must add only the required table rowid lookup; and
+- STAT1 must preserve the table-scan choice for the deliberately unselective
+  noncovering case while allowing the corresponding covering plan.
+
+All 48 timing children and 16 diagnostic children completed with exact logical
+work, source/build/host provenance, and empty stderr artifacts.
