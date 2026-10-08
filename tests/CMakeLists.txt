@@ -1238,6 +1238,25 @@ if(TARGET modern_sqlite_read_benchmark AND
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endif()
+if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v1/run-manifest.json")
+  add_test(
+    NAME performance.write_baseline_validation
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tools/write_performance.py"
+      validate-baseline
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+      --baseline "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v1"
+  )
+  set_tests_properties(
+    performance.write_baseline_validation
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
 
 add_test(
   NAME project.graph
