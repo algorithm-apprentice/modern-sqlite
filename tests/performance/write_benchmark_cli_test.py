@@ -23,6 +23,7 @@ _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=pathlib.Path, required=True)
+    parser.add_argument("--diagnostic-binary", type=pathlib.Path, required=True)
     parser.add_argument("--schema-fixture", type=pathlib.Path, required=True)
     parser.add_argument("--populated-fixture", type=pathlib.Path, required=True)
     parser.add_argument("--workloads", type=pathlib.Path, required=True)
@@ -90,6 +91,25 @@ class WriteBenchmarkCliTest(unittest.TestCase):
             fixture_path=fixture.resolve(),
             scratch_path=scratch.resolve(),
             run_kind="smoke",
+        )
+
+    def run_validated_diagnostic(
+        self,
+        engine: str,
+        profile: str,
+        case: str,
+        fixture: pathlib.Path,
+        scratch: pathlib.Path,
+    ) -> write_performance.DiagnosticChildResult:
+        return write_performance.run_diagnostic_child(
+            binary_path=self.arguments.diagnostic_binary.resolve(),
+            repository_root=REPOSITORY_ROOT,
+            workload_manifest=self.workloads,
+            engine=engine,
+            profile=profile,
+            case_id=case,
+            fixture_path=fixture.resolve(),
+            scratch_path=scratch.resolve(),
         )
 
     def assert_work(
@@ -236,6 +256,49 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                         )
             for path, before in fixture_bytes.items():
                 self.assertEqual(before, path.read_bytes())
+
+    def test_diagnostic_matrix_has_strict_engine_specific_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            zero_fixture = root / "zero.db"
+            zero_fixture.write_bytes(b"")
+            for profile in ("engine-default", "matched-durable"):
+                for case in self.workloads["cases"]:
+                    for engine in ("modern", "sqlite"):
+                        scratch = root / f"{profile}-{case['id']}-{engine}"
+                        scratch.mkdir()
+                        with self.subTest(
+                            profile=profile,
+                            case=case["id"],
+                            engine=engine,
+                        ):
+                            completed = self.run_validated_diagnostic(
+                                engine,
+                                profile,
+                                case["id"],
+                                self.fixture_for(case["id"], zero_fixture),
+                                scratch,
+                            )
+                            self.assertEqual(0, completed.returncode)
+                            self.assertEqual(b"", completed.stderr)
+                            report = completed.report
+                            self.assertEqual(
+                                case["expected"]["baseline"],
+                                report["work"],
+                            )
+                            if engine == "modern":
+                                self.assertTrue(report["counters"]["modern"])
+                                self.assertEqual(
+                                    {}, report["counters"]["sqlite"]
+                                )
+                                self.assertTrue(report["counters"]["vfs"])
+                            else:
+                                self.assertEqual(
+                                    {}, report["counters"]["modern"]
+                                )
+                                self.assertTrue(report["counters"]["sqlite"])
+                                self.assertEqual({}, report["counters"]["vfs"])
+                            self.assertEqual([], list(scratch.iterdir()))
 
     def test_usage_and_invalid_scratch_are_harness_errors(self) -> None:
         no_arguments = subprocess.run(

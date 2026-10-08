@@ -517,6 +517,11 @@ SQLite native counters are not renamed as Modern counters when semantics
 differ. The report also includes engine-neutral transaction, statement,
 operation, changed-row, final-row, byte, and digest counts.
 
+Diagnostic runs execute the manifest's `baseline` fixed-work group exactly
+once after one untimed warmup. The manifest records this relationship as
+`"diagnostic_work": "baseline"` rather than duplicating every expected count
+and digest.
+
 Instrumented elapsed time is diagnostic only and cannot populate baseline
 timing or satisfy a guard.
 

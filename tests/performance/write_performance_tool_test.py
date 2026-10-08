@@ -325,6 +325,50 @@ EXPECTED_WORK = {
     },
 }
 
+MODERN_COUNTER_NAMES = (
+    "allocations",
+    "bytes_copied",
+    "vfs_calls",
+    "pages_read",
+    "pages_written",
+    "cache_hits",
+    "cache_misses",
+    "btree_comparisons",
+    "vm_instructions",
+    "planner_work",
+)
+SQLITE_COUNTER_NAMES = (
+    "cache_bytes_current",
+    "cache_hits",
+    "cache_misses",
+    "cache_writes",
+    "changes",
+    "fullscan_steps",
+    "malloc_count_current",
+    "malloc_count_highwater",
+    "malloc_size_highwater",
+    "reprepares",
+    "statement_runs",
+    "total_changes",
+    "vm_steps",
+)
+VFS_FILE_COUNTER_NAMES = (
+    "open_calls",
+    "close_calls",
+    "read_calls",
+    "read_bytes",
+    "write_calls",
+    "write_bytes",
+    "sync_calls",
+    "truncate_calls",
+    "delete_calls",
+    "directory_sync_requests",
+    "lock_calls",
+    "unlock_calls",
+    "access_calls",
+    "full_path_calls",
+)
+
 
 def valid_manifest() -> dict[str, object]:
     digest = "1" * 16
@@ -343,6 +387,7 @@ def valid_manifest() -> dict[str, object]:
             "locking_mode": "normal",
             "thread_mode": "single",
         },
+        "diagnostic_work": "baseline",
         "profiles": [
             {
                 "id": "engine-default",
@@ -495,6 +540,74 @@ def valid_timing_report(
             "wall": "steady_clock",
         },
         "warmup": work,
+        "workload_semantics_version": 1,
+    }
+
+
+def valid_diagnostic_report(
+    *,
+    engine: str = "modern",
+    profile: str = "matched-durable",
+    case_id: str = "insert-point-implicit",
+) -> dict[str, object]:
+    modern_counters: dict[str, int] = {}
+    sqlite_counters: dict[str, int] = {}
+    vfs_counters: dict[str, object] = {}
+    if engine == "modern":
+        modern_counters = {name: 1 for name in MODERN_COUNTER_NAMES}
+        file_counters = {name: 0 for name in VFS_FILE_COUNTER_NAMES}
+        file_counters.update(
+            {
+                "open_calls": 1,
+                "close_calls": 1,
+                "read_calls": 1,
+                "read_bytes": 4096,
+            }
+        )
+        vfs_counters = {
+            "global": {"random_byte_calls": 0},
+            "main_database": deepcopy(file_counters),
+            "main_journal": {
+                name: 0 for name in VFS_FILE_COUNTER_NAMES
+            },
+            "subjournal": {name: 0 for name in VFS_FILE_COUNTER_NAMES},
+            "write_ahead_log": {
+                name: 0 for name in VFS_FILE_COUNTER_NAMES
+            },
+        }
+    else:
+        sqlite_counters = {name: 1 for name in SQLITE_COUNTER_NAMES}
+        sqlite_counters["reprepares"] = 0
+        sqlite_counters["fullscan_steps"] = 0
+    configuration = deepcopy(
+        valid_timing_report(
+            engine=engine,
+            profile=profile,
+            case_id=case_id,
+        )["effective_configuration"]
+    )
+    return {
+        "case": case_id,
+        "completion": {
+            "diagnostic_runs": 1,
+            "fresh_databases": 2,
+            "post_verifications": 2,
+            "pre_verifications": 1,
+            "status": "complete",
+            "warmups": 1,
+        },
+        "counters": {
+            "modern": modern_counters,
+            "sqlite": sqlite_counters,
+            "vfs": vfs_counters,
+        },
+        "diagnostic_schema_version": 1,
+        "effective_configuration": configuration,
+        "engine": engine,
+        "mode": "diagnostic",
+        "profile": profile,
+        "schema_version": 1,
+        "work": deepcopy(EXPECTED_WORK[case_id]["baseline"]),
         "workload_semantics_version": 1,
     }
 
@@ -770,6 +883,75 @@ class WritePerformanceToolTest(unittest.TestCase):
                     write_performance.load_json_bytes_strict(
                         data,
                         "timing report",
+                    )
+
+    def test_accepts_engine_specific_diagnostic_reports(self) -> None:
+        manifest = valid_manifest()
+        for engine, profile in (
+            ("modern", "engine-default"),
+            ("sqlite", "engine-default"),
+            ("modern", "matched-durable"),
+            ("sqlite", "matched-durable"),
+        ):
+            with self.subTest(engine=engine, profile=profile):
+                report = valid_diagnostic_report(
+                    engine=engine,
+                    profile=profile,
+                )
+                self.assertIs(
+                    report,
+                    write_performance.validate_raw_diagnostic_report(
+                        report,
+                        workload_manifest=manifest,
+                        expected_engine=engine,
+                        expected_profile=profile,
+                        expected_case="insert-point-implicit",
+                    ),
+                )
+
+    def test_rejects_invalid_diagnostic_counter_families(self) -> None:
+        manifest = valid_manifest()
+        mutations = (
+            (
+                lambda report: report["counters"]["modern"].__setitem__(
+                    "unknown", 1
+                ),
+                "Modern counter names are invalid",
+            ),
+            (
+                lambda report: report["counters"].__setitem__(
+                    "sqlite",
+                    {name: 0 for name in SQLITE_COUNTER_NAMES},
+                ),
+                "SQLite counters must be empty for Modern",
+            ),
+            (
+                lambda report: report["counters"]["vfs"][
+                    "main_database"
+                ].__setitem__("read_bytes", True),
+                "read_bytes must be an integer",
+            ),
+            (
+                lambda report: report["counters"]["modern"].__setitem__(
+                    "allocations", 0
+                ),
+                "Modern diagnostic allocations must be positive",
+            ),
+        )
+        for mutate, expected in mutations:
+            with self.subTest(expected=expected):
+                report = valid_diagnostic_report()
+                mutate(report)
+                with self.assertRaisesRegex(
+                    write_performance.HarnessError,
+                    expected,
+                ):
+                    write_performance.validate_raw_diagnostic_report(
+                        report,
+                        workload_manifest=manifest,
+                        expected_engine="modern",
+                        expected_profile="matched-durable",
+                        expected_case="insert-point-implicit",
                     )
 
     def test_usage_and_missing_file_are_harness_failures(self) -> None:
