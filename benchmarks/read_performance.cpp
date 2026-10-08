@@ -73,15 +73,19 @@ constexpr std::uint64_t kSplitMixIncrement = 0x9E3779B97F4A7C15ULL;
 constexpr std::uint64_t kFitSeed = 0x9E3779B97F4A7C15ULL;
 constexpr std::uint64_t kPressureSeed = 0xD1B54A32D192ED03ULL;
 constexpr std::uint32_t kApplicationId = 1'297'305'936U;
+constexpr std::uint32_t kIndexApplicationId = 1'297'305'937U;
 constexpr std::uint32_t kUserVersion = 1U;
 constexpr std::uint64_t kMinimumWallNanoseconds = 200'000'000ULL;
+constexpr std::uint64_t kIndexMinimumWallNanoseconds = 5'000'000ULL;
 constexpr std::size_t kValueSize = 256U;
+constexpr std::size_t kIndexValueSize = 128U;
 constexpr std::size_t kIntegerResultBytes = 8U;
 constexpr std::size_t kScanResultBytes = kIntegerResultBytes + kValueSize;
 constexpr std::size_t kTimingRepetitions = 3U;
 constexpr std::uint64_t kResultSinkInitial = 0x6A09E667F3BCC909ULL;
 constexpr std::string_view kPointSql = "SELECT v FROM kv WHERE k=?1";
 constexpr std::string_view kScanSql = "SELECT k,v FROM kv";
+constexpr std::string_view kIndexVerificationSql = "SELECT id,payload FROM items";
 constexpr std::string_view kSqliteVersion = "3.54.0";
 constexpr std::string_view kSqliteSourceId =
     "2026-10-02 20:18:07 "
@@ -108,6 +112,14 @@ enum class WorkloadKind : std::uint8_t {
   kPointPresent,
   kPointMissing,
   kScan,
+  kIndexEqualityCoveringHit,
+  kIndexEqualityCoveringMiss,
+  kIndexEqualityNoncoveringHit,
+  kIndexMultiEqualityCovering,
+  kIndexRangeCovering,
+  kIndexRangeNoncovering,
+  kIndexUnselectiveNoncovering,
+  kIndexUnselectiveCovering,
 };
 
 struct WorkResult {
@@ -127,9 +139,13 @@ struct WorkloadDefinition {
   WorkloadKind kind;
   std::string_view sql;
   bool pressure = false;
+  bool indexed = false;
   std::uint64_t seed = 0;
   std::uint64_t row_count = 0;
   std::uint64_t page_count = 0;
+  std::uint32_t application_id = kApplicationId;
+  std::uint32_t user_version = kUserVersion;
+  std::uint64_t minimum_wall_ns = kMinimumWallNanoseconds;
   std::uint64_t warmup_iterations = 0;
   std::uint64_t measured_iterations = 0;
   std::uint64_t diagnostic_iterations = 0;
@@ -154,7 +170,7 @@ constexpr WorkResult Work(std::uint64_t operations, std::uint64_t items, std::ui
   };
 }
 
-constexpr std::array<WorkloadDefinition, 6> kWorkloads{{
+constexpr std::array<WorkloadDefinition, 14> kWorkloads{{
     {
         .id = "point-present-ipk-fit",
         .kind = WorkloadKind::kPointPresent,
@@ -260,6 +276,158 @@ constexpr std::array<WorkloadDefinition, 6> kWorkloads{{
         .diagnostic = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0x6D8C1155F69EB405ULL),
         .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0x6D8C1155F69EB405ULL),
     },
+    {
+        .id = "index-equality-covering-hit",
+        .kind = WorkloadKind::kIndexEqualityCoveringHit,
+        .sql = "SELECT id,score FROM items WHERE category=?1",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 128,
+        .measured_iterations = 4'096,
+        .diagnostic_iterations = 128,
+        .items_per_iteration = 1,
+        .warmup = Work(128, 128, 128, 2'048, 128, 0, 0xAB52CC9D2C671100ULL),
+        .measured = Work(4'096, 4'096, 4'096, 65'536, 4'096, 0, 0x361A0560FAAE23FAULL),
+        .diagnostic = Work(128, 128, 128, 2'048, 128, 0, 0xAB52CC9D2C671100ULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-equality-covering-miss",
+        .kind = WorkloadKind::kIndexEqualityCoveringMiss,
+        .sql = "SELECT id,score FROM items WHERE category=?1",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 128,
+        .measured_iterations = 4'096,
+        .diagnostic_iterations = 128,
+        .items_per_iteration = 1,
+        .warmup = Work(128, 128, 0, 0, 0, 128, 0x5133EC9CB399BAADULL),
+        .measured = Work(4'096, 4'096, 0, 0, 0, 4'096, 0x80E144ABBBC5B0E0ULL),
+        .diagnostic = Work(128, 128, 0, 0, 0, 128, 0x5133EC9CB399BAADULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-equality-noncovering-hit",
+        .kind = WorkloadKind::kIndexEqualityNoncoveringHit,
+        .sql = "SELECT payload FROM items WHERE category=?1",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 128,
+        .measured_iterations = 4'096,
+        .diagnostic_iterations = 128,
+        .items_per_iteration = 1,
+        .warmup = Work(128, 128, 128, 16'384, 128, 0, 0x7D2466F408E2807BULL),
+        .measured = Work(4'096, 4'096, 4'096, 524'288, 4'096, 0, 0xFA336362F74EB93FULL),
+        .diagnostic = Work(128, 128, 128, 16'384, 128, 0, 0x7D2466F408E2807BULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-multi-equality-covering",
+        .kind = WorkloadKind::kIndexMultiEqualityCovering,
+        .sql = "SELECT id FROM items WHERE category=?1 AND score=?2",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 128,
+        .measured_iterations = 4'096,
+        .diagnostic_iterations = 128,
+        .items_per_iteration = 1,
+        .warmup = Work(128, 128, 128, 1'024, 128, 0, 0x6BE770E13C4C5A3EULL),
+        .measured = Work(4'096, 4'096, 4'096, 32'768, 4'096, 0, 0x1E9753DC95EE454AULL),
+        .diagnostic = Work(128, 128, 128, 1'024, 128, 0, 0x6BE770E13C4C5A3EULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-range-covering",
+        .kind = WorkloadKind::kIndexRangeCovering,
+        .sql = "SELECT id,score FROM items WHERE category>=?1 AND category<?2",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 2,
+        .measured_iterations = 2'048,
+        .diagnostic_iterations = 2,
+        .items_per_iteration = 64,
+        .warmup = Work(2, 128, 128, 2'048, 2, 0, 0x7AFFFC22BF2789A8ULL),
+        .measured = Work(2'048, 131'072, 131'072, 2'097'152, 2'048, 0, 0xED6CBC89154321A9ULL),
+        .diagnostic = Work(2, 128, 128, 2'048, 2, 0, 0x7AFFFC22BF2789A8ULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-range-noncovering",
+        .kind = WorkloadKind::kIndexRangeNoncovering,
+        .sql = "SELECT payload FROM items WHERE category>=?1 AND category<?2",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 2,
+        .measured_iterations = 2'048,
+        .diagnostic_iterations = 2,
+        .items_per_iteration = 64,
+        .warmup = Work(2, 128, 128, 16'384, 2, 0, 0xE5C3214557991CC2ULL),
+        .measured = Work(2'048, 131'072, 131'072, 16'777'216, 2'048, 0, 0x936FBE83F4C7C437ULL),
+        .diagnostic = Work(2, 128, 128, 16'384, 2, 0, 0xE5C3214557991CC2ULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-unselective-noncovering",
+        .kind = WorkloadKind::kIndexUnselectiveNoncovering,
+        .sql = "SELECT payload FROM items WHERE flag=?1",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 32,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 2'048,
+        .warmup = Work(1, 2'048, 2'048, 262'144, 1, 0, 0x9156E0A13A7F27DAULL),
+        .measured = Work(32, 65'536, 65'536, 8'388'608, 32, 0, 0x4C5C08A7D63EA9B5ULL),
+        .diagnostic = Work(1, 2'048, 2'048, 262'144, 1, 0, 0x9156E0A13A7F27DAULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
+    {
+        .id = "index-unselective-covering",
+        .kind = WorkloadKind::kIndexUnselectiveCovering,
+        .sql = "SELECT id FROM items WHERE flag=?1",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 4'096,
+        .page_count = 206,
+        .application_id = kIndexApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 256,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 2'048,
+        .warmup = Work(1, 2'048, 2'048, 16'384, 1, 0, 0xA8CCC1A94D5C8252ULL),
+        .measured = Work(256, 524'288, 524'288, 4'194'304, 256, 0, 0x76D9F609F97F9A14ULL),
+        .diagnostic = Work(1, 2'048, 2'048, 16'384, 1, 0, 0xA8CCC1A94D5C8252ULL),
+        .verification = Work(1, 4'096, 4'096, 557'056, 1, 0, 0xD0470B9DD267E30CULL),
+    },
 }};
 
 class Digest final {
@@ -359,6 +527,110 @@ void VerifyValue(modern_sqlite::ByteView value, std::uint64_t logical_row, Diges
     }
     digest.AddByte(std::to_integer<std::uint8_t>(value[index]));
   }
+}
+
+[[nodiscard]] std::string IndexedText(std::string_view prefix, std::uint64_t logical_row) {
+  constexpr std::string_view digits = "0123456789abcdef";
+  std::string result{prefix};
+  result.append(4U, '0');
+  for (std::size_t index = 0; index < 4U; ++index) {
+    const std::size_t shift = (3U - index) * 4U;
+    result[prefix.size() + index] = digits[static_cast<std::size_t>((logical_row >> shift) & 0xFU)];
+  }
+  return result;
+}
+
+void AddText(Digest& digest, std::string_view text) noexcept {
+  digest.AddKey(text.size());
+  for (const char character : text) {
+    digest.AddByte(static_cast<std::uint8_t>(static_cast<unsigned char>(character)));
+  }
+}
+
+void VerifyIndexValue(modern_sqlite::ByteView value, std::uint64_t logical_row, Digest& digest) {
+  if (value.size() != kIndexValueSize) {
+    throw BenchmarkMismatch{"indexed result BLOB has the wrong length"};
+  }
+  const auto prefix = ExpectedPrefix(logical_row);
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const std::byte expected = index < prefix.size() ? prefix[index] : static_cast<std::byte>('0');
+    if (value[index] != expected) {
+      throw BenchmarkMismatch{index < prefix.size() ? "indexed result BLOB has the wrong key prefix"
+                                                    : "indexed result BLOB has the wrong payload"};
+    }
+    digest.AddByte(std::to_integer<std::uint8_t>(value[index]));
+  }
+}
+
+[[nodiscard]] bool IsIndexWorkload(WorkloadKind kind) noexcept {
+  return kind != WorkloadKind::kPointPresent && kind != WorkloadKind::kPointMissing &&
+         kind != WorkloadKind::kScan;
+}
+
+struct IndexInvocation {
+  std::uint64_t logical_row = 0;
+  std::uint64_t first_row = 0;
+  std::uint64_t end_row = 0;
+  std::uint64_t flag = 0;
+  std::uint64_t expected_rows = 0;
+  std::string first_text;
+  std::string second_text;
+};
+
+[[nodiscard]] IndexInvocation MakeIndexInvocation(const WorkloadDefinition& definition,
+                                                  std::uint64_t iteration,
+                                                  std::span<const std::uint64_t> permutation) {
+  const auto permutation_index = static_cast<std::size_t>(iteration % definition.row_count);
+  const std::uint64_t logical_row = permutation[permutation_index];
+  IndexInvocation invocation{
+      .logical_row = logical_row,
+      .first_row = logical_row,
+      .end_row = logical_row + 1U,
+      .flag = logical_row % 2U,
+      .expected_rows = 1U,
+      .first_text = {},
+      .second_text = {},
+  };
+  switch (definition.kind) {
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+    case WorkloadKind::kIndexMultiEqualityCovering:
+      invocation.first_text = IndexedText("category-", logical_row);
+      return invocation;
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+      invocation.first_text = IndexedText("missing-", logical_row);
+      invocation.expected_rows = 0U;
+      return invocation;
+    case WorkloadKind::kIndexRangeCovering:
+    case WorkloadKind::kIndexRangeNoncovering:
+      invocation.first_row = ((logical_row - 1U) % (definition.row_count - 63U)) + 1U;
+      invocation.end_row = invocation.first_row + 64U;
+      invocation.expected_rows = 64U;
+      invocation.first_text = IndexedText("category-", invocation.first_row);
+      invocation.second_text = IndexedText("category-", invocation.end_row);
+      return invocation;
+    case WorkloadKind::kIndexUnselectiveNoncovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      invocation.expected_rows = definition.row_count / 2U;
+      return invocation;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached indexed invocation setup"};
+  }
+  throw BenchmarkMismatch{"invalid indexed workload kind"};
+}
+
+void AddIndexInvocationDigest(Digest& digest, WorkloadKind kind,
+                              const IndexInvocation& invocation) {
+  digest.AddTag('I');
+  digest.AddByte(static_cast<std::uint8_t>(kind));
+  digest.AddKey(invocation.logical_row);
+  digest.AddKey(invocation.first_row);
+  digest.AddKey(invocation.end_row);
+  digest.AddKey(invocation.flag);
+  AddText(digest, invocation.first_text);
+  AddText(digest, invocation.second_text);
 }
 
 [[maybe_unused]] void MixResult(WorkResult result) noexcept {
@@ -488,6 +760,197 @@ void RequireStatus(modern_sqlite::Status status, std::string_view operation) {
   return result;
 }
 
+void BindModernIndex(modern_sqlite::ReadStatement& statement, const WorkloadDefinition& definition,
+                     const IndexInvocation& invocation) {
+  switch (definition.kind) {
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+      RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Text(invocation.first_text)),
+                    "Modern SQLite indexed text bind");
+      return;
+    case WorkloadKind::kIndexMultiEqualityCovering:
+      RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Text(invocation.first_text)),
+                    "Modern SQLite indexed category bind");
+      RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Integer(static_cast<std::int64_t>(
+                                          invocation.logical_row % 256U))),
+                    "Modern SQLite indexed score bind");
+      return;
+    case WorkloadKind::kIndexRangeCovering:
+    case WorkloadKind::kIndexRangeNoncovering:
+      RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Text(invocation.first_text)),
+                    "Modern SQLite indexed lower bind");
+      RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Text(invocation.second_text)),
+                    "Modern SQLite indexed upper bind");
+      return;
+    case WorkloadKind::kIndexUnselectiveNoncovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Integer(
+                                          static_cast<std::int64_t>(invocation.flag))),
+                    "Modern SQLite indexed flag bind");
+      return;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached indexed bind"};
+  }
+  throw BenchmarkMismatch{"invalid indexed workload bind"};
+}
+
+[[nodiscard]] std::uint64_t ExpectedIndexRow(const WorkloadDefinition& definition,
+                                             const IndexInvocation& invocation,
+                                             std::uint64_t row_index) {
+  switch (definition.kind) {
+    case WorkloadKind::kIndexRangeCovering:
+    case WorkloadKind::kIndexRangeNoncovering:
+      return invocation.first_row + row_index;
+    case WorkloadKind::kIndexUnselectiveNoncovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      return invocation.flag == 0U ? 2U + row_index * 2U : 1U + row_index * 2U;
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+    case WorkloadKind::kIndexMultiEqualityCovering:
+      return invocation.logical_row;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached indexed row validation"};
+  }
+  throw BenchmarkMismatch{"invalid indexed workload row validation"};
+}
+
+void ValidateModernIndexRow(std::span<const modern_sqlite::SqlValue> row,
+                            const WorkloadDefinition& definition, const IndexInvocation& invocation,
+                            std::uint64_t row_index, WorkResult& result, Digest& digest) {
+  const std::uint64_t expected_row = ExpectedIndexRow(definition, invocation, row_index);
+  digest.AddTag('R');
+  digest.AddKey(expected_row);
+  switch (definition.kind) {
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexRangeCovering: {
+      if (row.size() != 2U ||
+          row[0].integer_value() !=
+              std::optional<std::int64_t>{static_cast<std::int64_t>(expected_row)} ||
+          row[1].integer_value() !=
+              std::optional<std::int64_t>{static_cast<std::int64_t>(expected_row % 256U)}) {
+        throw BenchmarkMismatch{"Modern SQLite indexed covering row is invalid"};
+      }
+      digest.AddKey(expected_row % 256U);
+      result.bytes += 2U * kIntegerResultBytes;
+      return;
+    }
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+      throw BenchmarkMismatch{"Modern SQLite missing indexed lookup returned a row"};
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+    case WorkloadKind::kIndexRangeNoncovering:
+    case WorkloadKind::kIndexUnselectiveNoncovering: {
+      const std::optional<modern_sqlite::ByteView> blob =
+          row.size() == 1U ? row[0].blob_value() : std::nullopt;
+      if (!blob.has_value()) {
+        throw BenchmarkMismatch{"Modern SQLite indexed payload row is invalid"};
+      }
+      VerifyIndexValue(*blob, expected_row, digest);
+      result.bytes += kIndexValueSize;
+      return;
+    }
+    case WorkloadKind::kIndexMultiEqualityCovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      if (row.size() != 1U ||
+          row[0].integer_value() !=
+              std::optional<std::int64_t>{static_cast<std::int64_t>(expected_row)}) {
+        throw BenchmarkMismatch{"Modern SQLite indexed rowid result is invalid"};
+      }
+      result.bytes += kIntegerResultBytes;
+      return;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached indexed result validation"};
+  }
+  throw BenchmarkMismatch{"invalid indexed result shape"};
+}
+
+[[nodiscard]] WorkResult RunModernIndex(modern_sqlite::ReadStatement& statement,
+                                        const WorkloadDefinition& definition,
+                                        std::uint64_t iterations,
+                                        std::span<const std::uint64_t> permutation) {
+  WorkResult result;
+  Digest digest;
+  for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
+    const IndexInvocation invocation = MakeIndexInvocation(definition, iteration, permutation);
+    BindModernIndex(statement, definition, invocation);
+    AddIndexInvocationDigest(digest, definition.kind, invocation);
+    std::uint64_t row_index = 0;
+    while (true) {
+      const modern_sqlite::ReadStep step =
+          TakeResult(statement.Step(), "Modern SQLite indexed step");
+      if (step == modern_sqlite::ReadStep::kDone) {
+        break;
+      }
+      ValidateModernIndexRow(statement.row(), definition, invocation, row_index, result, digest);
+      ++row_index;
+    }
+    if (row_index != invocation.expected_rows) {
+      throw BenchmarkMismatch{"Modern SQLite indexed query returned the wrong row count"};
+    }
+    digest.AddTag('D');
+    RequireStatus(statement.Reset(), "Modern SQLite indexed reset");
+    ++result.operations;
+    result.items += definition.items_per_iteration;
+    result.rows += row_index;
+    if (row_index == 0U) {
+      ++result.result_misses;
+    } else {
+      ++result.result_hits;
+    }
+  }
+  result.digest = digest.value();
+  return result;
+}
+
+[[nodiscard]] WorkResult VerifyModernIndex(modern_sqlite::ReadSession& session,
+                                           const WorkloadDefinition& definition) {
+  modern_sqlite::ReadStatement statement = PrepareModern(session, kIndexVerificationSql);
+  WorkResult result;
+  Digest digest;
+  digest.AddTag('V');
+  std::uint64_t expected_row = 1U;
+  while (true) {
+    const modern_sqlite::ReadStep step =
+        TakeResult(statement.Step(), "Modern SQLite indexed verification step");
+    if (step == modern_sqlite::ReadStep::kDone) {
+      break;
+    }
+    const std::span<const modern_sqlite::SqlValue> row = statement.row();
+    const std::optional<modern_sqlite::ByteView> blob =
+        row.size() == 2U ? row[1].blob_value() : std::nullopt;
+    if (row.size() != 2U ||
+        row[0].integer_value() !=
+            std::optional<std::int64_t>{static_cast<std::int64_t>(expected_row)} ||
+        !blob.has_value()) {
+      throw BenchmarkMismatch{"Modern SQLite indexed verification row is invalid"};
+    }
+    digest.AddTag('R');
+    digest.AddKey(expected_row);
+    VerifyIndexValue(*blob, expected_row, digest);
+    result.bytes += kIntegerResultBytes + kIndexValueSize;
+    ++result.items;
+    ++result.rows;
+    ++expected_row;
+  }
+  if (expected_row - 1U != definition.row_count) {
+    throw BenchmarkMismatch{"Modern SQLite indexed verification row count is invalid"};
+  }
+  digest.AddTag('D');
+  RequireStatus(statement.Reset(), "Modern SQLite indexed verification reset");
+  RequireStatus(statement.Finalize(), "Modern SQLite indexed verification finalize");
+  result.operations = 1U;
+  result.result_hits = 1U;
+  result.digest = digest.value();
+  return result;
+}
+
 class ModernEngine final {
  public:
   explicit ModernEngine(modern_sqlite::ReadSession session) : session_(std::move(session)) {}
@@ -506,6 +969,9 @@ class ModernEngine final {
   [[nodiscard]] WorkResult Run(Statement& statement, const WorkloadDefinition& definition,
                                std::uint64_t iterations,
                                std::span<const std::uint64_t> permutation) {
+    if (IsIndexWorkload(definition.kind)) {
+      return RunModernIndex(statement, definition, iterations, permutation);
+    }
     if (definition.kind == WorkloadKind::kScan) {
       return RunModernScan(statement, definition, iterations);
     }
@@ -517,6 +983,9 @@ class ModernEngine final {
   }
 
   [[nodiscard]] WorkResult Verify(const WorkloadDefinition& definition) {
+    if (definition.indexed) {
+      return VerifyModernIndex(session_, definition);
+    }
     WorkloadDefinition scan_definition = definition;
     scan_definition.kind = WorkloadKind::kScan;
     scan_definition.sql = kScanSql;
@@ -577,7 +1046,7 @@ class SqliteStatement final {
   CheckSqlite(sqlite3_prepare_v3(database, sql.data(), static_cast<int>(sql.size()), 0,
                                  &raw_statement, &tail),
               database, "SQLite pragma prepare");
-  SqliteStatement statement{raw_statement};
+  const SqliteStatement statement{raw_statement};
   if (tail != sql.data() + sql.size() || sqlite3_step(statement.get()) != SQLITE_ROW) {
     throw BenchmarkMismatch{"SQLite pragma did not return one row"};
   }
@@ -766,6 +1235,193 @@ void ConfigureSqlite(sqlite3* database) {
   return result;
 }
 
+void BindSqliteIndex(sqlite3* database, sqlite3_stmt* statement,
+                     const WorkloadDefinition& definition, const IndexInvocation& invocation) {
+  const auto bind_text = [&](int parameter, const std::string& value, std::string_view operation) {
+    CheckSqlite(sqlite3_bind_text(statement, parameter, value.data(),
+                                  static_cast<int>(value.size()), nullptr),
+                database, operation);
+  };
+  switch (definition.kind) {
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+      bind_text(1, invocation.first_text, "SQLite indexed text bind");
+      return;
+    case WorkloadKind::kIndexMultiEqualityCovering:
+      bind_text(1, invocation.first_text, "SQLite indexed category bind");
+      CheckSqlite(sqlite3_bind_int64(statement, 2,
+                                     static_cast<sqlite3_int64>(invocation.logical_row % 256U)),
+                  database, "SQLite indexed score bind");
+      return;
+    case WorkloadKind::kIndexRangeCovering:
+    case WorkloadKind::kIndexRangeNoncovering:
+      bind_text(1, invocation.first_text, "SQLite indexed lower bind");
+      bind_text(2, invocation.second_text, "SQLite indexed upper bind");
+      return;
+    case WorkloadKind::kIndexUnselectiveNoncovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      CheckSqlite(sqlite3_bind_int64(statement, 1, static_cast<sqlite3_int64>(invocation.flag)),
+                  database, "SQLite indexed flag bind");
+      return;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached SQLite indexed bind"};
+  }
+  throw BenchmarkMismatch{"invalid SQLite indexed workload bind"};
+}
+
+void ValidateSqliteIndexRow(sqlite3_stmt* statement, const WorkloadDefinition& definition,
+                            const IndexInvocation& invocation, std::uint64_t row_index,
+                            WorkResult& result, Digest& digest) {
+  const std::uint64_t expected_row = ExpectedIndexRow(definition, invocation, row_index);
+  digest.AddTag('R');
+  digest.AddKey(expected_row);
+  switch (definition.kind) {
+    case WorkloadKind::kIndexEqualityCoveringHit:
+    case WorkloadKind::kIndexRangeCovering:
+      if (sqlite3_column_count(statement) != 2 ||
+          sqlite3_column_type(statement, 0) != SQLITE_INTEGER ||
+          sqlite3_column_type(statement, 1) != SQLITE_INTEGER ||
+          sqlite3_column_int64(statement, 0) != static_cast<sqlite3_int64>(expected_row) ||
+          sqlite3_column_int64(statement, 1) != static_cast<sqlite3_int64>(expected_row % 256U)) {
+        throw BenchmarkMismatch{"SQLite indexed covering row is invalid"};
+      }
+      digest.AddKey(expected_row % 256U);
+      result.bytes += 2U * kIntegerResultBytes;
+      return;
+    case WorkloadKind::kIndexEqualityCoveringMiss:
+      throw BenchmarkMismatch{"SQLite missing indexed lookup returned a row"};
+    case WorkloadKind::kIndexEqualityNoncoveringHit:
+    case WorkloadKind::kIndexRangeNoncovering:
+    case WorkloadKind::kIndexUnselectiveNoncovering: {
+      if (sqlite3_column_count(statement) != 1 ||
+          sqlite3_column_type(statement, 0) != SQLITE_BLOB) {
+        throw BenchmarkMismatch{"SQLite indexed payload row is invalid"};
+      }
+      const void* pointer = sqlite3_column_blob(statement, 0);
+      const int length = sqlite3_column_bytes(statement, 0);
+      if (pointer == nullptr || length != static_cast<int>(kIndexValueSize)) {
+        throw BenchmarkMismatch{"SQLite indexed payload bytes are invalid"};
+      }
+      VerifyIndexValue(modern_sqlite::ByteView{static_cast<const std::byte*>(pointer),
+                                               static_cast<std::size_t>(length)},
+                       expected_row, digest);
+      result.bytes += kIndexValueSize;
+      return;
+    }
+    case WorkloadKind::kIndexMultiEqualityCovering:
+    case WorkloadKind::kIndexUnselectiveCovering:
+      if (sqlite3_column_count(statement) != 1 ||
+          sqlite3_column_type(statement, 0) != SQLITE_INTEGER ||
+          sqlite3_column_int64(statement, 0) != static_cast<sqlite3_int64>(expected_row)) {
+        throw BenchmarkMismatch{"SQLite indexed rowid result is invalid"};
+      }
+      result.bytes += kIntegerResultBytes;
+      return;
+    case WorkloadKind::kPointPresent:
+    case WorkloadKind::kPointMissing:
+    case WorkloadKind::kScan:
+      throw BenchmarkMismatch{"non-index workload reached SQLite indexed result validation"};
+  }
+  throw BenchmarkMismatch{"invalid SQLite indexed result shape"};
+}
+
+[[nodiscard]] WorkResult RunSqliteIndex(sqlite3* database, sqlite3_stmt* statement,
+                                        const WorkloadDefinition& definition,
+                                        std::uint64_t iterations,
+                                        std::span<const std::uint64_t> permutation) {
+  WorkResult result;
+  Digest digest;
+  for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
+    const IndexInvocation invocation = MakeIndexInvocation(definition, iteration, permutation);
+    BindSqliteIndex(database, statement, definition, invocation);
+    AddIndexInvocationDigest(digest, definition.kind, invocation);
+    std::uint64_t row_index = 0;
+    while (true) {
+      const int step = sqlite3_step(statement);
+      if (step == SQLITE_DONE) {
+        break;
+      }
+      if (step != SQLITE_ROW) {
+        CheckSqlite(step, database, "SQLite indexed step");
+      }
+      ValidateSqliteIndexRow(statement, definition, invocation, row_index, result, digest);
+      ++row_index;
+    }
+    if (row_index != invocation.expected_rows) {
+      throw BenchmarkMismatch{"SQLite indexed query returned the wrong row count"};
+    }
+    digest.AddTag('D');
+    CheckSqlite(sqlite3_reset(statement), database, "SQLite indexed reset");
+    ++result.operations;
+    result.items += definition.items_per_iteration;
+    result.rows += row_index;
+    if (row_index == 0U) {
+      ++result.result_misses;
+    } else {
+      ++result.result_hits;
+    }
+  }
+  result.digest = digest.value();
+  return result;
+}
+
+[[nodiscard]] WorkResult VerifySqliteIndex(sqlite3* database,
+                                           const WorkloadDefinition& definition) {
+  sqlite3_stmt* raw_statement = nullptr;
+  const char* tail = nullptr;
+  CheckSqlite(sqlite3_prepare_v3(database, kIndexVerificationSql.data(),
+                                 static_cast<int>(kIndexVerificationSql.size()),
+                                 SQLITE_PREPARE_PERSISTENT, &raw_statement, &tail),
+              database, "SQLite indexed verification prepare");
+  SqliteStatement statement{raw_statement};
+  if (raw_statement == nullptr ||
+      tail != kIndexVerificationSql.data() + kIndexVerificationSql.size()) {
+    throw BenchmarkMismatch{"SQLite indexed verification prepare was incomplete"};
+  }
+  WorkResult result;
+  Digest digest;
+  digest.AddTag('V');
+  std::uint64_t expected_row = 1U;
+  while (true) {
+    const int step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW || sqlite3_column_count(statement.get()) != 2 ||
+        sqlite3_column_type(statement.get(), 0) != SQLITE_INTEGER ||
+        sqlite3_column_int64(statement.get(), 0) != static_cast<sqlite3_int64>(expected_row) ||
+        sqlite3_column_type(statement.get(), 1) != SQLITE_BLOB) {
+      throw BenchmarkMismatch{"SQLite indexed verification row is invalid"};
+    }
+    const void* pointer = sqlite3_column_blob(statement.get(), 1);
+    const int length = sqlite3_column_bytes(statement.get(), 1);
+    if (pointer == nullptr || length != static_cast<int>(kIndexValueSize)) {
+      throw BenchmarkMismatch{"SQLite indexed verification payload is invalid"};
+    }
+    digest.AddTag('R');
+    digest.AddKey(expected_row);
+    VerifyIndexValue(modern_sqlite::ByteView{static_cast<const std::byte*>(pointer),
+                                             static_cast<std::size_t>(length)},
+                     expected_row, digest);
+    result.bytes += kIntegerResultBytes + kIndexValueSize;
+    ++result.items;
+    ++result.rows;
+    ++expected_row;
+  }
+  if (expected_row - 1U != definition.row_count) {
+    throw BenchmarkMismatch{"SQLite indexed verification row count is invalid"};
+  }
+  digest.AddTag('D');
+  CheckSqlite(sqlite3_reset(statement.get()), database, "SQLite indexed verification reset");
+  result.operations = 1U;
+  result.result_hits = 1U;
+  result.digest = digest.value();
+  return result;
+}
+
 class SqliteEngine final {
  public:
   SqliteEngine(const SqliteEngine&) = delete;
@@ -827,6 +1483,9 @@ class SqliteEngine final {
   [[nodiscard]] WorkResult Run(Statement& statement, const WorkloadDefinition& definition,
                                std::uint64_t iterations,
                                std::span<const std::uint64_t> permutation) {
+    if (IsIndexWorkload(definition.kind)) {
+      return RunSqliteIndex(database_, statement.get(), definition, iterations, permutation);
+    }
     if (definition.kind == WorkloadKind::kScan) {
       return RunSqliteScan(database_, statement.get(), definition, iterations);
     }
@@ -841,6 +1500,9 @@ class SqliteEngine final {
   }
 
   [[nodiscard]] WorkResult Verify(const WorkloadDefinition& definition) {
+    if (definition.indexed) {
+      return VerifySqliteIndex(database_, definition);
+    }
     WorkloadDefinition scan_definition = definition;
     scan_definition.kind = WorkloadKind::kScan;
     scan_definition.sql = kScanSql;
@@ -944,7 +1606,7 @@ template <typename Engine>
         });
     if (!smoke) {
       RequireWork("measured repetition", repetition.work, definition.measured);
-      if (repetition.wall_ns < kMinimumWallNanoseconds) {
+      if (repetition.wall_ns < definition.minimum_wall_ns) {
         throw HarnessFailure{"baseline repetition did not reach the minimum wall time"};
       }
     }
@@ -1482,8 +2144,8 @@ void ValidateDatabaseFile(const std::filesystem::path& path, const WorkloadDefin
   const std::uintmax_t file_size = std::filesystem::file_size(path, error);
   if (error || page_size != 4096U ||
       file_size != definition.page_count * static_cast<std::uint64_t>(page_size) ||
-      load32(28) != definition.page_count || load32(60) != kUserVersion ||
-      load32(68) != kApplicationId) {
+      load32(28) != definition.page_count || load32(60) != definition.user_version ||
+      load32(68) != definition.application_id) {
     throw HarnessFailure{"benchmark database metadata does not match the selected case"};
   }
   for (const std::string_view suffix : {"-journal", "-wal", "-shm"}) {
