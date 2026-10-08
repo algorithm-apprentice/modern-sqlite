@@ -92,7 +92,7 @@ class VerificationLayeringTest(unittest.TestCase):
                 module,
             )
 
-    def test_write_performance_tool_uses_only_the_standard_library(
+    def test_write_performance_tool_uses_only_standard_library_and_local_tools(
         self,
     ) -> None:
         tool = self.root / "tools/write_performance.py"
@@ -109,7 +109,11 @@ class VerificationLayeringTest(unittest.TestCase):
 
         self.assertTrue(imported)
         for module in imported:
-            self.assertIn(module, sys.stdlib_module_names, module)
+            self.assertTrue(
+                module in {"read_performance", "tools"}
+                or module in sys.stdlib_module_names,
+                module,
+            )
 
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
         read_allowed = {
