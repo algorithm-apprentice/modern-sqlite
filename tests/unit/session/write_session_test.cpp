@@ -75,6 +75,11 @@ void ExecuteDone(WriteSession& session, std::string_view sql) {
   return text->bytes();
 }
 
+[[nodiscard]] std::filesystem::path IndexFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "index_performance" / "indexed.db";
+}
+
 class TemporaryDirectory final {
  public:
   TemporaryDirectory() {
@@ -244,6 +249,42 @@ TEST(WriteSession, EnforcesStatementLifecycleResetAndBusyRules) {
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ(3, rows[1][0].integer_value());
   EXPECT_EQ(4, rows[2][0].integer_value());
+}
+
+TEST(WriteSession, MaintainsIndexesForInsertStatements) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  std::filesystem::copy_file(IndexFixturePath(), path);
+  WriteSession session = TakeValue(WriteSession::Open(path.string()));
+
+  ExecuteDone(session,
+              "INSERT INTO items(id,category,score,flag,payload) "
+              "VALUES(5000,'category-new',42,0,x'00')");
+  EXPECT_EQ(1U, session.changes());
+  EXPECT_EQ(5000, session.last_insert_rowid());
+
+  const auto category_rows =
+      QueryRows(session, "SELECT id,score FROM items WHERE category='category-new'");
+  ASSERT_EQ(1U, category_rows.size());
+  EXPECT_EQ(5000, category_rows[0][0].integer_value());
+  EXPECT_EQ(42, category_rows[0][1].integer_value());
+
+  const auto score_rows = QueryRows(session, "SELECT id FROM items WHERE score=42 AND id=5000");
+  ASSERT_EQ(1U, score_rows.size());
+  EXPECT_EQ(5000, score_rows[0][0].integer_value());
+
+  const auto flag_rows = QueryRows(session, "SELECT id FROM items WHERE flag=0 AND id=5000");
+  ASSERT_EQ(1U, flag_rows.size());
+  EXPECT_EQ(5000, flag_rows[0][0].integer_value());
+
+  WriteStatement duplicate = PrepareOne(session,
+                                        "INSERT INTO items(id,category,score,flag,payload) "
+                                        "VALUES(5000,'category-other',7,1,x'01')");
+  const auto duplicate_step = duplicate.Step();
+  ASSERT_FALSE(duplicate_step.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate_step.error().code());
+  EXPECT_EQ(0U, session.changes());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM items WHERE category='category-other'").empty());
 }
 
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {

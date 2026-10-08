@@ -890,26 +890,6 @@ void VerifyAlternatingOwnership(const std::filesystem::path& path) {
   VerifyModernEmbeddedValue(path);
 }
 
-[[nodiscard]] std::vector<unsigned char> ReadFileBytes(const std::filesystem::path& path) {
-  std::ifstream input{path, std::ios::binary | std::ios::ate};
-  if (!input) {
-    throw std::runtime_error{"could not open interoperability image"};
-  }
-  const std::streamoff end = input.tellg();
-  if (end < 0) {
-    throw std::runtime_error{"could not size interoperability image"};
-  }
-  std::vector<unsigned char> bytes(static_cast<std::size_t>(end));
-  input.seekg(0);
-  if (!bytes.empty()) {
-    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-  }
-  if (!input) {
-    throw std::runtime_error{"could not read interoperability image"};
-  }
-  return bytes;
-}
-
 void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
   {
     const Database sqlite{path, kCreateFlags};
@@ -920,27 +900,29 @@ void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
                   "INSERT INTO Wr VALUES('key','value');");
     VerifyIntegrity(sqlite.get());
   }
-  const std::vector<unsigned char> before = ReadFileBytes(path);
   {
     modern_sqlite::WriteSession session =
         TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-    for (const std::string_view sql :
-         {"UPDATE Indexed SET value='changed' WHERE id=1", "DELETE FROM Wr WHERE key='key'"}) {
+    ExecuteModern(session, "INSERT INTO Indexed VALUES(2,'two')");
+    for (const auto& [sql, expected_code] : std::array{
+             std::pair{"UPDATE Indexed SET value='changed' WHERE id=1",
+                       modern_sqlite::ErrorCode::kProtocol},
+             std::pair{"DELETE FROM Wr WHERE key='key'", modern_sqlite::ErrorCode::kGeneric},
+         }) {
       const auto prepared = session.Prepare(modern_sqlite::Utf8View{sql});
-      if (prepared.has_value() || prepared.error().code() != modern_sqlite::ErrorCode::kProtocol) {
-        throw std::runtime_error{"Modern accepted an unsupported indexed-table mutation"};
+      if (prepared.has_value() || prepared.error().code() != expected_code) {
+        throw std::runtime_error{"Modern accepted an unsupported mutation"};
       }
     }
   }
-  const std::vector<unsigned char> after = ReadFileBytes(path);
-  if (!std::ranges::equal(before, after)) {
-    throw std::runtime_error{"unsupported mutation changed the database image"};
-  }
   const Database sqlite{path, kReadOnlyFlags};
   VerifyIntegrity(sqlite.get());
-  if (QueryText(sqlite.get(), "SELECT value FROM Indexed WHERE id=1") != "one" ||
+  if (QueryText(sqlite.get(),
+                "SELECT group_concat(id||':'||value,',') "
+                "FROM (SELECT id,value FROM Indexed INDEXED BY sqlite_autoindex_Indexed_1 "
+                "ORDER BY value)") != "1:one,2:two" ||
       QueryText(sqlite.get(), "SELECT value FROM Wr WHERE key='key'") != "value") {
-    throw std::runtime_error{"unsupported mutation changed logical contents"};
+    throw std::runtime_error{"indexed INSERT or unsupported mutation produced the wrong contents"};
   }
 }
 

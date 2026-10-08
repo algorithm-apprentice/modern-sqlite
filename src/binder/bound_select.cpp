@@ -562,7 +562,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(insert.table);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(insert.table, true);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -622,7 +622,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(update.table);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(update.table, false);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -670,7 +670,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(delete_statement.table);
+    BindExpected<BoundMutationTarget> target = ResolveMutationTarget(delete_statement.table, false);
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
@@ -880,7 +880,8 @@ class StatementBinder final {
         std::move(static_cast<BoundExpressionState&>(*impl_));
   }
 
-  [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name) {
+  [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name,
+                                                                        bool allow_indexes) {
     BindExpected<DecodedNameParts> parts = NameParts(name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -901,10 +902,6 @@ class StatementBinder final {
                                          "no such table: " + std::string{requested_name}));
     }
     const CatalogTable& table = catalog_->table(*table_id);
-    if (!catalog_->table_indexes(*table_id).empty()) {
-      return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
-                                         "table mutation with indexes is not supported"));
-    }
     if (table.without_rowid || table.strict || table.autoincrement ||
         !table.check_constraints.empty()) {
       return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, name.span,
@@ -946,6 +943,56 @@ class StatementBinder final {
           .default_value = column.missing_record_value,
           .rowid_alias = table.rowid_alias == ColumnId{index},
       });
+    }
+    const std::span<const IndexId> table_indexes = catalog_->table_indexes(*table_id);
+    if (!allow_indexes && !table_indexes.empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
+                                         "table mutation with indexes is not supported"));
+    }
+    target.indexes.reserve(table_indexes.size());
+    for (const IndexId index_id : table_indexes) {
+      const CatalogIndex& index = catalog_->index(index_id);
+      const bool conflict_supported = !index.conflict_action.has_value() ||
+                                      *index.conflict_action == ConflictAction::kDefault ||
+                                      *index.conflict_action == ConflictAction::kAbort;
+      if (index.partial_predicate.has_value() || index.key_term_count == 0U ||
+          index.key_term_count > std::numeric_limits<std::uint32_t>::max() ||
+          index.terms.size() != index.key_term_count + 1U || !conflict_supported ||
+          !std::holds_alternative<RowIdIndexTerm>(index.terms.back().target)) {
+        return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
+                                           "index shape is not supported for mutation"));
+      }
+      BoundIndexMaintenance maintenance{
+          .index = index_id,
+          .root_page = index.root_page,
+          .unique = index.unique,
+          .unique_not_null = index.unique_not_null,
+          .key_term_count = static_cast<std::uint32_t>(index.key_term_count),
+      };
+      maintenance.terms.reserve(index.terms.size());
+      for (std::size_t term_index = 0; term_index < index.terms.size(); ++term_index) {
+        const CatalogIndexTerm& term = index.terms[term_index];
+        if (FindRegisteredCollation(term.collation_name) == nullptr) {
+          return std::unexpected(BinderError(BindErrorCode::kNoSuchCollation, name.span,
+                                             "no such collation sequence: " + term.collation_name));
+        }
+        BoundIndexTerm bound_term{
+            .collation_name = term.collation_name,
+            .order = term.order,
+        };
+        if (term_index < index.key_term_count) {
+          const auto* column = std::get_if<ColumnId>(&term.target);
+          if (column == nullptr || column->value >= table.columns.size()) {
+            return std::unexpected(BinderError(BindErrorCode::kIndexedTableUnsupported, name.span,
+                                               "index expression is not supported for mutation"));
+          }
+          bound_term.column = *column;
+        } else {
+          bound_term.rowid = true;
+        }
+        maintenance.terms.push_back(bound_term);
+      }
+      target.indexes.push_back(std::move(maintenance));
     }
     return target;
   }

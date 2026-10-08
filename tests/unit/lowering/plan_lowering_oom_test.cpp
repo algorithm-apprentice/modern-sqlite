@@ -310,6 +310,7 @@ int main() try {
   const PhysicalPlan noncovering_index =
       PhysicalIndexFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1");
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
+  const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
   const PhysicalMutationPlan update = UpdateFixture(catalog);
   const PhysicalMutationPlan stable_update = StableUpdateFixture(catalog);
@@ -346,8 +347,8 @@ int main() try {
   };
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
-                 verify_oom(mutation) && verify_oom(deletion) && verify_oom(update) &&
-                 verify_oom(stable_update) && verify_oom(create)
+                 verify_oom(mutation) && verify_oom(indexed_insert) && verify_oom(deletion) &&
+                 verify_oom(update) && verify_oom(stable_update) && verify_oom(create)
              ? 0
              : 1;
 } catch (...) {

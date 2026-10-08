@@ -207,6 +207,88 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr IndexedInsertCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 0, .generation = 17},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)"));
+  input.definitions.push_back(ParseTree("CREATE UNIQUE INDEX items_name ON Items(Name)"));
+  input.definitions.push_back(ParseTree("CREATE INDEX items_score ON Items(Score DESC)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{
+                  .name = "Name",
+                  .declared_type = "TEXT",
+              },
+              CatalogColumnInput{
+                  .name = "Score",
+                  .declared_type = "REAL",
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{1},
+      .name = "items_name",
+      .table = TableId{0},
+      .root_page = RootPageId{3},
+      .origin = IndexOrigin::kCreateIndex,
+      .unique = true,
+      .conflict_action = ConflictAction::kDefault,
+      .key_term_count = 1,
+      .terms =
+          {
+              CatalogIndexTerm{
+                  .target = ColumnId{1},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+              CatalogIndexTerm{
+                  .target = RowIdIndexTerm{},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{2},
+      .name = "items_score",
+      .table = TableId{0},
+      .root_page = RootPageId{4},
+      .origin = IndexOrigin::kCreateIndex,
+      .key_term_count = 1,
+      .terms =
+          {
+              CatalogIndexTerm{
+                  .target = ColumnId{2},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kDescending,
+              },
+              CatalogIndexTerm{
+                  .target = RowIdIndexTerm{},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kAscending,
+              },
+          },
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] CatalogSnapshotPtr EmptyCatalog() {
   CatalogInput input{
       .schema_name = "main",
@@ -346,6 +428,35 @@ void InitializeMutationDatabase(test::WritePagerFixedVfs& vfs) {
   RequireStatus(statement.Succeed());
 }
 
+void InitializeIndexedInsertDatabase(test::WritePagerFixedVfs& vfs) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  TransactionStatement statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(statement.writer()->InitializeDatabase());
+  const TableBtreeWriter table = TakeValue(statement.writer()->CreateTableBtree());
+  if (table.root_page() != PageNumber{2}) {
+    throw std::runtime_error{"indexed INSERT table root is not page 2"};
+  }
+  const std::array<IndexColumnOrder, 2> name_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const IndexBtreeWriter name = TakeValue(statement.writer()->CreateIndexBtree(name_columns));
+  if (name.root_page() != PageNumber{3}) {
+    throw std::runtime_error{"indexed INSERT name root is not page 3"};
+  }
+  const std::array<IndexColumnOrder, 2> score_columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const IndexBtreeWriter score = TakeValue(statement.writer()->CreateIndexBtree(score_columns));
+  if (score.root_page() != PageNumber{4}) {
+    throw std::runtime_error{"indexed INSERT score root is not page 4"};
+  }
+  RequireStatus(statement.Succeed());
+}
+
 struct MutationOutcome {
   std::uint64_t changes = 0;
   std::optional<std::int64_t> last_insert_rowid{};
@@ -400,6 +511,28 @@ struct MutationOutcome {
       const std::int64_t rowid = TakeValue(cursor.rowid());
       const ByteBuffer payload = TakeValue(cursor.CopyPayload());
       rows.emplace_back(rowid, TakeValue(DecodeRecord(payload.view())));
+      has_row = TakeValue(cursor.Next());
+    }
+  }
+  RequireStatus(pager->EndRead());
+  return rows;
+}
+
+[[nodiscard]] std::vector<std::vector<SqlValue>> ReadIndexRows(
+    test::WritePagerFixedVfs& vfs, PageNumber root_page,
+    std::span<const IndexColumnOrder> columns) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to reopen indexed lowering test pager"};
+  }
+  RequireStatus(pager->BeginRead());
+  std::vector<std::vector<SqlValue>> rows;
+  {
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root_page, columns));
+    bool has_row = TakeValue(cursor.First());
+    while (has_row) {
+      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+      rows.push_back(TakeValue(DecodeRecord(payload.view())));
       has_row = TakeValue(cursor.Next());
     }
   }
@@ -559,6 +692,7 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
                 InstructionKind::kLoadParameter,
                 InstructionKind::kOpenWrite,
                 InstructionKind::kResolveInsertRowId,
+                InstructionKind::kCheckInsertRowId,
                 InstructionKind::kBuildTableRecord,
                 InstructionKind::kInsertTable,
                 InstructionKind::kCloseWrite,
@@ -639,7 +773,7 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   ASSERT_EQ(3U, rows[0].second.size());
   EXPECT_EQ(SqlValueType::kNull, rows[0].second[0].type());
   EXPECT_EQ("1", TextBytes(rows[0].second[1]));
-  EXPECT_DOUBLE_EQ(7.0, TakeOptional(rows[0].second[2].real_value(), "expected REAL score"));
+  EXPECT_EQ(7, rows[0].second[2].integer_value());
 
   EXPECT_EQ(2, rows[1].first);
   EXPECT_EQ(SqlValueType::kNull, rows[1].second[0].type());
@@ -658,6 +792,65 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   EXPECT_EQ("plain", TextBytes(plain_rows[0].second[0]));
   EXPECT_EQ(20, plain_rows[1].first);
   EXPECT_EQ("42", TextBytes(plain_rows[1].second[0]));
+}
+
+TEST(InsertLowering, MaintainsIndexesAndEnforcesUniquePrefixes) {
+  const CatalogSnapshotPtr catalog = IndexedInsertCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedInsertDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const std::vector<InstructionKind> kinds = InstructionKinds(insert);
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCheckInsertRowId), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCheckUniqueIndex), kinds.end());
+  EXPECT_EQ(2U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kInsertIndex)));
+  const auto table_insert = std::ranges::find(kinds, InstructionKind::kInsertTable);
+  const auto first_index_insert = std::ranges::find(kinds, InstructionKind::kInsertIndex);
+  ASSERT_NE(kinds.end(), table_insert);
+  ASSERT_NE(kinds.end(), first_index_insert);
+  EXPECT_LT(first_index_insert, table_insert);
+
+  const auto execute = [&](std::int64_t rowid, SqlValue name, SqlValue score) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(std::move(name));
+    parameters.push_back(std::move(score));
+    return ExecuteMutationProgram(insert, vfs, parameters);
+  };
+
+  EXPECT_EQ(1U, TakeValue(execute(1, SqlValue::Text("alpha"), SqlValue::Integer(7))).changes);
+  const auto duplicate = execute(2, SqlValue::Text("alpha"), SqlValue::Integer(8));
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate.error().code());
+  EXPECT_EQ(1U, ReadMutationRows(vfs).size());
+
+  EXPECT_EQ(1U, TakeValue(execute(2, SqlValue{}, SqlValue::Integer(8))).changes);
+  EXPECT_EQ(1U, TakeValue(execute(3, SqlValue{}, SqlValue::Integer(9))).changes);
+  const auto table_rows = ReadMutationRows(vfs);
+  ASSERT_EQ(3U, table_rows.size());
+  EXPECT_EQ(7, table_rows[0].second[2].integer_value());
+
+  const std::array<IndexColumnOrder, 2> name_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto name_rows = ReadIndexRows(vfs, PageNumber{3}, name_columns);
+  ASSERT_EQ(3U, name_rows.size());
+  EXPECT_EQ(SqlValueType::kNull, name_rows[0][0].type());
+  EXPECT_EQ(SqlValueType::kNull, name_rows[1][0].type());
+  EXPECT_EQ("alpha", TextBytes(name_rows[2][0]));
+  EXPECT_EQ(1, name_rows[2][1].integer_value());
+
+  const std::array<IndexColumnOrder, 2> score_columns{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto score_rows = ReadIndexRows(vfs, PageNumber{4}, score_columns);
+  ASSERT_EQ(3U, score_rows.size());
+  EXPECT_EQ(9, score_rows[0][0].integer_value());
+  EXPECT_EQ(8, score_rows[1][0].integer_value());
+  EXPECT_EQ(7, score_rows[2][0].integer_value());
 }
 
 TEST(InsertLowering, RetainsLimitsAndRejectsMovedFromPlans) {
@@ -1066,13 +1259,13 @@ TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(1, rows[0].first);
   EXPECT_EQ("2", TextBytes(rows[0].second[1]));
-  EXPECT_EQ(1.0, TakeOptional(rows[0].second[2].real_value(), "missing row 1 score"));
+  EXPECT_EQ(1, rows[0].second[2].integer_value());
   EXPECT_EQ(2, rows[1].first);
   EXPECT_EQ("42", TextBytes(rows[1].second[1]));
-  EXPECT_EQ(12.0, TakeOptional(rows[1].second[2].real_value(), "missing row 2 score"));
+  EXPECT_EQ(12, rows[1].second[2].integer_value());
   EXPECT_EQ(5, rows[2].first);
   EXPECT_EQ("gamma", TextBytes(rows[2].second[1]));
-  EXPECT_EQ(13.0, TakeOptional(rows[2].second[2].real_value(), "missing row 5 score"));
+  EXPECT_EQ(13, rows[2].second[2].integer_value());
 
   const BytecodeProgram plain_insert =
       LowerMutationOrThrow("INSERT INTO Plain(rowid,Value) VALUES(?1,?2)", catalog);
