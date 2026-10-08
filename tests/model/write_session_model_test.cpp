@@ -100,6 +100,8 @@ enum class ActionKind : std::uint8_t {
   kCreateMainNoOp,
   kCreateTemp,
   kCreateTempNoOp,
+  kCreateIndex,
+  kAnalyze,
   kInsertExplicit,
   kInsertDefault,
   kInsertDuplicate,
@@ -143,6 +145,8 @@ struct ModelRow {
 struct DatabaseModel {
   bool items_visible = false;
   bool temp_visible = false;
+  bool index_visible = false;
+  bool stat1_visible = false;
   std::map<std::int64_t, ModelRow> rows;
 
   bool operator==(const DatabaseModel&) const = default;
@@ -248,6 +252,21 @@ class ReferenceModel final {
         database_.temp_visible = true;
         return {};
       case ActionKind::kCreateTempNoOp:
+        return {};
+      case ActionKind::kCreateIndex:
+        if (!database_.items_visible) {
+          return PrepareError(ErrorCode::kGeneric);
+        }
+        if (database_.index_visible) {
+          return PrepareError(ErrorCode::kGeneric);
+        }
+        database_.index_visible = true;
+        return {};
+      case ActionKind::kAnalyze:
+        if (!database_.items_visible) {
+          return PrepareError(ErrorCode::kGeneric);
+        }
+        database_.stat1_visible = true;
         return {};
       case ActionKind::kInsertExplicit:
         return InsertExplicit(action.first, action.second, action.text);
@@ -482,6 +501,10 @@ class ReferenceModel final {
       return "create-temp";
     case ActionKind::kCreateTempNoOp:
       return "create-temp-noop";
+    case ActionKind::kCreateIndex:
+      return "create-index";
+    case ActionKind::kAnalyze:
+      return "analyze";
     case ActionKind::kInsertExplicit:
       return "insert-explicit";
     case ActionKind::kInsertDefault:
@@ -535,6 +558,8 @@ class ReferenceModel final {
       {.kind = ActionKind::kCreateMainNoOp, .text = {}},
       {.kind = ActionKind::kInsertExplicit, .first = 1, .second = 1, .text = "alpha"},
       {.kind = ActionKind::kInsertDefault, .text = {}},
+      {.kind = ActionKind::kCreateIndex, .text = {}},
+      {.kind = ActionKind::kAnalyze, .text = {}},
       {.kind = ActionKind::kInsertDuplicate, .first = 1, .second = 9, .text = "duplicate"},
       {.kind = ActionKind::kInsertNotNull, .first = 3, .text = {}},
       {.kind = ActionKind::kInsertFractional, .first = 7, .text = {}},
@@ -603,7 +628,7 @@ class ReferenceModel final {
   constexpr std::array<std::string_view, 5> kSavepointNames{
       "alpha", "ALPHA", "beta", "BETA", "gamma",
   };
-  const std::uint64_t selector = words[0] % 18U;
+  const std::uint64_t selector = words[0] % 20U;
   if (model.database().rows.size() >= kMaximumRows && selector <= 3U) {
     return Action{
         .kind = ActionKind::kDeleteScan,
@@ -718,6 +743,10 @@ class ReferenceModel final {
                                 : Action{.kind = ActionKind::kSelectSnapshot, .text = {}};
     case 17:
       return Action{.kind = ActionKind::kCreateTempNoOp, .text = {}};
+    case 18:
+      return Action{.kind = ActionKind::kCreateIndex, .text = {}};
+    case 19:
+      return Action{.kind = ActionKind::kAnalyze, .text = {}};
     default:
       break;
   }
@@ -788,6 +817,10 @@ class ReferenceModel final {
       return ExecuteSql(session, "CREATE TABLE Temp(id INTEGER PRIMARY KEY)");
     case ActionKind::kCreateTempNoOp:
       return ExecuteSql(session, "CREATE TABLE IF NOT EXISTS Temp(id INTEGER PRIMARY KEY)");
+    case ActionKind::kCreateIndex:
+      return ExecuteSql(session, "CREATE INDEX items_score ON Items(Score DESC)");
+    case ActionKind::kAnalyze:
+      return ExecuteSql(session, "ANALYZE Items");
     case ActionKind::kInsertExplicit: {
       std::vector<SqlValue> bindings;
       bindings.push_back(SqlValue::Integer(action.first));
@@ -992,6 +1025,8 @@ void CompareRows(WriteSession& session, const DatabaseModel& expected, std::stri
 void CompareState(WriteSession& session, const ReferenceModel& model, std::string_view trace) {
   CompareCatalogVisibility(session, "Items", model.database().items_visible, trace);
   CompareCatalogVisibility(session, "Temp", model.database().temp_visible, trace);
+  CompareCatalogVisibility(session, "items_score", model.database().index_visible, trace);
+  CompareCatalogVisibility(session, "sqlite_stat1", model.database().stat1_visible, trace);
   CompareRows(session, model.database(), trace);
   if (session.changes() != model.changes()) {
     Fail(trace, "changes differs");

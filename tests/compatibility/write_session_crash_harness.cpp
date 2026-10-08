@@ -222,6 +222,14 @@ template <typename T>
   return ExecuteDone(session, "ANALYZE Items");
 }
 
+[[nodiscard]] bool IndexedDmlCommit(WriteSession& session) {
+  return ExecuteDone(session, "BEGIN") &&
+         ExecuteDone(session, "CREATE UNIQUE INDEX items_name ON Items(Name DESC)") &&
+         ExecuteDone(session, "UPDATE Items SET Name=Name||'x' WHERE id=2") &&
+         ExecuteDone(session, "INSERT INTO Items VALUES(4,'four')") &&
+         ExecuteDone(session, "DELETE FROM Items WHERE id=1") && ExecuteDone(session, "COMMIT");
+}
+
 [[nodiscard]] bool ExactRowIdMove(WriteSession& session) {
   return ExecuteDone(session, "UPDATE Items SET id=10,Name='moved' WHERE id=1");
 }
@@ -321,6 +329,20 @@ template <typename T>
           .id = "implicit-analyze",
           .execute = ImplicitAnalyze,
           .terminal = InitialState(),
+      },
+      CrashScenario{
+          .id = "indexed-dml-commit",
+          .execute = IndexedDmlCommit,
+          .terminal =
+              LogicalState{
+                  .rows =
+                      {
+                          {.rowid = 2, .name = "twox"},
+                          {.rowid = 3, .name = "three"},
+                          {.rowid = 4, .name = "four"},
+                      },
+                  .temp_visible = false,
+              },
       },
       CrashScenario{
           .id = "exact-rowid-move",

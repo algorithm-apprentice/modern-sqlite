@@ -225,6 +225,9 @@ struct CrashExpectedState {
   if (scenario == "implicit-analyze") {
     return kInitial;
   }
+  if (scenario == "indexed-dml-commit") {
+    return CrashExpectedState{.rows = "2:twox,3:three,4:four", .temp_visible = false};
+  }
   if (scenario == "exact-rowid-move") {
     return CrashExpectedState{.rows = "2:two,3:three,10:moved", .temp_visible = false};
   }
@@ -999,11 +1002,12 @@ void VerifyAnalyzeStoredIndexes(const std::filesystem::path& path) {
   }
 }
 
-constexpr std::array<std::string_view, 14> kCrashCaseIds{
+constexpr std::array<std::string_view, 15> kCrashCaseIds{
     "implicit-insert",
     "implicit-create",
     "implicit-create-index",
     "implicit-analyze",
+    "indexed-dml-commit",
     "exact-rowid-move",
     "scan-rowid-move",
     "scan-delete",
@@ -1025,16 +1029,35 @@ constexpr std::array<std::string_view, 6> kNonPageCaseIds{
     "sqlite-created",         "alternating-ownership", "unsupported-boundaries",
 };
 
-constexpr std::array<std::string_view, 28> kAllCaseIds{
-    "alternating-ownership",  "analyze-stored-indexes", "constraint-then-commit",
-    "create-full-rollback",   "create-rollback-to",     "differential-trace",
-    "exact-rowid-move",       "explicit-commit",        "full-dml-rollback",
-    "implicit-analyze",       "implicit-create",        "implicit-create-index",
-    "implicit-insert",        "modern-created",         "named-rollback-then-commit",
-    "page-size-1024",         "page-size-16384",        "page-size-2048",
-    "page-size-32768",        "page-size-4096",         "page-size-512",
-    "page-size-65536",        "page-size-8192",         "scan-delete",
-    "scan-rowid-move",        "sqlite-created",         "transaction-savepoint-release",
+constexpr std::array<std::string_view, 29> kAllCaseIds{
+    "alternating-ownership",
+    "analyze-stored-indexes",
+    "constraint-then-commit",
+    "create-full-rollback",
+    "create-rollback-to",
+    "differential-trace",
+    "exact-rowid-move",
+    "explicit-commit",
+    "full-dml-rollback",
+    "implicit-analyze",
+    "implicit-create",
+    "implicit-create-index",
+    "implicit-insert",
+    "indexed-dml-commit",
+    "modern-created",
+    "named-rollback-then-commit",
+    "page-size-1024",
+    "page-size-16384",
+    "page-size-2048",
+    "page-size-32768",
+    "page-size-4096",
+    "page-size-512",
+    "page-size-65536",
+    "page-size-8192",
+    "scan-delete",
+    "scan-rowid-move",
+    "sqlite-created",
+    "transaction-savepoint-release",
     "unsupported-boundaries",
 };
 
