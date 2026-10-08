@@ -122,6 +122,7 @@ class TableBtreeMutationCursor final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] Result<bool> First();
+  [[nodiscard]] Result<bool> Next();
   // The payload view remains valid until the cursor moves or is destroyed.
   [[nodiscard]] Result<TableBtreeMutationRow> row();
   [[nodiscard]] Result<bool> DeleteAndNext();

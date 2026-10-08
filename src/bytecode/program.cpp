@@ -680,6 +680,22 @@ template <typename T>
           } else if constexpr (std::is_same_v<Operation, OpenReadCursorInstruction> ||
                                std::is_same_v<Operation, CloseCursorInstruction>) {
             return check_cursor(operation.cursor, index);
+          } else if constexpr (std::is_same_v<Operation, OpenMutationCursorInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kDelete &&
+                input.statement_kind != ProgramStatementKind::kUpdate) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (input.transaction_access != ProgramTransactionAccess::kWrite) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.cursors[operation.cursor.value()].storage != CursorStorageKind::kRowIdTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kRowIdOperationRequiresRowIdTable,
+                                             index, operation.cursor.value()));
+            }
+            return ProgramResult<void>{};
           } else if constexpr (std::is_same_v<Operation, OpenWriteCursorInstruction> ||
                                std::is_same_v<Operation, CloseWriteCursorInstruction>) {
             return check_write_cursor(operation.cursor, index);
@@ -792,6 +808,18 @@ template <typename T>
               return result;
             }
             return check_register(operation.rowid, index);
+          } else if constexpr (std::is_same_v<Operation, DeleteCurrentTableInstruction>) {
+            if (input.statement_kind != ProgramStatementKind::kDelete) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (input.cursors[operation.cursor.value()].storage != CursorStorageKind::kRowIdTable) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kRowIdOperationRequiresRowIdTable,
+                                             index, operation.cursor.value()));
+            }
+            return check_target(operation.exhausted_target, index);
           } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kUpdate) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
@@ -1137,7 +1165,8 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             initialize(operation.output);
             return fallthrough();
-          } else if constexpr (std::is_same_v<Operation, OpenReadCursorInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, OpenReadCursorInstruction> ||
+                               std::is_same_v<Operation, OpenMutationCursorInstruction>) {
             if (cursor_state(operation.cursor) != CursorState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyOpen,
                                              instruction_index, operation.cursor.value()));
@@ -1294,6 +1323,15 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, DeleteCurrentTableInstruction>) {
+            if (auto result = require_positioned(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return merge_state(operation.exhausted_target.value(), state);
           } else if constexpr (std::is_same_v<Operation, UpdateTableInstruction>) {
             if (auto result = require_write_open(operation.cursor); !result) {
               return result;
@@ -1427,6 +1465,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "cast";
     case InstructionKind::kOpenRead:
       return "open_read";
+    case InstructionKind::kOpenMutation:
+      return "open_mutation";
     case InstructionKind::kOpenWrite:
       return "open_write";
     case InstructionKind::kClose:
@@ -1459,6 +1499,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "insert_table";
     case InstructionKind::kDeleteTable:
       return "delete_table";
+    case InstructionKind::kDeleteCurrentTable:
+      return "delete_current_table";
     case InstructionKind::kUpdateTable:
       return "update_table";
     case InstructionKind::kEnsureDatabaseInitialized:
@@ -1860,6 +1902,7 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<RewindRowIdListInstruction>(instruction) ||
       std::holds_alternative<NextRowIdListInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
+      std::holds_alternative<DeleteCurrentTableInstruction>(instruction) ||
       std::holds_alternative<JumpInstruction>(instruction) ||
       std::holds_alternative<JumpIfInstruction>(instruction)) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kBranchRequiresLabel));
@@ -1905,6 +1948,14 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor,
   }
   return AppendPending(
       PendingSeekRowId{.cursor = cursor, .key = key, .target = missing_target, .mode = mode});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitDeleteCurrentTable(CursorId cursor,
+                                                                         Label exhausted_target) {
+  if (auto checked = CheckLabel(exhausted_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingDeleteCurrentTable{.cursor = cursor, .target = exhausted_target});
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitJump(Label target) {
@@ -1989,6 +2040,11 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
                 .key = operation.key,
                 .missing_target = target(operation.target),
                 .mode = operation.mode,
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingDeleteCurrentTable>) {
+            return DeleteCurrentTableInstruction{
+                .cursor = operation.cursor,
+                .exhausted_target = target(operation.target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingJump>) {
             return JumpInstruction{.target = target(operation.target)};
