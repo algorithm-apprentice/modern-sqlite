@@ -1,5 +1,6 @@
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -8,7 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -19,6 +22,7 @@
 #include <vector>
 
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
 #include "tests/compatibility/write_session_crash_harness.hpp"
@@ -34,6 +38,12 @@ template <typename T>
     throw std::runtime_error(result.error().ToString());
   }
   return std::move(*result);
+}
+
+void RequireStatus(modern_sqlite::Status status) {
+  if (!status.has_value()) {
+    throw std::runtime_error(status.error().ToString());
+  }
 }
 
 template <typename T>
@@ -716,6 +726,233 @@ void VerifySqliteCreated(const std::filesystem::path& path) {
   }
 }
 
+void InsertBoundValues(modern_sqlite::WriteSession& session) {
+  modern_sqlite::WriteStatement statement =
+      Prepare(session, "INSERT INTO Items(id,Name,Score,Payload) VALUES(?1,?2,?3,?4)");
+  const std::array<std::byte, 2> payload{std::byte{0x00}, std::byte{0xff}};
+  RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Integer(30)));
+  RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Text(std::string{"nul\0text", 8})));
+  RequireStatus(statement.Bind(3, modern_sqlite::SqlValue::Integer(7)));
+  RequireStatus(
+      statement.Bind(4, modern_sqlite::SqlValue::Blob(modern_sqlite::ByteBuffer::CopyOf(payload))));
+  if (TakeValue(statement.Step()) != modern_sqlite::WriteStep::kDone) {
+    throw std::runtime_error{"bound compatibility INSERT produced a row"};
+  }
+  RequireStatus(statement.Finalize());
+}
+
+void InsertNamedRow(modern_sqlite::WriteSession& session, std::int64_t rowid, std::string name) {
+  modern_sqlite::WriteStatement statement =
+      Prepare(session, "INSERT INTO Items(id,Name) VALUES(?1,?2)");
+  RequireStatus(statement.Bind(1, modern_sqlite::SqlValue::Integer(rowid)));
+  RequireStatus(statement.Bind(2, modern_sqlite::SqlValue::Text(std::move(name))));
+  if (TakeValue(statement.Step()) != modern_sqlite::WriteStep::kDone) {
+    throw std::runtime_error{"boundary compatibility INSERT produced a row"};
+  }
+  RequireStatus(statement.Finalize());
+}
+
+void VerifyModernEmbeddedValue(const std::filesystem::path& path) {
+  modern_sqlite::WriteSession session = TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+  modern_sqlite::WriteStatement statement = Prepare(session,
+                                                    "SELECT Name,Score,Payload FROM Items "
+                                                    "WHERE id=30");
+  if (TakeValue(statement.Step()) != modern_sqlite::WriteStep::kRow ||
+      statement.row().size() != 3U) {
+    throw std::runtime_error{"Modern did not return the embedded compatibility row"};
+  }
+  const std::array<std::byte, 2> expected_payload{std::byte{0x00}, std::byte{0xff}};
+  const modern_sqlite::ByteView actual_payload =
+      TakeOptional(statement.row()[2].blob_value(), "embedded payload is missing");
+  if (TakeOptional(statement.row()[0].text_value(), "embedded name is missing").bytes() !=
+          std::string_view{"nul\0text", 8} ||
+      TakeOptional(statement.row()[1].real_value(), "embedded score is missing") != 7.0 ||
+      !std::ranges::equal(actual_payload, expected_payload) ||
+      TakeValue(statement.Step()) != modern_sqlite::WriteStep::kDone) {
+    throw std::runtime_error{"Modern disagrees after the page-size handoff"};
+  }
+  RequireStatus(statement.Finalize());
+}
+
+void VerifyOnePageSize(const TemporaryDirectory& directory, int page_size) {
+  const std::filesystem::path path =
+      directory.DatabasePath("page-size-" + std::to_string(page_size));
+  {
+    const Database sqlite{path, kCreateFlags};
+    ExecuteSqlite(sqlite.get(), "PRAGMA page_size=" + std::to_string(page_size));
+    ExecuteSqlite(sqlite.get(), "PRAGMA journal_mode=DELETE");
+    ExecuteSqlite(sqlite.get(),
+                  "CREATE TABLE Items("
+                  "id INTEGER PRIMARY KEY,"
+                  "Name TEXT NOT NULL DEFAULT 'seed',"
+                  "Score REAL,"
+                  "Payload BLOB"
+                  ")");
+    ExecuteSqlite(sqlite.get(), "INSERT INTO Items VALUES(-1,'negative',-1,x'00')");
+    ExecuteSqlite(sqlite.get(), "INSERT INTO Items VALUES(0,'zero',0,NULL)");
+    ExecuteSqlite(sqlite.get(), "INSERT INTO Items VALUES(2,'overflow',2,zeroblob(70000))");
+    if (QueryInteger(sqlite.get(), "PRAGMA page_size") != page_size) {
+      throw std::runtime_error{"SQLite did not create the requested page size"};
+    }
+  }
+
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session, "INSERT INTO Items DEFAULT VALUES");
+    ExecuteModern(session, "UPDATE Items SET id=id+10,Name=Name||'x' WHERE id>=0");
+    ExecuteModern(session, "DELETE FROM Items WHERE id=10");
+    ExecuteModern(session, "BEGIN");
+    ExecuteModern(session, "INSERT INTO Items VALUES(20,'rollback',20,NULL)");
+    ExecuteModern(session, "ROLLBACK");
+    ExecuteModern(session, "SAVEPOINT s");
+    ExecuteModern(session, "INSERT INTO Items VALUES(21,'savepoint',21,NULL)");
+    ExecuteModern(session, "ROLLBACK TO s");
+    ExecuteModern(session, "RELEASE s");
+    InsertNamedRow(session, std::numeric_limits<std::int64_t>::min(), "minimum");
+    InsertNamedRow(session, std::numeric_limits<std::int64_t>::max(), "maximum");
+    InsertBoundValues(session);
+    if (session.changes() != 1U || session.last_insert_rowid() != 30 || !session.autocommit()) {
+      throw std::runtime_error{"Modern connection state differs in the page-size matrix"};
+    }
+  }
+
+  {
+    const Database sqlite{path, kReadOnlyFlags};
+    VerifyIntegrity(sqlite.get());
+    if (QueryInteger(sqlite.get(), "PRAGMA page_size") != page_size ||
+        QueryText(sqlite.get(),
+                  "SELECT group_concat(id,',') FROM (SELECT id FROM Items ORDER BY id)") !=
+            "-9223372036854775808,-1,12,13,30,9223372036854775807" ||
+        QueryInteger(sqlite.get(), "SELECT length(Payload) FROM Items WHERE id=12") != 70000 ||
+        QueryText(sqlite.get(), "SELECT hex(Name) FROM Items WHERE id=30") != "6E756C0074657874" ||
+        QueryText(sqlite.get(), "SELECT typeof(Score) FROM Items WHERE id=30") != "real" ||
+        QueryText(sqlite.get(), "SELECT hex(Payload) FROM Items WHERE id=30") != "00FF" ||
+        QueryText(sqlite.get(), "SELECT typeof(Payload) FROM Items WHERE id=13") != "null" ||
+        QueryText(sqlite.get(), "SELECT Name FROM Items WHERE id=-9223372036854775808") !=
+            "minimum" ||
+        QueryText(sqlite.get(), "SELECT Name FROM Items WHERE id=9223372036854775807") !=
+            "maximum" ||
+        QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE id IN(20,21)") != 0) {
+      throw std::runtime_error{"SQLite disagrees in the public page-size matrix"};
+    }
+  }
+  VerifyModernEmbeddedValue(path);
+}
+
+void VerifyPageSizeMatrix(const TemporaryDirectory& directory) {
+  for (const int page_size : {512, 1024, 2048, 4096, 8192, 16384, 32768, 65536}) {
+    try {
+      VerifyOnePageSize(directory, page_size);
+    } catch (const std::exception& error) {
+      throw std::runtime_error{"page-size-" + std::to_string(page_size) + ": " + error.what()};
+    }
+  }
+}
+
+void VerifyAlternatingOwnership(const std::filesystem::path& path) {
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session,
+                  "CREATE TABLE Items("
+                  "id INTEGER PRIMARY KEY,"
+                  "Name TEXT NOT NULL,"
+                  "Score REAL,"
+                  "Payload BLOB"
+                  ")");
+    ExecuteModern(session, "INSERT INTO Items VALUES(1,'one',1,x'01')");
+    ExecuteModern(session, "INSERT INTO Items VALUES(2,'two',2,x'02')");
+  }
+  {
+    const Database sqlite{path, kCreateFlags};
+    ExecuteSqlite(sqlite.get(), "INSERT INTO Items VALUES(3,'three',3,x'03')");
+    ExecuteSqlite(sqlite.get(), "UPDATE Items SET Name='sqlite' WHERE id=1");
+    ExecuteSqlite(sqlite.get(), "DELETE FROM Items WHERE id=2");
+    ExecuteSqlite(sqlite.get(), "BEGIN");
+    ExecuteSqlite(sqlite.get(), "INSERT INTO Items VALUES(4,'rollback',4,x'04')");
+    ExecuteSqlite(sqlite.get(), "ROLLBACK");
+    VerifyIntegrity(sqlite.get());
+  }
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session, "UPDATE Items SET id=13,Name=Name||'x' WHERE id=3");
+    ExecuteModern(session, "SAVEPOINT s");
+    ExecuteModern(session, "INSERT INTO Items VALUES(5,'rollback',5,x'05')");
+    ExecuteModern(session, "ROLLBACK TO s");
+    ExecuteModern(session, "RELEASE s");
+    InsertBoundValues(session);
+  }
+  {
+    const Database sqlite{path, kReadOnlyFlags};
+    VerifyIntegrity(sqlite.get());
+    if (QueryText(sqlite.get(),
+                  "SELECT group_concat(id,',') FROM (SELECT id FROM Items ORDER BY id)") !=
+            "1,13,30" ||
+        QueryText(sqlite.get(), "SELECT Name FROM Items WHERE id=1") != "sqlite" ||
+        QueryText(sqlite.get(), "SELECT Name FROM Items WHERE id=13") != "threex" ||
+        QueryText(sqlite.get(), "SELECT hex(Payload) FROM Items WHERE id=13") != "03") {
+      throw std::runtime_error{"alternating engine ownership produced the wrong final state"};
+    }
+  }
+  VerifyModernEmbeddedValue(path);
+}
+
+[[nodiscard]] std::vector<unsigned char> ReadFileBytes(const std::filesystem::path& path) {
+  std::ifstream input{path, std::ios::binary | std::ios::ate};
+  if (!input) {
+    throw std::runtime_error{"could not open interoperability image"};
+  }
+  const std::streamoff end = input.tellg();
+  if (end < 0) {
+    throw std::runtime_error{"could not size interoperability image"};
+  }
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(end));
+  input.seekg(0);
+  if (!bytes.empty()) {
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+  }
+  if (!input) {
+    throw std::runtime_error{"could not read interoperability image"};
+  }
+  return bytes;
+}
+
+void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
+  {
+    const Database sqlite{path, kCreateFlags};
+    ExecuteSqlite(sqlite.get(),
+                  "CREATE TABLE Indexed(id INTEGER PRIMARY KEY,value TEXT UNIQUE);"
+                  "INSERT INTO Indexed VALUES(1,'one');"
+                  "CREATE TABLE Wr(key TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID;"
+                  "INSERT INTO Wr VALUES('key','value');");
+    VerifyIntegrity(sqlite.get());
+  }
+  const std::vector<unsigned char> before = ReadFileBytes(path);
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    for (const std::string_view sql :
+         {"UPDATE Indexed SET value='changed' WHERE id=1", "DELETE FROM Wr WHERE key='key'"}) {
+      const auto prepared = session.Prepare(modern_sqlite::Utf8View{sql});
+      if (prepared.has_value() || prepared.error().code() != modern_sqlite::ErrorCode::kProtocol) {
+        throw std::runtime_error{"Modern accepted an unsupported indexed-table mutation"};
+      }
+    }
+  }
+  const std::vector<unsigned char> after = ReadFileBytes(path);
+  if (!std::ranges::equal(before, after)) {
+    throw std::runtime_error{"unsupported mutation changed the database image"};
+  }
+  const Database sqlite{path, kReadOnlyFlags};
+  VerifyIntegrity(sqlite.get());
+  if (QueryText(sqlite.get(), "SELECT value FROM Indexed WHERE id=1") != "one" ||
+      QueryText(sqlite.get(), "SELECT value FROM Wr WHERE key='key'") != "value") {
+    throw std::runtime_error{"unsupported mutation changed logical contents"};
+  }
+}
+
 }  // namespace
 
 int main() try {
@@ -731,6 +968,9 @@ int main() try {
                           directory.DatabasePath("sqlite-trace"));
   VerifyModernCreated(directory.DatabasePath("modern-created"));
   VerifySqliteCreated(directory.DatabasePath("sqlite-created"));
+  VerifyPageSizeMatrix(directory);
+  VerifyAlternatingOwnership(directory.DatabasePath("alternating-ownership"));
+  VerifyUnsupportedMutationBoundaries(directory.DatabasePath("unsupported-boundaries"));
   return 0;
 } catch (const std::exception& error) {
   static_cast<void>(std::fprintf(stderr, "%s\n", error.what()));
