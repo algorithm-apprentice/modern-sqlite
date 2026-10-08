@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -840,16 +841,6 @@ void VerifyOnePageSize(const TemporaryDirectory& directory, int page_size) {
   VerifyModernEmbeddedValue(path);
 }
 
-void VerifyPageSizeMatrix(const TemporaryDirectory& directory) {
-  for (const int page_size : {512, 1024, 2048, 4096, 8192, 16384, 32768, 65536}) {
-    try {
-      VerifyOnePageSize(directory, page_size);
-    } catch (const std::exception& error) {
-      throw std::runtime_error{"page-size-" + std::to_string(page_size) + ": " + error.what()};
-    }
-  }
-}
-
 void VerifyAlternatingOwnership(const std::filesystem::path& path) {
   {
     modern_sqlite::WriteSession session =
@@ -953,24 +944,211 @@ void VerifyUnsupportedMutationBoundaries(const std::filesystem::path& path) {
   }
 }
 
-}  // namespace
+constexpr std::array<std::string_view, 12> kCrashCaseIds{
+    "implicit-insert",
+    "implicit-create",
+    "exact-rowid-move",
+    "scan-rowid-move",
+    "scan-delete",
+    "explicit-commit",
+    "constraint-then-commit",
+    "named-rollback-then-commit",
+    "transaction-savepoint-release",
+    "create-full-rollback",
+    "create-rollback-to",
+    "full-dml-rollback",
+};
 
-int main() try {
-  const TemporaryDirectory directory;
+constexpr std::array<int, 8> kPageSizes{
+    512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+};
+
+constexpr std::array<std::string_view, 5> kNonPageCaseIds{
+    "differential-trace",    "modern-created",         "sqlite-created",
+    "alternating-ownership", "unsupported-boundaries",
+};
+
+constexpr std::array<std::string_view, 25> kAllCaseIds{
+    "alternating-ownership",  "constraint-then-commit", "create-full-rollback",
+    "create-rollback-to",     "differential-trace",     "exact-rowid-move",
+    "explicit-commit",        "full-dml-rollback",      "implicit-create",
+    "implicit-insert",        "modern-created",         "named-rollback-then-commit",
+    "page-size-1024",         "page-size-16384",        "page-size-2048",
+    "page-size-32768",        "page-size-4096",         "page-size-512",
+    "page-size-65536",        "page-size-8192",         "scan-delete",
+    "scan-rowid-move",        "sqlite-created",         "transaction-savepoint-release",
+    "unsupported-boundaries",
+};
+
+struct CommandLineOptions {
+  std::optional<std::string_view> case_id{};
+  std::optional<std::size_t> cut{};
+  std::optional<bool> writes_are_durable{};
+};
+
+[[nodiscard]] std::string ShellQuote(std::string_view value) {
+  std::string quoted{"'"};
+  for (const char character : value) {
+    if (character == '\'') {
+      quoted.append("'\\''");
+    } else {
+      quoted.push_back(character);
+    }
+  }
+  quoted.push_back('\'');
+  return quoted;
+}
+
+[[nodiscard]] bool IsCrashCase(std::string_view case_id) {
+  return std::ranges::find(kCrashCaseIds, case_id) != kCrashCaseIds.end();
+}
+
+[[nodiscard]] std::optional<int> PageSizeCase(std::string_view case_id) {
+  for (const int page_size : kPageSizes) {
+    if (case_id == "page-size-" + std::to_string(page_size)) {
+      return page_size;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool IsNonCrashCase(std::string_view case_id) {
+  return std::ranges::find(kNonPageCaseIds, case_id) != kNonPageCaseIds.end() ||
+         PageSizeCase(case_id).has_value();
+}
+
+[[nodiscard]] CommandLineOptions ParseCommandLine(int argument_count, char* const* arguments) {
+  CommandLineOptions options;
+  for (int index = 1; index < argument_count; ++index) {
+    const std::string_view argument = arguments[index];
+    const auto next_value = [&]() -> std::string_view {
+      if (index + 1 >= argument_count) {
+        throw std::runtime_error{std::string{argument} + " requires a value"};
+      }
+      return arguments[++index];
+    };
+    if (argument == "--case") {
+      if (options.case_id.has_value()) {
+        throw std::runtime_error{"--case may be specified only once"};
+      }
+      options.case_id = next_value();
+    } else if (argument == "--cut") {
+      if (options.cut.has_value()) {
+        throw std::runtime_error{"--cut may be specified only once"};
+      }
+      const std::string_view value = next_value();
+      std::size_t cut = 0;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), cut);
+      if (error != std::errc{} || end != value.data() + value.size() || cut == 0U) {
+        throw std::runtime_error{"--cut requires a positive decimal integer"};
+      }
+      options.cut = cut;
+    } else if (argument == "--durability") {
+      if (options.writes_are_durable.has_value()) {
+        throw std::runtime_error{"--durability may be specified only once"};
+      }
+      const std::string_view value = next_value();
+      if (value == "volatile") {
+        options.writes_are_durable = false;
+      } else if (value == "durable") {
+        options.writes_are_durable = true;
+      } else {
+        throw std::runtime_error{"--durability requires volatile or durable"};
+      }
+    } else {
+      throw std::runtime_error{"unknown argument: " + std::string{argument}};
+    }
+  }
+
+  if (!options.case_id.has_value()) {
+    if (options.cut.has_value() || options.writes_are_durable.has_value()) {
+      throw std::runtime_error{"--cut and --durability require --case"};
+    }
+    return options;
+  }
+  if (!IsCrashCase(options.case_id.value()) && !IsNonCrashCase(options.case_id.value())) {
+    throw std::runtime_error{"unknown compatibility case: " + std::string{options.case_id.value()}};
+  }
+  if (!IsCrashCase(options.case_id.value()) &&
+      (options.cut.has_value() || options.writes_are_durable.has_value())) {
+    throw std::runtime_error{"--cut and --durability apply only to crash cases"};
+  }
+  return options;
+}
+
+void RunCrashCases(const TemporaryDirectory& directory, const CommandLineOptions& options,
+                   std::string_view executable) {
   CrashVerifierContext crash_context{.directory = &directory};
   const modern_sqlite::test::WriteSessionCrashVerification crash_verification{
       .context = &crash_context,
       .verify = VerifyCrashImageWithSqlite,
+      .scenario_filter = options.case_id.value_or(std::string_view{}),
+      .cut_filter = options.cut,
+      .durability_filter = options.writes_are_durable,
+      .executable = executable,
   };
   modern_sqlite::test::RunWriteSessionCrashHarness(crash_verification);
   modern_sqlite::test::RunWriteSessionTransactionCrashHarness(crash_verification);
-  VerifyDifferentialTrace(directory.DatabasePath("modern-trace"),
-                          directory.DatabasePath("sqlite-trace"));
-  VerifyModernCreated(directory.DatabasePath("modern-created"));
-  VerifySqliteCreated(directory.DatabasePath("sqlite-created"));
-  VerifyPageSizeMatrix(directory);
-  VerifyAlternatingOwnership(directory.DatabasePath("alternating-ownership"));
-  VerifyUnsupportedMutationBoundaries(directory.DatabasePath("unsupported-boundaries"));
+}
+
+void RunNonCrashCase(std::string_view case_id, const TemporaryDirectory& directory) {
+  if (case_id == "differential-trace") {
+    VerifyDifferentialTrace(directory.DatabasePath("modern-trace"),
+                            directory.DatabasePath("sqlite-trace"));
+  } else if (case_id == "modern-created") {
+    VerifyModernCreated(directory.DatabasePath("modern-created"));
+  } else if (case_id == "sqlite-created") {
+    VerifySqliteCreated(directory.DatabasePath("sqlite-created"));
+  } else if (case_id == "alternating-ownership") {
+    VerifyAlternatingOwnership(directory.DatabasePath("alternating-ownership"));
+  } else if (case_id == "unsupported-boundaries") {
+    VerifyUnsupportedMutationBoundaries(directory.DatabasePath("unsupported-boundaries"));
+  } else {
+    VerifyOnePageSize(
+        directory, TakeOptional(PageSizeCase(case_id), "page-size compatibility case is invalid"));
+  }
+}
+
+void RunNamedNonCrashCase(std::string_view case_id, const TemporaryDirectory& directory,
+                          std::string_view executable) {
+  try {
+    RunNonCrashCase(case_id, directory);
+  } catch (const std::exception& error) {
+    throw std::runtime_error{"case " + std::string{case_id} + ": " + error.what() +
+                             "\nreproduce: " + ShellQuote(executable) + " --case " +
+                             std::string{case_id}};
+  }
+}
+
+void RunAllCases(const TemporaryDirectory& directory, std::string_view executable) {
+  if (!std::ranges::is_sorted(kAllCaseIds) ||
+      std::ranges::adjacent_find(kAllCaseIds) != kAllCaseIds.end()) {
+    throw std::runtime_error{"compatibility case registry is not unique lexical order"};
+  }
+  for (const std::string_view case_id : kAllCaseIds) {
+    if (IsCrashCase(case_id)) {
+      CommandLineOptions selected;
+      selected.case_id = case_id;
+      RunCrashCases(directory, selected, executable);
+    } else {
+      RunNamedNonCrashCase(case_id, directory, executable);
+    }
+  }
+}
+
+}  // namespace
+
+int main(int argument_count, char* const* arguments) try {
+  const CommandLineOptions options = ParseCommandLine(argument_count, arguments);
+  const TemporaryDirectory directory;
+  const std::string_view executable = arguments[0];
+  if (!options.case_id.has_value()) {
+    RunAllCases(directory, executable);
+  } else if (IsCrashCase(options.case_id.value())) {
+    RunCrashCases(directory, options, executable);
+  } else {
+    RunNamedNonCrashCase(options.case_id.value(), directory, executable);
+  }
   return 0;
 } catch (const std::exception& error) {
   static_cast<void>(std::fprintf(stderr, "%s\n", error.what()));
