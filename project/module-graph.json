@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "edgeDirection": "node-to-prerequisite",
-  "currentNode": "optimize-one-pass-mutations",
+  "currentNode": "implement-index-planning",
   "canonicalOrder": [
     "document-architecture",
     "bootstrap-build",

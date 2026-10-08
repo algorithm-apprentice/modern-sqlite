@@ -69,23 +69,24 @@ exceeded the 10x guard. The diagnostic replay recorded:
 - 1,168,839 Modern B-tree comparisons; and
 - 917,509 Modern VM instructions versus 196,616 SQLite VM steps.
 
-The baseline therefore records a validated guard failure instead of widening
-the threshold or replacing samples. ADR-0008's optimization-admission process
-must address this case in a separate reviewed node.
+The original baseline therefore recorded a validated guard failure instead of
+widening the threshold or replacing samples. ADR-0008's
+optimization-admission process admitted ADR-0051 as a separate reviewed node.
 
 ## Canonical baseline result
 
-The committed `benchmarks/write-baseline-v1` run records:
+The regenerated `benchmarks/write-baseline-v1` run at source revision
+`83c1344c53d756ca4e0d14dbf33db5e6c8c25872` records:
 
-- `delete-scan-implicit`: 10.44x aggregate wall and 9.02x CPU, with all
-  paired wall rounds between 10.24x and 10.87x;
-- `update-scan-implicit`: 9.54x aggregate wall and 8.64x CPU, with round 0
-  wall at 10.07x; and
-- every other matched aggregate and paired-round wall/CPU ratio below 10x.
+- `delete-scan-implicit`: 9.08x aggregate wall and 7.62x CPU, with maximum
+  paired-round ratios of 9.20x wall and 7.75x CPU;
+- `update-scan-implicit`: 6.93x aggregate wall and 5.70x CPU, with maximum
+  paired-round ratios of 7.02x wall and 5.77x CPU; and
+- every matched aggregate and every paired-round wall/CPU ratio below 10x.
 
-`engine-default` remains informational. ADR-0051 admits a separate
-SQLite-aligned one-pass scan-mutation optimization node; the canonical
-baseline and guard remain unchanged until that node is remeasured.
+`engine-default` remains informational. ADR-0051's SQLite-aligned one-pass
+scan-mutation implementation preserves the version-1 workloads and matched
+durability configuration while satisfying the canonical guard.
 
 ## Fixed profile replay
 

@@ -50,6 +50,6 @@
     "build": "cmake --build --preset dev-debug",
     "test": "ctest --preset dev-debug"
   },
-  "currentNode": "optimize-one-pass-mutations",
+  "currentNode": "implement-index-planning",
   "currentNodeState": "in_progress"
 }
