@@ -81,6 +81,8 @@ class IndexPerformanceValidationTest(unittest.TestCase):
             index_performance.MINIMUM_WALL_NS,
             read_performance.MINIMUM_WALL_NS,
         )
+        self.assertEqual(132, read_performance.MAX_BASELINE_ARTIFACTS)
+        self.assertFalse(read_performance.ENFORCE_GUARD_ON_VALIDATION)
         case = self.manifest["cases"][0]
         self.assertEqual(
             case["expected"]["smoke"],

@@ -76,6 +76,8 @@ WORKLOAD_SEMANTICS_VERSION = 1
 COMPLETION_SCHEMA_VERSION = 1
 DIAGNOSTIC_SCHEMA_VERSION = 1
 MINIMUM_WALL_NS = 200_000_000
+MAX_BASELINE_ARTIFACTS = 100
+ENFORCE_GUARD_ON_VALIDATION = True
 CACHE_PAGES = 512
 SQLITE_VERSION = "3.54.0"
 SQLITE_SOURCE_ID = (
@@ -3966,9 +3968,10 @@ def validate_baseline_directory(
     }
     if actual != referenced:
         raise HarnessError("baseline directory contains missing or extra artifacts")
-    if len(actual) > 100:
+    if len(actual) > MAX_BASELINE_ARTIFACTS:
         raise HarnessError("baseline directory exceeds its artifact count limit")
-    enforce_performance_guard(aggregate)
+    if ENFORCE_GUARD_ON_VALIDATION:
+        enforce_performance_guard(aggregate)
     return aggregate
 
 

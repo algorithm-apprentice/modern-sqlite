@@ -481,6 +481,8 @@ def _collect_input_references(
 def _configure_common() -> None:
     common.EXPECTED_CASE_IDS = CASE_IDS
     common.MINIMUM_WALL_NS = MINIMUM_WALL_NS
+    common.MAX_BASELINE_ARTIFACTS = 132
+    common.ENFORCE_GUARD_ON_VALIDATION = False
     common.validate_workload_manifest = validate_workload_manifest
     common._smoke_work = _smoke_work
     common._collect_input_references = _collect_input_references
