@@ -1524,12 +1524,16 @@ TEST(Binder, RejectsLiteralTokensThatDoNotMatchTheirPublicAstKinds) {
     };
     Statement statement = SelectStatement{
         .span = statement_span,
-        .result_columns =
-            {
-                ResultColumn{
-                    .span = token_span,
-                    .expression = ExpressionId{0},
-                },
+        .first =
+            SelectCore{
+                .span = statement_span,
+                .result_columns =
+                    {
+                        ResultColumn{
+                            .span = token_span,
+                            .expression = ExpressionId{0},
+                        },
+                    },
             },
     };
     Result<SyntaxTree> tree =
@@ -1581,12 +1585,16 @@ TEST(Binder, RejectsLiteralTokensThatDoNotMatchTheirPublicAstKinds) {
   };
   Statement statement = SelectStatement{
       .span = statement_span,
-      .result_columns =
-          {
-              ResultColumn{
-                  .span = call_span,
-                  .expression = ExpressionId{2},
-              },
+      .first =
+          SelectCore{
+              .span = statement_span,
+              .result_columns =
+                  {
+                      ResultColumn{
+                          .span = call_span,
+                          .expression = ExpressionId{2},
+                      },
+                  },
           },
   };
   Result<SyntaxTree> tree =
@@ -1605,6 +1613,10 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   ExpectBindError("SELECT *", catalog, BindErrorCode::kNoTablesSpecified, "no tables specified");
   ExpectBindError("SELECT DISTINCT Name FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "SELECT DISTINCT is not supported");
+  ExpectBindError("VALUES(1),(2)", catalog, BindErrorCode::kUnsupportedFeature,
+                  "VALUES is not supported");
+  ExpectBindError("SELECT 1 UNION SELECT 2", catalog, BindErrorCode::kUnsupportedFeature,
+                  "compound SELECT is not supported");
   ExpectBindError("SELECT Name LIKE 'a%' FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "pattern operators are not supported");
   ExpectBindError("SELECT Name FROM Items LIMIT Name", catalog, BindErrorCode::kNoSuchColumn,

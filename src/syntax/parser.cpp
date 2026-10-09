@@ -45,6 +45,20 @@ using NameResult = std::expected<QualifiedName, ParseError>;
 using ExpressionResult = std::expected<ExpressionId, ParseError>;
 using StatementResult = std::expected<Statement, ParseError>;
 
+struct ParsedQueryCore {
+  QueryCore core;
+  std::vector<OrderingTerm> order_by{};
+  std::optional<LimitClause> limit{};
+};
+
+struct ParsedCompoundOperator {
+  CompoundOperator operation = CompoundOperator::kUnion;
+  SourceSpan span{};
+};
+
+using QueryCoreResult = std::expected<ParsedQueryCore, ParseError>;
+using CompoundOperatorResult = std::expected<ParsedCompoundOperator, ParseError>;
+
 [[nodiscard]] SourceSpan MakeSpan(ByteOffset begin, ByteOffset end) noexcept {
   const auto span = SourceSpan::FromBounds(begin, end);
   assert(span.has_value());
@@ -1184,7 +1198,7 @@ class Parser final {
     return terms;
   }
 
-  [[nodiscard]] StatementResult ParseSelect() {
+  [[nodiscard]] QueryCoreResult ParseSimpleSelectCore() {
     const Token select_keyword = Consume();
     SelectQuantifier quantifier = SelectQuantifier::kDefault;
     if (ConsumeIf(TokenKind::kDistinct)) {
@@ -1241,11 +1255,11 @@ class Parser final {
     }
 
     if (Peek().kind == TokenKind::kGroup || Peek().kind == TokenKind::kHaving ||
-        Peek().kind == TokenKind::kWindow || Peek().kind == TokenKind::kUnion ||
-        Peek().kind == TokenKind::kIntersect || Peek().kind == TokenKind::kExcept) {
+        Peek().kind == TokenKind::kWindow) {
       return std::unexpected(Unsupported(Peek()));
     }
 
+    const ByteOffset core_end = last_consumed_end_;
     std::vector<OrderingTerm> order_by;
     if (Peek().kind == TokenKind::kOrder) {
       auto parsed_order_by = ParseOrderByClause();
@@ -1264,13 +1278,157 @@ class Parser final {
       limit = *parsed_limit;
     }
 
-    const ByteOffset end = last_consumed_end_;
+    return ParsedQueryCore{
+        .core =
+            SelectCore{
+                .span = MakeSpan(select_keyword.span.begin(), core_end),
+                .quantifier = quantifier,
+                .result_columns = std::move(columns),
+                .from = std::move(from),
+                .where = where,
+            },
+        .order_by = std::move(order_by),
+        .limit = limit,
+    };
+  }
+
+  [[nodiscard]] std::expected<std::vector<ExpressionId>, ParseError> ParseValuesRow() {
+    TokenResult left = Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
+    if (!left.has_value()) {
+      return std::unexpected(left.error());
+    }
+    if (options_.maximum_columns == 0U) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
+    ExpressionResult first = ParseGeneralExpression();
+    if (!first.has_value()) {
+      return std::unexpected(first.error());
+    }
+    std::vector<ExpressionId> row{*first};
+    while (ConsumeIf(TokenKind::kComma)) {
+      if (row.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      row.push_back(*expression);
+    }
+    TokenResult right = Expect(TokenKind::kRightParenthesis, ParseExpectation::kRightParenthesis);
+    if (!right.has_value()) {
+      return std::unexpected(right.error());
+    }
+    return row;
+  }
+
+  [[nodiscard]] QueryCoreResult ParseValuesCore() {
+    const Token values_keyword = Consume();
+    auto first = ParseValuesRow();
+    if (!first.has_value()) {
+      return std::unexpected(first.error());
+    }
+    std::vector<std::vector<ExpressionId>> rows;
+    rows.push_back(std::move(*first));
+    while (ConsumeIf(TokenKind::kComma)) {
+      auto row = ParseValuesRow();
+      if (!row.has_value()) {
+        return std::unexpected(row.error());
+      }
+      rows.push_back(std::move(*row));
+    }
+    return ParsedQueryCore{
+        .core =
+            ValuesCore{
+                .span = MakeSpan(values_keyword.span.begin(), last_consumed_end_),
+                .rows = std::move(rows),
+            },
+    };
+  }
+
+  [[nodiscard]] QueryCoreResult ParseQueryCore() {
+    if (Peek().kind == TokenKind::kSelect) {
+      return ParseSimpleSelectCore();
+    }
+    if (Peek().kind == TokenKind::kValues) {
+      return ParseValuesCore();
+    }
+    return std::unexpected(Unexpected(Peek(), ParseExpectation::kStatement));
+  }
+
+  [[nodiscard]] static bool IsCompoundOperator(TokenKind kind) noexcept {
+    return kind == TokenKind::kUnion || kind == TokenKind::kIntersect || kind == TokenKind::kExcept;
+  }
+
+  [[nodiscard]] CompoundOperatorResult ParseCompoundOperator() {
+    const Token token = Consume();
+    CompoundOperator operation = CompoundOperator::kUnion;
+    ByteOffset end = token.span.end();
+    if (token.kind == TokenKind::kUnion) {
+      if (ConsumeIf(TokenKind::kAll)) {
+        operation = CompoundOperator::kUnionAll;
+        end = last_consumed_end_;
+      }
+    } else if (token.kind == TokenKind::kIntersect) {
+      operation = CompoundOperator::kIntersect;
+    } else if (token.kind == TokenKind::kExcept) {
+      operation = CompoundOperator::kExcept;
+    } else {
+      return std::unexpected(Unexpected(token, ParseExpectation::kStatement));
+    }
+    return ParsedCompoundOperator{
+        .operation = operation,
+        .span = MakeSpan(token.span.begin(), end),
+    };
+  }
+
+  [[nodiscard]] static SourceSpan QueryCoreSpan(const QueryCore& core) {
+    return std::visit([](const auto& value) { return value.span; }, core);
+  }
+
+  [[nodiscard]] StatementResult ParseSelect() {
+    if (options_.maximum_compound_terms == 0U) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
+    QueryCoreResult first = ParseQueryCore();
+    if (!first.has_value()) {
+      return std::unexpected(first.error());
+    }
+    const ByteOffset begin = QueryCoreSpan(first->core).begin();
+    std::vector<OrderingTerm> order_by = std::move(first->order_by);
+    std::optional<LimitClause> limit = first->limit;
+    QueryCore first_core = std::move(first->core);
+    std::vector<CompoundTerm> compounds;
+
+    while (IsCompoundOperator(Peek().kind)) {
+      if (!order_by.empty() || limit.has_value()) {
+        return std::unexpected(Unexpected(Peek(), ParseExpectation::kEndOfStatement));
+      }
+      if (compounds.size() >= options_.maximum_compound_terms - 1U) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
+      auto operation = ParseCompoundOperator();
+      if (!operation.has_value()) {
+        return std::unexpected(operation.error());
+      }
+      QueryCoreResult core = ParseQueryCore();
+      if (!core.has_value()) {
+        return std::unexpected(core.error());
+      }
+      const SourceSpan core_span = QueryCoreSpan(core->core);
+      compounds.push_back(CompoundTerm{
+          .span = MakeSpan(operation->span.begin(), core_span.end()),
+          .operation = operation->operation,
+          .core = std::move(core->core),
+      });
+      order_by = std::move(core->order_by);
+      limit = core->limit;
+    }
+
     return Statement{SelectStatement{
-        .span = MakeSpan(select_keyword.span.begin(), end),
-        .quantifier = quantifier,
-        .result_columns = std::move(columns),
-        .from = std::move(from),
-        .where = where,
+        .span = MakeSpan(begin, last_consumed_end_),
+        .first = std::move(first_core),
+        .compounds = std::move(compounds),
         .order_by = std::move(order_by),
         .limit = limit,
     }};
@@ -2272,7 +2430,6 @@ class Parser final {
   [[nodiscard]] bool IsUnsupportedStatementStart(TokenKind kind) const noexcept {
     switch (kind) {
       case TokenKind::kWith:
-      case TokenKind::kValues:
       case TokenKind::kInsert:
       case TokenKind::kUpdate:
       case TokenKind::kDelete:
@@ -2300,7 +2457,7 @@ class Parser final {
     if (token.kind == TokenKind::kIllegal) {
       return std::unexpected(IllegalToken(token));
     }
-    if (token.kind == TokenKind::kSelect) {
+    if (token.kind == TokenKind::kSelect || token.kind == TokenKind::kValues) {
       return ParseSelect();
     }
     if (token.kind == TokenKind::kAnalyze) {

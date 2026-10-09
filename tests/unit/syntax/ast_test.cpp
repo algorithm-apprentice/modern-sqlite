@@ -60,13 +60,17 @@ template <typename Enum>
                                                  ExpressionId expression) {
   return SelectStatement{
       .span = statement_span,
-      .quantifier = SelectQuantifier::kDefault,
-      .result_columns =
-          {
-              ResultColumn{
-                  .span = result_span,
-                  .expression = expression,
-              },
+      .first =
+          SelectCore{
+              .span = statement_span,
+              .quantifier = SelectQuantifier::kDefault,
+              .result_columns =
+                  {
+                      ResultColumn{
+                          .span = result_span,
+                          .expression = expression,
+                      },
+                  },
           },
   };
 }
@@ -129,13 +133,17 @@ TEST(SyntaxTree, OwnsExactRawSourceAndPreservesTokenSpellings) {
     };
     Statement statement = SelectStatement{
         .span = statement_span,
-        .quantifier = SelectQuantifier::kDefault,
-        .result_columns =
-            {
-                ResultColumn{.span = identifier_span, .expression = ExpressionId{0}},
-                ResultColumn{.span = string_span, .expression = ExpressionId{1}},
-                ResultColumn{.span = integer_span, .expression = ExpressionId{2}},
-                ResultColumn{.span = blob_span, .expression = ExpressionId{3}},
+        .first =
+            SelectCore{
+                .span = statement_span,
+                .quantifier = SelectQuantifier::kDefault,
+                .result_columns =
+                    {
+                        ResultColumn{.span = identifier_span, .expression = ExpressionId{0}},
+                        ResultColumn{.span = string_span, .expression = ExpressionId{1}},
+                        ResultColumn{.span = integer_span, .expression = ExpressionId{2}},
+                        ResultColumn{.span = blob_span, .expression = ExpressionId{3}},
+                    },
             },
     };
     return SyntaxTree::Create(std::move(source), std::move(expressions), std::move(statement));
@@ -347,22 +355,26 @@ TEST(SyntaxTree, RepresentsTypedExpressionPayloadsInPostorder) {
   };
   Statement statement = SelectStatement{
       .span = statement_span,
-      .quantifier = SelectQuantifier::kDefault,
-      .result_columns =
-          {
-              ResultColumn{.span = binary, .expression = ExpressionId{5}},
-              ResultColumn{
-                  .span = second_result,
-                  .expression = ExpressionId{8},
-                  .alias = alias,
-              },
-              ResultColumn{.span = wildcard, .expression = ExpressionId{3}},
-          },
-      .from =
-          TableSource{
-              .span = source_clause,
-              .name = Name(source_name, {main_part, items_part}),
-              .alias = source_alias,
+      .first =
+          SelectCore{
+              .span = statement_span,
+              .quantifier = SelectQuantifier::kDefault,
+              .result_columns =
+                  {
+                      ResultColumn{.span = binary, .expression = ExpressionId{5}},
+                      ResultColumn{
+                          .span = second_result,
+                          .expression = ExpressionId{8},
+                          .alias = alias,
+                      },
+                      ResultColumn{.span = wildcard, .expression = ExpressionId{3}},
+                  },
+              .from =
+                  TableSource{
+                      .span = source_clause,
+                      .name = Name(source_name, {main_part, items_part}),
+                      .alias = source_alias,
+                  },
           },
   };
 
@@ -461,22 +473,26 @@ TEST(SyntaxTree, RepresentsSelectClausesAndNormalizesLimitOperands) {
   };
   Statement statement = SelectStatement{
       .span = statement_span,
-      .quantifier = SelectQuantifier::kDistinct,
-      .result_columns =
-          {
-              ResultColumn{
-                  .span = result_column,
-                  .expression = ExpressionId{0},
-                  .alias = result_alias,
-              },
+      .first =
+          SelectCore{
+              .span = FindSpan(source, "SELECT DISTINCT a AS x FROM main.t AS source WHERE a > 0"),
+              .quantifier = SelectQuantifier::kDistinct,
+              .result_columns =
+                  {
+                      ResultColumn{
+                          .span = result_column,
+                          .expression = ExpressionId{0},
+                          .alias = result_alias,
+                      },
+                  },
+              .from =
+                  TableSource{
+                      .span = table_source,
+                      .name = Name(table_name, {main_part, table_part}),
+                      .alias = table_alias,
+                  },
+              .where = ExpressionId{3},
           },
-      .from =
-          TableSource{
-              .span = table_source,
-              .name = Name(table_name, {main_part, table_part}),
-              .alias = table_alias,
-          },
-      .where = ExpressionId{3},
       .limit =
           LimitClause{
               .span = limit_clause,
@@ -490,10 +506,11 @@ TEST(SyntaxTree, RepresentsSelectClausesAndNormalizesLimitOperands) {
 
   ASSERT_TRUE(result.has_value()) << result.error().ToString();
   const auto& select = std::get<SelectStatement>(result->statement());
-  EXPECT_EQ(SelectQuantifier::kDistinct, select.quantifier);
-  ASSERT_TRUE(select.from.has_value());
-  EXPECT_EQ(table_alias, select.from->alias);
-  EXPECT_EQ(ExpressionId{3}, select.where);
+  const auto& core = std::get<SelectCore>(select.first);
+  EXPECT_EQ(SelectQuantifier::kDistinct, core.quantifier);
+  ASSERT_TRUE(core.from.has_value());
+  EXPECT_EQ(table_alias, core.from->alias);
+  EXPECT_EQ(ExpressionId{3}, core.where);
   ASSERT_TRUE(select.limit.has_value());
   EXPECT_EQ(ExpressionId{4}, select.limit->limit);
   EXPECT_EQ(ExpressionId{5}, select.limit->offset);
@@ -533,9 +550,13 @@ TEST(SyntaxTree, PreservesCommaLimitSyntaxWithNormalizedOperands) {
   };
   Statement statement = SelectStatement{
       .span = Span(0, source.size()),
-      .result_columns =
-          {
-              ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+      .first =
+          SelectCore{
+              .span = FindSpan(source, "SELECT 1"),
+              .result_columns =
+                  {
+                      ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+                  },
           },
       .limit =
           LimitClause{
@@ -555,6 +576,62 @@ TEST(SyntaxTree, PreservesCommaLimitSyntaxWithNormalizedOperands) {
   EXPECT_EQ(ExpressionId{2}, limit.limit);
   EXPECT_EQ(ExpressionId{1}, limit.offset);
   EXPECT_EQ(LimitSyntax::kComma, limit.syntax);
+}
+
+TEST(SyntaxTree, RepresentsValuesAndLeftAssociatedCompoundTerms) {
+  const std::string source = "VALUES(1),(2) UNION SELECT 3";
+  const SourceSpan first = FindSpan(source, "1");
+  const SourceSpan second = FindSpan(source, "2");
+  const SourceSpan third = FindSpan(source, "3");
+  std::vector<Expression> expressions{
+      Expression{
+          .span = first,
+          .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = first},
+      },
+      Expression{
+          .span = second,
+          .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = second},
+      },
+      Expression{
+          .span = third,
+          .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = third},
+      },
+  };
+  Statement statement = SelectStatement{
+      .span = Span(0, source.size()),
+      .first =
+          ValuesCore{
+              .span = FindSpan(source, "VALUES(1),(2)"),
+              .rows = {{ExpressionId{0}}, {ExpressionId{1}}},
+          },
+      .compounds =
+          {
+              CompoundTerm{
+                  .span = FindSpan(source, "UNION SELECT 3"),
+                  .operation = CompoundOperator::kUnion,
+                  .core =
+                      SelectCore{
+                          .span = FindSpan(source, "SELECT 3"),
+                          .result_columns =
+                              {
+                                  ResultColumn{
+                                      .span = third,
+                                      .expression = ExpressionId{2},
+                                  },
+                              },
+                      },
+              },
+          },
+  };
+
+  auto result = SyntaxTree::Create(source, std::move(expressions), std::move(statement));
+
+  ASSERT_TRUE(result.has_value()) << result.error().ToString();
+  const auto& select = std::get<SelectStatement>(result->statement());
+  ASSERT_EQ(2U, std::get<ValuesCore>(select.first).rows.size());
+  ASSERT_EQ(1U, select.compounds.size());
+  EXPECT_EQ(CompoundOperator::kUnion, select.compounds[0].operation);
+  EXPECT_TRUE(std::holds_alternative<SelectCore>(select.compounds[0].core));
 }
 
 TEST(SyntaxTree, RepresentsCreateTableColumnConstraints) {
@@ -1246,10 +1323,14 @@ TEST(SyntaxTree, RejectsForwardDuplicateAndUnreferencedExpressionOwnership) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = Span(7, 9), .expression = ExpressionId{1}},
-                ResultColumn{.span = Span(11, 12), .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = Span(0, source.size()),
+                .result_columns =
+                    {
+                        ResultColumn{.span = Span(7, 9), .expression = ExpressionId{1}},
+                        ResultColumn{.span = Span(11, 12), .expression = ExpressionId{0}},
+                    },
             },
     };
     ExpectMisuse(
@@ -1315,12 +1396,16 @@ TEST(SyntaxTree, RejectsChildAndComponentSpansOutsideTheirOwners) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, 8),
-        .result_columns =
-            {
-                ResultColumn{
-                    .span = Span(0, 6),
-                    .expression = ExpressionId{0},
-                },
+        .first =
+            SelectCore{
+                .span = Span(0, 8),
+                .result_columns =
+                    {
+                        ResultColumn{
+                            .span = Span(0, 6),
+                            .expression = ExpressionId{0},
+                        },
+                    },
             },
     };
     ExpectMisuse(
@@ -1486,9 +1571,112 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
   {
     Statement statement = SelectStatement{
         .span = Span(0, 8),
-        .result_columns = {},
+        .first = SelectCore{.span = Span(0, 8), .result_columns = {}},
     };
     ExpectMisuse(SyntaxTree::Create("SELECT 1", {}, std::move(statement)));
+  }
+  {
+    Statement statement = SelectStatement{
+        .span = Span(0, 9),
+        .first = ValuesCore{.span = Span(0, 9), .rows = {}},
+    };
+    ExpectMisuse(SyntaxTree::Create("VALUES(1)", {}, std::move(statement)));
+  }
+  {
+    const std::string source = "VALUES(1) ORDER BY 1";
+    const SourceSpan value = FindSpan(source, "1");
+    const SourceSpan ordering = FindSpan(source, "1", value.end().value());
+    std::vector<Expression> expressions{
+        Expression{
+            .span = value,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = value},
+        },
+        Expression{
+            .span = ordering,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = ordering},
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .first = ValuesCore{.span = FindSpan(source, "VALUES(1)"), .rows = {{ExpressionId{0}}}},
+        .order_by = {{.span = ordering, .expression = ExpressionId{1}}},
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    const std::string source = "SELECT 1 UNION VALUES(2) LIMIT 3";
+    const SourceSpan first = FindSpan(source, "1");
+    const SourceSpan second = FindSpan(source, "2");
+    const SourceSpan limit = FindSpan(source, "3");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = first,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = first},
+        },
+        Expression{
+            .span = second,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = second},
+        },
+        Expression{
+            .span = limit,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = limit},
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns = {{.span = first, .expression = ExpressionId{0}}},
+            },
+        .compounds =
+            {
+                CompoundTerm{
+                    .span = FindSpan(source, "UNION VALUES(2)"),
+                    .operation = CompoundOperator::kUnion,
+                    .core = ValuesCore{.span = FindSpan(source, "VALUES(2)"),
+                                       .rows = {{ExpressionId{1}}}},
+                },
+            },
+        .limit = LimitClause{.span = FindSpan(source, "LIMIT 3"), .limit = ExpressionId{2}},
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    const std::string source = "SELECT 1 UNION SELECT 2";
+    const SourceSpan first = FindSpan(source, "1");
+    const SourceSpan second = FindSpan(source, "2");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = first,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = first},
+        },
+        Expression{
+            .span = second,
+            .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = second},
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns = {{.span = first, .expression = ExpressionId{0}}},
+            },
+        .compounds =
+            {
+                CompoundTerm{
+                    .span = FindSpan(source, "UNION SELECT 2"),
+                    .operation = InvalidEnumValue<CompoundOperator>(255),
+                    .core =
+                        SelectCore{
+                            .span = FindSpan(source, "SELECT 2"),
+                            .result_columns = {{.span = second, .expression = ExpressionId{1}}},
+                        },
+                },
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
   }
   {
     const std::string source = "SELECT 1 ORDER BY 1";
@@ -1514,9 +1702,13 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = result, .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns =
+                    {
+                        ResultColumn{.span = result, .expression = ExpressionId{0}},
+                    },
             },
         .order_by =
             {
@@ -1562,9 +1754,13 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = result, .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns =
+                    {
+                        ResultColumn{.span = result, .expression = ExpressionId{0}},
+                    },
             },
         .order_by =
             {
@@ -1619,9 +1815,13 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = first, .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns =
+                    {
+                        ResultColumn{.span = first, .expression = ExpressionId{0}},
+                    },
             },
         .limit =
             LimitClause{
@@ -1812,9 +2012,13 @@ TEST(SyntaxTree, RejectsLimitOperandsThatDisagreeWithRetainedSyntax) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns =
+                    {
+                        ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+                    },
             },
         .limit =
             LimitClause{
@@ -1860,9 +2064,13 @@ TEST(SyntaxTree, RejectsLimitOperandsThatDisagreeWithRetainedSyntax) {
     };
     Statement statement = SelectStatement{
         .span = Span(0, source.size()),
-        .result_columns =
-            {
-                ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+        .first =
+            SelectCore{
+                .span = FindSpan(source, "SELECT 1"),
+                .result_columns =
+                    {
+                        ResultColumn{.span = result_value, .expression = ExpressionId{0}},
+                    },
             },
         .limit =
             LimitClause{

@@ -55,6 +55,7 @@ using ParseResult = std::expected<ParseOutput, ParseError>;
 struct ParseOptions {
   std::size_t maximum_source_bytes = 1'000'000'000;
   std::size_t maximum_columns = 2'000;
+  std::size_t maximum_compound_terms = 500;
 };
 
 inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
