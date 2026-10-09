@@ -690,5 +690,185 @@ TEST(IndexRecordComparison, RejectsInvalidOrderingConfiguration) {
   EXPECT_EQ(ErrorCode::kMisuse, prefix.error().code());
 }
 
+TEST(RecordPrefixComparison, ComparesBorrowedFieldsWithCollationDirectionAndNullPlacement) {
+  std::vector<SqlValue> left_fields;
+  left_fields.push_back(SqlValue::Text("A"));
+  left_fields.push_back(SqlValue::Integer(2));
+  left_fields.emplace_back();
+  std::vector<SqlValue> right_fields;
+  right_fields.push_back(SqlValue::Text("a"));
+  right_fields.push_back(SqlValue::Integer(1));
+  right_fields.push_back(SqlValue::Integer(0));
+  ByteBuffer left_storage;
+  ByteBuffer right_storage;
+  const auto left = EncodeAndParse(left_fields, left_storage);
+  const auto right = EncodeAndParse(right_fields, right_storage);
+  ASSERT_TRUE(left.has_value());
+  ASSERT_TRUE(right.has_value());
+
+  const std::array<IndexColumnOrder, 2> descending_second{
+      IndexColumnOrder{NoCaseCollation()},
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kFirst},
+  };
+  const auto descending = CompareRecordPrefixes(*left, *right, descending_second);
+  ASSERT_TRUE(descending.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *descending);
+
+  std::vector<SqlValue> null_left_fields;
+  null_left_fields.push_back(SqlValue::Text("A"));
+  null_left_fields.push_back(SqlValue::Integer(2));
+  null_left_fields.emplace_back();
+  std::vector<SqlValue> null_right_fields;
+  null_right_fields.push_back(SqlValue::Text("a"));
+  null_right_fields.push_back(SqlValue::Integer(2));
+  null_right_fields.push_back(SqlValue::Integer(0));
+  ByteBuffer null_left_storage;
+  ByteBuffer null_right_storage;
+  const auto null_left = EncodeAndParse(null_left_fields, null_left_storage);
+  const auto null_right = EncodeAndParse(null_right_fields, null_right_storage);
+  ASSERT_TRUE(null_left.has_value());
+  ASSERT_TRUE(null_right.has_value());
+  const std::array<IndexColumnOrder, 3> nulls_first{
+      IndexColumnOrder{NoCaseCollation()},
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kFirst},
+  };
+  const std::array<IndexColumnOrder, 3> nulls_last{
+      IndexColumnOrder{NoCaseCollation()},
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kAscending,
+                       IndexNullPlacement::kLast},
+  };
+  const auto first = CompareRecordPrefixes(*null_left, *null_right, nulls_first);
+  const auto last = CompareRecordPrefixes(*null_left, *null_right, nulls_last);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(last.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *first);
+  EXPECT_EQ(std::weak_ordering::greater, *last);
+}
+
+TEST(RecordPrefixComparison, PreservesExactNumericOrderingAndIgnoresRecordTail) {
+  std::vector<SqlValue> integer_fields;
+  integer_fields.push_back(SqlValue::Integer(9007199254740993LL));
+  integer_fields.push_back(SqlValue::Integer(1));
+  std::vector<SqlValue> real_fields;
+  real_fields.push_back(SqlValue::Real(9007199254740992.0));
+  real_fields.push_back(SqlValue::Integer(99));
+  ByteBuffer integer_storage;
+  ByteBuffer real_storage;
+  const auto integer_record = EncodeAndParse(integer_fields, integer_storage);
+  const auto real_record = EncodeAndParse(real_fields, real_storage);
+  ASSERT_TRUE(integer_record.has_value());
+  ASSERT_TRUE(real_record.has_value());
+
+  const std::array<IndexColumnOrder, 1> numeric_prefix{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto numeric = CompareRecordPrefixes(*integer_record, *real_record, numeric_prefix);
+  const auto reversed = CompareRecordPrefixes(*real_record, *integer_record, numeric_prefix);
+  ASSERT_TRUE(numeric.has_value());
+  ASSERT_TRUE(reversed.has_value());
+  EXPECT_EQ(std::weak_ordering::greater, *numeric);
+  EXPECT_EQ(std::weak_ordering::less, *reversed);
+
+  std::vector<SqlValue> left_text;
+  left_text.push_back(SqlValue::Text("key   "));
+  left_text.push_back(SqlValue::Integer(1));
+  std::vector<SqlValue> right_text;
+  right_text.push_back(SqlValue::Text("key"));
+  right_text.push_back(SqlValue::Integer(2));
+  ByteBuffer left_text_storage;
+  ByteBuffer right_text_storage;
+  const auto left = EncodeAndParse(left_text, left_text_storage);
+  const auto right = EncodeAndParse(right_text, right_text_storage);
+  ASSERT_TRUE(left.has_value());
+  ASSERT_TRUE(right.has_value());
+  const std::array<IndexColumnOrder, 1> text_prefix{
+      IndexColumnOrder{RTrimCollation()},
+  };
+  const auto equivalent = CompareRecordPrefixes(*left, *right, text_prefix);
+  ASSERT_TRUE(equivalent.has_value());
+  EXPECT_EQ(std::weak_ordering::equivalent, *equivalent);
+}
+
+TEST(RecordPrefixComparison, ComparesStorageClassesAndBlobBytes) {
+  std::vector<SqlValue> text_fields;
+  text_fields.push_back(SqlValue::Text("z"));
+  std::vector<SqlValue> blob_fields;
+  blob_fields.push_back(SqlValue::Blob(Bytes({0x00})));
+  ByteBuffer text_storage;
+  ByteBuffer blob_storage;
+  const auto text_record = EncodeAndParse(text_fields, text_storage);
+  const auto blob_record = EncodeAndParse(blob_fields, blob_storage);
+  ASSERT_TRUE(text_record.has_value());
+  ASSERT_TRUE(blob_record.has_value());
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto storage_order = CompareRecordPrefixes(*text_record, *blob_record, columns);
+  ASSERT_TRUE(storage_order.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *storage_order);
+
+  std::vector<SqlValue> low_blob_fields;
+  low_blob_fields.push_back(SqlValue::Blob(Bytes({0x00, 0xff})));
+  std::vector<SqlValue> high_blob_fields;
+  high_blob_fields.push_back(SqlValue::Blob(Bytes({0x01})));
+  ByteBuffer low_blob_storage;
+  ByteBuffer high_blob_storage;
+  const auto low_blob = EncodeAndParse(low_blob_fields, low_blob_storage);
+  const auto high_blob = EncodeAndParse(high_blob_fields, high_blob_storage);
+  ASSERT_TRUE(low_blob.has_value());
+  ASSERT_TRUE(high_blob.has_value());
+  const auto blob_order = CompareRecordPrefixes(*low_blob, *high_blob, columns);
+  ASSERT_TRUE(blob_order.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *blob_order);
+}
+
+TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
+  std::vector<SqlValue> one_field;
+  one_field.push_back(SqlValue::Integer(1));
+  std::vector<SqlValue> two_fields;
+  two_fields.push_back(SqlValue::Integer(1));
+  two_fields.push_back(SqlValue::Integer(2));
+  ByteBuffer one_storage;
+  ByteBuffer two_storage;
+  const auto one = EncodeAndParse(one_field, one_storage);
+  const auto two = EncodeAndParse(two_fields, two_storage);
+  ASSERT_TRUE(one.has_value());
+  ASSERT_TRUE(two.has_value());
+
+  const std::array<IndexColumnOrder, 2> two_columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const auto short_left = CompareRecordPrefixes(*one, *two, two_columns);
+  const auto short_right = CompareRecordPrefixes(*two, *one, two_columns);
+  ASSERT_FALSE(short_left.has_value());
+  ASSERT_FALSE(short_right.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, short_left.error().code());
+  EXPECT_EQ(ErrorCode::kCorruption, short_right.error().code());
+
+  const std::array<IndexColumnOrder, 1> invalid_direction{
+      IndexColumnOrder{BinaryCollation(), InvalidEnumValue<IndexSortDirection>(2),
+                       IndexNullPlacement::kFirst},
+  };
+  const std::array<IndexColumnOrder, 1> invalid_null_placement{
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kAscending,
+                       InvalidEnumValue<IndexNullPlacement>(2)},
+  };
+  const auto direction = CompareRecordPrefixes(*one, *two, invalid_direction);
+  const auto null_placement = CompareRecordPrefixes(*one, *two, invalid_null_placement);
+  ASSERT_FALSE(direction.has_value());
+  ASSERT_FALSE(null_placement.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, direction.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, null_placement.error().code());
+
+  const auto empty = CompareRecordPrefixes(*one, *two, std::span<const IndexColumnOrder>{});
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_EQ(std::weak_ordering::equivalent, *empty);
+}
+
 }  // namespace
 }  // namespace modern_sqlite

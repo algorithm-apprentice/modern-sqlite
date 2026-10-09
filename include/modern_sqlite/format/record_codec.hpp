@@ -170,6 +170,9 @@ struct IndexKeyComparison {
   bool equivalent_prefix;
 };
 
+[[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixes(
+    const RecordView& left, const RecordView& right, std::span<const IndexColumnOrder> columns);
+
 [[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
     const RecordView& record, std::span<const SqlValue> search_key,
     std::span<const IndexColumnOrder> columns,

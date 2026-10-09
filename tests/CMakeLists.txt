@@ -82,6 +82,27 @@ gtest_discover_tests(
     TIMEOUT 10
 )
 
+add_executable(
+  modern_sqlite_record_codec_allocation_test
+  unit/format/record_codec_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_record_codec_allocation_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_record_codec_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_record_codec_allocation_test)
+add_test(
+  NAME format.record_codec_allocation
+  COMMAND modern_sqlite_record_codec_allocation_test
+)
+set_tests_properties(
+  format.record_codec_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
 foreach(kind allocation oom)
   add_executable(
     modern_sqlite_page_bitvec_${kind}_test

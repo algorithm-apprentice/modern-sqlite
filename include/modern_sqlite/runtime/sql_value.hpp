@@ -93,6 +93,13 @@ class SqlValue {
 [[nodiscard]] std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept;
 [[nodiscard]] SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept;
 
+[[nodiscard]] std::strong_ordering CompareSqlIntegers(std::int64_t left,
+                                                      std::int64_t right) noexcept;
+[[nodiscard]] std::strong_ordering CompareSqlIntegerAndReal(std::int64_t left,
+                                                            double right) noexcept;
+[[nodiscard]] std::strong_ordering CompareSqlRealAndInteger(double left,
+                                                            std::int64_t right) noexcept;
+[[nodiscard]] std::strong_ordering CompareSqlReals(double left, double right) noexcept;
 [[nodiscard]] std::strong_ordering CompareSqlValues(const SqlValue& left,
                                                     const SqlValue& right) noexcept;
 [[nodiscard]] SqlTruthValue EvaluateSqlComparison(const SqlValue& left, const SqlValue& right,

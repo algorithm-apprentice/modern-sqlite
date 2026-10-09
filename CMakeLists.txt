@@ -710,6 +710,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/catalog/catalog_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/diagnostics/storage_inspector_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/format/record_codec_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/counters_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/instrumentation/disabled_test.cpp"

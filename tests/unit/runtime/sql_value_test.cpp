@@ -458,6 +458,16 @@ TEST(SqlValueComparison, ComparesIntegerAndRealWithoutLosingIntegerPrecision) {
                              SqlValue::Real(-std::numeric_limits<double>::infinity())));
 }
 
+TEST(SqlValueComparison, ExposesExactPrimitiveNumericOrdering) {
+  EXPECT_EQ(std::strong_ordering::less, CompareSqlIntegers(1, 2));
+  EXPECT_EQ(std::strong_ordering::greater, CompareSqlReals(2.0, 1.0));
+  EXPECT_EQ(std::strong_ordering::greater,
+            CompareSqlIntegerAndReal(9007199254740993LL, 9007199254740992.0));
+  EXPECT_EQ(std::strong_ordering::less,
+            CompareSqlRealAndInteger(9007199254740992.0, 9007199254740993LL));
+  EXPECT_EQ(std::strong_ordering::equal, CompareSqlRealAndInteger(-0.0, 0));
+}
+
 TEST(SqlComparison, PropagatesNullForOrdinaryOperators) {
   for (const SqlComparison comparison :
        {SqlComparison::kEqual, SqlComparison::kNotEqual, SqlComparison::kLess,
