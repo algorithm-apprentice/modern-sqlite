@@ -19,6 +19,7 @@
 namespace modern_sqlite {
 
 using RecordSchemaFormat = DatabaseSchemaFormat;
+inline constexpr std::size_t kMaximumRecordFieldCount = 65'534;
 
 struct RecordCodecOptions {
   RecordSchemaFormat schema_format = RecordSchemaFormat::kFour;

@@ -25,7 +25,6 @@
 namespace modern_sqlite {
 namespace {
 
-constexpr std::size_t kMaximumRecordFieldCount = 65534;
 constexpr std::size_t kMaximumRecordHeaderSize = 98307;
 constexpr std::size_t kMaximumRecordSize = 2147483645;
 constexpr std::array<std::size_t, 10> kSmallSerialTypeSizes{0, 1, 2, 3, 4, 6, 8, 8, 0, 0};
