@@ -377,6 +377,22 @@ struct DecimalPrefix {
 
 }  // namespace
 
+std::strong_ordering CompareSqlIntegers(std::int64_t left, std::int64_t right) noexcept {
+  return CompareIntegers(left, right);
+}
+
+std::strong_ordering CompareSqlIntegerAndReal(std::int64_t left, double right) noexcept {
+  return CompareIntegerAndReal(left, right);
+}
+
+std::strong_ordering CompareSqlRealAndInteger(double left, std::int64_t right) noexcept {
+  return Reverse(CompareIntegerAndReal(right, left));
+}
+
+std::strong_ordering CompareSqlReals(double left, double right) noexcept {
+  return CompareReals(left, right);
+}
+
 SqlValue SqlValue::Integer(std::int64_t value) noexcept {
   SqlValue result;
   result.storage_.emplace<1>(value);
@@ -620,16 +636,15 @@ std::strong_ordering CompareSqlValues(const SqlValue& left, const SqlValue& righ
   }
   if (left_rank == 1) {
     if (left.type() == SqlValueType::kInteger && right.type() == SqlValueType::kInteger) {
-      return CompareIntegers(SqlValueAccess::Integer(left), SqlValueAccess::Integer(right));
+      return CompareSqlIntegers(SqlValueAccess::Integer(left), SqlValueAccess::Integer(right));
     }
     if (left.type() == SqlValueType::kReal && right.type() == SqlValueType::kReal) {
-      return CompareReals(SqlValueAccess::Real(left), SqlValueAccess::Real(right));
+      return CompareSqlReals(SqlValueAccess::Real(left), SqlValueAccess::Real(right));
     }
     if (left.type() == SqlValueType::kInteger) {
-      return CompareIntegerAndReal(SqlValueAccess::Integer(left), SqlValueAccess::Real(right));
+      return CompareSqlIntegerAndReal(SqlValueAccess::Integer(left), SqlValueAccess::Real(right));
     }
-    return Reverse(
-        CompareIntegerAndReal(SqlValueAccess::Integer(right), SqlValueAccess::Real(left)));
+    return CompareSqlRealAndInteger(SqlValueAccess::Real(left), SqlValueAccess::Integer(right));
   }
   if (left.type() == SqlValueType::kText) {
     return CompareBytes(AsBytes(SqlValueAccess::Text(left).bytes()),

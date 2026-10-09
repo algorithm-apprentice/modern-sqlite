@@ -236,7 +236,8 @@ void WriteSignedInteger(MutableByteView output, std::int64_t value) noexcept {
   return std::weak_ordering::equivalent;
 }
 
-[[nodiscard]] std::weak_ordering CompareField(const RecordFieldView& left, const SqlValue& right,
+template <typename Left, typename Right>
+[[nodiscard]] std::weak_ordering CompareField(const Left& left, const Right& right,
                                               const IndexColumnOrder& column) {
   const bool left_is_null = left.type() == SqlValueType::kNull;
   const bool right_is_null = right.type() == SqlValueType::kNull;
@@ -254,10 +255,18 @@ void WriteSignedInteger(MutableByteView output, std::int64_t value) noexcept {
   if (left_rank != right_rank) {
     ordering = left_rank < right_rank ? std::weak_ordering::less : std::weak_ordering::greater;
   } else if (left_rank == 1) {
-    const SqlValue left_value = left.type() == SqlValueType::kInteger
-                                    ? SqlValue::Integer(Required(left.integer_value()))
-                                    : SqlValue::Real(Required(left.real_value()));
-    ordering = CompareSqlValues(left_value, right);
+    if (left.type() == SqlValueType::kInteger && right.type() == SqlValueType::kInteger) {
+      ordering =
+          CompareSqlIntegers(Required(left.integer_value()), Required(right.integer_value()));
+    } else if (left.type() == SqlValueType::kInteger) {
+      ordering =
+          CompareSqlIntegerAndReal(Required(left.integer_value()), Required(right.real_value()));
+    } else if (right.type() == SqlValueType::kInteger) {
+      ordering =
+          CompareSqlRealAndInteger(Required(left.real_value()), Required(right.integer_value()));
+    } else {
+      ordering = CompareSqlReals(Required(left.real_value()), Required(right.real_value()));
+    }
   } else if (left.type() == SqlValueType::kText) {
     ordering =
         column.collation().Compare(Required(left.text_value()), Required(right.text_value()));
@@ -295,6 +304,15 @@ void WriteSignedInteger(MutableByteView output, std::int64_t value) noexcept {
 [[nodiscard]] bool IsValidEqualPrefixResult(EqualPrefixResult result) noexcept {
   return result == EqualPrefixResult::kLess || result == EqualPrefixResult::kEquivalent ||
          result == EqualPrefixResult::kGreater;
+}
+
+[[nodiscard]] Result<void> ValidateComparisonColumns(std::span<const IndexColumnOrder> columns) {
+  for (const IndexColumnOrder& column : columns) {
+    if (!IsValidDirection(column.direction()) || !IsValidNullPlacement(column.null_placement())) {
+      return std::unexpected(Misuse("invalid index comparison ordering metadata"));
+    }
+  }
+  return {};
 }
 
 void EncodeMeasuredRecord(std::span<const SqlValue> values, RecordCodecOptions options,
@@ -700,6 +718,35 @@ Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions 
   return values;
 }
 
+Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const RecordView& right,
+                                                 std::span<const IndexColumnOrder> columns) {
+  auto valid_columns = ValidateComparisonColumns(columns);
+  if (!valid_columns.has_value()) {
+    return std::unexpected(std::move(valid_columns.error()));
+  }
+  if (left.field_count() < columns.size()) {
+    return std::unexpected(Corruption("left record has fewer fields than comparison prefix"));
+  }
+  if (right.field_count() < columns.size()) {
+    return std::unexpected(Corruption("right record has fewer fields than comparison prefix"));
+  }
+
+  RecordCursor left_cursor = left.cursor();
+  RecordCursor right_cursor = right.cursor();
+  for (const IndexColumnOrder& column : columns) {
+    const std::optional<RecordFieldView> left_field = left_cursor.Next();
+    const std::optional<RecordFieldView> right_field = right_cursor.Next();
+    if (!left_field.has_value() || !right_field.has_value()) {
+      return std::unexpected(Corruption("record field metadata ended during comparison"));
+    }
+    const std::weak_ordering ordering = CompareField(*left_field, *right_field, column);
+    if (ordering != std::weak_ordering::equivalent) {
+      return ordering;
+    }
+  }
+  return std::weak_ordering::equivalent;
+}
+
 Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
                                               std::span<const SqlValue> search_key,
                                               std::span<const IndexColumnOrder> columns,
@@ -710,10 +757,9 @@ Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
   if (columns.size() < search_key.size()) {
     return std::unexpected(Misuse("index comparison metadata is shorter than the search key"));
   }
-  for (const IndexColumnOrder& column : columns.first(search_key.size())) {
-    if (!IsValidDirection(column.direction()) || !IsValidNullPlacement(column.null_placement())) {
-      return std::unexpected(Misuse("invalid index comparison ordering metadata"));
-    }
+  auto valid_columns = ValidateComparisonColumns(columns.first(search_key.size()));
+  if (!valid_columns.has_value()) {
+    return std::unexpected(std::move(valid_columns.error()));
   }
   if (record.field_count() < search_key.size()) {
     return std::unexpected(Corruption("index record has fewer fields than the search key"));
@@ -722,7 +768,9 @@ Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
   RecordCursor cursor = record.cursor();
   for (std::size_t index = 0; index < search_key.size(); ++index) {
     const auto field = cursor.Next();
-    assert(field.has_value());
+    if (!field.has_value()) {
+      return std::unexpected(Corruption("index record field metadata ended during comparison"));
+    }
     const std::weak_ordering ordering = CompareField(*field, search_key[index], columns[index]);
     if (ordering != std::weak_ordering::equivalent) {
       return IndexKeyComparison{
