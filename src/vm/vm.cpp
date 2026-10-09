@@ -267,6 +267,7 @@ struct Vm::Impl {
         cursors_(program.cursors().size()),
         write_cursors_(program.write_cursors().size()),
         sorters_(program.sorters().size()),
+        top_ns_(program.top_ns().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
@@ -597,6 +598,25 @@ struct Vm::Impl {
 
   [[nodiscard]] const Collation& CollationFor(SymbolId symbol) const noexcept {
     return *resolved_collations_[symbol.value()];
+  }
+
+  [[nodiscard]] RecordSorterDescriptor RuntimeOrderingDescriptor(
+      const OrderingRecordDescriptor& descriptor) const {
+    RecordSorterDescriptor runtime{
+        .field_count = descriptor.field_count,
+        .key_field_count = descriptor.key_field_count,
+    };
+    runtime.key_columns.reserve(descriptor.key_columns.size());
+    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
+      runtime.key_columns.emplace_back(
+          CollationFor(column.collation),
+          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
+                                                         : IndexSortDirection::kAscending,
+          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
+                                                                : IndexNullPlacement::kFirst);
+    }
+    runtime.record_options = record_options_;
+    return runtime;
   }
 
   [[nodiscard]] DispatchResult Dispatch(std::uint32_t address, const Instruction& instruction) {
@@ -2095,22 +2115,8 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kInternal, "sorter is already open"));
     }
 
-    const OrderingRecordDescriptor& descriptor = program_->sorter(operation.sorter);
-    RecordSorterDescriptor runtime_descriptor{
-        .field_count = descriptor.field_count,
-        .key_field_count = descriptor.key_field_count,
-    };
-    runtime_descriptor.key_columns.reserve(descriptor.key_columns.size());
-    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
-      runtime_descriptor.key_columns.emplace_back(
-          CollationFor(column.collation),
-          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
-                                                         : IndexSortDirection::kAscending,
-          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
-                                                                : IndexNullPlacement::kFirst);
-    }
-    runtime_descriptor.record_options = record_options_;
-    auto created = temporary_storage_->CreateRecordSorter(runtime_descriptor);
+    auto created = temporary_storage_->CreateRecordSorter(
+        RuntimeOrderingDescriptor(program_->sorter(operation.sorter)));
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
@@ -2204,18 +2210,139 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
-  template <typename Operation>
-    requires(std::is_same_v<Operation, OpenTopNInstruction> ||
-             std::is_same_v<Operation, CheckTopNInstruction> ||
-             std::is_same_v<Operation, InsertTopNInstruction> ||
-             std::is_same_v<Operation, RewindTopNInstruction> ||
-             std::is_same_v<Operation, ReadTopNFieldInstruction> ||
-             std::is_same_v<Operation, NextTopNInstruction> ||
-             std::is_same_v<Operation, ResetTopNInstruction> ||
-             std::is_same_v<Operation, CloseTopNInstruction>)
-  [[nodiscard]] DispatchResult Execute(std::uint32_t, const Operation&) {
-    return std::unexpected(
-        VmError(ErrorCode::kGeneric, "ordering bytecode execution is not implemented"));
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenTopNInstruction& operation) {
+    if (temporary_storage_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "top-N bytecode requires temporary storage"));
+    }
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is already open"));
+    }
+    const std::optional<std::int64_t> bound = Register(operation.bound).integer_value();
+    if (!bound.has_value() || *bound < 0) {
+      return std::unexpected(
+          VmError(ErrorCode::kTypeMismatch, "top-N bound must be a nonnegative integer"));
+    }
+    const auto unsigned_bound = static_cast<std::uint64_t>(*bound);
+    if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
+    }
+    auto created =
+        temporary_storage_->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)),
+                                       static_cast<std::size_t>(unsigned_bound));
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    runtime.emplace(std::move(*created));
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CheckTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    const auto key = std::span<const SqlValue>{registers_}.subspan(operation.first_key.value(),
+                                                                   operation.key_count);
+    auto encoded = EncodeRecord(key, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto checked = runtime->CheckCandidate(std::move(*encoded));
+    if (!checked.has_value()) {
+      return std::unexpected(std::move(checked.error()));
+    }
+    if (*checked == TopNCheckResult::kRejected) {
+      program_counter_ = operation.rejected_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    const auto values = std::span<const SqlValue>{registers_}.subspan(operation.first_value.value(),
+                                                                      operation.value_count);
+    auto encoded = EncodeRecord(values, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto inserted = runtime->Insert(std::move(*encoded));
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    auto rewound = runtime->Rewind();
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (runtime->state() == BoundedTopNState::kExhausted) {
+      program_counter_ = operation.empty_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadTopNFieldInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    auto record = runtime->current_record();
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    auto field = record->field(operation.field);
+    if (!field.has_value()) {
+      return std::unexpected(std::move(field.error()));
+    }
+    return SetRegister(operation.output, field->ToOwned());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    auto advanced = runtime->Next();
+    if (!advanced.has_value()) {
+      return std::unexpected(std::move(advanced.error()));
+    }
+    if (*advanced) {
+      program_counter_ = operation.next_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResetTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    auto reset = runtime->Reset();
+    if (!reset.has_value()) {
+      return std::unexpected(std::move(reset.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseTopNInstruction& operation) {
+    std::optional<BoundedTopN>& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    runtime->Close();
+    runtime.reset();
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
@@ -2362,6 +2489,9 @@ struct Vm::Impl {
     for (std::optional<RecordSorter>& sorter : sorters_) {
       sorter.reset();
     }
+    for (std::optional<BoundedTopN>& top_n : top_ns_) {
+      top_n.reset();
+    }
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -2379,6 +2509,7 @@ struct Vm::Impl {
   std::vector<RuntimeCursor> cursors_;
   std::vector<RuntimeWriteCursor> write_cursors_;
   std::vector<std::optional<RecordSorter>> sorters_;
+  std::vector<std::optional<BoundedTopN>> top_ns_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;

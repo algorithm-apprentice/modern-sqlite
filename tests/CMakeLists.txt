@@ -53,6 +53,7 @@ add_executable(
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
+  unit/temporary_storage/bounded_top_n_test.cpp
   unit/temporary_storage/record_sorter_test.cpp
   unit/temporary_storage/temporary_storage_test.cpp
   unit/text/text_test.cpp
@@ -125,6 +126,31 @@ add_test(
 )
 set_tests_properties(
   temporary_storage.record_sorter_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
+  modern_sqlite_bounded_top_n_oom_test
+  unit/temporary_storage/bounded_top_n_oom_test.cpp
+)
+target_include_directories(
+  modern_sqlite_bounded_top_n_oom_test
+  PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  modern_sqlite_bounded_top_n_oom_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_bounded_top_n_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_bounded_top_n_oom_test)
+add_test(
+  NAME temporary_storage.bounded_top_n_oom
+  COMMAND modern_sqlite_bounded_top_n_oom_test
+)
+set_tests_properties(
+  temporary_storage.bounded_top_n_oom
   PROPERTIES
     LABELS unit
     TIMEOUT 10
