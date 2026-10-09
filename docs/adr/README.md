@@ -59,3 +59,4 @@ their corresponding implementation begins.
 53. [ADR-0053: SQLite-Aligned Advanced SQL Architecture and Ordered Delivery](0053-sqlite-aligned-advanced-sql-architecture.md)
 54. [ADR-0054: SQLite-Aligned ORDER BY and External Sorter](0054-sqlite-aligned-order-by-and-external-sorter.md)
 55. [ADR-0055: SQLite-Aligned Ephemeral Pager and Spillable Top-N](0055-sqlite-aligned-ephemeral-pager-and-spillable-top-n.md)
+56. [ADR-0056: SQLite-Aligned DISTINCT, VALUES, and Compound SELECT](0056-sqlite-aligned-distinct-values-and-compound-select.md)
