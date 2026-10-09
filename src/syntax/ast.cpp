@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -97,6 +98,17 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
     case SelectQuantifier::kDefault:
     case SelectQuantifier::kAll:
     case SelectQuantifier::kDistinct:
+      return true;
+  }
+  return false;
+}
+
+[[nodiscard]] constexpr bool IsValid(CompoundOperator value) noexcept {
+  switch (value) {
+    case CompoundOperator::kUnion:
+    case CompoundOperator::kUnionAll:
+    case CompoundOperator::kIntersect:
+    case CompoundOperator::kExcept:
       return true;
   }
   return false;
@@ -576,21 +588,21 @@ class Validator final {
     return {};
   }
 
-  [[nodiscard]] Status ValidateSelect(const SelectStatement& select) {
-    const Status root_status = ValidateRootSpan(select.span);
-    if (!root_status.has_value()) {
-      return root_status;
+  [[nodiscard]] Status ValidateSelectCore(const SelectCore& core, SourceSpan owner) {
+    const Status span_status = ValidateContainedSpan(core.span, owner);
+    if (!span_status.has_value()) {
+      return span_status;
     }
-    if (!IsValid(select.quantifier)) {
+    if (!IsValid(core.quantifier)) {
       return Misuse("select quantifier is invalid");
     }
-    if (select.result_columns.empty()) {
-      return Misuse("select statement requires at least one result column");
+    if (core.result_columns.empty()) {
+      return Misuse("select core requires at least one result column");
     }
 
-    ByteOffset previous_end = select.span.begin();
-    for (const ResultColumn& column : select.result_columns) {
-      const Status column_status = ValidateResultColumn(column, select.span);
+    ByteOffset previous_end = core.span.begin();
+    for (const ResultColumn& column : core.result_columns) {
+      const Status column_status = ValidateResultColumn(column, core.span);
       if (!column_status.has_value()) {
         return column_status;
       }
@@ -600,27 +612,108 @@ class Validator final {
       previous_end = column.span.end();
     }
     ByteOffset clause_end = previous_end;
-    if (select.from.has_value()) {
-      const Status source_status = ValidateTableSource(*select.from, select.span);
+    if (core.from.has_value()) {
+      const Status source_status = ValidateTableSource(*core.from, core.span);
       if (!source_status.has_value()) {
         return source_status;
       }
-      if (select.from->span.begin() < clause_end) {
+      if (core.from->span.begin() < clause_end) {
         return Misuse("select FROM clause is out of order");
       }
-      clause_end = select.from->span.end();
+      clause_end = core.from->span.end();
     }
-    if (select.where.has_value()) {
-      const Status where_status = ReferenceExpression(*select.where, select.span, std::nullopt);
+    if (core.where.has_value()) {
+      const Status where_status = ReferenceExpression(*core.where, core.span, std::nullopt);
       if (!where_status.has_value()) {
         return where_status;
       }
-      const SourceSpan where_span = expressions_[select.where->value].span;
+      const SourceSpan where_span = expressions_[core.where->value].span;
       if (where_span.begin() < clause_end) {
         return Misuse("select WHERE clause is out of order");
       }
-      clause_end = where_span.end();
     }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateValuesCore(const ValuesCore& core, SourceSpan owner) {
+    const Status span_status = ValidateContainedSpan(core.span, owner);
+    if (!span_status.has_value()) {
+      return span_status;
+    }
+    if (core.rows.empty()) {
+      return Misuse("VALUES core requires at least one row");
+    }
+    ByteOffset previous_end = core.span.begin();
+    for (const std::vector<ExpressionId>& row : core.rows) {
+      if (row.empty()) {
+        return Misuse("VALUES row requires at least one expression");
+      }
+      for (const ExpressionId expression : row) {
+        const Status expression_status = ReferenceExpression(expression, core.span, std::nullopt);
+        if (!expression_status.has_value()) {
+          return expression_status;
+        }
+        const SourceSpan expression_span = expressions_[expression.value].span;
+        if (expression_span.begin() < previous_end) {
+          return Misuse("VALUES expressions must be in source order");
+        }
+        previous_end = expression_span.end();
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] Status ValidateQueryCore(const QueryCore& core, SourceSpan owner) {
+    return std::visit(
+        [this, owner](const auto& value) -> Status {
+          using Core = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<Core, SelectCore>) {
+            return ValidateSelectCore(value, owner);
+          } else {
+            return ValidateValuesCore(value, owner);
+          }
+        },
+        core);
+  }
+
+  [[nodiscard]] static SourceSpan CoreSpan(const QueryCore& core) {
+    return std::visit([](const auto& value) { return value.span; }, core);
+  }
+
+  [[nodiscard]] Status ValidateSelect(const SelectStatement& select) {
+    const Status root_status = ValidateRootSpan(select.span);
+    if (!root_status.has_value()) {
+      return root_status;
+    }
+    const Status first_status = ValidateQueryCore(select.first, select.span);
+    if (!first_status.has_value()) {
+      return first_status;
+    }
+
+    ByteOffset clause_end = CoreSpan(select.first).end();
+    for (const CompoundTerm& term : select.compounds) {
+      if (!IsValid(term.operation) || !Contains(select.span, term.span) ||
+          term.span.begin() < clause_end) {
+        return Misuse("compound SELECT term is invalid or out of order");
+      }
+      const Status core_status = ValidateQueryCore(term.core, term.span);
+      if (!core_status.has_value()) {
+        return core_status;
+      }
+      const SourceSpan core_span = CoreSpan(term.core);
+      if (core_span.begin() < term.span.begin() || core_span.end() > term.span.end()) {
+        return Misuse("compound SELECT core is outside its term");
+      }
+      clause_end = term.span.end();
+    }
+
+    const QueryCore& rightmost =
+        select.compounds.empty() ? select.first : select.compounds.back().core;
+    if (std::holds_alternative<ValuesCore>(rightmost) &&
+        (!select.order_by.empty() || select.limit.has_value())) {
+      return Misuse("rightmost VALUES core cannot own ORDER BY or LIMIT");
+    }
+
     ByteOffset previous_order_end = clause_end;
     for (const OrderingTerm& term : select.order_by) {
       if (!Contains(select.span, term.span) || !IsValid(term.order) || !IsValid(term.null_order)) {

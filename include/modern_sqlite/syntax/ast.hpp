@@ -194,12 +194,38 @@ struct OrderingTerm {
   NullOrder null_order = NullOrder::kDefault;
 };
 
-struct SelectStatement {
+enum class CompoundOperator : std::uint8_t {
+  kUnion,
+  kUnionAll,
+  kIntersect,
+  kExcept,
+};
+
+struct SelectCore {
   SourceSpan span;
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
   std::vector<ResultColumn> result_columns;
   std::optional<TableSource> from{};
   std::optional<ExpressionId> where{};
+};
+
+struct ValuesCore {
+  SourceSpan span;
+  std::vector<std::vector<ExpressionId>> rows;
+};
+
+using QueryCore = std::variant<SelectCore, ValuesCore>;
+
+struct CompoundTerm {
+  SourceSpan span;
+  CompoundOperator operation = CompoundOperator::kUnion;
+  QueryCore core;
+};
+
+struct SelectStatement {
+  SourceSpan span;
+  QueryCore first;
+  std::vector<CompoundTerm> compounds;
   std::vector<OrderingTerm> order_by{};
   std::optional<LimitClause> limit{};
 };

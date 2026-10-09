@@ -449,8 +449,19 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInvalidInput, select.span,
                                          "syntax tree contains an invalid reference"));
     }
-    if (select.quantifier == SelectQuantifier::kDistinct) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, select.span,
+    if (!select.compounds.empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature,
+                                         select.compounds.front().span,
+                                         "compound SELECT is not supported"));
+    }
+    const auto* core = std::get_if<SelectCore>(&select.first);
+    if (core == nullptr) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature,
+                                         std::get<ValuesCore>(select.first).span,
+                                         "VALUES is not supported"));
+    }
+    if (core->quantifier == SelectQuantifier::kDistinct) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, core->span,
                                          "SELECT DISTINCT is not supported"));
     }
 
@@ -458,7 +469,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    BindExpected<void> source = BindSource(select);
+    BindExpected<void> source = BindSource(*core);
     if (!source.has_value()) {
       return std::unexpected(std::move(source.error()));
     }
@@ -471,14 +482,14 @@ class StatementBinder final {
         impl_->registered_collations.emplace_back(collation->name());
       }
     }
-    ReserveOutputStorage(select);
-    BindExpected<void> results = BindResults(select);
+    ReserveOutputStorage(*core);
+    BindExpected<void> results = BindResults(*core);
     if (!results.has_value()) {
       return std::unexpected(std::move(results.error()));
     }
-    if (select.where.has_value()) {
+    if (core->where.has_value()) {
       BindExpected<BoundExpressionId> where =
-          BindExpression(*select.where, BindScope{.source_columns = true, .result_aliases = true});
+          BindExpression(*core->where, BindScope{.source_columns = true, .result_aliases = true});
       if (!where.has_value()) {
         return std::unexpected(std::move(where.error()));
       }
@@ -1553,7 +1564,7 @@ class StatementBinder final {
            options_.maximum_function_arguments <= maximum;
   }
 
-  void ReserveOutputStorage(const SelectStatement& select) {
+  void ReserveOutputStorage(const SelectCore& select) {
     const std::size_t syntax_count = tree_.expressions().size();
     const std::size_t wildcard_slack = impl_->source_columns.size();
     const std::size_t expression_capacity =
@@ -1588,23 +1599,49 @@ class StatementBinder final {
     return std::ranges::all_of(name.parts, [this](SourceSpan part) { return SpanIsValid(part); });
   }
 
-  [[nodiscard]] bool ValidateTree(const SelectStatement& select) const noexcept {
-    if (!SpanIsValid(select.span) || select.result_columns.empty()) {
+  [[nodiscard]] bool ValidateSelectCore(const SelectCore& core) const noexcept {
+    if (!SpanIsValid(core.span) || core.result_columns.empty()) {
       return false;
     }
-    for (const ResultColumn& result : select.result_columns) {
+    for (const ResultColumn& result : core.result_columns) {
       if (!SpanIsValid(result.span) || !IdIsValid(result.expression) ||
           (result.alias.has_value() && !SpanIsValid(*result.alias))) {
         return false;
       }
     }
-    if (select.from.has_value() &&
-        (!SpanIsValid(select.from->span) || !QualifiedNameIsValid(select.from->name) ||
-         (select.from->alias.has_value() && !SpanIsValid(*select.from->alias)))) {
+    if (core.from.has_value() &&
+        (!SpanIsValid(core.from->span) || !QualifiedNameIsValid(core.from->name) ||
+         (core.from->alias.has_value() && !SpanIsValid(*core.from->alias)))) {
       return false;
     }
-    if (select.where.has_value() && !IdIsValid(*select.where)) {
+    return !core.where.has_value() || IdIsValid(*core.where);
+  }
+
+  [[nodiscard]] bool ValidateQueryCore(const QueryCore& core) const noexcept {
+    if (const auto* select = std::get_if<SelectCore>(&core); select != nullptr) {
+      return ValidateSelectCore(*select);
+    }
+    const auto* values = std::get_if<ValuesCore>(&core);
+    if (values == nullptr || !SpanIsValid(values->span) || values->rows.empty()) {
       return false;
+    }
+    for (const std::vector<ExpressionId>& row : values->rows) {
+      if (row.empty() ||
+          !std::ranges::all_of(row, [this](ExpressionId id) { return IdIsValid(id); })) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool ValidateTree(const SelectStatement& select) const noexcept {
+    if (!SpanIsValid(select.span) || !ValidateQueryCore(select.first)) {
+      return false;
+    }
+    for (const CompoundTerm& term : select.compounds) {
+      if (!SpanIsValid(term.span) || !ValidateQueryCore(term.core)) {
+        return false;
+      }
     }
     for (const OrderingTerm& term : select.order_by) {
       if (!SpanIsValid(term.span) || !IdIsValid(term.expression)) {
@@ -1773,7 +1810,7 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> BindSource(const SelectStatement& select) {
+  [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select) {
     if (!select.from.has_value()) {
       return {};
     }
@@ -1857,7 +1894,7 @@ class StatementBinder final {
                                        "no such table: " + std::string{SpanText(span)}));
   }
 
-  [[nodiscard]] BindExpected<void> BindResults(const SelectStatement& select) {
+  [[nodiscard]] BindExpected<void> BindResults(const SelectCore& select) {
     for (const ResultColumn& result : select.result_columns) {
       const Expression& expression = tree_.expression(result.expression);
       if (const auto* wildcard = std::get_if<WildcardExpression>(&expression.payload);

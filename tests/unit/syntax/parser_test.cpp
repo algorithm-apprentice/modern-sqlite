@@ -27,6 +27,7 @@ static_assert(std::is_nothrow_move_constructible_v<ParseOutput>);
 static_assert(std::is_nothrow_move_assignable_v<ParseOutput>);
 static_assert(kMaximumExpressionConstructionDepth == 1000U);
 static_assert(kMaximumParserRecursionDepth == 512U);
+static_assert(ParseOptions{}.maximum_compound_terms == 500U);
 
 [[nodiscard]] ParseOutput ParseOrThrow(std::string_view sql) {
   ParseResult result = ParseOne(Utf8View{sql});
@@ -68,6 +69,10 @@ static_assert(kMaximumParserRecursionDepth == 512U);
   return std::get<SelectStatement>(tree.statement());
 }
 
+[[nodiscard]] const SelectCore& FirstSelectCore(const SyntaxTree& tree) {
+  return std::get<SelectCore>(Select(tree).first);
+}
+
 [[nodiscard]] const CreateTableStatement& CreateTable(const SyntaxTree& tree) {
   return std::get<CreateTableStatement>(tree.statement());
 }
@@ -94,7 +99,7 @@ static_assert(kMaximumParserRecursionDepth == 512U);
 
 [[nodiscard]] const Expression& ResultExpression(const SyntaxTree& tree,
                                                  std::size_t result_index = 0) {
-  return tree.expression(Select(tree).result_columns.at(result_index).expression);
+  return tree.expression(FirstSelectCore(tree).result_columns.at(result_index).expression);
 }
 
 template <typename T>
@@ -424,7 +429,7 @@ TEST(Parser, PreservesGeneratedAlwaysFallbackWordsInDeclaredTypes) {
 
 TEST(Parser, MatchesPinnedSqliteDifferentialCorpusPolicy) {
   const std::vector<ParserCorpusCase> cases = ReadParserCorpus();
-  ASSERT_EQ(77U, cases.size());
+  ASSERT_EQ(78U, cases.size());
 
   for (const ParserCorpusCase& test_case : cases) {
     SCOPED_TRACE(test_case.name);
@@ -462,9 +467,10 @@ TEST(Parser, UsesPrepareStyleStatementSlicesAndTailOffsets) {
             first_tree.source().bytes());
 
   const SelectStatement& select = Select(first_tree);
+  const SelectCore& core = FirstSelectCore(first_tree);
   EXPECT_EQ("SELECT 1", SpanText(first_tree, select.span));
-  ASSERT_EQ(1U, select.result_columns.size());
-  EXPECT_EQ("1", SpanText(first_tree, select.result_columns.front().span));
+  ASSERT_EQ(1U, core.result_columns.size());
+  EXPECT_EQ("1", SpanText(first_tree, core.result_columns.front().span));
 
   const ParseOutput second =
       ParseOrThrow(std::string_view{input}.substr(output.next_offset.value()));
@@ -512,7 +518,7 @@ TEST(Parser, BuildsAllInitialPrimaryExpressionKindsWithoutDecoding) {
       "main.t.c, fn(DISTINCT a), tab.*;";
   const ParseOutput output = ParseOrThrow(sql);
   const SyntaxTree& tree = RequiredTree(output);
-  ASSERT_EQ(11U, Select(tree).result_columns.size());
+  ASSERT_EQ(11U, FirstSelectCore(tree).result_columns.size());
 
   const auto& null_literal =
       std::get<LiteralExpression>(tree.expression(FindExpression(tree, "NULL")).payload);
@@ -707,18 +713,19 @@ TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
       "WHERE a > 0 LIMIT 10 OFFSET 2;");
   const SyntaxTree& tree = RequiredTree(output);
   const SelectStatement& select = Select(tree);
-  EXPECT_EQ(SelectQuantifier::kDistinct, select.quantifier);
-  ASSERT_EQ(2U, select.result_columns.size());
-  ASSERT_TRUE(select.result_columns[0].alias.has_value());
-  ASSERT_TRUE(select.result_columns[1].alias.has_value());
-  EXPECT_EQ("x", SpanText(tree, RequiredOptional(select.result_columns[0].alias)));
-  EXPECT_EQ("y", SpanText(tree, RequiredOptional(select.result_columns[1].alias)));
-  ASSERT_TRUE(select.from.has_value());
-  const TableSource& source = RequiredOptional(select.from);
+  const SelectCore& core = FirstSelectCore(tree);
+  EXPECT_EQ(SelectQuantifier::kDistinct, core.quantifier);
+  ASSERT_EQ(2U, core.result_columns.size());
+  ASSERT_TRUE(core.result_columns[0].alias.has_value());
+  ASSERT_TRUE(core.result_columns[1].alias.has_value());
+  EXPECT_EQ("x", SpanText(tree, RequiredOptional(core.result_columns[0].alias)));
+  EXPECT_EQ("y", SpanText(tree, RequiredOptional(core.result_columns[1].alias)));
+  ASSERT_TRUE(core.from.has_value());
+  const TableSource& source = RequiredOptional(core.from);
   ASSERT_EQ(2U, source.name.parts.size());
   EXPECT_EQ("source", SpanText(tree, RequiredOptional(source.alias)));
-  ASSERT_TRUE(select.where.has_value());
-  EXPECT_EQ("a > 0", SpanText(tree, tree.expression(RequiredOptional(select.where)).span));
+  ASSERT_TRUE(core.where.has_value());
+  EXPECT_EQ("a > 0", SpanText(tree, tree.expression(RequiredOptional(core.where)).span));
   ASSERT_TRUE(select.limit.has_value());
   const LimitClause& limit = RequiredOptional(select.limit);
   EXPECT_EQ(LimitSyntax::kOffsetKeyword, limit.syntax);
@@ -728,11 +735,134 @@ TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
   const ParseOutput comma_output = ParseOrThrow("SELECT ALL 1 LIMIT 2, 3");
   const SyntaxTree& comma_tree = RequiredTree(comma_output);
   const LimitClause& comma_limit = RequiredOptional(Select(comma_tree).limit);
-  EXPECT_EQ(SelectQuantifier::kAll, Select(comma_tree).quantifier);
+  EXPECT_EQ(SelectQuantifier::kAll, FirstSelectCore(comma_tree).quantifier);
   EXPECT_EQ(LimitSyntax::kComma, comma_limit.syntax);
   EXPECT_EQ("3", SpanText(comma_tree, comma_tree.expression(comma_limit.limit).span));
   EXPECT_EQ("2",
             SpanText(comma_tree, comma_tree.expression(RequiredOptional(comma_limit.offset)).span));
+}
+
+TEST(Parser, ParsesValuesAndCompoundSelectStatements) {
+  const ParseOutput output = ParseOrThrow(
+      "VALUES(1,'a'),(2,'b') "
+      "UNION ALL SELECT DISTINCT 3 AS x "
+      "EXCEPT SELECT 4 ORDER BY x DESC LIMIT 2 OFFSET 1");
+  const SyntaxTree& tree = RequiredTree(output);
+  const SelectStatement& select = Select(tree);
+  EXPECT_EQ(
+      "VALUES(1,'a'),(2,'b') UNION ALL SELECT DISTINCT 3 AS x "
+      "EXCEPT SELECT 4 ORDER BY x DESC LIMIT 2 OFFSET 1",
+      SpanText(tree, select.span));
+
+  const auto& values = std::get<ValuesCore>(select.first);
+  EXPECT_EQ("VALUES(1,'a'),(2,'b')", SpanText(tree, values.span));
+  ASSERT_EQ(2U, values.rows.size());
+  ASSERT_EQ(2U, values.rows[0].size());
+  ASSERT_EQ(2U, values.rows[1].size());
+  EXPECT_EQ("1", SpanText(tree, tree.expression(values.rows[0][0]).span));
+  EXPECT_EQ("'a'", SpanText(tree, tree.expression(values.rows[0][1]).span));
+  EXPECT_EQ("2", SpanText(tree, tree.expression(values.rows[1][0]).span));
+  EXPECT_EQ("'b'", SpanText(tree, tree.expression(values.rows[1][1]).span));
+
+  ASSERT_EQ(2U, select.compounds.size());
+  EXPECT_EQ(CompoundOperator::kUnionAll, select.compounds[0].operation);
+  EXPECT_EQ("UNION ALL SELECT DISTINCT 3 AS x", SpanText(tree, select.compounds[0].span));
+  const auto& middle = std::get<SelectCore>(select.compounds[0].core);
+  EXPECT_EQ(SelectQuantifier::kDistinct, middle.quantifier);
+  ASSERT_EQ(1U, middle.result_columns.size());
+  EXPECT_EQ("x", SpanText(tree, RequiredOptional(middle.result_columns[0].alias)));
+
+  EXPECT_EQ(CompoundOperator::kExcept, select.compounds[1].operation);
+  EXPECT_EQ("EXCEPT SELECT 4", SpanText(tree, select.compounds[1].span));
+  const auto& right = std::get<SelectCore>(select.compounds[1].core);
+  ASSERT_EQ(1U, right.result_columns.size());
+  EXPECT_EQ("4", SpanText(tree, right.result_columns[0].span));
+
+  ASSERT_EQ(1U, select.order_by.size());
+  EXPECT_EQ("x DESC", SpanText(tree, select.order_by[0].span));
+  ASSERT_TRUE(select.limit.has_value());
+  EXPECT_EQ("2", SpanText(tree, tree.expression(select.limit->limit).span));
+  EXPECT_EQ("1", SpanText(tree, tree.expression(RequiredOptional(select.limit->offset)).span));
+
+  EXPECT_TRUE(ParseOne(Utf8View{"VALUES(1),(2,3)"}).has_value());
+
+  const ParseOutput mixed = ParseOrThrow("SELECT 1 UNION SELECT 2 INTERSECT SELECT 3");
+  const SelectStatement& mixed_select = Select(RequiredTree(mixed));
+  ASSERT_EQ(2U, mixed_select.compounds.size());
+  EXPECT_EQ(CompoundOperator::kUnion, mixed_select.compounds[0].operation);
+  EXPECT_EQ(CompoundOperator::kIntersect, mixed_select.compounds[1].operation);
+
+  const std::string tailed = "VALUES(1),(2); SELECT 3";
+  ParseResult first_statement = ParseOne(Utf8View{tailed});
+  ASSERT_TRUE(first_statement.has_value()) << ParseErrorMessage(first_statement.error());
+  EXPECT_EQ(tailed.find(';') + 1U, first_statement->next_offset.value());
+}
+
+TEST(Parser, RejectsMalformedAndMisplacedCompoundClauses) {
+  struct Case {
+    std::string_view sql;
+    TokenKind actual;
+  };
+  constexpr std::array cases{
+      Case{.sql = "VALUES", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "VALUES()", .actual = TokenKind::kRightParenthesis},
+      Case{.sql = "VALUES(1),", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "SELECT 1 UNION", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "SELECT 1 UNION DISTINCT SELECT 2", .actual = TokenKind::kDistinct},
+      Case{.sql = "SELECT 1 ORDER BY 1 UNION SELECT 2", .actual = TokenKind::kUnion},
+      Case{.sql = "SELECT 1 LIMIT 1 EXCEPT SELECT 2", .actual = TokenKind::kExcept},
+      Case{.sql = "VALUES(1) ORDER BY 1", .actual = TokenKind::kOrder},
+      Case{.sql = "SELECT 1 UNION VALUES(2) LIMIT 1", .actual = TokenKind::kLimit},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const ParseResult result = ParseOne(Utf8View{test_case.sql});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ParseErrorCode::kUnexpectedToken, result.error().code);
+    EXPECT_EQ(test_case.actual, result.error().actual);
+  }
+}
+
+TEST(Parser, EnforcesCompoundAndValuesResourceLimitsWithoutRowRecursion) {
+  const ParseResult no_terms =
+      ParseOne(Utf8View{"SELECT 1"}, ParseOptions{.maximum_compound_terms = 0});
+  ASSERT_FALSE(no_terms.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, no_terms.error().code);
+
+  const ParseResult too_many_terms = ParseOne(Utf8View{"SELECT 1 UNION SELECT 2 EXCEPT SELECT 3"},
+                                              ParseOptions{.maximum_compound_terms = 2});
+  ASSERT_FALSE(too_many_terms.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, too_many_terms.error().code);
+  EXPECT_EQ(TokenKind::kExcept, too_many_terms.error().actual);
+
+  const ParseResult too_many_values =
+      ParseOne(Utf8View{"VALUES(1,2)"}, ParseOptions{.maximum_columns = 1});
+  ASSERT_FALSE(too_many_values.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, too_many_values.error().code);
+
+  std::string many_rows{"VALUES"};
+  for (std::size_t index = 0; index < 1'000U; ++index) {
+    many_rows.append(index == 0U ? "(" : ",(");
+    many_rows.append(std::to_string(index));
+    many_rows.push_back(')');
+  }
+  const ParseResult iterative =
+      ParseOne(Utf8View{many_rows}, ParseOptions{.maximum_compound_terms = 1});
+  ASSERT_TRUE(iterative.has_value()) << ParseErrorMessage(iterative.error());
+  ASSERT_TRUE(iterative->tree.has_value());
+  EXPECT_EQ(1'000U, std::get<ValuesCore>(Select(*iterative->tree).first).rows.size());
+
+  std::string maximum_terms{"SELECT 0"};
+  for (std::size_t index = 1; index < 500U; ++index) {
+    maximum_terms.append(" UNION ALL SELECT ");
+    maximum_terms.append(std::to_string(index));
+  }
+  EXPECT_TRUE(ParseOne(Utf8View{maximum_terms}).has_value());
+  maximum_terms.append(" UNION ALL SELECT 500");
+  const ParseResult over_default_limit = ParseOne(Utf8View{maximum_terms});
+  ASSERT_FALSE(over_default_limit.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, over_default_limit.error().code);
+  EXPECT_EQ(TokenKind::kUnion, over_default_limit.error().actual);
 }
 
 TEST(Parser, ParsesOrderByTermsWithDirectionNullPlacementAndLimit) {
@@ -814,7 +944,7 @@ TEST(Parser, AppliesExactIdentifierClassesAndContextualWindowKeywords) {
   const ParseOutput output =
       ParseOrThrow("SELECT abort, indexed, left, window, over, filter, CURRENT_DATE");
   const SyntaxTree& tree = RequiredTree(output);
-  ASSERT_EQ(7U, Select(tree).result_columns.size());
+  ASSERT_EQ(7U, FirstSelectCore(tree).result_columns.size());
   for (std::size_t index = 0; index < 6U; ++index) {
     EXPECT_TRUE(
         std::holds_alternative<IdentifierExpression>(ResultExpression(tree, index).payload));
@@ -859,9 +989,11 @@ TEST(Parser, AppliesExactIdentifierClassesAndContextualWindowKeywords) {
 TEST(Parser, DistinguishesExplicitAndBareAliasAndTypeNameClasses) {
   const ParseOutput aliases = ParseOrThrow("SELECT 1 AS left, 2 'two'");
   const SyntaxTree& tree = RequiredTree(aliases);
-  ASSERT_EQ(2U, Select(tree).result_columns.size());
-  EXPECT_EQ("left", SpanText(tree, RequiredOptional(Select(tree).result_columns[0].alias)));
-  EXPECT_EQ("'two'", SpanText(tree, RequiredOptional(Select(tree).result_columns[1].alias)));
+  ASSERT_EQ(2U, FirstSelectCore(tree).result_columns.size());
+  EXPECT_EQ("left",
+            SpanText(tree, RequiredOptional(FirstSelectCore(tree).result_columns[0].alias)));
+  EXPECT_EQ("'two'",
+            SpanText(tree, RequiredOptional(FirstSelectCore(tree).result_columns[1].alias)));
 
   ParseResult bare_join_alias = ParseOne(Utf8View{"SELECT 1 left"});
   ASSERT_FALSE(bare_join_alias.has_value());
@@ -1125,7 +1257,6 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
   };
   constexpr std::array cases{
       Case{.sql = "SELECT 1 GROUP BY 1", .first_unsupported = TokenKind::kGroup},
-      Case{.sql = "SELECT 1 UNION SELECT 2", .first_unsupported = TokenKind::kUnion},
       Case{.sql = "SELECT * FROM a JOIN b", .first_unsupported = TokenKind::kJoin},
       Case{.sql = "SELECT * FROM f(1)", .first_unsupported = TokenKind::kLeftParenthesis},
       Case{
