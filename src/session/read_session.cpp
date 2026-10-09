@@ -161,8 +161,11 @@ struct CompiledStatement {
 }  // namespace
 
 struct ReadSession::State final {
-  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<Pager> owned_pager) noexcept
-      : vfs(std::move(owned_vfs)), pager(std::move(owned_pager)) {}
+  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<Pager> owned_pager,
+        TemporaryStorageFactory owned_temporary_storage) noexcept
+      : vfs(std::move(owned_vfs)),
+        pager(std::move(owned_pager)),
+        temporary_storage(std::move(owned_temporary_storage)) {}
 
   [[nodiscard]] Status CleanupBarrier() {
     if (active_readers != 0U) {
@@ -284,6 +287,7 @@ struct ReadSession::State final {
 
   std::unique_ptr<Vfs> vfs;
   std::unique_ptr<Pager> pager;
+  TemporaryStorageFactory temporary_storage;
   CatalogSnapshotPtr catalog;
   std::uint64_t catalog_generation = 0;
   std::size_t active_readers = 0;
@@ -402,7 +406,7 @@ struct ReadStatement::Impl final {
         return FailAndRelease(std::move(current.error()));
       }
       auto attached = execution->vm.AttachExecutionContext(
-          VmExecutionContext{*state->pager, state->catalog_generation});
+          VmExecutionContext{*state->pager, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
         return FailAndRelease(std::move(attached.error()));
       }
@@ -689,24 +693,35 @@ Status ReadStatement::Finalize() {
   }
 }
 
-Result<ReadSession> ReadSession::Open(std::string_view path) {
+Result<ReadSession> ReadSession::Open(std::string_view path, ReadSessionOptions options) {
   try {
-    return Open(std::make_unique<PosixVfs>(), path);
+    return Open(std::make_unique<PosixVfs>(), path, options);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
 }
 
-Result<ReadSession> ReadSession::Open(std::unique_ptr<Vfs> vfs, std::string_view path) {
+Result<ReadSession> ReadSession::Open(std::unique_ptr<Vfs> vfs, std::string_view path,
+                                      ReadSessionOptions options) {
   try {
     if (vfs == nullptr) {
       return std::unexpected(Misuse("read session requires an owned VFS"));
+    }
+    auto valid_options = ValidateTemporaryStorageOptions(options.temporary_storage);
+    if (!valid_options.has_value()) {
+      return std::unexpected(std::move(valid_options.error()));
     }
     auto pager = Pager::Open(*vfs, path);
     if (!pager.has_value()) {
       return std::unexpected(std::move(pager.error()));
     }
-    auto state = std::make_shared<State>(std::move(vfs), std::move(*pager));
+    auto temporary_storage =
+        TemporaryStorageFactory::Create(*vfs, **pager, options.temporary_storage);
+    if (!temporary_storage.has_value()) {
+      return std::unexpected(std::move(temporary_storage.error()));
+    }
+    auto state =
+        std::make_shared<State>(std::move(vfs), std::move(*pager), std::move(*temporary_storage));
     return ReadSession(std::move(state));
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());

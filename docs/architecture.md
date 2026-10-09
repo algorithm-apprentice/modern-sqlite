@@ -332,6 +332,7 @@ src/
     journal/
     pager/
     btree/
+  temporary_storage/
   sql/
     syntax/
     catalog/

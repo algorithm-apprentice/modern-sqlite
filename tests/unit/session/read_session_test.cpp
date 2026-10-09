@@ -307,6 +307,31 @@ TEST(ReadSession, OpensLazilyAndReportsMissingCorruptAndEmptyDatabases) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(schema.Step()));
 }
 
+TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = ByteCount{4096},
+          },
+  };
+  ReadSession path_session = TakeValue(ReadSession::Open(FixturePath().string(), options));
+  ReadStatement path_statement = PrepareStatement(path_session, "SELECT 1");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
+
+  ReadSession vfs_session =
+      TakeValue(ReadSession::Open(std::make_unique<PosixVfs>(), FixturePath().string(), options));
+  ReadStatement vfs_statement = PrepareStatement(vfs_session, "SELECT 2");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
+
+  ReadSessionOptions invalid = options;
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+  invalid.temporary_storage.mode = static_cast<TemporaryStoreMode>(2);
+  const auto rejected = ReadSession::Open(FixturePath().string(), invalid);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+}
+
 TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   constexpr std::string_view sql = " ; /* empty */ ; SELECT 1; SELECT 2";

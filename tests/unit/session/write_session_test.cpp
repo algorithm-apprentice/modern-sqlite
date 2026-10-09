@@ -260,6 +260,33 @@ TEST(WriteSession, EnforcesStatementLifecycleResetAndBusyRules) {
   EXPECT_EQ(4, rows[2][0].integer_value());
 }
 
+TEST(WriteSession, AcceptsTemporaryStorageOptionsAndRejectsInvalidConfiguration) {
+  const WriteSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = ByteCount{8192},
+          },
+  };
+  WriteSession session = TakeValue(WriteSession::Open(
+      std::make_unique<test::WritePagerFixedVfs>(false), test::kWritePagerDatabasePath, options));
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+
+  WriteSessionOptions invalid = options;
+  invalid.temporary_storage.sorter_memory_threshold = ByteCount{0};
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  const auto path_rejected = WriteSession::Open(path.string(), invalid);
+  ASSERT_FALSE(path_rejected.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, path_rejected.error().code());
+  EXPECT_FALSE(std::filesystem::exists(path));
+
+  const auto rejected = WriteSession::Open(std::make_unique<test::WritePagerFixedVfs>(false),
+                                           test::kWritePagerDatabasePath, invalid);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+}
+
 TEST(WriteSession, MaintainsIndexesForDmlStatements) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();

@@ -36,6 +36,7 @@
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -2531,6 +2532,23 @@ TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
   ASSERT_FALSE(attached.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
   EXPECT_EQ(VmState::kReady, vm.state());
+}
+
+TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
+  PosixVfs first_vfs;
+  PosixVfs second_vfs;
+  const std::unique_ptr<Pager> first = TakeValue(Pager::Open(first_vfs, FixturePath().string()));
+  const std::unique_ptr<Pager> second = TakeValue(Pager::Open(second_vfs, FixturePath().string()));
+  const TemporaryStorageFactory second_factory =
+      TakeValue(TemporaryStorageFactory::Create(second_vfs, *second));
+  const BytecodeProgram program = BuildProgram(*first, 0, 0, {}, {}, {}, {}, {HaltInstruction{}});
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+
+  const Status attached =
+      vm.AttachExecutionContext(VmExecutionContext{*first, kCatalogGeneration, second_factory});
+  ASSERT_FALSE(attached.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
+  EXPECT_FALSE(vm.has_execution_context());
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION

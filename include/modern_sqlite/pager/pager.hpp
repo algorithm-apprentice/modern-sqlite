@@ -213,6 +213,10 @@ class Pager final {
   [[nodiscard]] bool in_read_transaction() const noexcept;
   [[nodiscard]] const DatabaseHeader* header() const noexcept;
   [[nodiscard]] ByteCount page_size() const noexcept;
+  [[nodiscard]] std::size_t cache_capacity_pages() const noexcept {
+    return options_.cache_capacity_pages;
+  }
+  [[nodiscard]] bool uses_vfs(const Vfs& vfs) const noexcept { return vfs_ == &vfs; }
   [[nodiscard]] std::uint32_t page_count() const noexcept { return current_page_count_; }
   [[nodiscard]] std::uint64_t data_version() const noexcept { return data_version_; }
   [[nodiscard]] std::uint64_t write_transaction_generation() const noexcept {

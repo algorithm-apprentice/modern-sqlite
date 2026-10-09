@@ -53,6 +53,7 @@ add_executable(
   unit/syntax/ast_test.cpp
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
+  unit/temporary_storage/temporary_storage_test.cpp
   unit/text/text_test.cpp
   unit/transaction/transaction_coordinator_test.cpp
   unit/vm/vm_test.cpp

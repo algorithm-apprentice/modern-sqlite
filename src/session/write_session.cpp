@@ -198,8 +198,12 @@ void CopyParameterNames(const Statement& statement,
 
 struct WriteSession::State final {
   State(std::unique_ptr<Vfs> owned_vfs, Pager& owned_pager,
-        TransactionCoordinator owned_coordinator) noexcept
-      : vfs(std::move(owned_vfs)), pager(&owned_pager), coordinator(std::move(owned_coordinator)) {}
+        TransactionCoordinator owned_coordinator,
+        TemporaryStorageFactory owned_temporary_storage) noexcept
+      : vfs(std::move(owned_vfs)),
+        pager(&owned_pager),
+        coordinator(std::move(owned_coordinator)),
+        temporary_storage(std::move(owned_temporary_storage)) {}
 
   ~State() {
     if (coordinator.valid() && (!coordinator.autocommit() || coordinator.statement_active())) {
@@ -339,6 +343,7 @@ struct WriteSession::State final {
   std::unique_ptr<Vfs> vfs;
   Pager* pager;
   TransactionCoordinator coordinator;
+  TemporaryStorageFactory temporary_storage;
   CatalogSnapshotPtr catalog;
   std::uint64_t catalog_generation = 0;
   std::uint64_t changes = 0;
@@ -557,11 +562,13 @@ struct WriteStatement::Impl final {
         return Fail(std::move(statement.error()));
       }
       active_statement.emplace(std::move(*statement));
-      Status attached = program.transaction_access() == ProgramTransactionAccess::kWrite
-                            ? execution->vm.AttachExecutionContext(VmExecutionContext{
-                                  *active_statement->writer(), state->catalog_generation})
-                            : execution->vm.AttachExecutionContext(
-                                  VmExecutionContext{*state->pager, state->catalog_generation});
+      Status attached =
+          program.transaction_access() == ProgramTransactionAccess::kWrite
+              ? execution->vm.AttachExecutionContext(VmExecutionContext{*active_statement->writer(),
+                                                                        state->catalog_generation,
+                                                                        state->temporary_storage})
+              : execution->vm.AttachExecutionContext(VmExecutionContext{
+                    *state->pager, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
         return FailAndRollback(std::move(attached.error()));
       }
@@ -858,29 +865,40 @@ Status WriteStatement::Finalize() {
   }
 }
 
-Result<WriteSession> WriteSession::Open(std::string_view path) {
+Result<WriteSession> WriteSession::Open(std::string_view path, WriteSessionOptions options) {
   try {
-    return Open(std::make_unique<PosixVfs>(), path);
+    return Open(std::make_unique<PosixVfs>(), path, options);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
 }
 
-Result<WriteSession> WriteSession::Open(std::unique_ptr<Vfs> vfs, std::string_view path) {
+Result<WriteSession> WriteSession::Open(std::unique_ptr<Vfs> vfs, std::string_view path,
+                                        WriteSessionOptions options) {
   try {
     if (vfs == nullptr) {
       return std::unexpected(Misuse("write session requires an owned VFS"));
+    }
+    auto valid_options = ValidateTemporaryStorageOptions(options.temporary_storage);
+    if (!valid_options.has_value()) {
+      return std::unexpected(std::move(valid_options.error()));
     }
     auto pager = Pager::OpenWritable(*vfs, path);
     if (!pager.has_value()) {
       return std::unexpected(std::move(pager.error()));
     }
     Pager* const pager_identity = pager->get();
+    auto temporary_storage =
+        TemporaryStorageFactory::Create(*vfs, *pager_identity, options.temporary_storage);
+    if (!temporary_storage.has_value()) {
+      return std::unexpected(std::move(temporary_storage.error()));
+    }
     auto coordinator = TransactionCoordinator::Open(std::move(*pager));
     if (!coordinator.has_value()) {
       return std::unexpected(std::move(coordinator.error()));
     }
-    auto state = std::make_shared<State>(std::move(vfs), *pager_identity, std::move(*coordinator));
+    auto state = std::make_shared<State>(std::move(vfs), *pager_identity, std::move(*coordinator),
+                                         std::move(*temporary_storage));
     return WriteSession(std::move(state));
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
