@@ -1,14 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -17,6 +21,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
@@ -46,20 +51,68 @@ template <typename Enum>
 
 class SorterEnvironment final {
  public:
-  explicit SorterEnvironment(ByteCount threshold = ByteCount{1U << 20U})
+  explicit SorterEnvironment(ByteCount threshold = ByteCount{1U << 20U},
+                             TemporaryStoreMode mode = TemporaryStoreMode::kMemory)
       : pager_(TakeValue(Pager::Open(vfs_, test::kWritePagerInputPath))),
         factory_(TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
                                                            TemporaryStorageOptions{
-                                                               .mode = TemporaryStoreMode::kMemory,
+                                                               .mode = mode,
                                                                .sorter_memory_threshold = threshold,
                                                            }))) {}
 
   [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+  [[nodiscard]] test::WritePagerFixedVfs& vfs() noexcept { return vfs_; }
 
  private:
   test::WritePagerFixedVfs vfs_;
   std::unique_ptr<Pager> pager_;
   TemporaryStorageFactory factory_;
+};
+
+class PosixSorterEnvironment final {
+ public:
+  PosixSorterEnvironment() {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    directory_ = std::filesystem::temp_directory_path() /
+                 ("modern-sqlite-sorter-test-" + std::to_string(suffix));
+    std::filesystem::create_directories(directory_);
+    database_path_ = directory_ / "main.db";
+    const std::ofstream database{database_path_, std::ios::binary};
+    if (!database.is_open()) {
+      throw std::runtime_error{"failed to create POSIX sorter database"};
+    }
+    pager_ = TakeValue(Pager::Open(vfs_, database_path_.string()));
+    factory_.emplace(
+        TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                  TemporaryStorageOptions{
+                                                      .mode = TemporaryStoreMode::kFile,
+                                                      .sorter_memory_threshold = ByteCount{1},
+                                                  })));
+  }
+
+  PosixSorterEnvironment(const PosixSorterEnvironment&) = delete;
+  PosixSorterEnvironment& operator=(const PosixSorterEnvironment&) = delete;
+
+  ~PosixSorterEnvironment() noexcept {
+    factory_.reset();
+    pager_.reset();
+    std::error_code error;
+    std::filesystem::remove_all(directory_, error);
+  }
+
+  [[nodiscard]] const TemporaryStorageFactory& factory() const {
+    if (!factory_.has_value()) {
+      throw std::runtime_error{"POSIX sorter factory is uninitialized"};
+    }
+    return *factory_;
+  }
+
+ private:
+  std::filesystem::path directory_;
+  std::filesystem::path database_path_;
+  PosixVfs vfs_;
+  std::unique_ptr<Pager> pager_;
+  std::optional<TemporaryStorageFactory> factory_;
 };
 
 [[nodiscard]] ByteBuffer Encode(std::span<const SqlValue> fields) {
@@ -322,6 +375,135 @@ TEST(RecordSorter, RejectsInvalidDescriptorsBeforeAllocatingRuntimeState) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
   }
+}
+
+TEST(RecordSorter, SpillsBeforeThresholdCrossingAndAppendsTwoPmasAtRewind) {
+  SorterEnvironment environment{ByteCount{1}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.factory().CreateRecordSorter(TwoKeyDescriptor()));
+
+  std::vector<SqlValue> first;
+  first.push_back(SqlValue::Text("b"));
+  first.push_back(SqlValue::Integer(2));
+  first.push_back(SqlValue::Text("first"));
+  std::vector<SqlValue> second;
+  second.push_back(SqlValue::Text("a"));
+  second.push_back(SqlValue::Integer(1));
+  second.push_back(SqlValue::Text("second"));
+
+  ASSERT_TRUE(sorter.Insert(Encode(first)).has_value());
+  EXPECT_FALSE(sorter.has_spilled());
+  EXPECT_EQ(0U, environment.vfs().pathless_open_count());
+  ASSERT_TRUE(sorter.Insert(Encode(second)).has_value());
+  EXPECT_TRUE(sorter.has_spilled());
+  EXPECT_EQ(1U, sorter.spilled_run_count());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+
+  const ByteView first_pma = environment.vfs().pathless_file_bytes();
+  const auto size = DecodeSqliteVarint(first_pma);
+  ASSERT_TRUE(size.has_value());
+  EXPECT_EQ(first_pma.size() - size->bytes_consumed.value(), size->value);
+  const auto stored = RecordView::Parse(
+      first_pma.subspan(size->bytes_consumed.value(), static_cast<std::size_t>(size->value)));
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ("first", TextField(*stored, 2));
+
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  EXPECT_EQ(2U, sorter.spilled_run_count());
+  EXPECT_EQ(0U, sorter.merge_level_count());
+  EXPECT_EQ("second", TextField(TakeValue(sorter.current_record()), 2));
+  EXPECT_TRUE(TakeValue(sorter.Next()));
+  EXPECT_EQ("first", TextField(TakeValue(sorter.current_record()), 2));
+  EXPECT_FALSE(TakeValue(sorter.Next()));
+
+  sorter.Close();
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(RecordSorter, BuildsFanInSixteenMergeLevelsAndStreamsSortedRecords) {
+  const PosixSorterEnvironment environment;
+  RecordSorter sorter = TakeValue(environment.factory().CreateRecordSorter(RecordSorterDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              IndexColumnOrder{BinaryCollation()},
+          },
+  }));
+
+  constexpr std::size_t kRecordCount = 300;
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    std::array<SqlValue, 2> fields{
+        SqlValue::Integer(static_cast<std::int64_t>(kRecordCount - index)),
+        SqlValue::Integer(static_cast<std::int64_t>(index)),
+    };
+    ASSERT_TRUE(sorter.Insert(Encode(fields)).has_value());
+  }
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  EXPECT_EQ(2U, sorter.merge_level_count());
+  EXPECT_LE(sorter.spilled_run_count(), 16U);
+
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    const RecordView current = TakeValue(sorter.current_record());
+    const RecordFieldView key = TakeValue(current.field(0));
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), key.integer_value());
+    EXPECT_EQ(index + 1U < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
+TEST(RecordSorter, PreservesStableTiesAcrossPmaRuns) {
+  const PosixSorterEnvironment environment;
+  RecordSorter sorter = TakeValue(environment.factory().CreateRecordSorter(RecordSorterDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              IndexColumnOrder{NoCaseCollation()},
+          },
+  }));
+
+  constexpr std::size_t kRecordCount = 34;
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    std::array<SqlValue, 2> fields{
+        SqlValue::Text(index % 2U == 0U ? "same" : "SAME"),
+        SqlValue::Integer(static_cast<std::int64_t>(index)),
+    };
+    ASSERT_TRUE(sorter.Insert(Encode(fields)).has_value());
+  }
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    const RecordView current = TakeValue(sorter.current_record());
+    const RecordFieldView payload = TakeValue(current.field(1));
+    EXPECT_EQ(static_cast<std::int64_t>(index), payload.integer_value());
+    EXPECT_EQ(index + 1U < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
+TEST(RecordSorter, ClosesAndDeletesTemporaryFilesAfterSpillFailures) {
+  SorterEnvironment write_failure{ByteCount{1}, TemporaryStoreMode::kFile};
+  RecordSorter writer = TakeValue(write_failure.factory().CreateRecordSorter(TwoKeyDescriptor()));
+  std::vector<SqlValue> fields;
+  fields.push_back(SqlValue::Text("x"));
+  fields.push_back(SqlValue::Integer(1));
+  fields.push_back(SqlValue::Text("payload"));
+  ASSERT_TRUE(writer.Insert(Encode(fields)).has_value());
+  write_failure.vfs().FailPathlessWriteAfter(0, ErrorCode::kIo);
+  const auto failed_write = writer.Insert(Encode(fields));
+  ASSERT_FALSE(failed_write.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_write.error().code());
+  EXPECT_FALSE(writer.valid());
+  EXPECT_FALSE(write_failure.vfs().pathless_file_present());
+
+  SorterEnvironment read_failure{ByteCount{1}, TemporaryStoreMode::kFile};
+  RecordSorter reader = TakeValue(read_failure.factory().CreateRecordSorter(TwoKeyDescriptor()));
+  ASSERT_TRUE(reader.Insert(Encode(fields)).has_value());
+  ASSERT_TRUE(reader.Insert(Encode(fields)).has_value());
+  read_failure.vfs().FailPathlessReadAfter(0, ErrorCode::kIo);
+  const auto failed_read = reader.Rewind();
+  ASSERT_FALSE(failed_read.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_read.error().code());
+  EXPECT_FALSE(reader.valid());
+  EXPECT_FALSE(read_failure.vfs().pathless_file_present());
 }
 
 }  // namespace

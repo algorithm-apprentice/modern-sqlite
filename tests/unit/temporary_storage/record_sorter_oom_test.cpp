@@ -136,10 +136,11 @@ int main() try {
   const Status failed_insert = sorter.Insert(std::move(failed_record));
   inject_failure = false;
   if (failed_insert.has_value() || failed_insert.error().code() != ErrorCode::kOutOfMemory ||
-      sorter.record_count() != 0U || sorter.memory_usage() != ByteCount{0}) {
+      sorter.valid() || sorter.record_count() != 0U || sorter.memory_usage() != ByteCount{0}) {
     return 1;
   }
 
+  sorter = TakeValue(factory.CreateRecordSorter(descriptor));
   constexpr std::size_t kRecordCount = 32;
   for (std::size_t index = 0; index < kRecordCount; ++index) {
     const Status inserted =
@@ -174,6 +175,46 @@ int main() try {
   }
   sorter.Close();
   fail_all_allocations = false;
+
+  const TemporaryStorageFactory file_factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  const auto build_spilled_sorter = [&]() {
+    RecordSorter result = TakeValue(file_factory.CreateRecordSorter(descriptor));
+    if (!result.Insert(EncodedRecord(2)).has_value() ||
+        !result.Insert(EncodedRecord(1)).has_value()) {
+      throw std::runtime_error{"failed to build spilled sorter OOM fixture"};
+    }
+    return result;
+  };
+
+  RecordSorter rewind_baseline = build_spilled_sorter();
+  allocation_index.store(0, std::memory_order_relaxed);
+  const Status baseline_rewind = rewind_baseline.Rewind();
+  if (!baseline_rewind.has_value()) {
+    return 1;
+  }
+  const std::size_t rewind_allocations = allocation_index.load(std::memory_order_relaxed);
+  if (rewind_allocations == 0U || rewind_allocations > 16U) {
+    return 1;
+  }
+  rewind_baseline.Close();
+
+  for (std::size_t failure = 0; failure < rewind_allocations; ++failure) {
+    RecordSorter candidate = build_spilled_sorter();
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    const Status rejected = candidate.Rewind();
+    inject_failure = false;
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        candidate.valid() || vfs.pathless_file_present()) {
+      return 1;
+    }
+  }
   return 0;
 } catch (...) {
   inject_failure = false;

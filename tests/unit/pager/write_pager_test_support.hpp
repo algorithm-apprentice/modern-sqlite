@@ -44,6 +44,7 @@ struct WritePagerFileState {
   std::optional<FileSize> reported_size;
   std::optional<std::pair<DatabaseLock, ErrorCode>> lock_failure;
   std::optional<std::pair<DatabaseLock, ErrorCode>> unlock_failure;
+  std::optional<std::pair<std::size_t, ErrorCode>> read_failure;
   std::optional<std::pair<std::size_t, ErrorCode>> write_failure;
 };
 
@@ -110,6 +111,14 @@ class WritePagerMemoryFile final : public File {
  private:
   [[nodiscard]] Result<ByteCount> DoReadAt(MutableByteView destination,
                                            FileOffset offset) override {
+    if (state_->read_failure.has_value()) {
+      if (state_->read_failure->first == 0U) {
+        const ErrorCode code = state_->read_failure->second;
+        state_->read_failure.reset();
+        return std::unexpected(Error::Create(code, "injected fixed-file read failure"));
+      }
+      --state_->read_failure->first;
+    }
     if (offset.value() > std::numeric_limits<std::size_t>::max()) {
       return std::unexpected(Error::Create(ErrorCode::kTooLarge, "fixed-file offset is too large"));
     }
@@ -127,7 +136,7 @@ class WritePagerMemoryFile final : public File {
     if (crash_->frozen()) {
       return std::unexpected(Error::Create(ErrorCode::kIo, "fixed VFS is crash-frozen"));
     }
-    if (database_file_ && state_->write_failure.has_value()) {
+    if (state_->write_failure.has_value()) {
       if (state_->write_failure->first == 0U) {
         const ErrorCode code = state_->write_failure->second;
         state_->write_failure.reset();
@@ -277,6 +286,9 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] ByteView database_bytes() const noexcept {
     return ByteView{main_.bytes}.first(main_.size);
   }
+  [[nodiscard]] ByteView pathless_file_bytes() const noexcept {
+    return ByteView{subjournal_.bytes}.first(subjournal_.size);
+  }
 
   [[nodiscard]] std::size_t mutation_count() const noexcept { return crash_.mutation_count; }
 
@@ -315,6 +327,12 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   void FailNextPathlessOpen(ErrorCode code) noexcept { pathless_open_failure_ = code; }
+  void FailPathlessReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
+    subjournal_.read_failure = std::pair{successful_reads, code};
+  }
+  void FailPathlessWriteAfter(std::size_t successful_writes, ErrorCode code) noexcept {
+    subjournal_.write_failure = std::pair{successful_writes, code};
+  }
 
   void ArmCrashCut(std::optional<std::size_t> cut) noexcept {
     crash_.fail_after_mutation = cut;
