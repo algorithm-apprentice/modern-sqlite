@@ -354,6 +354,10 @@ class WritableCursor final {
                                                   std::span<const IndexColumnOrder> columns,
                                                   RecordCodecOptions options,
                                                   std::vector<std::byte>& scratch);
+  [[nodiscard]] Result<IndexSeekResult> SeekIndexRecord(const RecordView& key,
+                                                        std::span<const IndexColumnOrder> columns,
+                                                        RecordCodecOptions options,
+                                                        std::vector<std::byte>& scratch);
   [[nodiscard]] Result<BtreePageView> CurrentPage() const;
   [[nodiscard]] Status PromoteCurrent();
   [[nodiscard]] Status Balance(MutableBtreePage page, BtreeWriteWorkspace& workspace);
@@ -365,12 +369,20 @@ class WritableCursor final {
                                    RecordCodecOptions options, BtreeInsertMode mode,
                                    std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status InsertIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
+                                         RecordCodecOptions options, BtreeInsertMode mode,
+                                         std::vector<std::byte>& seek_scratch,
+                                         BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Result<bool> DeleteCurrentTableAndNext(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteIndex(std::span<const SqlValue> key,
                                    std::span<const IndexColumnOrder> columns,
                                    RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status DeleteIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
+                                         RecordCodecOptions options,
+                                         std::vector<std::byte>& seek_scratch,
+                                         BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
@@ -382,6 +394,14 @@ class WritableCursor final {
   [[nodiscard]] bool table() const noexcept { return table_; }
 
  private:
+  template <typename Compare>
+  [[nodiscard]] Result<IndexSeekResult> SeekIndexWith(RecordCodecOptions options,
+                                                      std::vector<std::byte>& scratch,
+                                                      Compare&& compare);
+  [[nodiscard]] Status InsertIndexAt(ByteView record, const IndexSeekResult& seek,
+                                     BtreeInsertMode mode, BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWorkspace& workspace);
+
   struct Frame {
     std::size_t owner_slot = 0;
     std::size_t child_index = 0;

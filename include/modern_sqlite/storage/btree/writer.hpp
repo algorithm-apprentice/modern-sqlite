@@ -152,7 +152,11 @@ class IndexBtreeWriter final {
 
   [[nodiscard]] Result<std::optional<std::int64_t>> FindPrefixRowId(std::span<const SqlValue> key);
   [[nodiscard]] Status Insert(std::span<const SqlValue> values);
+  // Encoded operations use the writer's columns as a unique comparison prefix
+  // and may store additional payload fields. Do not mix them with SqlValue mutations.
+  [[nodiscard]] Status InsertEncoded(ByteView record);
   [[nodiscard]] Result<bool> Delete(std::span<const SqlValue> values);
+  [[nodiscard]] Result<bool> DeleteEncoded(ByteView record);
   [[nodiscard]] Result<std::uint64_t> Clear();
   [[nodiscard]] Status Drop();
 

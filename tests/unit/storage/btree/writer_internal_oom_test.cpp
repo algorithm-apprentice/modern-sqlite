@@ -799,6 +799,149 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] Outcome RunPublicEncodedIndexInsert(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
+  };
+  modern_sqlite::PageNumber root_page;
+  {
+    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    if (!session.has_value()) {
+      return {};
+    }
+    auto index = session->CreateIndexBtree(columns);
+    if (!index.has_value()) {
+      return {};
+    }
+    root_page = index->root_page();
+  }
+  if (!pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return {};
+  }
+  auto index = session->OpenIndexBtree(root_page, columns);
+  if (!index.has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer key_blob{modern_sqlite::ByteCount{90}};
+  modern_sqlite::ByteBuffer payload{modern_sqlite::ByteCount{2'000}};
+  std::ranges::fill(key_blob.mutable_view(), std::byte{0x4b});
+  std::ranges::fill(payload.mutable_view(), std::byte{0x50});
+  const auto record = modern_sqlite::EncodeRecord(std::array{
+      modern_sqlite::SqlValue::Blob(std::move(key_blob)),
+      modern_sqlite::SqlValue::Blob(std::move(payload)),
+  });
+  if (!record.has_value()) {
+    return {};
+  }
+
+  Arm(failure);
+  const auto inserted = index->InsertEncoded(record->view());
+  const std::size_t allocations = Disarm();
+  const bool succeeded = inserted.has_value();
+  const modern_sqlite::ErrorCode error =
+      inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
+[[nodiscard]] Outcome RunPublicEncodedIndexDelete(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
+      !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+  const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
+  };
+  modern_sqlite::PageNumber root_page;
+  modern_sqlite::ByteBuffer key_blob{modern_sqlite::ByteCount{90}};
+  modern_sqlite::ByteBuffer payload{modern_sqlite::ByteCount{2'000}};
+  std::ranges::fill(key_blob.mutable_view(), std::byte{0x4b});
+  std::ranges::fill(payload.mutable_view(), std::byte{0x50});
+  const auto record = modern_sqlite::EncodeRecord(std::array{
+      modern_sqlite::SqlValue::Blob(std::move(key_blob)),
+      modern_sqlite::SqlValue::Blob(std::move(payload)),
+  });
+  if (!record.has_value()) {
+    return {};
+  }
+  {
+    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    if (!session.has_value()) {
+      return {};
+    }
+    auto index = session->CreateIndexBtree(columns);
+    if (!index.has_value() || !index->InsertEncoded(record->view()).has_value()) {
+      return {};
+    }
+    root_page = index->root_page();
+  }
+  if (!pager->Commit().has_value()) {
+    return {};
+  }
+  const modern_sqlite::ByteBuffer original =
+      modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  if (!pager->BeginWrite().has_value()) {
+    return {};
+  }
+  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  if (!session.has_value()) {
+    return {};
+  }
+  auto index = session->OpenIndexBtree(root_page, columns);
+  if (!index.has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer delete_key{modern_sqlite::ByteCount{90}};
+  std::ranges::fill(delete_key.mutable_view(), std::byte{0x4b});
+  const auto candidate = modern_sqlite::EncodeRecord(std::array{
+      modern_sqlite::SqlValue::Blob(std::move(delete_key)),
+      modern_sqlite::SqlValue::Blob(modern_sqlite::ByteBuffer{}),
+  });
+  if (!candidate.has_value()) {
+    return {};
+  }
+
+  Arm(failure);
+  const auto deleted = index->DeleteEncoded(candidate->view());
+  const std::size_t allocations = Disarm();
+  const bool succeeded = deleted.has_value() && *deleted;
+  const modern_sqlite::ErrorCode error =
+      deleted.has_value() ? modern_sqlite::ErrorCode::kGeneric : deleted.error().code();
+  const bool rolled_back = pager->Rollback().has_value();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+  };
+}
+
 [[nodiscard]] Outcome RunPublicMutationCursor(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
@@ -1577,6 +1720,12 @@ int main() try {
   }
   if (!ExhaustAllocations(RunPublicIndexInsert)) {
     return 12;
+  }
+  if (!ExhaustAllocations(RunPublicEncodedIndexInsert)) {
+    return 25;
+  }
+  if (!ExhaustAllocations(RunPublicEncodedIndexDelete)) {
+    return 26;
   }
   if (!ExhaustAllocations(RunTableReplace)) {
     return 13;
