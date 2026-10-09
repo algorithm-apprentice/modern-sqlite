@@ -901,6 +901,9 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   for (const BoundResultColumn& result : bound_select.result_columns()) {
     MarkRequiredSourceValues(bound_select, result.expression, &required_columns, &required_rowid);
   }
+  for (const BoundOrderingTerm& ordering : bound_select.order_by()) {
+    MarkRequiredSourceValues(bound_select, ordering.expression, &required_columns, &required_rowid);
+  }
 
   std::vector<bool> covered_columns(table.columns.size(), false);
   bool covered_rowid = false;

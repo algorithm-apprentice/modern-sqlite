@@ -1051,6 +1051,22 @@ TEST(PhysicalPlan, UsesExternalStrategyWithoutSyntacticLimit) {
       ExplainPhysicalPlan(plan));
 }
 
+TEST(PhysicalPlan, IncludesOrderingExpressionsInCoveringIndexRequirements) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT id,Score FROM Items ORDER BY Category,id", catalog);
+
+  ASSERT_EQ(2U, plan.candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate().kind);
+  EXPECT_EQ(IndexId{0}, plan.selected_candidate().index);
+  EXPECT_TRUE(plan.selected_candidate().covering);
+  EXPECT_EQ(
+      "SCAN \"Items\" USING COVERING INDEX \"items_category_score\"\n"
+      "SORT 2 TERMS (COLLATE \"NOCASE\" ASC NULLS FIRST, "
+      "COLLATE \"BINARY\" ASC NULLS FIRST) USING SORTER",
+      ExplainPhysicalPlan(plan));
+}
+
 TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
   const PhysicalPlan plan = OptimizeOrThrow(
