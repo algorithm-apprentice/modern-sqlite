@@ -1124,6 +1124,66 @@ class Parser final {
     };
   }
 
+  [[nodiscard]] std::expected<NullOrder, ParseError> ParseNullOrder() {
+    if (!ConsumeIf(TokenKind::kNulls)) {
+      return NullOrder::kDefault;
+    }
+    if (ConsumeIf(TokenKind::kFirst)) {
+      return NullOrder::kFirst;
+    }
+    if (ConsumeIf(TokenKind::kLast)) {
+      return NullOrder::kLast;
+    }
+    return std::unexpected(Unexpected(Peek(), ParseExpectation::kExpression));
+  }
+
+  [[nodiscard]] std::expected<OrderingTerm, ParseError> ParseOrderingTerm() {
+    const ByteOffset begin = Peek().span.begin();
+    ExpressionResult expression = ParseGeneralExpression();
+    if (!expression.has_value()) {
+      return std::unexpected(expression.error());
+    }
+    const SortOrder order = ParseSortOrder();
+    auto null_order = ParseNullOrder();
+    if (!null_order.has_value()) {
+      return std::unexpected(null_order.error());
+    }
+    return OrderingTerm{
+        .span = MakeSpan(begin, last_consumed_end_),
+        .expression = *expression,
+        .order = order,
+        .null_order = *null_order,
+    };
+  }
+
+  [[nodiscard]] std::expected<std::vector<OrderingTerm>, ParseError> ParseOrderByClause() {
+    static_cast<void>(Consume());
+    TokenResult by = Expect(TokenKind::kBy, ParseExpectation::kExpression);
+    if (!by.has_value()) {
+      return std::unexpected(by.error());
+    }
+    if (options_.maximum_columns == 0U) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
+    std::vector<OrderingTerm> terms;
+    auto first = ParseOrderingTerm();
+    if (!first.has_value()) {
+      return std::unexpected(first.error());
+    }
+    terms.push_back(std::move(*first));
+    while (ConsumeIf(TokenKind::kComma)) {
+      if (terms.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
+      auto term = ParseOrderingTerm();
+      if (!term.has_value()) {
+        return std::unexpected(term.error());
+      }
+      terms.push_back(std::move(*term));
+    }
+    return terms;
+  }
+
   [[nodiscard]] StatementResult ParseSelect() {
     const Token select_keyword = Consume();
     SelectQuantifier quantifier = SelectQuantifier::kDefault;
@@ -1181,10 +1241,18 @@ class Parser final {
     }
 
     if (Peek().kind == TokenKind::kGroup || Peek().kind == TokenKind::kHaving ||
-        Peek().kind == TokenKind::kWindow || Peek().kind == TokenKind::kOrder ||
-        Peek().kind == TokenKind::kUnion || Peek().kind == TokenKind::kIntersect ||
-        Peek().kind == TokenKind::kExcept) {
+        Peek().kind == TokenKind::kWindow || Peek().kind == TokenKind::kUnion ||
+        Peek().kind == TokenKind::kIntersect || Peek().kind == TokenKind::kExcept) {
       return std::unexpected(Unsupported(Peek()));
+    }
+
+    std::vector<OrderingTerm> order_by;
+    if (Peek().kind == TokenKind::kOrder) {
+      auto parsed_order_by = ParseOrderByClause();
+      if (!parsed_order_by.has_value()) {
+        return std::unexpected(parsed_order_by.error());
+      }
+      order_by = std::move(*parsed_order_by);
     }
 
     std::optional<LimitClause> limit;
@@ -1203,6 +1271,7 @@ class Parser final {
         .result_columns = std::move(columns),
         .from = std::move(from),
         .where = where,
+        .order_by = std::move(order_by),
         .limit = limit,
     }};
   }

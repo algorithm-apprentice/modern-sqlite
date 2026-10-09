@@ -44,7 +44,7 @@ bare_cast	syntax_error	unexpected	SELECT cast;
 leading_table_option_comma	ok	ok	CREATE TABLE x(a INT) , STRICT;
 unterminated_parenthesis	syntax_error	unexpected	SELECT (1;
 cast_expression	ok	unsupported	SELECT CAST(1 AS TEXT);
-order_by	ok	unsupported	SELECT 1 ORDER BY 1;
+order_by	ok	ok	SELECT 1 ORDER BY 1;
 compound_select	ok	unsupported	SELECT 1 UNION SELECT 2;
 common_table_expression	ok	unsupported	WITH x AS (SELECT 1) SELECT * FROM x;
 join	ok	unsupported	SELECT * FROM (SELECT 1) a JOIN (SELECT 2) b;

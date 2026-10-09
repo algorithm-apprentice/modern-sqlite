@@ -1506,6 +1506,8 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   ExpectBindError("SELECT *", catalog, BindErrorCode::kNoTablesSpecified, "no tables specified");
   ExpectBindError("SELECT DISTINCT Name FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "SELECT DISTINCT is not supported");
+  ExpectBindError("SELECT Name FROM Items ORDER BY Name", catalog,
+                  BindErrorCode::kUnsupportedFeature, "ORDER BY is not supported");
   ExpectBindError("SELECT Name LIKE 'a%' FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "pattern operators are not supported");
   ExpectBindError("SELECT Name FROM Items LIMIT Name", catalog, BindErrorCode::kNoSuchColumn,

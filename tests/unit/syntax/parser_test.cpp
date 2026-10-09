@@ -735,6 +735,60 @@ TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
             SpanText(comma_tree, comma_tree.expression(RequiredOptional(comma_limit.offset)).span));
 }
 
+TEST(Parser, ParsesOrderByTermsWithDirectionNullPlacementAndLimit) {
+  const ParseOutput output = ParseOrThrow(
+      "SELECT a AS x,b FROM t WHERE a>0 "
+      "ORDER BY x COLLATE nocase DESC NULLS FIRST,+b ASC NULLS LAST "
+      "LIMIT 3 OFFSET 1");
+  const SyntaxTree& tree = RequiredTree(output);
+  const SelectStatement& select = Select(tree);
+  ASSERT_EQ(2U, select.order_by.size());
+
+  const OrderingTerm& first = select.order_by[0];
+  EXPECT_EQ("x COLLATE nocase DESC NULLS FIRST", SpanText(tree, first.span));
+  EXPECT_EQ("x COLLATE nocase", SpanText(tree, tree.expression(first.expression).span));
+  EXPECT_EQ(SortOrder::kDescending, first.order);
+  EXPECT_EQ(NullOrder::kFirst, first.null_order);
+  const auto* first_collate =
+      std::get_if<CollateExpression>(&tree.expression(first.expression).payload);
+  ASSERT_NE(nullptr, first_collate);
+  EXPECT_EQ("nocase", SpanText(tree, first_collate->collation));
+
+  const OrderingTerm& second = select.order_by[1];
+  EXPECT_EQ("+b ASC NULLS LAST", SpanText(tree, second.span));
+  EXPECT_EQ("+b", SpanText(tree, tree.expression(second.expression).span));
+  EXPECT_EQ(SortOrder::kAscending, second.order);
+  EXPECT_EQ(NullOrder::kLast, second.null_order);
+  ASSERT_TRUE(select.limit.has_value());
+  EXPECT_EQ("3", SpanText(tree, tree.expression(select.limit->limit).span));
+  EXPECT_EQ("1", SpanText(tree, tree.expression(RequiredOptional(select.limit->offset)).span));
+}
+
+TEST(Parser, RejectsMalformedAndOversizedOrderByLists) {
+  struct Case {
+    std::string_view sql;
+    TokenKind actual;
+  };
+  constexpr std::array cases{
+      Case{.sql = "SELECT 1 ORDER BY", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "SELECT 1 ORDER BY 1,", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "SELECT 1 ORDER BY 1 NULLS", .actual = TokenKind::kEndOfInput},
+      Case{.sql = "SELECT 1 ORDER BY 1 NULLS middle", .actual = TokenKind::kIdentifier},
+  };
+  for (const Case& test : cases) {
+    const ParseResult parsed = ParseOne(Utf8View{test.sql});
+    ASSERT_FALSE(parsed.has_value()) << test.sql;
+    EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code) << test.sql;
+    EXPECT_EQ(test.actual, parsed.error().actual) << test.sql;
+  }
+
+  const ParseResult oversized =
+      ParseOne(Utf8View{"SELECT 1 ORDER BY 1,2"}, ParseOptions{.maximum_columns = 1});
+  ASSERT_FALSE(oversized.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, oversized.error().code);
+  EXPECT_EQ("2", SpanText(Utf8View{"SELECT 1 ORDER BY 1,2"}, oversized.error().span));
+}
+
 TEST(Parser, TreatsWildcardsAsCompleteResultColumns) {
   struct Case {
     std::string_view sql;
@@ -1070,7 +1124,6 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
     TokenKind first_unsupported;
   };
   constexpr std::array cases{
-      Case{.sql = "SELECT 1 ORDER BY 1", .first_unsupported = TokenKind::kOrder},
       Case{.sql = "SELECT 1 GROUP BY 1", .first_unsupported = TokenKind::kGroup},
       Case{.sql = "SELECT 1 UNION SELECT 2", .first_unsupported = TokenKind::kUnion},
       Case{.sql = "SELECT * FROM a JOIN b", .first_unsupported = TokenKind::kJoin},

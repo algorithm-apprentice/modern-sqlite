@@ -450,6 +450,10 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, select.span,
                                          "SELECT DISTINCT is not supported"));
     }
+    if (!select.order_by.empty()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, select.span,
+                                         "ORDER BY is not supported"));
+    }
 
     BindExpected<void> initialized = InitializeCommon();
     if (!initialized.has_value()) {
@@ -1598,6 +1602,11 @@ class StatementBinder final {
     }
     if (select.where.has_value() && !IdIsValid(*select.where)) {
       return false;
+    }
+    for (const OrderingTerm& term : select.order_by) {
+      if (!SpanIsValid(term.span) || !IdIsValid(term.expression)) {
+        return false;
+      }
     }
     if (select.limit.has_value() &&
         (!SpanIsValid(select.limit->span) || !IdIsValid(select.limit->limit) ||

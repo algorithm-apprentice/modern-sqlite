@@ -164,8 +164,8 @@ missing function `)` after a valid final argument uses
 parenthesized expression still needs its delimiter uses
 `kRightParenthesis`.
 
-For example, `SELECT x ORDER BY y` reports `ORDER`, `kUnsupportedSyntax`,
-`kNone`, and the byte after `ORDER`. A contextual `OVER` that remains a
+For example, `SELECT x GROUP BY y` reports `GROUP`, `kUnsupportedSyntax`,
+`kNone`, and the byte after `GROUP`. A contextual `OVER` that remains a
 keyword reports `kOver`; one reclassified as a name reports `kIdentifier`.
 SQLite's rendered `near "<token>"` text is presentation policy for a later API
 boundary.
@@ -288,8 +288,9 @@ may raise this limit without changing the AST.
 
 `ParseOptions` adds preparation-boundary limits without changing default
 language acceptance. `maximum_source_bytes` is checked before tokenization.
-`maximum_columns` is checked before appending SELECT result columns, CREATE
-TABLE columns, table-constraint indexed terms, or CREATE INDEX terms.
+`maximum_columns` is checked before appending SELECT result columns, SELECT
+ORDER BY terms, CREATE TABLE columns, table-constraint indexed terms, or
+CREATE INDEX terms.
 Exceeding either option reports `kResourceLimitExceeded`. The defaults match
 the catalog loader's SQLite-derived source and column limits.
 
@@ -365,8 +366,13 @@ operators. The table source is zero or one named table with an optional
 alias. Comma sources, joins, table-valued functions, subqueries, and
 `INDEXED BY` are unsupported.
 
-`GROUP BY`, `HAVING`, `WINDOW`, `VALUES`, compounds, CTEs, `ORDER BY`, and
-other absent clauses report `kUnsupportedSyntax`.
+`GROUP BY`, `HAVING`, `WINDOW`, `VALUES`, compounds, CTEs, and other absent
+clauses report `kUnsupportedSyntax`.
+
+ADR-0054 later extends this syntax contract with simple-SELECT ORDER BY terms,
+including ASC/DESC and NULLS FIRST/LAST. The parser now represents that clause
+immutably while the binder continues to reject execution until the following
+vertical slice.
 
 LIMIT is normalized into the AST's semantic `limit` and optional `offset`
 slots while retaining `LimitSyntax`. The source order remains exact:
@@ -522,7 +528,7 @@ This node does not implement:
 
 - catalog-aware name resolution or semantic validation;
 - literal decoding or runtime values;
-- joins, grouping, ordering, compounds, CTEs, subqueries, windows, VALUES, or
+- joins, grouping, compounds, CTEs, subqueries, windows, VALUES, or
   table-valued functions;
 - DML, transactions, pragmas, attach/detach, vacuum, triggers, views, or
   virtual tables;
