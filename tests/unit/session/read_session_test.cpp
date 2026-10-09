@@ -330,7 +330,7 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   ASSERT_FALSE(order_by.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, order_by.error().code());
   EXPECT_NE(std::string_view::npos,
-            order_by.error().message().find("ORDER BY logical planning is not supported"));
+            order_by.error().message().find("ORDER BY lowering is not supported"));
 }
 
 TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {

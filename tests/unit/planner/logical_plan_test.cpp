@@ -107,6 +107,8 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("filter", LogicalNodeKindName(LogicalNodeKind::kFilter));
   EXPECT_EQ("limit", LogicalNodeKindName(LogicalNodeKind::kLimit));
   EXPECT_EQ("projection", LogicalNodeKindName(LogicalNodeKind::kProjection));
+  EXPECT_EQ("order", LogicalNodeKindName(LogicalNodeKind::kOrder));
+  EXPECT_EQ("output", LogicalNodeKindName(LogicalNodeKind::kOutput));
   EXPECT_EQ("unknown",
             LogicalNodeKindName(static_cast<LogicalNodeKind>(255)));  // NOLINT
   EXPECT_EQ("insert", LogicalMutationKindName(LogicalMutationKind::kInsert));
@@ -329,13 +331,89 @@ TEST(LogicalPlan, PreservesAliasIdentityAndRejectsMovedFromInput) {
 
   const BuildLogicalPlanResult recovered = BuildLogicalPlan(std::move(retained));
   EXPECT_TRUE(recovered.has_value());
+}
 
-  BuildLogicalPlanResult ordered =
-      BuildLogicalPlan(BindOrThrow("SELECT Name FROM Items ORDER BY Name", catalog));
-  ASSERT_FALSE(ordered.has_value());
-  EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, ordered.error().code);
-  EXPECT_EQ(ErrorCode::kGeneric, ordered.error().base_error_code());
-  EXPECT_EQ("ORDER BY logical planning is not supported", ordered.error().detail);
+TEST(LogicalPlan, BuildsOrderedOutputMappingsAndPayloadFirstSchedule) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan plan = PlanOrThrow(
+      "SELECT Name, id + 1, abs(?) FROM Items WHERE id > ? "
+      "ORDER BY Name, id + 1, Name DESC NULLS FIRST",
+      catalog);
+
+  ASSERT_EQ(4U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<LogicalScanNode>(plan.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<LogicalFilterNode>(plan.nodes()[1].payload));
+
+  const auto& order = std::get<LogicalOrderNode>(plan.nodes()[2].payload);
+  EXPECT_EQ(LogicalNodeId{1}, order.input);
+  EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, order.schedule);
+  ASSERT_EQ(3U, order.terms.size());
+  ASSERT_EQ(1U, order.payload_expressions.size());
+  ASSERT_EQ(3U, order.output_fields.size());
+
+  const BoundSelect& bound = plan.bound_select();
+  ASSERT_EQ(3U, bound.order_by().size());
+  EXPECT_EQ(bound.order_by()[0].expression, order.terms[0].expression);
+  EXPECT_EQ(bound.order_by()[1].expression, order.terms[1].expression);
+  EXPECT_EQ(bound.order_by()[2].expression, order.terms[2].expression);
+  EXPECT_EQ(0U, order.terms[0].result_column);
+  EXPECT_EQ(1U, order.terms[1].result_column);
+  EXPECT_EQ(0U, order.terms[2].result_column);
+  EXPECT_EQ(bound.result_columns()[2].expression, order.payload_expressions[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 2}),
+            order.output_fields[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 1}),
+            order.output_fields[1]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 0}),
+            order.output_fields[2]);
+
+  const auto& output = std::get<LogicalOutputNode>(plan.nodes()[3].payload);
+  EXPECT_EQ(LogicalNodeId{2}, output.input);
+  EXPECT_EQ(LogicalNodeId{3}, plan.root());
+}
+
+TEST(LogicalPlan, PlacesOrderedLimitAfterOrderAndUsesKeyFirstSchedule) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan plan = PlanOrThrow(
+      "SELECT Name, abs(?) FROM Items WHERE id > ? "
+      "ORDER BY Name LIMIT ? OFFSET ?",
+      catalog);
+
+  ASSERT_EQ(5U, plan.nodes().size());
+  const auto& order = std::get<LogicalOrderNode>(plan.nodes()[2].payload);
+  EXPECT_EQ(LogicalNodeId{1}, order.input);
+  EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, order.schedule);
+  ASSERT_EQ(1U, order.payload_expressions.size());
+  EXPECT_EQ(plan.bound_select().result_columns()[1].expression, order.payload_expressions[0]);
+  ASSERT_EQ(2U, order.output_fields.size());
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 0}),
+            order.output_fields[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 0}),
+            order.output_fields[1]);
+
+  const auto& limit = std::get<LogicalLimitNode>(plan.nodes()[3].payload);
+  EXPECT_EQ(LogicalNodeId{2}, limit.input);
+  const auto& output = std::get<LogicalOutputNode>(plan.nodes()[4].payload);
+  EXPECT_EQ(LogicalNodeId{3}, output.input);
+  EXPECT_EQ(LogicalNodeId{4}, plan.root());
+}
+
+TEST(LogicalPlan, OrdersSourceFreeQueriesWithoutPayloadDuplication) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan plan = PlanOrThrow("SELECT abs(?) AS x, ? AS y ORDER BY x, y LIMIT ?", catalog);
+
+  ASSERT_EQ(4U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<LogicalSingleRowNode>(plan.nodes()[0].payload));
+  const auto& order = std::get<LogicalOrderNode>(plan.nodes()[1].payload);
+  EXPECT_EQ(LogicalNodeId{0}, order.input);
+  EXPECT_TRUE(order.payload_expressions.empty());
+  ASSERT_EQ(2U, order.output_fields.size());
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 0}),
+            order.output_fields[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 1}),
+            order.output_fields[1]);
+  EXPECT_TRUE(std::holds_alternative<LogicalLimitNode>(plan.nodes()[2].payload));
+  EXPECT_TRUE(std::holds_alternative<LogicalOutputNode>(plan.nodes()[3].payload));
 }
 
 }  // namespace

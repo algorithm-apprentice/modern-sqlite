@@ -57,8 +57,38 @@ struct LogicalProjectionNode {
   std::vector<BoundExpressionId> expressions{};
 };
 
-using LogicalNodePayload = std::variant<LogicalSingleRowNode, LogicalScanNode, LogicalFilterNode,
-                                        LogicalLimitNode, LogicalProjectionNode>;
+enum class OrderEvaluationSchedule : std::uint8_t {
+  kPayloadThenKeys,
+  kKeysThenAdmissionThenPayload,
+};
+
+enum class SortOutputFieldKind : std::uint8_t {
+  kKey,
+  kPayload,
+};
+
+struct SortOutputField {
+  SortOutputFieldKind kind = SortOutputFieldKind::kPayload;
+  std::uint32_t field_index = 0;
+
+  constexpr auto operator<=>(const SortOutputField&) const noexcept = default;
+};
+
+struct LogicalOrderNode {
+  LogicalNodeId input;
+  std::vector<BoundOrderingTerm> terms{};
+  std::vector<BoundExpressionId> payload_expressions{};
+  std::vector<SortOutputField> output_fields{};
+  OrderEvaluationSchedule schedule = OrderEvaluationSchedule::kPayloadThenKeys;
+};
+
+struct LogicalOutputNode {
+  LogicalNodeId input;
+};
+
+using LogicalNodePayload =
+    std::variant<LogicalSingleRowNode, LogicalScanNode, LogicalFilterNode, LogicalLimitNode,
+                 LogicalProjectionNode, LogicalOrderNode, LogicalOutputNode>;
 
 struct LogicalNode {
   LogicalNodePayload payload;
@@ -70,6 +100,8 @@ enum class LogicalNodeKind : std::uint8_t {
   kFilter,
   kLimit,
   kProjection,
+  kOrder,
+  kOutput,
 };
 
 [[nodiscard]] LogicalNodeKind LogicalNodeKindOf(const LogicalNode& node) noexcept;

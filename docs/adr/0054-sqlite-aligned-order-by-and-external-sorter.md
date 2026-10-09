@@ -457,6 +457,10 @@ struct LogicalOrderNode {
   OrderEvaluationSchedule schedule =
       OrderEvaluationSchedule::kPayloadThenKeys;
 };
+
+struct LogicalOutputNode {
+  LogicalNodeId input;
+};
 ```
 
 The logical shape for a sorted query is:
@@ -480,6 +484,11 @@ in lowering.
 Add:
 
 ```cpp
+enum class PhysicalSortStrategy : std::uint8_t {
+  kExternal,
+  kRuntimeLimit,
+};
+
 struct PhysicalSortNode {
   PhysicalNodeId input;
   std::vector<BoundOrderingTerm> terms;
@@ -489,6 +498,11 @@ struct PhysicalSortNode {
       OrderEvaluationSchedule::kPayloadThenKeys;
   PhysicalSortStrategy strategy = PhysicalSortStrategy::kExternal;
   bool input_order_satisfied = false;
+};
+
+struct PhysicalOutputNode {
+  PhysicalNodeId input;
+  LogicalNodeId logical_output;
 };
 ```
 

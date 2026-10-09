@@ -139,10 +139,31 @@ struct PhysicalProjectionNode {
   LogicalNodeId logical_projection;
 };
 
+enum class PhysicalSortStrategy : std::uint8_t {
+  kExternal,
+  kRuntimeLimit,
+};
+
+struct PhysicalSortNode {
+  PhysicalNodeId input;
+  std::vector<BoundOrderingTerm> terms{};
+  std::vector<BoundExpressionId> payload_expressions{};
+  std::vector<SortOutputField> output_fields{};
+  OrderEvaluationSchedule schedule = OrderEvaluationSchedule::kPayloadThenKeys;
+  PhysicalSortStrategy strategy = PhysicalSortStrategy::kExternal;
+  bool input_order_satisfied = false;
+};
+
+struct PhysicalOutputNode {
+  PhysicalNodeId input;
+  LogicalNodeId logical_output;
+};
+
 using PhysicalNodePayload =
     std::variant<PhysicalSingleRowNode, PhysicalEmptyNode, PhysicalTableScanNode,
                  PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
-                 PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode>;
+                 PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
+                 PhysicalOutputNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -158,6 +179,8 @@ enum class PhysicalNodeKind : std::uint8_t {
   kFilter,
   kLimit,
   kProjection,
+  kSort,
+  kOutput,
 };
 
 [[nodiscard]] PhysicalNodeKind PhysicalNodeKindOf(const PhysicalNode& node) noexcept;

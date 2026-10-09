@@ -82,6 +82,13 @@ struct ReadAccessCandidate {
   return OptimizerFailure(OptimizerErrorCode::kInternalInvariant, detail);
 }
 
+[[nodiscard]] bool OrderingTermsEqual(const BoundOrderingTerm& left,
+                                      const BoundOrderingTerm& right) noexcept {
+  return left.expression == right.expression && left.collation == right.collation &&
+         left.order == right.order && left.null_placement == right.null_placement &&
+         left.result_column == right.result_column;
+}
+
 template <typename Bound>
 [[nodiscard]] bool IsValidExpressionId(const Bound& bound, BoundExpressionId id) noexcept {
   return id.value() < bound.expressions().size();
@@ -442,6 +449,26 @@ template <typename Bound>
       .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
       .rowid_eligible = !table.without_rowid,
   };
+}
+
+[[nodiscard]] const LogicalOrderNode* LogicalOrderOf(const LogicalPlan& logical_plan) noexcept {
+  if (logical_plan.bound_select().order_by().empty()) {
+    return nullptr;
+  }
+  const auto* output =
+      std::get_if<LogicalOutputNode>(&logical_plan.node(logical_plan.root()).payload);
+  if (output == nullptr || output->input.value() >= logical_plan.nodes().size()) {
+    return nullptr;
+  }
+  LogicalNodeId input = output->input;
+  if (logical_plan.bound_select().limit() != nullptr) {
+    const auto* limit = std::get_if<LogicalLimitNode>(&logical_plan.node(input).payload);
+    if (limit == nullptr || limit->input.value() >= logical_plan.nodes().size()) {
+      return nullptr;
+    }
+    input = limit->input;
+  }
+  return std::get_if<LogicalOrderNode>(&logical_plan.node(input).payload);
 }
 
 template <typename Bound>
@@ -1187,6 +1214,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     case PhysicalNodeKind::kFilter:
     case PhysicalNodeKind::kLimit:
     case PhysicalNodeKind::kProjection:
+    case PhysicalNodeKind::kSort:
+    case PhysicalNodeKind::kOutput:
       break;
   }
   return PhysicalAccessKind::kEmpty;
@@ -1395,7 +1424,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   if (!logical_plan.valid()) {
     return std::unexpected{InvariantFailure("physical plan retained an invalid logical plan")};
   }
-  if (nodes.size() < 2U || nodes.size() > 5U || root.value() != nodes.size() - 1U) {
+  if (nodes.size() < 2U || nodes.size() > 6U || root.value() != nodes.size() - 1U) {
     return std::unexpected{InvariantFailure("physical plan node arena is invalid")};
   }
   if (candidates.empty() || selected_candidate_index >= candidates.size() ||
@@ -1536,6 +1565,34 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     input = PhysicalNodeId{static_cast<std::uint32_t>(index++)};
   }
 
+  const LogicalOrderNode* logical_order = LogicalOrderOf(logical_plan);
+  if (logical_order != nullptr) {
+    if (index >= nodes.size()) {
+      return std::unexpected{InvariantFailure("physical sort is missing")};
+    }
+    const auto* sort = std::get_if<PhysicalSortNode>(&nodes[index].payload);
+    const PhysicalSortStrategy expected_strategy = bound_select.limit() == nullptr
+                                                       ? PhysicalSortStrategy::kExternal
+                                                       : PhysicalSortStrategy::kRuntimeLimit;
+    if (sort == nullptr || sort->input != input ||
+        sort->terms.size() != logical_order->terms.size() ||
+        sort->payload_expressions != logical_order->payload_expressions ||
+        sort->output_fields != logical_order->output_fields ||
+        sort->schedule != logical_order->schedule || sort->strategy != expected_strategy ||
+        sort->input_order_satisfied) {
+      return std::unexpected{InvariantFailure("physical sort does not match logical ordering")};
+    }
+    for (std::size_t term_index = 0; term_index < sort->terms.size(); ++term_index) {
+      if (!OrderingTermsEqual(sort->terms[term_index], logical_order->terms[term_index])) {
+        return std::unexpected{
+            InvariantFailure("physical sort term does not match logical ordering")};
+      }
+    }
+    input = PhysicalNodeId{static_cast<std::uint32_t>(index++)};
+  } else if (!bound_select.order_by().empty()) {
+    return std::unexpected{InvariantFailure("logical ordering shape is invalid")};
+  }
+
   const BoundLimit* logical_limit = bound_select.limit();
   if (logical_limit != nullptr) {
     if (index >= nodes.size()) {
@@ -1552,10 +1609,19 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   if (index + 1U != nodes.size()) {
     return std::unexpected{InvariantFailure("physical plan contains unexpected nodes")};
   }
-  const auto* projection = std::get_if<PhysicalProjectionNode>(&nodes[index].payload);
-  if (projection == nullptr || projection->input != input ||
-      projection->logical_projection != logical_plan.root()) {
-    return std::unexpected{InvariantFailure("physical projection does not match logical root")};
+  if (logical_order != nullptr) {
+    const auto* output = std::get_if<PhysicalOutputNode>(&nodes[index].payload);
+    if (output == nullptr || output->input != input ||
+        output->logical_output != logical_plan.root()) {
+      return std::unexpected{
+          InvariantFailure("physical output does not match logical ordered output")};
+    }
+  } else {
+    const auto* projection = std::get_if<PhysicalProjectionNode>(&nodes[index].payload);
+    if (projection == nullptr || projection->input != input ||
+        projection->logical_projection != logical_plan.root()) {
+      return std::unexpected{InvariantFailure("physical projection does not match logical root")};
+    }
   }
   if (std::expected<void, OptimizerError> validated =
           ValidatePredicates(bound_select, source, leaf, guard_predicates, filter_predicates);
@@ -1711,10 +1777,12 @@ class PhysicalPlanBuilder final {
       }
     }
 
+    const bool ordered = !logical_plan.bound_select().order_by().empty();
     const std::size_t node_count =
         2U + static_cast<std::size_t>(!predicates.guards.empty()) +
         static_cast<std::size_t>(!residuals.empty()) +
-        static_cast<std::size_t>(logical_plan.bound_select().limit() != nullptr);
+        static_cast<std::size_t>(logical_plan.bound_select().limit() != nullptr) +
+        static_cast<std::size_t>(ordered);
     auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
     impl->nodes.reserve(node_count);
 
@@ -1789,6 +1857,27 @@ class PhysicalPlanBuilder final {
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
+    if (ordered) {
+      const LogicalOrderNode* logical_order = LogicalOrderOf(impl->logical_plan);
+      if (logical_order == nullptr) {
+        return std::unexpected{InvariantFailure("ordered logical plan has no order node")};
+      }
+      impl->nodes.push_back(PhysicalNode{
+          .payload =
+              PhysicalSortNode{
+                  .input = input,
+                  .terms = logical_order->terms,
+                  .payload_expressions = logical_order->payload_expressions,
+                  .output_fields = logical_order->output_fields,
+                  .schedule = logical_order->schedule,
+                  .strategy = impl->logical_plan.bound_select().limit() == nullptr
+                                  ? PhysicalSortStrategy::kExternal
+                                  : PhysicalSortStrategy::kRuntimeLimit,
+                  .input_order_satisfied = false,
+              },
+      });
+      input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
+    }
     if (const BoundLimit* limit = impl->logical_plan.bound_select().limit(); limit != nullptr) {
       impl->nodes.push_back(PhysicalNode{
           .payload =
@@ -1800,13 +1889,23 @@ class PhysicalPlanBuilder final {
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
-    impl->nodes.push_back(PhysicalNode{
-        .payload =
-            PhysicalProjectionNode{
-                .input = input,
-                .logical_projection = impl->logical_plan.root(),
-            },
-    });
+    if (ordered) {
+      impl->nodes.push_back(PhysicalNode{
+          .payload =
+              PhysicalOutputNode{
+                  .input = input,
+                  .logical_output = impl->logical_plan.root(),
+              },
+      });
+    } else {
+      impl->nodes.push_back(PhysicalNode{
+          .payload =
+              PhysicalProjectionNode{
+                  .input = input,
+                  .logical_projection = impl->logical_plan.root(),
+              },
+      });
+    }
     impl->root = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
 
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
@@ -2043,6 +2142,10 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "limit";
     case PhysicalNodeKind::kProjection:
       return "projection";
+    case PhysicalNodeKind::kSort:
+      return "sort";
+    case PhysicalNodeKind::kOutput:
+      return "output";
   }
   return "unknown";
 }
@@ -2136,21 +2239,17 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
     std::terminate();
   }
   const PhysicalNode& access = nodes[0];
-  if (std::holds_alternative<PhysicalSingleRowNode>(access.payload)) {
-    return "SCAN CONSTANT ROW";
-  }
-  if (std::holds_alternative<PhysicalEmptyNode>(access.payload)) {
-    return "EMPTY RESULT";
-  }
-
   std::string explain;
-  if (const auto* scan = std::get_if<PhysicalTableScanNode>(&access.payload); scan != nullptr) {
+  if (std::holds_alternative<PhysicalSingleRowNode>(access.payload)) {
+    explain = "SCAN CONSTANT ROW";
+  } else if (std::holds_alternative<PhysicalEmptyNode>(access.payload)) {
+    explain = "EMPTY RESULT";
+  } else if (const auto* scan = std::get_if<PhysicalTableScanNode>(&access.payload);
+             scan != nullptr) {
     explain = "SCAN ";
     AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &explain);
-    return explain;
-  }
-  if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&access.payload);
-      index_scan != nullptr) {
+  } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&access.payload);
+             index_scan != nullptr) {
     const BoundSelect& bound_select = plan.logical_plan().bound_select();
     const CatalogSnapshot& catalog = *bound_select.catalog();
     const CatalogTable& table = catalog.table(index_scan->table);
@@ -2160,38 +2259,60 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
     AppendExplainIdentifier(table.name, &explain);
     explain.append(index_scan->covering ? " USING COVERING INDEX " : " USING INDEX ");
     AppendExplainIdentifier(index.name, &explain);
-    if (!constrained) {
-      return explain;
-    }
-    explain.append(" (");
-    bool first = true;
-    const auto append_constraint = [&](ColumnId column, std::string_view operation) {
-      if (!first) {
-        explain.append(" AND ");
+    if (constrained) {
+      explain.append(" (");
+      bool first = true;
+      const auto append_constraint = [&](ColumnId column, std::string_view operation) {
+        if (!first) {
+          explain.append(" AND ");
+        }
+        first = false;
+        AppendExplainIdentifier(table.columns[column.value].name, &explain);
+        explain.append(operation);
+      };
+      for (const PhysicalIndexEquality& equality : index_scan->equalities) {
+        append_constraint(equality.column, equality.reject_null ? "=?" : " IS ?");
       }
-      first = false;
-      AppendExplainIdentifier(table.columns[column.value].name, &explain);
-      explain.append(operation);
-    };
-    for (const PhysicalIndexEquality& equality : index_scan->equalities) {
-      append_constraint(equality.column, equality.reject_null ? "=?" : " IS ?");
+      if (index_scan->range.has_value() && index_scan->range->lower.has_value()) {
+        append_constraint(index_scan->range->column,
+                          index_scan->range->lower->inclusive ? ">=?" : ">?");
+      }
+      if (index_scan->range.has_value() && index_scan->range->upper.has_value()) {
+        append_constraint(index_scan->range->column,
+                          index_scan->range->upper->inclusive ? "<=?" : "<?");
+      }
+      explain.push_back(')');
     }
-    if (index_scan->range.has_value() && index_scan->range->lower.has_value()) {
-      append_constraint(index_scan->range->column,
-                        index_scan->range->lower->inclusive ? ">=?" : ">?");
-    }
-    if (index_scan->range.has_value() && index_scan->range->upper.has_value()) {
-      append_constraint(index_scan->range->column,
-                        index_scan->range->upper->inclusive ? "<=?" : "<?");
-    }
-    explain.push_back(')');
-    return explain;
+  } else {
+    const auto& lookup = std::get<PhysicalRowIdLookupNode>(access.payload);
+    explain = "SEARCH ";
+    AppendExplainIdentifier(SourceName(plan, lookup.source_kind, lookup.table), &explain);
+    explain.append(" USING INTEGER PRIMARY KEY (rowid=?)");
   }
 
-  const auto& lookup = std::get<PhysicalRowIdLookupNode>(access.payload);
-  explain = "SEARCH ";
-  AppendExplainIdentifier(SourceName(plan, lookup.source_kind, lookup.table), &explain);
-  explain.append(" USING INTEGER PRIMARY KEY (rowid=?)");
+  const BoundSelect& bound_select = plan.logical_plan().bound_select();
+  for (const PhysicalNode& node : nodes) {
+    const auto* sort = std::get_if<PhysicalSortNode>(&node.payload);
+    if (sort == nullptr) {
+      continue;
+    }
+    explain.append("\nSORT ");
+    explain.append(std::to_string(sort->terms.size()));
+    explain.append(sort->terms.size() == 1U ? " TERM (" : " TERMS (");
+    for (std::size_t index = 0; index < sort->terms.size(); ++index) {
+      if (index != 0U) {
+        explain.append(", ");
+      }
+      const BoundOrderingTerm& term = sort->terms[index];
+      explain.append("COLLATE ");
+      AppendExplainIdentifier(bound_select.collations()[term.collation.value()].name, &explain);
+      explain.append(term.order == SortOrder::kDescending ? " DESC " : " ASC ");
+      explain.append(term.null_placement == BoundNullPlacement::kLast ? "NULLS LAST"
+                                                                      : "NULLS FIRST");
+    }
+    explain.append(sort->input_order_satisfied ? ") USING INPUT ORDER" : ") USING SORTER");
+    break;
+  }
   return explain;
 }
 

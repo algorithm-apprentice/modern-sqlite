@@ -642,6 +642,12 @@ class PlanLowerer final {
     if (nodes.size() < 2U) {
       return std::unexpected(InternalFailure("physical plan has no lowering chain"));
     }
+    for (const PhysicalNode& node : nodes) {
+      if (std::holds_alternative<PhysicalSortNode>(node.payload) ||
+          std::holds_alternative<PhysicalOutputNode>(node.payload)) {
+        return std::unexpected(UnsupportedFailure("ORDER BY lowering is not supported"));
+      }
+    }
 
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);

@@ -168,6 +168,21 @@ bool inject_failure = false;
   return std::move(*logical);
 }
 
+[[nodiscard]] modern_sqlite::LogicalPlan LogicalOrderFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindSelectResult bound = BindSelectStatement(
+      ParseTree("SELECT Name, Payload FROM Items ORDER BY Name LIMIT ?"), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind optimizer ORDER BY OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to build optimizer ORDER BY OOM fixture"};
+  }
+  return std::move(*logical);
+}
+
 [[nodiscard]] modern_sqlite::LogicalStatementPlan LogicalMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   using namespace modern_sqlite;
@@ -305,6 +320,38 @@ int main() try {
     if (!threw) {
       return 1;
     }
+  }
+
+  LogicalPlan order_baseline_logical = LogicalOrderFixture(catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const OptimizeLogicalPlanResult order_baseline =
+      OptimizeLogicalPlan(std::move(order_baseline_logical));
+  if (!order_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t order_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (order_allocation_count != 7U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < order_allocation_count; ++failure) {
+    LogicalPlan logical = LogicalOrderFixture(catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+          OptimizeLogicalPlan(std::move(logical));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  if (!OptimizeLogicalPlan(LogicalOrderFixture(catalog)).has_value()) {
+    return 1;
   }
 
   LogicalStatementPlan mutation_baseline = LogicalMutationFixture(catalog);
