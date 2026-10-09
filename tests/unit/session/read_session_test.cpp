@@ -325,6 +325,12 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   const auto syntax = session.Prepare(Utf8View{"SELECT )"});
   ASSERT_FALSE(syntax.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, syntax.error().code());
+
+  const auto order_by = session.Prepare(Utf8View{"SELECT Name FROM Items ORDER BY Name"});
+  ASSERT_FALSE(order_by.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, order_by.error().code());
+  EXPECT_NE(std::string_view::npos,
+            order_by.error().message().find("ORDER BY logical planning is not supported"));
 }
 
 TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {

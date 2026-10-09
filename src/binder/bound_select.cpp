@@ -44,6 +44,7 @@ struct ExpressionProperties {
 struct AliasEntry {
   std::string name;
   BoundExpressionId target;
+  std::size_t result_index = 0;
 };
 
 struct ParameterOccurrence {
@@ -365,7 +366,9 @@ struct BoundExpressionState {
 struct BoundSelect::Impl final : BoundExpressionState {
   std::vector<std::string> registered_collations;
   std::vector<BoundResultColumn> result_columns;
+  std::vector<std::optional<ExpressionId>> result_syntax;
   std::optional<BoundExpressionId> where;
+  std::vector<BoundOrderingTerm> order_by;
   std::optional<BoundLimit> limit;
 };
 
@@ -450,10 +453,6 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, select.span,
                                          "SELECT DISTINCT is not supported"));
     }
-    if (!select.order_by.empty()) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, select.span,
-                                         "ORDER BY is not supported"));
-    }
 
     BindExpected<void> initialized = InitializeCommon();
     if (!initialized.has_value()) {
@@ -484,6 +483,10 @@ class StatementBinder final {
         return std::unexpected(std::move(where.error()));
       }
       impl_->where = *where;
+    }
+    BindExpected<void> order_by = BindOrderBy(select);
+    if (!order_by.has_value()) {
+      return std::unexpected(std::move(order_by.error()));
     }
     if (select.limit.has_value()) {
       const BindScope empty_scope{.source_columns = false, .result_aliases = false};
@@ -1887,9 +1890,436 @@ class StatementBinder final {
           return std::unexpected(std::move(alias.error()));
         }
         output.name = *alias;
-        aliases_.push_back(AliasEntry{.name = std::move(*alias), .target = *bound});
+        aliases_.push_back(AliasEntry{
+            .name = std::move(*alias),
+            .target = *bound,
+            .result_index = impl_->result_columns.size(),
+        });
       }
+
       impl_->result_columns.push_back(std::move(output));
+      impl_->result_syntax.emplace_back(result.expression);
+    }
+    return {};
+  }
+
+  [[nodiscard]] ExpressionId OrderByCore(ExpressionId id) const noexcept {
+    while (true) {
+      const Expression& expression = tree_.expression(id);
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+        continue;
+      }
+      if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+          collate != nullptr) {
+        id = collate->operand;
+        continue;
+      }
+      return id;
+    }
+  }
+
+  [[nodiscard]] BindExpected<std::optional<std::size_t>> OrderByAlias(ExpressionId id) {
+    const Expression& expression = tree_.expression(OrderByCore(id));
+    const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
+    std::string owned_name;
+    std::optional<std::string_view> requested;
+    if (identifier != nullptr) {
+      BindExpected<DecodedNameParts> parts = NameParts(identifier->name);
+      if (!parts.has_value()) {
+        return std::unexpected(std::move(parts.error()));
+      }
+      if (parts->size() == 1U) {
+        requested = parts->front();
+      }
+    } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+               literal != nullptr && literal->kind == LiteralKind::kString &&
+               SpanText(literal->token).starts_with('"')) {
+      BindExpected<std::string> name = Dequote(literal->token);
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      owned_name = std::move(*name);
+      requested = owned_name;
+    }
+    if (!requested.has_value()) {
+      return std::optional<std::size_t>{};
+    }
+    for (const AliasEntry& alias : aliases_) {
+      if (NamesEqual(alias.name, *requested)) {
+        return std::optional<std::size_t>{alias.result_index};
+      }
+    }
+    return std::optional<std::size_t>{};
+  }
+
+  [[nodiscard]] BindExpected<std::optional<std::int64_t>> OrderByOrdinal(ExpressionId id) {
+    return ClassifyOrderByInteger(id, true);
+  }
+
+  [[nodiscard]] BindExpected<std::optional<std::int64_t>> ClassifyOrderByInteger(
+      ExpressionId id, bool allow_collate) {
+    const Expression& expression = tree_.expression(id);
+    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+        parenthesized != nullptr) {
+      return ClassifyOrderByInteger(parenthesized->inner, allow_collate);
+    }
+    if (allow_collate) {
+      if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+          collate != nullptr) {
+        return ClassifyOrderByInteger(collate->operand, true);
+      }
+    }
+    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+        unary != nullptr &&
+        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+      BindExpected<std::optional<std::int64_t>> operand =
+          ClassifyOrderByInteger(unary->operand, false);
+      if (!operand.has_value() || !operand->has_value()) {
+        return operand;
+      }
+      return std::optional<std::int64_t>{unary->op == UnaryOperator::kNegative ? -operand->value()
+                                                                               : operand->value()};
+    }
+    const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+    if (literal == nullptr || literal->kind != LiteralKind::kInteger) {
+      return std::optional<std::int64_t>{};
+    }
+    BindExpected<SqlValue> value = MaterializeSyntaxConstant(id);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    const std::optional<std::int64_t> integer = value->integer_value();
+    if (!integer.has_value() || *integer < 0 ||
+        *integer > std::numeric_limits<std::int32_t>::max()) {
+      return std::optional<std::int64_t>{};
+    }
+    return integer;
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindOrderByResultReference(
+      ExpressionId id, std::size_t result_index) {
+    const Expression& expression = tree_.expression(id);
+    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+        parenthesized != nullptr) {
+      return BindOrderByResultReference(parenthesized->inner, result_index);
+    }
+    if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+        collate != nullptr) {
+      BindExpected<BoundExpressionId> operand =
+          BindOrderByResultReference(collate->operand, result_index);
+      if (!operand.has_value()) {
+        return std::unexpected(std::move(operand.error()));
+      }
+      BindExpected<std::string> name = Dequote(collate->collation);
+      if (!name.has_value()) {
+        return std::unexpected(std::move(name.error()));
+      }
+      BindExpected<BoundCollationId> collation = InternCollation(*name, collate->collation);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      ExpressionProperties properties = Properties(*operand);
+      properties.collation = *collation;
+      properties.explicit_collation = true;
+      return AppendExpression(expression.span,
+                              BoundCollateExpression{.operand = *operand, .collation = *collation},
+                              properties);
+    }
+    const BoundExpressionId target = impl_->result_columns[result_index].expression;
+    return AppendExpression(expression.span, BoundAliasReferenceExpression{.target = target},
+                            Properties(target));
+  }
+
+  [[nodiscard]] bool SyntaxNamesEquivalent(const QualifiedName& left,
+                                           const QualifiedName& right) const {
+    BindExpected<DecodedNameParts> left_parts = NameParts(left);
+    BindExpected<DecodedNameParts> right_parts = NameParts(right);
+    if (!left_parts.has_value() || !right_parts.has_value() ||
+        left_parts->size() != right_parts->size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < left_parts->size(); ++index) {
+      if (!NamesEqual((*left_parts)[index], (*right_parts)[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+  [[nodiscard]] bool SyntaxExpressionsEquivalent(ExpressionId left_id, ExpressionId right_id) {
+    const Expression& left = ParenthesesTransparentExpression(left_id);
+    const Expression& right = ParenthesesTransparentExpression(right_id);
+    const auto is_string_literal = [](const Expression& expression) {
+      const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+      return literal != nullptr && literal->kind == LiteralKind::kString;
+    };
+    if ((std::holds_alternative<IdentifierExpression>(left.payload) && is_string_literal(right)) ||
+        (is_string_literal(left) && std::holds_alternative<IdentifierExpression>(right.payload))) {
+      return true;
+    }
+    if (left.payload.index() != right.payload.index()) {
+      return false;
+    }
+    if (const auto* literal = std::get_if<LiteralExpression>(&left.payload); literal != nullptr) {
+      const auto& other = std::get<LiteralExpression>(right.payload);
+      if (literal->kind != other.kind) {
+        return false;
+      }
+      if (literal->kind == LiteralKind::kInteger) {
+        BindExpected<SqlValue> left_value = MaterializeSyntaxConstant(left_id);
+        BindExpected<SqlValue> right_value = MaterializeSyntaxConstant(right_id);
+        if (!left_value.has_value() || !right_value.has_value()) {
+          return false;
+        }
+        const std::optional<std::int64_t> left_integer = left_value->integer_value();
+        const std::optional<std::int64_t> right_integer = right_value->integer_value();
+        if (left_integer.has_value() && right_integer.has_value() && *left_integer >= 0 &&
+            *right_integer >= 0 && *left_integer <= std::numeric_limits<std::int32_t>::max() &&
+            *right_integer <= std::numeric_limits<std::int32_t>::max()) {
+          return left_integer == right_integer;
+        }
+      } else if (literal->kind == LiteralKind::kString || literal->kind == LiteralKind::kNull ||
+                 literal->kind == LiteralKind::kTrue || literal->kind == LiteralKind::kFalse) {
+        return true;
+      }
+      return SpanText(literal->token) == SpanText(other.token);
+    }
+    if (const auto* variable = std::get_if<VariableExpression>(&left.payload);
+        variable != nullptr) {
+      return SpanText(variable->token) ==
+             SpanText(std::get<VariableExpression>(right.payload).token);
+    }
+    if (const auto* identifier = std::get_if<IdentifierExpression>(&left.payload);
+        identifier != nullptr) {
+      static_cast<void>(identifier);
+      return true;
+    }
+    if (const auto* unary = std::get_if<UnaryExpression>(&left.payload); unary != nullptr) {
+      const auto& other = std::get<UnaryExpression>(right.payload);
+      return unary->op == other.op && SyntaxExpressionsEquivalent(unary->operand, other.operand);
+    }
+    if (const auto* binary = std::get_if<BinaryExpression>(&left.payload); binary != nullptr) {
+      const auto& other = std::get<BinaryExpression>(right.payload);
+      return binary->op == other.op && SyntaxExpressionsEquivalent(binary->left, other.left) &&
+             SyntaxExpressionsEquivalent(binary->right, other.right);
+    }
+    if (const auto* call = std::get_if<FunctionCallExpression>(&left.payload); call != nullptr) {
+      const auto& other = std::get<FunctionCallExpression>(right.payload);
+      if (call->distinct != other.distinct || !SyntaxNamesEquivalent(call->name, other.name) ||
+          call->arguments.size() != other.arguments.size()) {
+        return false;
+      }
+      for (std::size_t index = 0; index < call->arguments.size(); ++index) {
+        if (!SyntaxExpressionsEquivalent(call->arguments[index], other.arguments[index])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (const auto* collate = std::get_if<CollateExpression>(&left.payload); collate != nullptr) {
+      const auto& other = std::get<CollateExpression>(right.payload);
+      BindExpected<std::string> left_name = Dequote(collate->collation);
+      BindExpected<std::string> right_name = Dequote(other.collation);
+      return left_name.has_value() && right_name.has_value() &&
+             NamesEqual(*left_name, *right_name) &&
+             SyntaxExpressionsEquivalent(collate->operand, other.operand);
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool BoundSemanticallyEquivalent(BoundExpressionId left_id,
+                                                 BoundExpressionId right_id) const {
+    const BoundExpression& left = impl_->expressions[left_id.value()];
+    const BoundExpression& right = impl_->expressions[right_id.value()];
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&left.payload);
+        alias != nullptr) {
+      return BoundSemanticallyEquivalent(alias->target, right_id);
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&right.payload);
+        alias != nullptr) {
+      return BoundSemanticallyEquivalent(left_id, alias->target);
+    }
+    if (left.payload.index() != right.payload.index()) {
+      return false;
+    }
+    if (const auto* literal = std::get_if<BoundLiteralExpression>(&left.payload);
+        literal != nullptr) {
+      const SqlValue& other = std::get<BoundLiteralExpression>(right.payload).value;
+      if (literal->value.type() != other.type()) {
+        return false;
+      }
+      switch (literal->value.type()) {
+        case SqlValueType::kNull:
+          return true;
+        case SqlValueType::kInteger:
+          return literal->value.integer_value() == other.integer_value();
+        case SqlValueType::kReal:
+          return literal->value.real_value() == other.real_value();
+        case SqlValueType::kText:
+          return literal->value.text_value().value_or(Utf8View{}).bytes() ==
+                 other.text_value().value_or(Utf8View{}).bytes();
+        case SqlValueType::kBlob:
+          return std::ranges::equal(literal->value.blob_value().value_or(ByteView{}),
+                                    other.blob_value().value_or(ByteView{}));
+      }
+    }
+    if (std::holds_alternative<BoundRowIdExpression>(left.payload)) {
+      return true;
+    }
+    if (const auto* column = std::get_if<BoundColumnExpression>(&left.payload); column != nullptr) {
+      return column->column == std::get<BoundColumnExpression>(right.payload).column;
+    }
+    if (const auto* parameter = std::get_if<BoundParameterExpression>(&left.payload);
+        parameter != nullptr) {
+      return parameter->parameter == std::get<BoundParameterExpression>(right.payload).parameter;
+    }
+    if (const auto* unary = std::get_if<BoundUnaryExpression>(&left.payload); unary != nullptr) {
+      const auto& other = std::get<BoundUnaryExpression>(right.payload);
+      return unary->operation == other.operation &&
+             BoundSemanticallyEquivalent(unary->operand, other.operand);
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&left.payload); binary != nullptr) {
+      const auto& other = std::get<BoundBinaryExpression>(right.payload);
+      return binary->operation == other.operation &&
+             BoundSemanticallyEquivalent(binary->left, other.left) &&
+             BoundSemanticallyEquivalent(binary->right, other.right);
+    }
+    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&left.payload);
+        comparison != nullptr) {
+      const auto& other = std::get<BoundComparisonExpression>(right.payload);
+      return comparison->comparison == other.comparison &&
+             comparison->collation == other.collation &&
+             BoundSemanticallyEquivalent(comparison->left, other.left) &&
+             BoundSemanticallyEquivalent(comparison->right, other.right);
+    }
+    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&left.payload);
+        truth != nullptr) {
+      const auto& other = std::get<BoundTruthTestExpression>(right.payload);
+      return truth->expected == other.expected && truth->negated == other.negated &&
+             BoundSemanticallyEquivalent(truth->operand, other.operand);
+    }
+    if (const auto* call = std::get_if<BoundScalarCallExpression>(&left.payload); call != nullptr) {
+      const auto& other = std::get<BoundScalarCallExpression>(right.payload);
+      return call->function == other.function && call->collation == other.collation &&
+             BoundArgumentsEquivalent(call->arguments, other.arguments);
+    }
+    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
+        coalesce != nullptr) {
+      return BoundArgumentsEquivalent(coalesce->arguments,
+                                      std::get<BoundCoalesceExpression>(right.payload).arguments);
+    }
+    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&left.payload);
+        conditional != nullptr) {
+      return BoundArgumentsEquivalent(
+          conditional->arguments, std::get<BoundConditionalExpression>(right.payload).arguments);
+    }
+    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&left.payload);
+        likelihood != nullptr) {
+      const auto& other = std::get<BoundLikelihoodExpression>(right.payload);
+      return likelihood->probability == other.probability &&
+             BoundSemanticallyEquivalent(likelihood->operand, other.operand);
+    }
+    const auto& collate = std::get<BoundCollateExpression>(left.payload);
+    const auto& other = std::get<BoundCollateExpression>(right.payload);
+    return collate.collation == other.collation &&
+           BoundSemanticallyEquivalent(collate.operand, other.operand);
+  }
+
+  [[nodiscard]] bool BoundArgumentsEquivalent(std::span<const BoundExpressionId> left,
+                                              std::span<const BoundExpressionId> right) const {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < left.size(); ++index) {
+      if (!BoundSemanticallyEquivalent(left[index], right[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] BindExpected<void> BindOrderBy(const SelectStatement& select) {
+    impl_->order_by.reserve(select.order_by.size());
+    for (std::size_t term_index = 0; term_index < select.order_by.size(); ++term_index) {
+      const OrderingTerm& term = select.order_by[term_index];
+      BindExpected<std::optional<std::size_t>> alias = OrderByAlias(term.expression);
+      if (!alias.has_value()) {
+        return std::unexpected(std::move(alias.error()));
+      }
+      std::optional<std::size_t> result_column = *alias;
+      if (!result_column.has_value()) {
+        BindExpected<std::optional<std::int64_t>> ordinal = OrderByOrdinal(term.expression);
+        if (!ordinal.has_value()) {
+          return std::unexpected(std::move(ordinal.error()));
+        }
+        if (ordinal->has_value()) {
+          if (**ordinal < 1 || std::cmp_greater(**ordinal, impl_->result_columns.size())) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kOrderByTermOutOfRange, term.span,
+                            std::to_string(term_index + 1U) +
+                                " ORDER BY term out of range - should be between 1 and " +
+                                std::to_string(impl_->result_columns.size())));
+          }
+          result_column = static_cast<std::size_t>(**ordinal - 1);
+        }
+      }
+
+      BindExpected<BoundExpressionId> expression =
+          result_column.has_value()
+              ? BindOrderByResultReference(term.expression, *result_column)
+              : BindExpression(term.expression,
+                               BindScope{.source_columns = true, .result_aliases = true});
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      if (!result_column.has_value()) {
+        for (std::size_t index = impl_->result_columns.size(); index > 0U; --index) {
+          const std::optional<ExpressionId>& syntax = impl_->result_syntax[index - 1U];
+          const BoundExpressionId result_expression = impl_->result_columns[index - 1U].expression;
+          const bool syntax_matches =
+              syntax.has_value() && SyntaxExpressionsEquivalent(term.expression, syntax.value());
+          const bool wildcard_column =
+              !syntax.has_value() && (std::holds_alternative<BoundColumnExpression>(
+                                          impl_->expressions[result_expression.value()].payload) ||
+                                      std::holds_alternative<BoundRowIdExpression>(
+                                          impl_->expressions[result_expression.value()].payload));
+          if ((syntax_matches || wildcard_column) &&
+              BoundSemanticallyEquivalent(*expression, result_expression)) {
+            result_column = index - 1U;
+            break;
+          }
+        }
+      }
+
+      const BoundExpressionProperties& properties =
+          impl_->expressions[expression->value()].properties;
+      BindExpected<BoundCollationId> collation =
+          properties.collation.has_value() ? BindExpected<BoundCollationId>{*properties.collation}
+                                           : InternCollation("BINARY", term.span);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      BindExpected<void> required = RequireCollation(*collation, term.span);
+      if (!required.has_value()) {
+        return std::unexpected(std::move(required.error()));
+      }
+      const SortOrder order =
+          term.order == SortOrder::kDescending ? SortOrder::kDescending : SortOrder::kAscending;
+      const BoundNullPlacement null_placement =
+          term.null_order == NullOrder::kFirst  ? BoundNullPlacement::kFirst
+          : term.null_order == NullOrder::kLast ? BoundNullPlacement::kLast
+          : order == SortOrder::kDescending     ? BoundNullPlacement::kLast
+                                                : BoundNullPlacement::kFirst;
+      impl_->order_by.emplace_back(BoundOrderingTerm{
+          .expression = *expression,
+          .collation = *collation,
+          .order = order,
+          .null_placement = null_placement,
+          .result_column = result_column,
+      });
     }
     return {};
   }
@@ -1979,6 +2409,7 @@ class StatementBinder final {
                                : std::nullopt,
           .affinity = column.affinity,
       });
+      impl_->result_syntax.emplace_back(std::nullopt);
     }
     return {};
   }
@@ -3032,6 +3463,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "wrong_function_arity";
     case BindErrorCode::kNoSuchCollation:
       return "no_such_collation";
+    case BindErrorCode::kOrderByTermOutOfRange:
+      return "order_by_term_out_of_range";
     case BindErrorCode::kInvalidLiteral:
       return "invalid_literal";
     case BindErrorCode::kInvalidVariableNumber:
@@ -3068,6 +3501,8 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kFunctionArgumentLimitExceeded:
     case BindErrorCode::kResultColumnLimitExceeded:
       return ErrorCode::kTooLarge;
+    case BindErrorCode::kOrderByTermOutOfRange:
+      return ErrorCode::kGeneric;
     case BindErrorCode::kIndexedTableUnsupported:
       return ErrorCode::kProtocol;
     case BindErrorCode::kInternalInvariant:
@@ -3168,6 +3603,11 @@ std::span<const BoundResultColumn> BoundSelect::result_columns() const noexcept 
 
 std::optional<BoundExpressionId> BoundSelect::where_expression() const noexcept {
   return impl_ != nullptr ? impl_->where : std::nullopt;
+}
+
+std::span<const BoundOrderingTerm> BoundSelect::order_by() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundOrderingTerm>{impl_->order_by}
+                          : std::span<const BoundOrderingTerm>{};
 }
 
 const BoundLimit* BoundSelect::limit() const noexcept {

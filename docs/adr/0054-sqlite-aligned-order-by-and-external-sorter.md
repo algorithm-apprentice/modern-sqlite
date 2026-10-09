@@ -143,7 +143,7 @@ struct BoundOrderingTerm {
   BoundExpressionId expression;
   BoundCollationId collation;
   SortOrder order = SortOrder::kAscending;
-  IndexNullPlacement null_placement = IndexNullPlacement::kFirst;
+  BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
   std::optional<std::size_t> result_column{};
 };
 
@@ -164,19 +164,23 @@ For each term:
 
 1. A simple identifier matching a result alias resolves to the leftmost
    matching result column before ordinary source lookup.
-2. A positive integer constant from 1 through the result count resolves as a
-   1-based result ordinal.
-3. An integer ordinal outside that range reports the SQLite-compatible
-   out-of-range error.
+2. SQLite's classifier first accepts an unsigned integer token only through
+   `INT32_MAX`, then recursively applies unary plus/minus and transparent
+   parentheses. A resulting value from 1 through the result count resolves as
+   a 1-based result ordinal.
+3. A recognized 32-bit integer ordinal outside that result range reports the
+   SQLite-compatible out-of-range error. Larger integer spellings are ordinary
+   expressions.
 4. Otherwise the term binds as an ordinary expression with source columns
    and result aliases visible under SQLite's ORDER BY rules.
 5. An expression structurally identical to one or more result expressions
    records the rightmost matching result-column index so lowering may reuse
    the materialized value.
 
-Unary plus is not an ordinal marker. `ORDER BY +1` is an ordinary constant
-expression. Parentheses and an outer COLLATE preserve SQLite's transparent
-alias/ordinal replacement rules.
+Parentheses, repeated unary plus/minus, and an outer COLLATE preserve SQLite's
+transparent ordinal replacement rules. A COLLATE nested inside a unary
+operand is an ordinary expression, and `-2147483648` is not an ordinal
+because its unsigned magnitude exceeds the classifier range.
 
 The effective collation is:
 
@@ -195,6 +199,10 @@ Effective defaults are:
 
 Explicit NULLS FIRST/LAST overrides the default. Duplicate ORDER BY terms are
 retained in source order.
+
+`BoundNullPlacement` is binder-owned semantic metadata. Physical planning or
+lowering maps it to record-comparator `IndexNullPlacement`; the binder public
+contract does not depend on the format layer.
 
 ### 4. Map output fields onto sort keys and payload fields
 

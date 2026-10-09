@@ -109,7 +109,8 @@ int main() try {
   constexpr std::array kSql{
       std::string_view{"SELECT Name COLLATE NOCASE, abs(?), coalesce(NULL,Name), "
                        "x'00112233445566778899AABBCCDDEEFF' AS payload "
-                       "FROM Items WHERE Name=? AND id>0 LIMIT ?"},
+                       "FROM Items WHERE Name=? AND id>0 "
+                       "ORDER BY payload DESC NULLS FIRST,+id LIMIT ?"},
       std::string_view{"INSERT INTO Items(Name,id) VALUES(abs(?1),?2)"},
       std::string_view{"UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Name=?2"},
       std::string_view{"DELETE FROM Items WHERE id=?1"},

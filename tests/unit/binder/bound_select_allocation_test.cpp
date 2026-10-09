@@ -147,7 +147,8 @@ int main() try {
   constexpr std::string_view kSql =
       "SELECT *, abs(?1) AS magnitude, coalesce(NULL,Name), "
       "iif(Score>0,Name,'none'), likelihood(Score,0.25) "
-      "FROM Items WHERE Name=?2 OR id=?3 LIMIT ?4";
+      "FROM Items WHERE Name=?2 OR id=?3 "
+      "ORDER BY magnitude DESC NULLS FIRST,Name LIMIT ?4";
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const std::size_t one_name_allocations = BindAllocationCount("SELECT Name FROM Items", catalog);

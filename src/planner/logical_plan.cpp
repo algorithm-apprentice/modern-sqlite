@@ -136,6 +136,10 @@ class LogicalPlanBuilder final {
       return std::unexpected{
           PlanError(LogicalPlanErrorCode::kInvalidInput, "bound select is invalid")};
     }
+    if (!bound_select.order_by().empty()) {
+      return std::unexpected{PlanError(LogicalPlanErrorCode::kUnsupportedFeature,
+                                       "ORDER BY logical planning is not supported")};
+    }
 
     const std::size_t node_count =
         2U + static_cast<std::size_t>(bound_select.where_expression().has_value()) +
@@ -365,6 +369,8 @@ std::string_view LogicalPlanErrorCodeName(LogicalPlanErrorCode code) noexcept {
   switch (code) {
     case LogicalPlanErrorCode::kInvalidInput:
       return "invalid_input";
+    case LogicalPlanErrorCode::kUnsupportedFeature:
+      return "unsupported_feature";
     case LogicalPlanErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
@@ -375,6 +381,8 @@ ErrorCode LogicalPlanError::base_error_code() const noexcept {
   switch (code) {
     case LogicalPlanErrorCode::kInvalidInput:
       return ErrorCode::kMisuse;
+    case LogicalPlanErrorCode::kUnsupportedFeature:
+      return ErrorCode::kGeneric;
     case LogicalPlanErrorCode::kInternalInvariant:
       return ErrorCode::kInternal;
   }
