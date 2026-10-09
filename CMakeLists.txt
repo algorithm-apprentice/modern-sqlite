@@ -330,6 +330,11 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     @ONLY
   )
   configure_file(
+    benchmarks/order_by_performance_build_config.hpp.in
+    "${_modern_sqlite_benchmark_generated_dir}/order_by_performance_build_config.hpp"
+    @ONLY
+  )
+  configure_file(
     benchmarks/write_performance_build_config.hpp.in
     "${_modern_sqlite_benchmark_generated_dir}/write_performance_build_config.hpp"
     @ONLY
@@ -426,6 +431,24 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   )
   modern_sqlite_set_project_warnings(modern_sqlite_index_benchmark PRIVATE)
   modern_sqlite_enable_clang_tidy(modern_sqlite_index_benchmark)
+
+  add_executable(
+    modern_sqlite_order_by_benchmark
+    benchmarks/order_by_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_order_by_benchmark
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_link_libraries(
+    modern_sqlite_order_by_benchmark
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_order_by_benchmark PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_order_by_benchmark)
 
   add_executable(
     modern_sqlite_write_benchmark
@@ -534,6 +557,38 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     )
   endif()
   modern_sqlite_enable_clang_tidy(modern_sqlite_index_diagnostics)
+
+  add_executable(
+    modern_sqlite_order_by_diagnostics
+    benchmarks/order_by_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_order_by_diagnostics
+    PRIVATE
+      "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_compile_definitions(
+    modern_sqlite_order_by_diagnostics
+    PRIVATE
+      MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+      MODERN_SQLITE_ORDER_BY_PERFORMANCE_DIAGNOSTICS=1
+  )
+  target_link_libraries(
+    modern_sqlite_order_by_diagnostics
+    PRIVATE
+      modern_sqlite_diagnostic_engine
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite::instrumentation
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_order_by_diagnostics PRIVATE)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      modern_sqlite_order_by_diagnostics
+      PRIVATE
+        -Wno-mismatched-new-delete
+    )
+  endif()
+  modern_sqlite_enable_clang_tidy(modern_sqlite_order_by_diagnostics)
 
   add_executable(
     modern_sqlite_write_diagnostics
