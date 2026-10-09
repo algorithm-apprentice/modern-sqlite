@@ -86,6 +86,7 @@ int main() try {
   ReadSession session = std::move(*opened);
   ReadStatement constant = Prepare(session, "SELECT 1");
   ReadStatement lookup = Prepare(session, "SELECT id FROM items WHERE rowid=?1");
+  ReadStatement ordered = Prepare(session, "SELECT id FROM items ORDER BY id DESC");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -140,6 +141,34 @@ int main() try {
   }
   ResetCount();
   if (!lookup.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto ordered_first = ordered.Step();
+  if (!ordered_first.has_value() || *ordered_first != ReadStep::kRow ||
+      ordered.row()[0].integer_value().value_or(0) != 3 || !AtMostAllocations(32U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto ordered_second = ordered.Step();
+  if (!ordered_second.has_value() || *ordered_second != ReadStep::kRow ||
+      ordered.row()[0].integer_value().value_or(0) != 2 || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  const auto ordered_third = ordered.Step();
+  if (!ordered_third.has_value() || *ordered_third != ReadStep::kRow ||
+      ordered.row()[0].integer_value().value_or(0) != 1 || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  const auto ordered_done = ordered.Step();
+  if (!ordered_done.has_value() || *ordered_done != ReadStep::kDone || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!ordered.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 

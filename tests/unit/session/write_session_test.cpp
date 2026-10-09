@@ -270,7 +270,18 @@ TEST(WriteSession, AcceptsTemporaryStorageOptionsAndRejectsInvalidConfiguration)
   };
   WriteSession session = TakeValue(WriteSession::Open(
       std::make_unique<test::WritePagerFixedVfs>(false), test::kWritePagerDatabasePath, options));
-  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'beta')");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'alpha')");
+  ExecuteDone(session, "INSERT INTO Items VALUES(3,'gamma')");
+  const auto rows = QueryRows(session, "SELECT id, Name FROM Items ORDER BY Name DESC");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ("gamma", Text(rows[0][1]));
+  EXPECT_EQ(2, rows[1][0].integer_value());
+  EXPECT_EQ("beta", Text(rows[1][1]));
+  EXPECT_EQ(1, rows[2][0].integer_value());
+  EXPECT_EQ("alpha", Text(rows[2][1]));
 
   WriteSessionOptions invalid = options;
   invalid.temporary_storage.sorter_memory_threshold = ByteCount{0};

@@ -261,6 +261,11 @@ struct GeneratedValueInput {
       output << "first_rowid=" << 1U + words[1] % kRows.size()
              << ",second_rowid=" << 1U + words[2] % kRows.size();
       break;
+    case 5:
+      output << "threshold=" << static_cast<std::int64_t>(words[1] % 73U) - 36
+             << ",direction=" << (words[2] % 2U == 0U ? "ascending" : "descending")
+             << ",nulls=" << (words[3] % 2U == 0U ? "first" : "last");
+      break;
     default:
       output << "unreachable";
       break;
@@ -353,11 +358,54 @@ void RunRepeatedExecution(ReadSession& session, const std::array<std::uint64_t, 
   RequireStatus(statement.Finalize());
 }
 
+void RunOrderedScan(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto threshold = static_cast<std::int64_t>(words[1] % 73U) - 36;
+  const bool descending = words[2] % 2U != 0U;
+  const bool nulls_first = words[3] % 2U == 0U;
+  const std::string sql =
+      "SELECT id, value, label, nullable FROM model_rows WHERE value>=?1 ORDER BY nullable " +
+      std::string{descending ? "DESC" : "ASC"} + (nulls_first ? " NULLS FIRST" : " NULLS LAST") +
+      ", value DESC, id";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(threshold)));
+
+  std::vector<const ModelRow*> matches;
+  for (const ModelRow& row : kRows) {
+    if (row.value >= threshold) {
+      matches.push_back(&row);
+    }
+  }
+  std::ranges::sort(matches, [=](const ModelRow* left, const ModelRow* right) {
+    if (left->nullable.has_value() != right->nullable.has_value()) {
+      return left->nullable.has_value() != nulls_first;
+    }
+    if (left->nullable != right->nullable) {
+      return descending ? left->nullable > right->nullable : left->nullable < right->nullable;
+    }
+    if (left->value != right->value) {
+      return left->value > right->value;
+    }
+    return left->id < right->id;
+  });
+
+  for (const ModelRow* expected : matches) {
+    ExpectRowStep(statement);
+    ASSERT_EQ(4U, statement.row().size());
+    ExpectInteger(statement.row()[0], expected->id);
+    ExpectInteger(statement.row()[1], expected->value);
+    ExpectText(statement.row()[2], expected->label);
+    ExpectNullable(statement.row()[3], expected->nullable);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 5> templates{
-      "predicate-scan", "rowid-lookup", "typed-rebinding", "limit-offset", "repeated-execution",
+  constexpr std::array<std::string_view, 6> templates{
+      "predicate-scan", "rowid-lookup",       "typed-rebinding",
+      "limit-offset",   "repeated-execution", "ordered-scan",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
@@ -379,6 +427,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 4:
         RunRepeatedExecution(session, words);
+        break;
+      case 5:
+        RunOrderedScan(session, words);
         break;
       default:
         FAIL() << "unreachable model template";
