@@ -16,6 +16,7 @@
 namespace modern_sqlite {
 
 class Pager;
+class TemporaryStorageFactory;
 
 enum class TemporaryStoreMode : std::uint8_t {
   kFile,
@@ -60,6 +61,9 @@ class RecordSorter final {
   [[nodiscard]] RecordSorterState state() const noexcept;
   [[nodiscard]] std::size_t record_count() const noexcept;
   [[nodiscard]] ByteCount memory_usage() const noexcept;
+  [[nodiscard]] bool has_spilled() const noexcept;
+  [[nodiscard]] std::size_t spilled_run_count() const noexcept;
+  [[nodiscard]] std::size_t merge_level_count() const noexcept;
 
   [[nodiscard]] Status Insert(ByteBuffer record);
   [[nodiscard]] Status Rewind();
@@ -78,7 +82,8 @@ class RecordSorter final {
 
   explicit RecordSorter(std::unique_ptr<Impl> impl) noexcept;
   [[nodiscard]] static Result<RecordSorter> Create(const RecordSorterDescriptor& descriptor,
-                                                   ByteCount memory_threshold);
+                                                   ByteCount memory_threshold,
+                                                   const TemporaryStorageFactory& factory);
 
   std::unique_ptr<Impl> impl_;
 };

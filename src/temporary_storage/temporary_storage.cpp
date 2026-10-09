@@ -11,6 +11,7 @@
 #include <string_view>
 #include <utility>
 
+#include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 
 namespace modern_sqlite {
@@ -19,6 +20,7 @@ namespace {
 constexpr std::size_t kMinimumPmaPageCount = 250;
 constexpr std::size_t kMaximumPmaSize = 1U << 29U;
 constexpr std::size_t kMergeRunCount = std::numeric_limits<std::size_t>::digits + 1U;
+constexpr std::size_t kMergeFanIn = 16;
 
 [[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
   try {
@@ -36,6 +38,10 @@ constexpr std::size_t kMergeRunCount = std::numeric_limits<std::size_t>::digits 
 
 [[nodiscard]] Error TooLarge(std::string_view message) noexcept {
   return MakeError(ErrorCode::kTooLarge, message);
+}
+
+[[nodiscard]] Error Corruption(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kCorruption, message);
 }
 
 [[nodiscard]] bool IsValid(TemporaryStoreMode mode) noexcept {
@@ -99,12 +105,202 @@ struct RecordSorter::Impl {
 
   using Run = std::unique_ptr<Entry>;
 
-  Impl(RecordSorterDescriptor owned_descriptor, ByteCount threshold) noexcept
-      : descriptor(std::move(owned_descriptor)), memory_threshold(threshold) {}
+  struct PmaRun {
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    std::size_t ordinal = 0;
+  };
 
-  ~Impl() { Clear(); }
+  struct PmaReader {
+    PmaReader(File& input, PmaRun input_run) noexcept
+        : file(&input), run(input_run), offset(input_run.begin) {}
 
-  void Clear() noexcept {
+    [[nodiscard]] Result<void> Advance(RecordCodecOptions options) {
+      view.reset();
+      record = ByteBuffer{};
+      if (offset == run.end) {
+        exhausted = true;
+        return {};
+      }
+      if (offset > run.end) {
+        return std::unexpected(Corruption("PMA reader advanced beyond its run"));
+      }
+
+      try {
+        std::array<std::byte, 9> header{};
+        const std::size_t header_size =
+            static_cast<std::size_t>(std::min<std::uint64_t>(header.size(), run.end - offset));
+        auto header_read =
+            file->ReadAt(MutableByteView{header}.first(header_size), FileOffset{offset});
+        if (!header_read.has_value()) {
+          return std::unexpected(std::move(header_read.error()));
+        }
+        if (!header_read->complete()) {
+          return std::unexpected(Corruption("PMA record-size varint is truncated"));
+        }
+        auto decoded = DecodeSqliteVarint(ByteView{header}.first(header_size));
+        if (!decoded.has_value()) {
+          return std::unexpected(Corruption("PMA record-size varint is malformed"));
+        }
+
+        const std::uint64_t size = decoded->value;
+        const std::uint64_t header_bytes = decoded->bytes_consumed.value();
+        if (header_bytes > run.end - offset) {
+          return std::unexpected(Corruption("PMA record-size varint crosses the run boundary"));
+        }
+        const std::uint64_t payload_offset = offset + header_bytes;
+        if (size > run.end - payload_offset || size > std::numeric_limits<std::size_t>::max()) {
+          return std::unexpected(Corruption("PMA record payload crosses the run boundary"));
+        }
+
+        ByteBuffer next_record{ByteCount{static_cast<std::size_t>(size)}};
+        auto payload_read = file->ReadAt(next_record.mutable_view(), FileOffset{payload_offset});
+        if (!payload_read.has_value()) {
+          return std::unexpected(std::move(payload_read.error()));
+        }
+        if (!payload_read->complete()) {
+          return std::unexpected(Corruption("PMA record payload is truncated"));
+        }
+        offset = payload_offset + size;
+        record = std::move(next_record);
+        auto parsed = RecordView::Parse(record.view(), options);
+        if (!parsed.has_value()) {
+          return std::unexpected(std::move(parsed.error()));
+        }
+        view = *parsed;
+        exhausted = false;
+        return {};
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+    }
+
+    File* file;
+    PmaRun run;
+    std::uint64_t offset;
+    ByteBuffer record;
+    std::optional<RecordView> view;
+    bool exhausted = false;
+  };
+
+  struct MergeCursor {
+    explicit MergeCursor(const RecordSorterDescriptor& sorter_descriptor) noexcept
+        : descriptor(&sorter_descriptor) {}
+
+    [[nodiscard]] static Result<std::unique_ptr<MergeCursor>> Create(
+        File& file, std::span<const PmaRun> runs, const RecordSorterDescriptor& descriptor) {
+      try {
+        auto cursor = std::make_unique<MergeCursor>(descriptor);
+        cursor->readers.reserve(runs.size());
+        cursor->heap.reserve(runs.size());
+        for (const PmaRun& run : runs) {
+          cursor->readers.emplace_back(file, run);
+          auto advanced = cursor->readers.back().Advance(descriptor.record_options);
+          if (!advanced.has_value()) {
+            return std::unexpected(std::move(advanced.error()));
+          }
+          if (!cursor->readers.back().exhausted) {
+            cursor->heap.push_back(cursor->readers.size() - 1U);
+          }
+        }
+        if (!cursor->heap.empty()) {
+          for (std::size_t index = cursor->heap.size() / 2U; index > 0U; --index) {
+            cursor->SiftDown(index - 1U);
+          }
+        }
+        return cursor;
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return heap.empty(); }
+
+    [[nodiscard]] const RecordView& current() const noexcept {
+      if (heap.empty()) {
+        std::terminate();
+      }
+      const std::optional<RecordView>& record_view = readers[heap.front()].view;
+      if (!record_view.has_value()) {
+        std::terminate();
+      }
+      return *record_view;  // NOLINT(bugprone-unchecked-optional-access)
+    }
+
+    [[nodiscard]] Result<bool> Next() {
+      if (heap.empty()) {
+        return std::unexpected(Misuse("PMA merge cursor is exhausted"));
+      }
+      PmaReader& reader = readers[heap.front()];
+      auto advanced = reader.Advance(descriptor->record_options);
+      if (!advanced.has_value()) {
+        return std::unexpected(std::move(advanced.error()));
+      }
+      if (reader.exhausted) {
+        heap.front() = heap.back();
+        heap.pop_back();
+      }
+      if (!heap.empty()) {
+        SiftDown(0);
+      }
+      return !heap.empty();
+    }
+
+   private:
+    [[nodiscard]] bool ComesBefore(std::size_t left_index, std::size_t right_index) const noexcept {
+      const PmaReader& left = readers[left_index];
+      const PmaReader& right = readers[right_index];
+      if (!left.view.has_value() || !right.view.has_value()) {
+        std::terminate();
+      }
+      const auto comparison =
+          CompareRecordPrefixes(*left.view, *right.view, descriptor->key_columns);
+      if (!comparison.has_value()) {
+        std::terminate();
+      }
+      if (*comparison == std::weak_ordering::equivalent) {
+        return left.run.ordinal < right.run.ordinal;
+      }
+      return *comparison == std::weak_ordering::less;
+    }
+
+    void SiftDown(std::size_t parent) noexcept {
+      while (true) {
+        const std::size_t left = (parent * 2U) + 1U;
+        if (left >= heap.size()) {
+          return;
+        }
+        const std::size_t right = left + 1U;
+        std::size_t selected = left;
+        if (right < heap.size() && ComesBefore(heap[right], heap[left])) {
+          selected = right;
+        }
+        if (!ComesBefore(heap[selected], heap[parent])) {
+          return;
+        }
+        std::swap(heap[parent], heap[selected]);
+        parent = selected;
+      }
+    }
+
+    const RecordSorterDescriptor* descriptor;
+    std::vector<PmaReader> readers;
+    std::vector<std::size_t> heap;
+  };
+
+  Impl(RecordSorterDescriptor owned_descriptor, ByteCount threshold,
+       const TemporaryStorageFactory& owning_factory) noexcept
+      : descriptor(std::move(owned_descriptor)),
+        memory_threshold(threshold),
+        factory(&owning_factory) {}
+
+  ~Impl() { ClearAll(); }
+
+  void ClearList() noexcept {
     while (head != nullptr) {
       Run next = std::move(head->next);
       head.reset();
@@ -112,8 +308,18 @@ struct RecordSorter::Impl {
     }
     tail = nullptr;
     current = nullptr;
-    count = 0;
     memory_bytes = 0;
+  }
+
+  void ClearAll() noexcept {
+    merge.reset();
+    ClearList();
+    spill_file.reset();
+    std::vector<PmaRun>{}.swap(runs);
+    count = 0;
+    spill_size = 0;
+    next_run_ordinal = 0;
+    merge_levels = 0;
   }
 
   [[nodiscard]] Run MergeRuns(Run left, Run right) const noexcept {
@@ -142,25 +348,25 @@ struct RecordSorter::Impl {
   }
 
   void Sort() noexcept {
-    std::array<Run, kMergeRunCount> runs;
+    std::array<Run, kMergeRunCount> sort_runs;
     while (head != nullptr) {
       Run run = std::move(head);
       head = std::move(run->next);
       run->next.reset();
 
       std::size_t level = 0;
-      while (runs[level] != nullptr) {
-        run = MergeRuns(std::move(runs[level]), std::move(run));
+      while (sort_runs[level] != nullptr) {
+        run = MergeRuns(std::move(sort_runs[level]), std::move(run));
         ++level;
-        if (level == runs.size()) {
+        if (level == sort_runs.size()) {
           std::terminate();
         }
       }
-      runs[level] = std::move(run);
+      sort_runs[level] = std::move(run);
     }
 
     Run sorted;
-    for (Run& run : runs) {
+    for (Run& run : sort_runs) {
       if (run == nullptr) {
         continue;
       }
@@ -170,14 +376,156 @@ struct RecordSorter::Impl {
     tail = nullptr;
   }
 
+  [[nodiscard]] static Result<std::uint64_t> WriteRecord(File& file, std::uint64_t offset,
+                                                         ByteView record) {
+    if (record.size() > std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("PMA record size is not representable"));
+    }
+    std::array<std::byte, 9> header{};
+    auto encoded = EncodeSqliteVarint(static_cast<std::uint64_t>(record.size()), header);
+    if (!encoded.has_value()) {
+      std::terminate();
+    }
+    const std::uint64_t header_size = encoded->value();
+    const auto record_size = static_cast<std::uint64_t>(record.size());
+    if (header_size > std::numeric_limits<std::uint64_t>::max() - offset ||
+        record_size > std::numeric_limits<std::uint64_t>::max() - offset - header_size) {
+      return std::unexpected(TooLarge("PMA file offset is not representable"));
+    }
+    auto header_write = file.WriteAt(ByteView{header}.first(encoded->value()), FileOffset{offset});
+    if (!header_write.has_value()) {
+      return std::unexpected(std::move(header_write.error()));
+    }
+    auto record_write = file.WriteAt(record, FileOffset{offset + header_size});
+    if (!record_write.has_value()) {
+      return std::unexpected(std::move(record_write.error()));
+    }
+    return offset + header_size + record_size;
+  }
+
+  [[nodiscard]] Result<void> EnsureSpillFile() {
+    if (spill_file != nullptr) {
+      return {};
+    }
+    auto opened = factory->CreateTemporaryFile();
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    spill_file = std::move(*opened);
+    spill_size = 0;
+    return {};
+  }
+
+  [[nodiscard]] Result<void> SpillCurrentRun() {
+    if (head == nullptr) {
+      return std::unexpected(Misuse("cannot spill an empty sorter run"));
+    }
+    Sort();
+    try {
+      runs.reserve(runs.size() + 1U);
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+    auto file_ready = EnsureSpillFile();
+    if (!file_ready.has_value()) {
+      return file_ready;
+    }
+
+    const std::uint64_t begin = spill_size;
+    std::uint64_t offset = begin;
+    for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
+      auto written = WriteRecord(*spill_file, offset, entry->record.view());
+      if (!written.has_value()) {
+        return std::unexpected(std::move(written.error()));
+      }
+      offset = *written;
+    }
+    runs.push_back(PmaRun{
+        .begin = begin,
+        .end = offset,
+        .ordinal = next_run_ordinal++,
+    });
+    spill_size = offset;
+    ClearList();
+    return {};
+  }
+
+  [[nodiscard]] Result<PmaRun> MergeGroupToFile(std::span<const PmaRun> group, File& output,
+                                                std::uint64_t begin) const {
+    auto cursor = MergeCursor::Create(*spill_file, group, descriptor);
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    std::uint64_t offset = begin;
+    while (!(*cursor)->empty()) {
+      auto written = WriteRecord(output, offset, (*cursor)->current().encoded());
+      if (!written.has_value()) {
+        return std::unexpected(std::move(written.error()));
+      }
+      offset = *written;
+      auto advanced = (*cursor)->Next();
+      if (!advanced.has_value()) {
+        return std::unexpected(std::move(advanced.error()));
+      }
+    }
+    return PmaRun{
+        .begin = begin,
+        .end = offset,
+        .ordinal = group.front().ordinal,
+    };
+  }
+
+  [[nodiscard]] Result<void> BuildMergeLevels() {
+    while (runs.size() > kMergeFanIn) {
+      auto next_file = factory->CreateTemporaryFile();
+      if (!next_file.has_value()) {
+        return std::unexpected(std::move(next_file.error()));
+      }
+      std::vector<PmaRun> next_runs;
+      try {
+        next_runs.reserve((runs.size() + kMergeFanIn - 1U) / kMergeFanIn);
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+
+      std::uint64_t next_size = 0;
+      for (std::size_t begin = 0; begin < runs.size(); begin += kMergeFanIn) {
+        const std::size_t group_count = std::min(kMergeFanIn, runs.size() - begin);
+        auto merged = MergeGroupToFile(std::span<const PmaRun>{runs}.subspan(begin, group_count),
+                                       **next_file, next_size);
+        if (!merged.has_value()) {
+          return std::unexpected(std::move(merged.error()));
+        }
+        next_size = merged->end;
+        next_runs.push_back(*merged);
+      }
+      spill_file = std::move(*next_file);
+      spill_size = next_size;
+      runs = std::move(next_runs);
+      ++merge_levels;
+    }
+    return {};
+  }
+
   RecordSorterDescriptor descriptor;
   ByteCount memory_threshold;
+  const TemporaryStorageFactory* factory;
   Run head;
   // Non-owning positions into the list rooted at head.
   Entry* tail = nullptr;
   Entry* current = nullptr;
   std::size_t count = 0;
   std::size_t memory_bytes = 0;
+  std::unique_ptr<File> spill_file;
+  std::vector<PmaRun> runs;
+  std::uint64_t spill_size = 0;
+  std::size_t next_run_ordinal = 0;
+  std::size_t merge_levels = 0;
+  std::unique_ptr<MergeCursor> merge;
   RecordSorterState state = RecordSorterState::kWriting;
 };
 
@@ -204,13 +552,14 @@ RecordSorter& RecordSorter::operator=(RecordSorter&&) noexcept = default;
 RecordSorter::~RecordSorter() = default;
 
 Result<RecordSorter> RecordSorter::Create(const RecordSorterDescriptor& descriptor,
-                                          ByteCount memory_threshold) {
+                                          ByteCount memory_threshold,
+                                          const TemporaryStorageFactory& factory) {
   auto validated = ValidateRecordSorterDescriptor(descriptor);
   if (!validated.has_value()) {
     return std::unexpected(std::move(validated.error()));
   }
   try {
-    auto impl = std::make_unique<Impl>(descriptor, memory_threshold);
+    auto impl = std::make_unique<Impl>(descriptor, memory_threshold, factory);
     return RecordSorter{std::move(impl)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
@@ -233,6 +582,18 @@ ByteCount RecordSorter::memory_usage() const noexcept {
   return ByteCount{impl_ == nullptr ? 0U : impl_->memory_bytes};
 }
 
+bool RecordSorter::has_spilled() const noexcept {
+  return impl_ != nullptr && impl_->spill_file != nullptr;
+}
+
+std::size_t RecordSorter::spilled_run_count() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->runs.size();
+}
+
+std::size_t RecordSorter::merge_level_count() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->merge_levels;
+}
+
 Status RecordSorter::Insert(ByteBuffer record) {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("records can only be inserted while the sorter is writing"));
@@ -250,9 +611,24 @@ Status RecordSorter::Insert(ByteBuffer record) {
     return std::unexpected(TooLarge("sorter record memory accounting overflowed"));
   }
   const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
-  if (entry_bytes > impl_->memory_threshold.value() ||
-      impl_->memory_bytes > impl_->memory_threshold.value() - entry_bytes) {
-    return std::unexpected(TooLarge("sorter memory threshold exceeded before spill support"));
+  const bool exceeds_threshold =
+      entry_bytes > impl_->memory_threshold.value() ||
+      impl_->memory_bytes > impl_->memory_threshold.value() - entry_bytes;
+  if (exceeds_threshold && impl_->head != nullptr) {
+    if (!impl_->factory->file_spill_enabled()) {
+      return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
+    }
+    auto spilled = impl_->SpillCurrentRun();
+    if (!spilled.has_value()) {
+      Error error = std::move(spilled.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+  } else if (exceeds_threshold && !impl_->factory->file_spill_enabled()) {
+    return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
+  }
+  if (impl_->count == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(TooLarge("sorter record count is exhausted"));
   }
 
   try {
@@ -268,9 +644,13 @@ Status RecordSorter::Insert(ByteBuffer record) {
     impl_->memory_bytes += entry_bytes;
     return {};
   } catch (const std::bad_alloc&) {
-    return std::unexpected(Error::OutOfMemory());
+    Error error = Error::OutOfMemory();
+    Close();
+    return std::unexpected(std::move(error));
   } catch (const std::length_error&) {
-    return std::unexpected(Error::OutOfMemory());
+    Error error = Error::OutOfMemory();
+    Close();
+    return std::unexpected(std::move(error));
   }
 }
 
@@ -278,24 +658,70 @@ Status RecordSorter::Rewind() {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("sorter rewind requires the writing state"));
   }
-  impl_->Sort();
-  impl_->current = impl_->head.get();
+  if (impl_->runs.empty()) {
+    impl_->Sort();
+    impl_->current = impl_->head.get();
+    impl_->state =
+        impl_->current == nullptr ? RecordSorterState::kExhausted : RecordSorterState::kPositioned;
+    return {};
+  }
+
+  if (impl_->head != nullptr) {
+    auto spilled = impl_->SpillCurrentRun();
+    if (!spilled.has_value()) {
+      Error error = std::move(spilled.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+  }
+  auto levels = impl_->BuildMergeLevels();
+  if (!levels.has_value()) {
+    Error error = std::move(levels.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  auto merge = Impl::MergeCursor::Create(*impl_->spill_file, impl_->runs, impl_->descriptor);
+  if (!merge.has_value()) {
+    Error error = std::move(merge.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  impl_->merge = std::move(*merge);
   impl_->state =
-      impl_->current == nullptr ? RecordSorterState::kExhausted : RecordSorterState::kPositioned;
+      impl_->merge->empty() ? RecordSorterState::kExhausted : RecordSorterState::kPositioned;
   return {};
 }
 
 Result<RecordView> RecordSorter::current_record() const {
-  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned ||
-      impl_->current == nullptr) {
+  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned) {
+    return std::unexpected(Misuse("sorter has no current record"));
+  }
+  if (impl_->merge != nullptr) {
+    return impl_->merge->current();
+  }
+  if (impl_->current == nullptr) {
     return std::unexpected(Misuse("sorter has no current record"));
   }
   return impl_->current->view;
 }
 
 Result<bool> RecordSorter::Next() {
-  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned ||
-      impl_->current == nullptr) {
+  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned) {
+    return std::unexpected(Misuse("sorter next requires a current record"));
+  }
+  if (impl_->merge != nullptr) {
+    auto advanced = impl_->merge->Next();
+    if (!advanced.has_value()) {
+      Error error = std::move(advanced.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (!*advanced) {
+      impl_->state = RecordSorterState::kExhausted;
+    }
+    return *advanced;
+  }
+  if (impl_->current == nullptr) {
     return std::unexpected(Misuse("sorter next requires a current record"));
   }
   impl_->current = impl_->current->next.get();
@@ -307,18 +733,21 @@ Result<bool> RecordSorter::Next() {
 }
 
 Result<std::weak_ordering> RecordSorter::CompareCurrent(const RecordView& record) const {
-  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned ||
-      impl_->current == nullptr) {
+  if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned) {
     return std::unexpected(Misuse("sorter comparison requires a current record"));
   }
-  return CompareRecordPrefixes(impl_->current->view, record, impl_->descriptor.key_columns);
+  auto current = current_record();
+  if (!current.has_value()) {
+    return std::unexpected(std::move(current.error()));
+  }
+  return CompareRecordPrefixes(*current, record, impl_->descriptor.key_columns);
 }
 
 Status RecordSorter::Reset() {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed sorter"));
   }
-  impl_->Clear();
+  impl_->ClearAll();
   impl_->state = RecordSorterState::kWriting;
   return {};
 }
@@ -368,7 +797,7 @@ ByteCount TemporaryStorageFactory::sorter_memory_threshold() const noexcept {
 
 Result<RecordSorter> TemporaryStorageFactory::CreateRecordSorter(
     const RecordSorterDescriptor& descriptor) const {
-  return RecordSorter::Create(descriptor, sorter_memory_threshold());
+  return RecordSorter::Create(descriptor, sorter_memory_threshold(), *this);
 }
 
 Result<std::unique_ptr<File>> TemporaryStorageFactory::CreateTemporaryFile() const {
