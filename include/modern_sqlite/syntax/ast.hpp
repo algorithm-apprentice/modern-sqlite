@@ -225,7 +225,7 @@ struct CompoundTerm {
 struct SelectStatement {
   SourceSpan span;
   QueryCore first;
-  std::vector<CompoundTerm> compounds;
+  std::vector<CompoundTerm> compounds{};
   std::vector<OrderingTerm> order_by{};
   std::optional<LimitClause> limit{};
 };

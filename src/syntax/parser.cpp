@@ -47,8 +47,8 @@ using StatementResult = std::expected<Statement, ParseError>;
 
 struct ParsedQueryCore {
   QueryCore core;
-  std::vector<OrderingTerm> order_by;
-  std::optional<LimitClause> limit;
+  std::vector<OrderingTerm> order_by{};
+  std::optional<LimitClause> limit{};
 };
 
 struct ParsedCompoundOperator {
