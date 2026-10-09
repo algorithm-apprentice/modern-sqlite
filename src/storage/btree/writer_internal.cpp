@@ -4111,15 +4111,12 @@ Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>&
   };
 }
 
-Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
-                                                  std::span<const IndexColumnOrder> columns,
-                                                  RecordCodecOptions options,
-                                                  std::vector<std::byte>& scratch) {
+template <typename Compare>
+Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options,
+                                                      std::vector<std::byte>& scratch,
+                                                      Compare&& compare) {
   if (table_) {
     return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
-  }
-  if (key.empty() || key.size() > columns.size()) {
-    return std::unexpected(Misuse("index seek key does not match its comparison metadata"));
   }
   auto reset = ResetToRoot();
   if (!reset.has_value()) {
@@ -4153,12 +4150,12 @@ Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
         EnterFault();
         return std::unexpected(std::move(record.error()));
       }
-      auto comparison = CompareIndexRecord(*record, key, columns);
+      auto comparison = compare(*record);
       if (!comparison.has_value()) {
         EnterFault();
         return std::unexpected(std::move(comparison.error()));
       }
-      if (comparison->ordering == std::weak_ordering::equivalent) {
+      if (*comparison == std::weak_ordering::equivalent) {
         current_index_ = middle;
         frames_[frame_count_ - 1U].child_index = middle;
         state_ = WritableCursorState::kValid;
@@ -4169,7 +4166,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
             .tree_depth = frame_count_,
         };
       }
-      if (comparison->ordering == std::weak_ordering::less) {
+      if (*comparison == std::weak_ordering::less) {
         lower = middle + 1U;
       } else {
         upper = middle;
@@ -4206,6 +4203,35 @@ Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
         .tree_depth = frame_count_,
     };
   }
+}
+
+Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
+                                                  std::span<const IndexColumnOrder> columns,
+                                                  RecordCodecOptions options,
+                                                  std::vector<std::byte>& scratch) {
+  if (key.empty() || key.size() > columns.size()) {
+    return std::unexpected(Misuse("index seek key does not match its comparison metadata"));
+  }
+  return SeekIndexWith(options, scratch, [&](const RecordView& record) {
+    auto comparison = CompareIndexRecord(record, key, columns);
+    if (!comparison.has_value()) {
+      return Result<std::weak_ordering>{std::unexpected(std::move(comparison.error()))};
+    }
+    return Result<std::weak_ordering>{comparison->ordering};
+  });
+}
+
+Result<IndexSeekResult> WritableCursor::SeekIndexRecord(const RecordView& key,
+                                                        std::span<const IndexColumnOrder> columns,
+                                                        RecordCodecOptions options,
+                                                        std::vector<std::byte>& scratch) {
+  if (columns.empty() || key.field_count() < columns.size()) {
+    return std::unexpected(
+        Misuse("encoded index seek record does not contain its complete comparison key"));
+  }
+  return SeekIndexWith(options, scratch, [&](const RecordView& record) {
+    return CompareRecordPrefixes(record, key, columns);
+  });
 }
 
 Result<BtreePageView> WritableCursor::CurrentPage() const {
@@ -4537,7 +4563,36 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
-  if (seek->exact && mode == BtreeInsertMode::kInsertOnly) {
+  return InsertIndexAt(record, *seek, mode, workspace);
+}
+
+Status WritableCursor::InsertIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
+                                         RecordCodecOptions options, BtreeInsertMode mode,
+                                         std::vector<std::byte>& seek_scratch,
+                                         BtreeWriteWorkspace& workspace) {
+  if (table_) {
+    return std::unexpected(Misuse("encoded index insertion requires an index B-tree cursor"));
+  }
+  if (columns.empty()) {
+    return std::unexpected(Misuse("encoded index insertion requires comparison metadata"));
+  }
+  auto record_view = RecordView::Parse(record, options);
+  if (!record_view.has_value()) {
+    return std::unexpected(std::move(record_view.error()));
+  }
+  if (record_view->field_count() < columns.size()) {
+    return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
+  }
+  auto seek = SeekIndexRecord(*record_view, columns, options, seek_scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  return InsertIndexAt(record, *seek, mode, workspace);
+}
+
+Status WritableCursor::InsertIndexAt(ByteView record, const IndexSeekResult& seek,
+                                     BtreeInsertMode mode, BtreeWriteWorkspace& workspace) {
+  if (seek.exact && mode == BtreeInsertMode::kInsertOnly) {
     return std::unexpected(Constraint("index key already exists"));
   }
 
@@ -4560,18 +4615,18 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   };
 
   std::optional<PageNumber> left_child;
-  if (seek->exact) {
+  if (seek.exact) {
     auto view = CurrentPage();
     if (!view.has_value()) {
       return fail(std::move(view.error()));
     }
-    auto old_cell = view->cell(seek->insertion_index);
+    auto old_cell = view->cell(seek.insertion_index);
     if (!old_cell.has_value()) {
       return fail(std::move(old_cell.error()));
     }
     left_child = old_cell->left_child();
     if (old_cell->payload_size().value() == record.size()) {
-      auto overwritten = page.OverwritePayload(seek->insertion_index, record, workspace);
+      auto overwritten = page.OverwritePayload(seek.insertion_index, record, workspace);
       if (!overwritten.has_value()) {
         return fail(std::move(overwritten.error()));
       }
@@ -4587,7 +4642,7 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   if (!formatted.has_value()) {
     return fail(std::move(formatted.error()));
   }
-  return InsertFormattedCell(std::move(page), seek->insertion_index, seek->exact, formatted->bytes,
+  return InsertFormattedCell(std::move(page), seek.insertion_index, seek.exact, formatted->bytes,
                              left_child, workspace);
 }
 
@@ -4760,9 +4815,39 @@ Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
   if (matched_record->field_count() != key.size()) {
     return std::unexpected(Misuse("index deletion key does not identify a complete record"));
   }
+  return DeleteIndexAt(*seek, workspace);
+}
 
+Status WritableCursor::DeleteIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
+                                         RecordCodecOptions options,
+                                         std::vector<std::byte>& seek_scratch,
+                                         BtreeWriteWorkspace& workspace) {
+  if (table_) {
+    return std::unexpected(Misuse("encoded index deletion requires an index B-tree cursor"));
+  }
+  if (columns.empty()) {
+    return std::unexpected(Misuse("encoded index deletion requires comparison metadata"));
+  }
+  auto record_view = RecordView::Parse(record, options);
+  if (!record_view.has_value()) {
+    return std::unexpected(std::move(record_view.error()));
+  }
+  if (record_view->field_count() < columns.size()) {
+    return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
+  }
+  auto seek = SeekIndexRecord(*record_view, columns, options, seek_scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (!seek->exact) {
+    return std::unexpected(NotFound("encoded index key does not exist"));
+  }
+  return DeleteIndexAt(*seek, workspace);
+}
+
+Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWorkspace& workspace) {
   const std::size_t original_depth = frame_count_;
-  const std::size_t original_index = seek->insertion_index;
+  const std::size_t original_index = seek.insertion_index;
   const std::size_t original_slot = current_owner_slot();
   auto promoted = PromoteCurrent();
   if (!promoted.has_value()) {

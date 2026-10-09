@@ -896,6 +896,26 @@ Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
                              core_->workspace());
 }
 
+Status IndexBtreeWriter::InsertEncoded(ByteView record) {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return valid;
+  }
+  btree_internal::MutationPageOwner owner{core_->pager()};
+  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  std::vector<std::byte> scratch;
+  return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
+                                   btree_internal::BtreeInsertMode::kInsertOnly, scratch,
+                                   core_->workspace());
+}
+
 Result<bool> IndexBtreeWriter::Delete(std::span<const SqlValue> values) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
@@ -916,6 +936,32 @@ Result<bool> IndexBtreeWriter::Delete(std::span<const SqlValue> values) {
   std::vector<std::byte> scratch;
   auto deleted =
       cursor->DeleteIndex(values, columns_, core_->record_options(), scratch, core_->workspace());
+  if (!deleted.has_value() && deleted.error().code() == ErrorCode::kNotFound) {
+    return false;
+  }
+  if (!deleted.has_value()) {
+    return std::unexpected(std::move(deleted.error()));
+  }
+  return true;
+}
+
+Result<bool> IndexBtreeWriter::DeleteEncoded(ByteView record) {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  btree_internal::MutationPageOwner owner{core_->pager()};
+  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  std::vector<std::byte> scratch;
+  auto deleted = cursor->DeleteIndexRecord(record, columns_, core_->record_options(), scratch,
+                                           core_->workspace());
   if (!deleted.has_value() && deleted.error().code() == ErrorCode::kNotFound) {
     return false;
   }

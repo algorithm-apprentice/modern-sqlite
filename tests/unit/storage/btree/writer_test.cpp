@@ -7,9 +7,12 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -309,6 +312,170 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   ASSERT_TRUE(vfs.pathless_file_present());
   pager.reset();
   EXPECT_FALSE(vfs.pathless_file_present());
+}
+
+TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
+  test::WritePagerFixedVfs vfs{false};
+  auto opened = Pager::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 4,
+           });
+  ASSERT_TRUE(opened.has_value());
+  std::unique_ptr<Pager> pager = std::move(*opened);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kAscending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kFirst},
+  };
+  struct RecordSpec {
+    std::optional<std::string_view> text;
+    std::int64_t number;
+    std::size_t payload_size;
+    std::byte fill;
+  };
+  const auto make_record = [](RecordSpec spec) {
+    ByteBuffer payload{ByteCount{spec.payload_size}};
+    std::ranges::fill(payload.mutable_view(), spec.fill);
+    std::array<SqlValue, 3> values{
+        spec.text.has_value() ? SqlValue::Text(std::string{*spec.text}) : SqlValue{},
+        SqlValue::Integer(spec.number),
+        SqlValue::Blob(std::move(payload)),
+    };
+    return TakeValue(EncodeRecord(values));
+  };
+
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    const ByteBuffer incomplete = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+    const auto incomplete_insert = index.InsertEncoded(incomplete.view());
+    ASSERT_FALSE(incomplete_insert.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, incomplete_insert.error().code());
+    const auto incomplete_delete = index.DeleteEncoded(incomplete.view());
+    ASSERT_FALSE(incomplete_delete.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, incomplete_delete.error().code());
+    const std::array records{
+        make_record(
+            RecordSpec{.text = "beta", .number = 2, .payload_size = 12U, .fill = std::byte{0x22}}),
+        make_record(RecordSpec{
+            .text = "Alpha", .number = 1, .payload_size = 900U, .fill = std::byte{0x11}}),
+        make_record(
+            RecordSpec{.text = "alpha", .number = 3, .payload_size = 24U, .fill = std::byte{0x33}}),
+        make_record(RecordSpec{
+            .text = std::nullopt, .number = 0, .payload_size = 8U, .fill = std::byte{0x44}}),
+    };
+    for (const ByteBuffer& record : records) {
+      RequireStatus(index.InsertEncoded(record.view()));
+    }
+
+    const ByteBuffer duplicate = make_record(
+        RecordSpec{.text = "ALPHA", .number = 3, .payload_size = 1U, .fill = std::byte{0x7f}});
+    const auto rejected = index.InsertEncoded(duplicate.view());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kConstraint, rejected.error().code());
+
+    const ByteBuffer removed = make_record(
+        RecordSpec{.text = "aLpHa", .number = 3, .payload_size = 0U, .fill = std::byte{}});
+    EXPECT_TRUE(TakeValue(index.DeleteEncoded(removed.view())));
+    EXPECT_FALSE(TakeValue(index.DeleteEncoded(removed.view())));
+  }
+
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  std::vector<std::pair<std::optional<std::string>, std::int64_t>> actual;
+  bool present = TakeValue(cursor.First());
+  while (present) {
+    const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
+    const std::vector<SqlValue> fields = TakeValue(DecodeRecord(encoded.view()));
+    ASSERT_EQ(3U, fields.size());
+    std::optional<std::string> text;
+    if (fields[0].type() != SqlValueType::kNull) {
+      const std::optional<Utf8View> value = fields[0].text_value();
+      ASSERT_TRUE(value.has_value());
+      text = std::string{value->bytes()};
+    }
+    const std::optional<std::int64_t> number = fields[1].integer_value();
+    ASSERT_TRUE(number.has_value());
+    actual.emplace_back(std::move(text), *number);
+    present = TakeValue(cursor.Next());
+  }
+  EXPECT_EQ((std::vector<std::pair<std::optional<std::string>, std::int64_t>>{
+                {std::string{"Alpha"}, 1},
+                {std::string{"beta"}, 2},
+                {std::nullopt, 0},
+            }),
+            actual);
+}
+
+TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
+  test::WritePagerFixedVfs vfs{false};
+  auto opened = Pager::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 4,
+           });
+  ASSERT_TRUE(opened.has_value());
+  std::unique_ptr<Pager> pager = std::move(*opened);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  struct RecordSpec {
+    std::int64_t key;
+    std::size_t payload_size;
+  };
+  const auto make_record = [](RecordSpec spec) {
+    ByteBuffer payload{ByteCount{spec.payload_size}};
+    std::ranges::fill(payload.mutable_view(),
+                      static_cast<std::byte>(static_cast<std::uint8_t>(spec.key)));
+    std::array<SqlValue, 2> values{
+        SqlValue::Integer(spec.key),
+        SqlValue::Blob(std::move(payload)),
+    };
+    return TakeValue(EncodeRecord(values));
+  };
+
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    for (std::int64_t key = 127; key >= 0; --key) {
+      const ByteBuffer record =
+          make_record(RecordSpec{.key = key, .payload_size = key % 17 == 0 ? 700U : 80U});
+      RequireStatus(index.InsertEncoded(record.view()));
+    }
+    for (std::int64_t key = 0; key < 128; key += 2) {
+      const ByteBuffer key_only = make_record(RecordSpec{.key = key, .payload_size = 0U});
+      EXPECT_TRUE(TakeValue(index.DeleteEncoded(key_only.view())));
+    }
+    const std::array malformed{std::byte{0xff}};
+    EXPECT_FALSE(index.InsertEncoded(malformed).has_value());
+    EXPECT_FALSE(index.DeleteEncoded(malformed).has_value());
+  }
+
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  bool present = TakeValue(cursor.First());
+  std::int64_t expected = 1;
+  while (present) {
+    const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
+    const std::vector<SqlValue> fields = TakeValue(DecodeRecord(encoded.view()));
+    ASSERT_EQ(2U, fields.size());
+    EXPECT_EQ(expected, fields[0].integer_value());
+    expected += 2;
+    present = TakeValue(cursor.Next());
+  }
+  EXPECT_EQ(129, expected);
 }
 
 TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
