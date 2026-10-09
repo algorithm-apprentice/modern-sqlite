@@ -316,11 +316,8 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
           },
   };
   ReadSession path_session = TakeValue(ReadSession::Open(FixturePath().string(), memory_options));
-  ReadStatement path_statement =
-      PrepareStatement(path_session, "SELECT id, name FROM items ORDER BY name DESC");
-  EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
-  EXPECT_EQ(3, IntegerValue(path_statement.row()[0]));
-  EXPECT_EQ("gamma", TextValue(path_statement.row()[1]));
+  ReadStatement path_statement = PrepareStatement(
+      path_session, "SELECT id, name FROM items ORDER BY name DESC LIMIT 2 OFFSET 1");
   EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
   EXPECT_EQ(2, IntegerValue(path_statement.row()[0]));
   EXPECT_EQ("beta", TextValue(path_statement.row()[1]));
@@ -330,7 +327,7 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(path_statement.Step()));
   RequireStatus(path_statement.Reset());
   EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
-  EXPECT_EQ(3, IntegerValue(path_statement.row()[0]));
+  EXPECT_EQ(2, IntegerValue(path_statement.row()[0]));
   RequireStatus(path_statement.Finalize());
 
   const ReadSessionOptions file_options{
@@ -343,16 +340,13 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   ReadSession vfs_session = TakeValue(
       ReadSession::Open(std::make_unique<PosixVfs>(), FixturePath().string(), file_options));
   ReadStatement vfs_statement =
-      PrepareStatement(vfs_session, "SELECT id, name FROM items ORDER BY name");
+      PrepareStatement(vfs_session, "SELECT id, name FROM items ORDER BY name LIMIT 2");
   EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
   EXPECT_EQ(1, IntegerValue(vfs_statement.row()[0]));
   EXPECT_EQ("alpha", TextValue(vfs_statement.row()[1]));
   EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
   EXPECT_EQ(2, IntegerValue(vfs_statement.row()[0]));
   EXPECT_EQ("beta", TextValue(vfs_statement.row()[1]));
-  EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
-  EXPECT_EQ(3, IntegerValue(vfs_statement.row()[0]));
-  EXPECT_EQ("gamma", TextValue(vfs_statement.row()[1]));
   EXPECT_EQ(ReadStep::kDone, TakeValue(vfs_statement.Step()));
   RequireStatus(vfs_statement.Reset());
   EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
@@ -386,11 +380,54 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   ASSERT_FALSE(syntax.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, syntax.error().code());
 
-  const auto order_by = session.Prepare(Utf8View{"SELECT Name FROM Items ORDER BY Name LIMIT 1"});
-  ASSERT_FALSE(order_by.has_value());
-  EXPECT_EQ(ErrorCode::kGeneric, order_by.error().code());
-  EXPECT_NE(std::string_view::npos, order_by.error().message().find(
-                                        "ORDER BY with runtime LIMIT strategy is not supported"));
+  ReadStatement order_by =
+      PrepareStatement(session, "SELECT Name FROM Items ORDER BY Name LIMIT 1");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(order_by.Step()));
+  EXPECT_EQ("alpha", TextValue(order_by.row().front()));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(order_by.Step()));
+}
+
+TEST(ReadSession, RebindsOrderedLimitBetweenTopNAndExternalSorterStrategies) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT id, name FROM items ORDER BY name LIMIT ?1 OFFSET ?2");
+
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("beta", TextValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(-1)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("beta", TextValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("gamma", TextValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(std::numeric_limits<std::int64_t>::max())));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("beta", TextValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("gamma", TextValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  ReadStatement invalid =
+      PrepareStatement(session, "SELECT name FROM items ORDER BY name LIMIT ?1");
+  RequireStatus(invalid.Bind(1, SqlValue::Text("invalid")));
+  const auto rejected = invalid.Step();
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, rejected.error().code());
+
+  ReadStatement zero =
+      PrepareStatement(session, "SELECT name FROM items ORDER BY name LIMIT 0 OFFSET ?1");
+  RequireStatus(zero.Bind(1, SqlValue::Text("not evaluated")));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(zero.Step()));
 }
 
 TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {

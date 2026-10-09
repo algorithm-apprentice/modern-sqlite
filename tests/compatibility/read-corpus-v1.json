@@ -781,6 +781,66 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "order-by",
+      "id": "order-by-limit-offset",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542069642c6e616d652c73636f72652046524f4d206974656d73204f524445522042592073636f72652044455343204e554c4c532046495253542c6e616d6520434f4c4c415445204e4f434153452044455343204c494d49542032204f46465345542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "order-by",
+      "id": "order-by-limit-rebinding",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "-1"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542069642c6e616d652046524f4d206974656d73204f52444552204259206e616d65204c494d4954203f31204f4646534554203f32"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "order-by",
+      "id": "order-by-comma-limit",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206e616d652046524f4d206974656d73204f52444552204259206e616d65204c494d495420322c32"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "order-by",
+      "id": "order-by-limit-overflow",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206e616d652046524f4d206974656d73204f52444552204259206e616d65204c494d49542039323233333732303336383534373735383037204f46465345542031"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "subquery",
       "id": "unsupported-subquery",
