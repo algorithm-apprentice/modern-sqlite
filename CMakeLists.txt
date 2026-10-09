@@ -124,6 +124,7 @@ set(
     src/syntax/ast.cpp
     src/syntax/lexer.cpp
     src/syntax/parser.cpp
+    src/temporary_storage/temporary_storage.cpp
     src/text/text.cpp
     src/transaction/transaction_coordinator.cpp
     src/vm/vm.cpp
@@ -646,6 +647,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/ast.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/lexer.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/syntax/parser.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/temporary_storage/temporary_storage.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/text/text.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/transaction/transaction_coordinator.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/vm/vm.hpp"
@@ -687,6 +689,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/ast.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/lexer.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/parser.cpp"
+  "${PROJECT_SOURCE_DIR}/src/temporary_storage/temporary_storage.cpp"
   "${PROJECT_SOURCE_DIR}/src/syntax/token_text.hpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
@@ -759,6 +762,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/parser_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/temporary_storage/temporary_storage_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/transaction/transaction_coordinator_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/transaction/transaction_coordinator_test.cpp"

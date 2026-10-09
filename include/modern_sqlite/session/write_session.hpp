@@ -13,6 +13,7 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/text/text.hpp"
 
 namespace modern_sqlite {
@@ -62,10 +63,16 @@ struct WritePrepareOutput {
   ByteOffset next_offset;
 };
 
+struct WriteSessionOptions {
+  TemporaryStorageOptions temporary_storage{};
+};
+
 class WriteSession final {
  public:
-  [[nodiscard]] static Result<WriteSession> Open(std::string_view path);
-  [[nodiscard]] static Result<WriteSession> Open(std::unique_ptr<Vfs> vfs, std::string_view path);
+  [[nodiscard]] static Result<WriteSession> Open(std::string_view path,
+                                                 WriteSessionOptions options = {});
+  [[nodiscard]] static Result<WriteSession> Open(std::unique_ptr<Vfs> vfs, std::string_view path,
+                                                 WriteSessionOptions options = {});
 
   WriteSession(const WriteSession&) = delete;
   WriteSession& operator=(const WriteSession&) = delete;

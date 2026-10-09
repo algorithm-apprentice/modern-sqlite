@@ -20,6 +20,7 @@ class SessionLayeringTest(unittest.TestCase):
                     "modern_sqlite/bytecode/program.hpp",
                     "modern_sqlite/platform/vfs.hpp",
                     "modern_sqlite/runtime/sql_value.hpp",
+                    "modern_sqlite/temporary_storage/temporary_storage.hpp",
                     "modern_sqlite/text/text.hpp",
                 },
                 includes,

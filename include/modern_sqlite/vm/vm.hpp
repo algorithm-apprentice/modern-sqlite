@@ -16,6 +16,7 @@ namespace modern_sqlite {
 class Collation;
 class FunctionRegistry;
 class Pager;
+class TemporaryStorageFactory;
 class TransactionWriter;
 
 enum class VmState : std::uint8_t {
@@ -53,10 +54,18 @@ class VmEnvironment final {
 
 class VmExecutionContext final {
  public:
+  // Every referenced capability must outlive the attached VM execution context.
   VmExecutionContext(Pager& pager, std::uint64_t catalog_generation) noexcept
       : pager_(&pager), catalog_generation_(catalog_generation) {}
+  VmExecutionContext(Pager& pager, std::uint64_t catalog_generation,
+                     const TemporaryStorageFactory& temporary_storage) noexcept
+      : pager_(&pager),
+        catalog_generation_(catalog_generation),
+        temporary_storage_(&temporary_storage) {}
 
   VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation) noexcept;
+  VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation,
+                     const TemporaryStorageFactory& temporary_storage) noexcept;
 
  private:
   friend class Vm;
@@ -64,6 +73,7 @@ class VmExecutionContext final {
   Pager* pager_;
   std::uint64_t catalog_generation_;
   TransactionWriter* writer_ = nullptr;
+  const TemporaryStorageFactory* temporary_storage_ = nullptr;
 };
 
 class Vm final {

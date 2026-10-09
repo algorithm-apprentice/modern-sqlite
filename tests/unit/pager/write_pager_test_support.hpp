@@ -291,6 +291,11 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] std::size_t total_subjournal_writes() const noexcept {
     return subjournal_.write_count;
   }
+  [[nodiscard]] bool pathless_file_present() const noexcept { return subjournal_.present; }
+  [[nodiscard]] std::size_t pathless_open_count() const noexcept { return pathless_open_count_; }
+  [[nodiscard]] std::optional<FileOpenOptions> last_pathless_open_options() const noexcept {
+    return last_pathless_open_options_;
+  }
   [[nodiscard]] std::size_t total_journal_deletes() const noexcept { return journal_delete_count_; }
   [[nodiscard]] std::size_t random_call_count() const noexcept { return random_call_count_; }
 
@@ -309,6 +314,8 @@ class WritePagerMemoryVfs final : public Vfs {
     main_.write_failure = std::pair{successful_writes, code};
   }
 
+  void FailNextPathlessOpen(ErrorCode code) noexcept { pathless_open_failure_ = code; }
+
   void ArmCrashCut(std::optional<std::size_t> cut) noexcept {
     crash_.fail_after_mutation = cut;
     crash_.mutation_count = 0U;
@@ -324,6 +331,7 @@ class WritePagerMemoryVfs final : public Vfs {
     main_.lock_failure.reset();
     main_.unlock_failure.reset();
     main_.write_failure.reset();
+    pathless_open_failure_.reset();
     crash_.fail_after_mutation.reset();
     crash_.cut_triggered = false;
   }
@@ -353,6 +361,9 @@ class WritePagerMemoryVfs final : public Vfs {
     crash_ = {};
     journal_delete_count_ = 0U;
     random_call_count_ = 0U;
+    pathless_open_count_ = 0U;
+    last_pathless_open_options_.reset();
+    pathless_open_failure_.reset();
     random_byte_ = snapshot.random_byte;
   }
 
@@ -371,6 +382,9 @@ class WritePagerMemoryVfs final : public Vfs {
     crash_ = {};
     journal_delete_count_ = 0U;
     random_call_count_ = 0U;
+    pathless_open_count_ = 0U;
+    last_pathless_open_options_.reset();
+    pathless_open_failure_.reset();
   }
 
   void SetReportedPageCount(std::uint32_t page_count) noexcept {
@@ -451,6 +465,13 @@ class WritePagerMemoryVfs final : public Vfs {
     }
     WritePagerFileState<Capacity>* state = nullptr;
     if (!path.has_value()) {
+      ++pathless_open_count_;
+      last_pathless_open_options_ = options;
+      if (pathless_open_failure_.has_value()) {
+        const ErrorCode code = *pathless_open_failure_;
+        pathless_open_failure_.reset();
+        return std::unexpected(Error::Create(code, "injected pathless open failure"));
+      }
       state = &subjournal_;
     } else if (*path == kWritePagerDatabasePath) {
       state = &main_;
@@ -539,6 +560,9 @@ class WritePagerMemoryVfs final : public Vfs {
   WritePagerCrashState crash_;
   std::size_t journal_delete_count_ = 0;
   std::size_t random_call_count_ = 0;
+  std::size_t pathless_open_count_ = 0;
+  std::optional<FileOpenOptions> last_pathless_open_options_;
+  std::optional<ErrorCode> pathless_open_failure_;
   std::byte random_byte_{0x5a};
 };
 

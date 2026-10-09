@@ -30,6 +30,7 @@
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 
 namespace modern_sqlite {
@@ -348,6 +349,11 @@ struct Vm::Impl {
     if (context.pager_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "VM execution context is incomplete"));
     }
+    if (context.temporary_storage_ != nullptr &&
+        !context.temporary_storage_->attached_to(*context.pager_)) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "temporary storage factory does not match the VM pager"));
+    }
     if (program_->transaction_access() == ProgramTransactionAccess::kWrite &&
         context.writer_ == nullptr) {
       return std::unexpected(
@@ -356,11 +362,13 @@ struct Vm::Impl {
     pager_ = context.pager_;
     catalog_generation_ = context.catalog_generation_;
     writer_ = context.writer_;
+    temporary_storage_ = context.temporary_storage_;
     Status schema = ValidateSchema();
     if (!schema.has_value()) {
       pager_ = nullptr;
       catalog_generation_ = 0;
       writer_ = nullptr;
+      temporary_storage_ = nullptr;
       return schema;
     }
     return {};
@@ -379,6 +387,7 @@ struct Vm::Impl {
     pager_ = nullptr;
     catalog_generation_ = 0;
     writer_ = nullptr;
+    temporary_storage_ = nullptr;
     return {};
   }
 
@@ -486,6 +495,7 @@ struct Vm::Impl {
     pager_ = nullptr;
     catalog_generation_ = 0;
     writer_ = nullptr;
+    temporary_storage_ = nullptr;
     return {};
   }
 
@@ -2205,6 +2215,7 @@ struct Vm::Impl {
   Pager* pager_ = nullptr;
   std::uint64_t catalog_generation_ = 0;
   TransactionWriter* writer_ = nullptr;
+  const TemporaryStorageFactory* temporary_storage_ = nullptr;
   const FunctionRegistry* functions_;
   std::span<const Collation* const> available_collations_;
   VmLimits limits_;
@@ -2231,6 +2242,13 @@ struct Vm::Impl {
 VmExecutionContext::VmExecutionContext(TransactionWriter& writer,
                                        std::uint64_t catalog_generation) noexcept
     : pager_(&writer.pager()), catalog_generation_(catalog_generation), writer_(&writer) {}
+
+VmExecutionContext::VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation,
+                                       const TemporaryStorageFactory& temporary_storage) noexcept
+    : pager_(&writer.pager()),
+      catalog_generation_(catalog_generation),
+      writer_(&writer),
+      temporary_storage_(&temporary_storage) {}
 
 VmEnvironment VmEnvironment::Core() noexcept {
   static const std::array<const Collation*, 3> collations{

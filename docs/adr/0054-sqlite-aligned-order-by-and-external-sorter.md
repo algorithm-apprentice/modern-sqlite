@@ -288,8 +288,8 @@ configuration used by embeddings, tests, and benchmarks:
   default temp-store policy;
 - `TemporaryStoreMode::kMemory` disables spill files while retaining
   allocation limits; and
-- an optional sorter threshold override is accepted for deterministic tests
-  and benchmark fixtures.
+- an optional sorter threshold override from 1 byte through 512 MiB is
+  accepted for deterministic tests and benchmark fixtures.
 
 PRAGMA temp_store remains deferred. The path and VFS overloads accept the same
 options so custom VFS tests do not bypass configuration.
@@ -339,11 +339,12 @@ The first implementation mirrors SQLite's single-threaded sorter:
 No worker threads are added. The ordinary build and pinned SQLite profile are
 single-threaded.
 
-The default spill threshold derives from the main database page size and
-configured cache pages and is capped at 512 MiB, matching SQLite's overflow
-bound. Tests may inject a smaller threshold to deterministically exercise
-spill and multi-level merge paths. `temp_store=MEMORY` disables file spill
-but still enforces the configured allocation/value limits.
+The default spill threshold is
+`max(250 * page_size, min(cache_pages * page_size, 512 MiB))`, matching the
+pinned SQLite PMA-page minimum, main-cache derivation, and overflow bound.
+Tests may inject a smaller threshold to deterministically exercise spill and
+multi-level merge paths. `temp_store=MEMORY` disables file spill but still
+enforces the configured allocation/value limits.
 
 The transient PMA bytes are not a persistent compatibility format. The
 lifecycle, bounds, comparison, spill point, fan-in, incremental merge, and

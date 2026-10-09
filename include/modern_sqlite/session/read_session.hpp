@@ -13,6 +13,7 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/text/text.hpp"
 
 namespace modern_sqlite {
@@ -62,10 +63,16 @@ struct ReadPrepareOutput {
   ByteOffset next_offset;
 };
 
+struct ReadSessionOptions {
+  TemporaryStorageOptions temporary_storage{};
+};
+
 class ReadSession final {
  public:
-  [[nodiscard]] static Result<ReadSession> Open(std::string_view path);
-  [[nodiscard]] static Result<ReadSession> Open(std::unique_ptr<Vfs> vfs, std::string_view path);
+  [[nodiscard]] static Result<ReadSession> Open(std::string_view path,
+                                                ReadSessionOptions options = {});
+  [[nodiscard]] static Result<ReadSession> Open(std::unique_ptr<Vfs> vfs, std::string_view path,
+                                                ReadSessionOptions options = {});
 
   ReadSession(const ReadSession&) = delete;
   ReadSession& operator=(const ReadSession&) = delete;
