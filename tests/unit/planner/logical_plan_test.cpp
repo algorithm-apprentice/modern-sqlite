@@ -117,6 +117,8 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalMutationKindName(static_cast<LogicalMutationKind>(255)));  // NOLINT
 
   EXPECT_EQ("invalid_input", LogicalPlanErrorCodeName(LogicalPlanErrorCode::kInvalidInput));
+  EXPECT_EQ("unsupported_feature",
+            LogicalPlanErrorCodeName(LogicalPlanErrorCode::kUnsupportedFeature));
   EXPECT_EQ("internal_invariant",
             LogicalPlanErrorCodeName(LogicalPlanErrorCode::kInternalInvariant));
   EXPECT_EQ("unknown",
@@ -327,6 +329,13 @@ TEST(LogicalPlan, PreservesAliasIdentityAndRejectsMovedFromInput) {
 
   const BuildLogicalPlanResult recovered = BuildLogicalPlan(std::move(retained));
   EXPECT_TRUE(recovered.has_value());
+
+  BuildLogicalPlanResult ordered =
+      BuildLogicalPlan(BindOrThrow("SELECT Name FROM Items ORDER BY Name", catalog));
+  ASSERT_FALSE(ordered.has_value());
+  EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, ordered.error().code);
+  EXPECT_EQ(ErrorCode::kGeneric, ordered.error().base_error_code());
+  EXPECT_EQ("ORDER BY logical planning is not supported", ordered.error().detail);
 }
 
 }  // namespace

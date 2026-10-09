@@ -238,6 +238,19 @@ struct BoundLimit {
   std::optional<BoundExpressionId> offset{};
 };
 
+enum class BoundNullPlacement : std::uint8_t {
+  kFirst,
+  kLast,
+};
+
+struct BoundOrderingTerm {
+  BoundExpressionId expression;
+  BoundCollationId collation;
+  SortOrder order = SortOrder::kAscending;
+  BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
+  std::optional<std::size_t> result_column{};
+};
+
 enum class BindErrorCode : std::uint8_t {
   kInvalidInput,
   kUnsupportedFeature,
@@ -248,6 +261,7 @@ enum class BindErrorCode : std::uint8_t {
   kNoSuchFunction,
   kWrongFunctionArity,
   kNoSuchCollation,
+  kOrderByTermOutOfRange,
   kInvalidLiteral,
   kInvalidVariableNumber,
   kParameterLimitExceeded,
@@ -324,6 +338,7 @@ class BoundSelect final {
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
   [[nodiscard]] std::span<const BoundResultColumn> result_columns() const noexcept;
   [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept;
+  [[nodiscard]] std::span<const BoundOrderingTerm> order_by() const noexcept;
   [[nodiscard]] const BoundLimit* limit() const noexcept;
 
  private:

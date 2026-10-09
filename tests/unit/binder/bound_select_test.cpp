@@ -410,6 +410,7 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("invalid_variable_number", BindErrorCodeName(BindErrorCode::kInvalidVariableNumber));
   EXPECT_EQ("indexed_table_unsupported",
             BindErrorCodeName(BindErrorCode::kIndexedTableUnsupported));
+  EXPECT_EQ("order_by_term_out_of_range", BindErrorCodeName(BindErrorCode::kOrderByTermOutOfRange));
   EXPECT_EQ("index_already_exists", BindErrorCodeName(BindErrorCode::kIndexAlreadyExists));
   EXPECT_EQ("unknown", BindErrorCodeName(static_cast<BindErrorCode>(255)));  // NOLINT
 
@@ -1293,6 +1294,104 @@ TEST(Binder, PublishesOnlyPinnedSqliteScalarTruthHints) {
             alias.expression(RequiredOptional(alias.where_expression())).properties.truth_hint);
 }
 
+TEST(Binder, ResolvesOrderByAliasesOrdinalsExpressionsAndMetadata) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow(
+      "SELECT Name AS x,Score AS x,Name FROM Items "
+      "ORDER BY x DESC NULLS FIRST,2 COLLATE nocase,Name,+1,2147483648",
+      catalog);
+  ASSERT_EQ(5U, select.order_by().size());
+
+  const BoundOrderingTerm& alias = select.order_by()[0];
+  EXPECT_EQ(0U, alias.result_column);
+  EXPECT_EQ(SortOrder::kDescending, alias.order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, alias.null_placement);
+  EXPECT_EQ("NOCASE", CollationName(select, alias.collation));
+  const auto& alias_expression =
+      std::get<BoundAliasReferenceExpression>(select.expression(alias.expression).payload);
+  EXPECT_EQ(select.result_columns()[0].expression, alias_expression.target);
+
+  const BoundOrderingTerm& ordinal = select.order_by()[1];
+  EXPECT_EQ(1U, ordinal.result_column);
+  EXPECT_EQ(SortOrder::kAscending, ordinal.order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, ordinal.null_placement);
+  EXPECT_EQ("NOCASE", CollationName(select, ordinal.collation));
+  EXPECT_TRUE(select.expression(ordinal.expression).properties.has_explicit_collation);
+
+  const BoundOrderingTerm& identical = select.order_by()[2];
+  EXPECT_EQ(2U, identical.result_column);
+  EXPECT_EQ("NOCASE", CollationName(select, identical.collation));
+
+  const BoundOrderingTerm& unary = select.order_by()[3];
+  EXPECT_EQ(0U, unary.result_column);
+
+  const BoundOrderingTerm& large = select.order_by()[4];
+  EXPECT_FALSE(large.result_column.has_value());
+  EXPECT_EQ(BoundExpressionKind::kLiteral,
+            BoundExpressionKindOf(select.expression(large.expression)));
+
+  ExpectBindError("SELECT Name FROM Items ORDER BY 0", catalog,
+                  BindErrorCode::kOrderByTermOutOfRange,
+                  "1 ORDER BY term out of range - should be between 1 and 1");
+  ExpectBindError("SELECT Name FROM Items ORDER BY -1", catalog,
+                  BindErrorCode::kOrderByTermOutOfRange,
+                  "1 ORDER BY term out of range - should be between 1 and 1");
+  ExpectBindError("SELECT Name FROM Items ORDER BY 2", catalog,
+                  BindErrorCode::kOrderByTermOutOfRange,
+                  "1 ORDER BY term out of range - should be between 1 and 1");
+
+  const BoundSelect quoted =
+      BindOrThrow("SELECT Score AS x,Name AS y FROM Items ORDER BY \"x\"", catalog);
+  ASSERT_EQ(1U, quoted.order_by().size());
+  EXPECT_EQ(0U, quoted.order_by()[0].result_column);
+
+  const BoundSelect distinct_calls = BindOrThrow(
+      "SELECT ifnull(Name,'x'),coalesce(Name,'x') FROM Items "
+      "ORDER BY ifnull(Name,'x')",
+      catalog);
+  ASSERT_EQ(1U, distinct_calls.order_by().size());
+  EXPECT_EQ(0U, distinct_calls.order_by()[0].result_column);
+
+  const BoundSelect anonymous = BindOrThrow("SELECT ?,? FROM Items ORDER BY ?", catalog);
+  EXPECT_FALSE(anonymous.order_by()[0].result_column.has_value());
+
+  const BoundSelect wildcard = BindOrThrow("SELECT * FROM Items ORDER BY Name", catalog);
+  EXPECT_EQ(1U, wildcard.order_by()[0].result_column);
+  const BoundSelect explicit_then_wildcard =
+      BindOrThrow("SELECT Name,* FROM Items ORDER BY Name", catalog);
+  EXPECT_EQ(2U, explicit_then_wildcard.order_by()[0].result_column);
+
+  const BoundSelect signed_ordinals =
+      BindOrThrow("SELECT Name,Score FROM Items ORDER BY ++2,-2147483648", catalog);
+  EXPECT_EQ(1U, signed_ordinals.order_by()[0].result_column);
+  EXPECT_FALSE(signed_ordinals.order_by()[1].result_column.has_value());
+  const BoundSelect collated_unary =
+      BindOrThrow("SELECT Name,Score FROM Items ORDER BY +(2 COLLATE nocase)", catalog);
+  EXPECT_FALSE(collated_unary.order_by()[0].result_column.has_value());
+
+  const BoundSelect normalized =
+      BindOrThrow("SELECT abs(Score)+01,Name FROM Items ORDER BY abs(Score)+1", catalog);
+  EXPECT_EQ(0U, normalized.order_by()[0].result_column);
+  const BoundSelect qualified = BindOrThrow("SELECT Name FROM Items ORDER BY Items.Name", catalog);
+  EXPECT_EQ(0U, qualified.order_by()[0].result_column);
+  const BoundSelect dqs = BindOrThrow("SELECT \"Name\" FROM Items ORDER BY Name", catalog);
+  EXPECT_EQ(0U, dqs.order_by()[0].result_column);
+  const BoundSelect dqs_text = BindOrThrow("SELECT 'missing' ORDER BY \"missing\"", catalog);
+  EXPECT_EQ(0U, dqs_text.order_by()[0].result_column);
+
+  const BoundSelect real_spelling = BindOrThrow(
+      "SELECT abs(Score)+1.0,abs(Score)+1e0 FROM Items ORDER BY abs(Score)+1.0", catalog);
+  EXPECT_EQ(0U, real_spelling.order_by()[0].result_column);
+  const BoundSelect large_integer_spelling = BindOrThrow(
+      "SELECT abs(Score)+2147483648,abs(Score)+02147483648 FROM Items "
+      "ORDER BY abs(Score)+2147483648",
+      catalog);
+  EXPECT_EQ(0U, large_integer_spelling.order_by()[0].result_column);
+
+  ExpectBindError("SELECT Name FROM Items ORDER BY Name COLLATE missing", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+}
+
 TEST(Binder, PreservesConditionalParityAndScalarOverrideRules) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect conditionals = BindOrThrow(
@@ -1506,8 +1605,6 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   ExpectBindError("SELECT *", catalog, BindErrorCode::kNoTablesSpecified, "no tables specified");
   ExpectBindError("SELECT DISTINCT Name FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "SELECT DISTINCT is not supported");
-  ExpectBindError("SELECT Name FROM Items ORDER BY Name", catalog,
-                  BindErrorCode::kUnsupportedFeature, "ORDER BY is not supported");
   ExpectBindError("SELECT Name LIKE 'a%' FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "pattern operators are not supported");
   ExpectBindError("SELECT Name FROM Items LIMIT Name", catalog, BindErrorCode::kNoSuchColumn,

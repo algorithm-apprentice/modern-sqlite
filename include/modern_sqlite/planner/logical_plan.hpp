@@ -77,6 +77,7 @@ enum class LogicalNodeKind : std::uint8_t {
 
 enum class LogicalPlanErrorCode : std::uint8_t {
   kInvalidInput,
+  kUnsupportedFeature,
   kInternalInvariant,
 };
 
