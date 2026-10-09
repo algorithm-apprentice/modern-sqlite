@@ -112,6 +112,50 @@ std::atomic<std::size_t> allocation_count = 0;
   return committed.has_value() ? std::optional<std::size_t>{allocations} : std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::size_t> EphemeralPressureSpillAllocations() {
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  auto opened = modern_sqlite::Pager::OpenEphemeral(
+      vfs, modern_sqlite::PagerOptions{
+               .empty_database_page_size =
+                   modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize},
+               .cache_capacity_pages = 1,
+           });
+  if (!opened.has_value()) {
+    return std::nullopt;
+  }
+  std::unique_ptr<modern_sqlite::Pager> pager = std::move(*opened);
+  if (!pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return std::nullopt;
+  }
+  {
+    auto page = pager->AllocatePage();
+    if (!page.has_value()) {
+      return std::nullopt;
+    }
+    page->mutable_bytes()[100] = std::byte{0x11};
+  }
+  auto retained_result = pager->ReadPage(modern_sqlite::PageNumber{1});
+  if (!retained_result.has_value()) {
+    return std::nullopt;
+  }
+  std::optional<modern_sqlite::ReadPagePin> retained;
+  retained.emplace(std::move(*retained_result));
+  {
+    auto page = pager->AllocatePage();
+    if (!page.has_value()) {
+      return std::nullopt;
+    }
+    page->mutable_bytes()[100] = std::byte{0x22};
+  }
+
+  allocation_count.store(0, std::memory_order_relaxed);
+  const auto page = pager->ReadPage(modern_sqlite::PageNumber{1});
+  const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+  return page.has_value() && page->frame().bytes()[100] == std::byte{0x11}
+             ? std::optional<std::size_t>{allocations}
+             : std::nullopt;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -144,6 +188,10 @@ int main() {
   const std::optional<std::size_t> commit = CommitAllocations();
   if (!commit.has_value() || *commit != 0U) {
     return 3;
+  }
+  const std::optional<std::size_t> ephemeral_spill = EphemeralPressureSpillAllocations();
+  if (!ephemeral_spill.has_value() || *ephemeral_spill != 0U) {
+    return 4;
   }
   return 0;
 }

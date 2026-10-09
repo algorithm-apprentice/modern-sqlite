@@ -263,11 +263,13 @@ Status Pager::BeginWrite() {
     return std::unexpected(Protocol("database format does not permit rollback-journal writes"));
   }
 
-  auto locked = file_->Lock(DatabaseLock::kReserved);
-  if (!locked.has_value()) {
-    return std::unexpected(std::move(locked.error()));
+  if (storage_mode_ != StorageMode::kEphemeral) {
+    auto locked = file_->Lock(DatabaseLock::kReserved);
+    if (!locked.has_value()) {
+      return std::unexpected(std::move(locked.error()));
+    }
+    database_lock_ = DatabaseLock::kReserved;
   }
-  database_lock_ = DatabaseLock::kReserved;
   transaction_start_header_ = current_header_;
   transaction_start_change_token_ = last_change_token_;
   transaction_start_page_count_ = current_page_count_;
@@ -343,13 +345,9 @@ Result<WritePagePin> Pager::WritePage(PageNumber page_number) {
     if (!pin.has_value()) {
       return std::unexpected(std::move(pin.error()));
     }
-    auto journal = EnsureJournalTransaction();
-    if (!journal.has_value()) {
-      return std::unexpected(std::move(journal.error()));
-    }
-    auto captured = CaptureSector(page_number, *pin, current_page_count_);
-    if (!captured.has_value()) {
-      return std::unexpected(std::move(captured.error()));
+    auto prepared = PreparePageWrite(page_number, *pin, current_page_count_);
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
     }
     auto dirty = pin->MarkDirty();
     if (!dirty.has_value()) {
@@ -402,13 +400,9 @@ Result<WritePagePin> Pager::WritePage(ReadPagePin&& read_pin) {
     if (!promoted.has_value()) {
       return std::unexpected(std::move(promoted.error()));
     }
-    auto journal = EnsureJournalTransaction();
-    if (!journal.has_value()) {
-      return std::unexpected(std::move(journal.error()));
-    }
-    auto captured = CaptureSector(page_number, pin, current_page_count_);
-    if (!captured.has_value()) {
-      return std::unexpected(std::move(captured.error()));
+    auto prepared = PreparePageWrite(page_number, pin, current_page_count_);
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
     }
     auto dirty = pin.MarkDirty();
     if (!dirty.has_value()) {
@@ -509,14 +503,10 @@ Status Pager::PermutePageNumbers(std::span<const PageNumberRekey> pages) {
     return {};
   }
 
-  auto journal = EnsureJournalTransaction();
-  if (!journal.has_value()) {
-    return journal;
-  }
   for (std::size_t index = 0; index < pages.size(); ++index) {
-    auto captured = CaptureSector(current[index], pages[index].pin->pin_, current_page_count_);
-    if (!captured.has_value()) {
-      return captured;
+    auto prepared = PreparePageWrite(current[index], pages[index].pin->pin_, current_page_count_);
+    if (!prepared.has_value()) {
+      return prepared;
     }
   }
 
@@ -605,26 +595,21 @@ Result<WritePagePin> Pager::AllocatePage() {
       }
       PageCache::Pin pin = std::move(*inserted);
 
-      auto journal = EnsureJournalTransaction();
-      if (!journal.has_value()) {
-        setup_error.emplace(std::move(journal.error()));
+      auto prepared = PreparePageWrite(PageNumber{candidate}, pin, candidate);
+      if (!prepared.has_value()) {
+        setup_error.emplace(std::move(prepared.error()));
       } else {
-        auto captured = CaptureSector(PageNumber{candidate}, pin, candidate);
-        if (!captured.has_value()) {
-          setup_error.emplace(std::move(captured.error()));
+        auto dirty = pin.MarkDirty();
+        if (!dirty.has_value()) {
+          setup_error.emplace(std::move(dirty.error()));
         } else {
-          auto dirty = pin.MarkDirty();
-          if (!dirty.has_value()) {
-            setup_error.emplace(std::move(dirty.error()));
-          } else {
-            current_page_count_ = candidate;
-            transaction_modified_ = true;
-            image_size_changed_ = true;
-            if (state_ == PagerState::kWriterLocked) {
-              state_ = PagerState::kWriterCacheModified;
-            }
-            return WritePagePin{std::move(pin)};
+          current_page_count_ = candidate;
+          transaction_modified_ = true;
+          image_size_changed_ = true;
+          if (state_ == PagerState::kWriterLocked) {
+            state_ = PagerState::kWriterCacheModified;
           }
+          return WritePagePin{std::move(pin)};
         }
       }
     }
@@ -736,6 +721,9 @@ Result<JournalSavepointId> Pager::CreateSavepoint() {
   if (!in_write_transaction() || state_ == PagerState::kWriterFinished || final_image_) {
     return std::unexpected(Misuse("savepoint creation requires a mutable write transaction"));
   }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return std::unexpected(Misuse("ephemeral pager does not support savepoints"));
+  }
   if (const auto failure = write_failure_code(); failure.has_value()) {
     return std::unexpected(MakeError(*failure, "savepoint creation requires transaction rollback"));
   }
@@ -756,6 +744,9 @@ Status Pager::ReleaseSavepoint(JournalSavepointId savepoint) {
   if (state_ == PagerState::kError) {
     return StoredError();
   }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return std::unexpected(Misuse("ephemeral pager does not support savepoints"));
+  }
   if (!in_write_transaction() || state_ == PagerState::kWriterFinished || final_image_ ||
       journal_transaction_ == nullptr) {
     return std::unexpected(Misuse("savepoint release requires a mutable write transaction"));
@@ -772,6 +763,9 @@ Status Pager::ReleaseSavepoint(JournalSavepointId savepoint) {
 Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
   if (state_ == PagerState::kError) {
     return StoredError();
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return std::unexpected(Misuse("ephemeral pager does not support savepoints"));
   }
   if (!in_write_transaction() || state_ == PagerState::kWriterFinished || final_image_ ||
       journal_transaction_ == nullptr) {
@@ -815,6 +809,9 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
 Status Pager::Commit() {
   if (state_ == PagerState::kError) {
     return StoredError();
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return std::unexpected(Misuse("ephemeral pager is discarded instead of committed"));
   }
   if (state_ == PagerState::kWriterFinished) {
     if (completion_ != WriteCompletion::kCommit) {
@@ -897,6 +894,9 @@ Status Pager::Commit() {
 Status Pager::Rollback() {
   if (state_ == PagerState::kError) {
     return StoredError();
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return std::unexpected(Misuse("ephemeral pager is discarded instead of rolled back"));
   }
   if (state_ == PagerState::kWriterFinished) {
     if (completion_ != WriteCompletion::kRollback) {
@@ -1018,6 +1018,18 @@ Status Pager::EnsureJournalTransaction() {
   return {};
 }
 
+Status Pager::PreparePageWrite(PageNumber page_number, const PageCache::Pin& target,
+                               std::uint32_t logical_page_count) {
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return {};
+  }
+  auto journal = EnsureJournalTransaction();
+  if (!journal.has_value()) {
+    return journal;
+  }
+  return CaptureSector(page_number, target, logical_page_count);
+}
+
 std::optional<ErrorCode> Pager::write_failure_code() const noexcept {
   if (write_coordinator_failure_.has_value()) {
     return write_coordinator_failure_;
@@ -1100,7 +1112,6 @@ Status Pager::EnsureExclusiveLock() {
 }
 
 Status Pager::SpillPage(PageNumber page_number) {
-  assert(journal_transaction_ != nullptr);
   auto pin = cache_->LookupExclusive(page_number);
   if (!pin.has_value()) {
     return std::unexpected(std::move(pin.error()));
@@ -1112,6 +1123,29 @@ Status Pager::SpillPage(PageNumber page_number) {
     return std::unexpected(Internal("writeback candidate is not dirty"));
   }
 
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    auto offset = PageOffset(page_number, page_size());
+    if (!offset.has_value()) {
+      ReportWriteCoordinatorFailure(offset.error().code());
+      return std::unexpected(std::move(offset.error()));
+    }
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesWritten, 1U);
+    auto written = file_->WriteAt((***pin).bytes(), *offset);
+    if (!written.has_value()) {
+      ReportWriteCoordinatorFailure(written.error().code());
+      return written;
+    }
+    auto clean = (**pin).MarkClean();
+    if (!clean.has_value()) {
+      ReportWriteCoordinatorFailure(clean.error().code());
+      return clean;
+    }
+    database_bytes_modified_ = true;
+    state_ = PagerState::kWriterDatabaseModified;
+    return {};
+  }
+
+  assert(journal_transaction_ != nullptr);
   auto exclusive = EnsureExclusiveLock();
   if (!exclusive.has_value()) {
     return exclusive;
@@ -1159,19 +1193,16 @@ Status Pager::UpdateChangeCounter() {
     if (final_image_) {
       return std::unexpected(Misuse("logical truncation requires page 1 to remain dirty"));
     }
-    auto journal = EnsureJournalTransaction();
-    if (!journal.has_value()) {
-      return journal;
-    }
-    auto captured = CaptureSector(PageNumber{1}, *page_one, current_page_count_);
-    if (!captured.has_value()) {
-      return captured;
+    auto prepared = PreparePageWrite(PageNumber{1}, *page_one, current_page_count_);
+    if (!prepared.has_value()) {
+      return prepared;
     }
     auto dirty = page_one->MarkDirty();
     if (!dirty.has_value()) {
       return dirty;
     }
-  } else if (journal_transaction_->NeedsCapture(PageNumber{1})) {
+  } else if (storage_mode_ != StorageMode::kEphemeral &&
+             journal_transaction_->NeedsCapture(PageNumber{1})) {
     auto captured = CaptureSector(PageNumber{1}, *page_one, current_page_count_);
     if (!captured.has_value()) {
       return captured;

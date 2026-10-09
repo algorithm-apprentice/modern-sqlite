@@ -87,6 +87,7 @@ struct MemoryFileState {
   std::vector<DatabaseLock> unlocks;
   std::optional<DatabaseLock> failing_lock;
   std::optional<DatabaseLock> failing_unlock;
+  std::optional<std::size_t> failing_read_attempt;
   std::optional<std::size_t> failing_write_attempt;
   int lock_failures_remaining = 0;
   int unlock_failures_remaining = 0;
@@ -95,6 +96,7 @@ struct MemoryFileState {
   int size_failures_remaining = 0;
   bool partial_write_before_failure = false;
   std::size_t read_count = 0;
+  std::size_t read_attempt_count = 0;
   std::size_t write_attempt_count = 0;
   std::size_t sync_count = 0;
   std::size_t write_count = 0;
@@ -106,7 +108,10 @@ struct MemoryVfsState {
   std::vector<std::shared_ptr<MemoryFileState>> temporary_files;
   std::vector<std::string> trace;
   std::vector<std::pair<std::string, FileOpenOptions>> opens;
+  std::vector<std::string> accesses;
+  std::size_t full_path_count = 0;
   std::optional<std::string> failing_delete;
+  std::optional<ErrorCode> failing_temporary_open;
   int delete_failures_remaining = 0;
   bool unlink_before_delete_failure = false;
   std::optional<std::size_t> fail_after_mutation;
@@ -159,6 +164,12 @@ class MemoryFile final : public File {
  private:
   [[nodiscard]] Result<ByteCount> DoReadAt(MutableByteView destination,
                                            FileOffset offset) override {
+    ++state_->read_attempt_count;
+    if (state_->failing_read_attempt == state_->read_attempt_count) {
+      state_->failing_read_attempt.reset();
+      vfs_state_->trace.push_back("read-error:" + name_);
+      return std::unexpected(Error::Create(ErrorCode::kIo, "injected read failure"));
+    }
     if (offset.value() > std::numeric_limits<std::size_t>::max()) {
       return std::unexpected(Error::Create(ErrorCode::kTooLarge, "test offset is too large"));
     }
@@ -331,6 +342,11 @@ class MemoryVfs final : public Vfs {
 
     std::shared_ptr<MemoryFileState> file_state;
     if (!path.has_value()) {
+      if (state_->failing_temporary_open.has_value()) {
+        const ErrorCode code = *state_->failing_temporary_open;
+        state_->failing_temporary_open.reset();
+        return std::unexpected(Error::Create(code, "injected temporary open failure"));
+      }
       file_state = std::make_shared<MemoryFileState>();
       file_state->durable_present = false;
       state_->temporary_files.push_back(file_state);
@@ -389,11 +405,13 @@ class MemoryVfs final : public Vfs {
   }
 
   [[nodiscard]] Result<bool> DoAccess(std::string_view path, FileAccessQuery) override {
+    state_->accesses.emplace_back(path);
     const auto file = state_->files.find(path);
     return file != state_->files.end() && file->second->present;
   }
 
   [[nodiscard]] Result<std::string> DoFullPath(std::string_view path) override {
+    ++state_->full_path_count;
     if (path == kInputPath) {
       return std::string{kCanonicalPath};
     }
@@ -514,6 +532,19 @@ class TemporaryDirectory final {
                                                 .legacy_page_size = ByteCount{kPageSize},
                                             },
                                     });
+  if (!opened.has_value()) {
+    return nullptr;
+  }
+  return std::move(*opened);
+}
+
+[[nodiscard]] std::unique_ptr<Pager> OpenEphemeral(WritableEnvironment& environment,
+                                                   std::size_t cache_pages = 1) {
+  auto opened =
+      Pager::OpenEphemeral(environment.vfs, PagerOptions{
+                                                .empty_database_page_size = ByteCount{kPageSize},
+                                                .cache_capacity_pages = cache_pages,
+                                            });
   if (!opened.has_value()) {
     return nullptr;
   }
@@ -655,6 +686,220 @@ TEST(WritePager, OpensReadWriteAndTransitionsThroughAnEmptyWriteTransaction) {
   EXPECT_EQ(PagerState::kReader, pager->state());
   EXPECT_FALSE(environment.JournalPresent());
   EXPECT_TRUE(pager->EndRead().has_value());
+}
+
+TEST(EphemeralPager, OpensOnePathlessTransientFileWithoutDurabilityProtocols) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeral(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_EQ(1U, environment.state->opens.size());
+  EXPECT_EQ("<temporary>", environment.state->opens[0].first);
+  EXPECT_EQ((FileOpenOptions{
+                .kind = FileKind::kTransientDatabase,
+                .access = FileAccessMode::kReadWrite,
+                .create = true,
+                .exclusive_create = true,
+                .delete_on_close = true,
+            }),
+            environment.state->opens[0].second);
+  ASSERT_EQ(1U, environment.state->temporary_files.size());
+  const std::shared_ptr<MemoryFileState> temporary = environment.state->temporary_files.front();
+  EXPECT_TRUE(temporary->present);
+  EXPECT_TRUE(pager->writable());
+  EXPECT_TRUE(pager->path().empty());
+
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  EXPECT_EQ(PagerState::kReader, pager->state());
+  EXPECT_EQ(nullptr, pager->header());
+  EXPECT_EQ(0U, pager->page_count());
+  ASSERT_TRUE(pager->EndRead().has_value());
+  EXPECT_EQ(PagerState::kOpen, pager->state());
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  EXPECT_EQ(PagerState::kWriterLocked, pager->state());
+  EXPECT_TRUE(pager->ClaimWriteCoordinator().has_value());
+  const auto duplicate = pager->ClaimWriteCoordinator();
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kLocked, duplicate.error().code());
+
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_FALSE(savepoint.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, savepoint.error().code());
+  const auto committed = pager->Commit();
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, committed.error().code());
+  const auto rolled_back = pager->Rollback();
+  ASSERT_FALSE(rolled_back.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, rolled_back.error().code());
+
+  EXPECT_TRUE(temporary->locks.empty());
+  EXPECT_TRUE(temporary->unlocks.empty());
+  EXPECT_EQ(0U, temporary->sync_count);
+  EXPECT_EQ(0U, temporary->write_count);
+  EXPECT_EQ(0U, environment.state->full_path_count);
+  EXPECT_TRUE(environment.state->accesses.empty());
+  pager.reset();
+  EXPECT_FALSE(temporary->present);
+}
+
+TEST(EphemeralPager, ValidatesBeforeVfsUseAndPropagatesPathlessOpenFailure) {
+  WritableEnvironment environment;
+  const auto invalid =
+      Pager::OpenEphemeral(environment.vfs, PagerOptions{
+                                                .empty_database_page_size = ByteCount{513},
+                                                .cache_capacity_pages = 1,
+                                            });
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid.error().code());
+  EXPECT_TRUE(environment.state->opens.empty());
+
+  environment.state->failing_temporary_open = ErrorCode::kIo;
+  const auto failed =
+      Pager::OpenEphemeral(environment.vfs, PagerOptions{
+                                                .empty_database_page_size = ByteCount{kPageSize},
+                                                .cache_capacity_pages = 1,
+                                            });
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(1U, environment.state->opens.size());
+  EXPECT_TRUE(environment.state->temporary_files.empty());
+}
+
+TEST(EphemeralPager, SpillsDirtyPagesDirectlyAndReadsThemBack) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeral(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::shared_ptr<MemoryFileState> temporary = environment.state->temporary_files.front();
+
+  {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    EXPECT_EQ(PageNumber{1}, page->frame().page_number());
+    page->mutable_bytes()[100] = std::byte{0x11};
+  }
+  {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    EXPECT_EQ(PageNumber{2}, page->frame().page_number());
+    page->mutable_bytes()[100] = std::byte{0x22};
+  }
+  {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    EXPECT_EQ(PageNumber{3}, page->frame().page_number());
+    page->mutable_bytes()[100] = std::byte{0x33};
+  }
+  EXPECT_GT(temporary->write_count, 0U);
+  EXPECT_EQ(0U, temporary->sync_count);
+  EXPECT_TRUE(temporary->locks.empty());
+  EXPECT_TRUE(temporary->unlocks.empty());
+  EXPECT_FALSE(environment.JournalPresent());
+
+  const std::size_t reads_before = temporary->read_count;
+  auto first = pager->ReadPage(PageNumber{1});
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(std::byte{0x11}, first->frame().bytes()[100]);
+  EXPECT_GT(temporary->read_count, reads_before);
+}
+
+TEST(EphemeralPager, PropagatesSpilledPageReadFailureAndRemainsRetryable) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeral(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::shared_ptr<MemoryFileState> temporary = environment.state->temporary_files.front();
+
+  for (std::uint32_t expected = 1; expected <= 3; ++expected) {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    EXPECT_EQ(PageNumber{expected}, page->frame().page_number());
+    page->mutable_bytes()[100] = static_cast<std::byte>(expected);
+  }
+  temporary->failing_read_attempt = temporary->read_attempt_count + 1U;
+
+  const auto failed = pager->ReadPage(PageNumber{1});
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(pager->write_failure_code().has_value());
+
+  const auto retried = pager->ReadPage(PageNumber{1});
+  ASSERT_TRUE(retried.has_value());
+  EXPECT_EQ(std::byte{1}, retried->frame().bytes()[100]);
+}
+
+TEST(EphemeralPager, PromotesAndPermutesPagesWithoutJournalCapture) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeral(environment, 4);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::shared_ptr<MemoryFileState> temporary = environment.state->temporary_files.front();
+
+  {
+    auto allocated = pager->AllocatePage();
+    ASSERT_TRUE(allocated.has_value());
+    allocated->mutable_bytes()[100] = std::byte{0x11};
+  }
+  auto read = pager->ReadPage(PageNumber{1});
+  ASSERT_TRUE(read.has_value());
+  auto promoted = pager->WritePage(std::move(*read));
+  ASSERT_TRUE(promoted.has_value());
+  promoted->mutable_bytes()[100] = std::byte{0x22};
+  auto second = pager->AllocatePage();
+  ASSERT_TRUE(second.has_value());
+  second->mutable_bytes()[100] = std::byte{0x33};
+
+  std::array<PageNumberRekey, 2> rekeys{
+      PageNumberRekey{
+          .pin = &*promoted,
+          .final_page = PageNumber{2},
+      },
+      PageNumberRekey{
+          .pin = &*second,
+          .final_page = PageNumber{1},
+      },
+  };
+  ASSERT_TRUE(pager->PermutePageNumbers(rekeys).has_value());
+  EXPECT_EQ(PageNumber{2}, promoted->frame().page_number());
+  EXPECT_EQ(PageNumber{1}, second->frame().page_number());
+  EXPECT_EQ(0U, temporary->write_count);
+  EXPECT_EQ(0U, temporary->sync_count);
+  EXPECT_FALSE(environment.JournalPresent());
+}
+
+TEST(EphemeralPager, PoisonsTheWriteGenerationAfterDirectIoFailure) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeral(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const std::shared_ptr<MemoryFileState> temporary = environment.state->temporary_files.front();
+
+  {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes()[100] = std::byte{0x11};
+  }
+  {
+    auto page = pager->AllocatePage();
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes()[100] = std::byte{0x22};
+  }
+  temporary->failing_write_attempt = temporary->write_attempt_count + 1U;
+
+  const auto failed = pager->AllocatePage();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(ErrorCode::kIo, pager->write_failure_code());
+  const auto blocked = pager->AllocatePage();
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(ErrorCode::kIo, blocked.error().code());
+
+  pager.reset();
+  EXPECT_FALSE(temporary->present);
 }
 
 TEST(WritePager, ClaimsOneWriteCoordinatorPerAdmittedGeneration) {
