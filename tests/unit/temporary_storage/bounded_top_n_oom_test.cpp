@@ -79,6 +79,247 @@ template <typename T>
   return TakeValue(EncodeRecord(values));
 }
 
+struct FileOutcome {
+  std::size_t allocations = 0;
+  bool succeeded = false;
+  modern_sqlite::ErrorCode error = modern_sqlite::ErrorCode::kGeneric;
+  bool cleaned = false;
+};
+
+template <typename Runner>
+[[nodiscard]] bool ExhaustFileAllocations(Runner&& runner) {
+  const FileOutcome baseline = runner(std::nullopt);
+  if (!baseline.succeeded || !baseline.cleaned || baseline.allocations == 0U) {
+    return false;
+  }
+  for (std::size_t failure = 0; failure < baseline.allocations; ++failure) {
+    const FileOutcome outcome = runner(failure);
+    if (outcome.succeeded || outcome.error != modern_sqlite::ErrorCode::kOutOfMemory ||
+        !outcome.cleaned) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] FileOutcome RunFileCreate(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  const RecordSorterDescriptor descriptor = Descriptor();
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  Result<BoundedTopN> created = factory.CreateTopN(descriptor, 4);
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = created.has_value();
+  const ErrorCode error = succeeded ? ErrorCode::kGeneric : created.error().code();
+  if (created.has_value()) {
+    created->Close();
+  }
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] FileOutcome RunFileInsert(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 1));
+  if (TakeValue(top_n.CheckCandidate(Key(1))) != TopNCheckResult::kAccepted) {
+    return {};
+  }
+  ByteBuffer row = Row(1);
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  const Status inserted = top_n.Insert(std::move(row));
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = inserted.has_value();
+  const ErrorCode error = succeeded ? ErrorCode::kGeneric : inserted.error().code();
+  if (top_n.valid()) {
+    top_n.Close();
+  }
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] FileOutcome RunFileRewind(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 4));
+  for (std::int64_t key = 4; key >= 1; --key) {
+    if (TakeValue(top_n.CheckCandidate(Key(key))) != TopNCheckResult::kAccepted ||
+        !top_n.Insert(Row(key)).has_value()) {
+      return {};
+    }
+  }
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  const Status rewound = top_n.Rewind();
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = rewound.has_value();
+  const ErrorCode error = succeeded ? ErrorCode::kGeneric : rewound.error().code();
+  if (top_n.valid()) {
+    top_n.Close();
+  }
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] FileOutcome RunFileFullCheck(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 1));
+  if (TakeValue(top_n.CheckCandidate(Key(2))) != TopNCheckResult::kAccepted ||
+      !top_n.Insert(Row(2)).has_value()) {
+    return {};
+  }
+  ByteBuffer candidate = Key(1);
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  const Result<TopNCheckResult> checked = top_n.CheckCandidate(std::move(candidate));
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = checked.has_value() && *checked == TopNCheckResult::kAccepted;
+  const ErrorCode error = checked.has_value() ? ErrorCode::kGeneric : checked.error().code();
+  if (top_n.valid()) {
+    top_n.Close();
+  }
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] FileOutcome RunFileNext(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 4));
+  for (std::int64_t key = 4; key >= 1; --key) {
+    if (TakeValue(top_n.CheckCandidate(Key(key))) != TopNCheckResult::kAccepted ||
+        !top_n.Insert(Row(key)).has_value()) {
+      return {};
+    }
+  }
+  if (!top_n.Rewind().has_value()) {
+    return {};
+  }
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  const Result<bool> advanced = top_n.Next();
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = advanced.has_value() && *advanced;
+  const ErrorCode error = advanced.has_value() ? ErrorCode::kGeneric : advanced.error().code();
+  if (top_n.valid()) {
+    top_n.Close();
+  }
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -177,6 +418,22 @@ int main() try {
   }
   iteration.Close();
   fail_all_allocations = false;
+
+  if (!ExhaustFileAllocations(RunFileCreate)) {
+    return 2;
+  }
+  if (!ExhaustFileAllocations(RunFileInsert)) {
+    return 3;
+  }
+  if (!ExhaustFileAllocations(RunFileRewind)) {
+    return 4;
+  }
+  if (!ExhaustFileAllocations(RunFileFullCheck)) {
+    return 5;
+  }
+  if (!ExhaustFileAllocations(RunFileNext)) {
+    return 6;
+  }
   return 0;
 } catch (...) {
   inject_failure = false;

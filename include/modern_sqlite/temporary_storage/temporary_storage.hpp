@@ -133,7 +133,8 @@ class BoundedTopN final {
 
   explicit BoundedTopN(std::unique_ptr<Impl> impl) noexcept;
   [[nodiscard]] static Result<BoundedTopN> Create(const RecordSorterDescriptor& descriptor,
-                                                  std::size_t bound, ByteCount memory_threshold);
+                                                  std::size_t bound, ByteCount memory_threshold,
+                                                  const TemporaryStorageFactory& factory);
 
   std::unique_ptr<Impl> impl_;
 };
@@ -162,6 +163,8 @@ class TemporaryStorageFactory final {
   [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;
 
  private:
+  friend class BoundedTopN;
+
   TemporaryStorageFactory(Vfs& vfs, const Pager& pager, TemporaryStorageOptions options) noexcept
       : vfs_(&vfs), pager_(&pager), options_(options) {}
 

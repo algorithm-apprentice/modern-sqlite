@@ -2805,6 +2805,42 @@ TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
   EXPECT_EQ(28U, vm.executed_instruction_count());
 }
 
+TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = BuildTopNProgram(*pager);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_TRUE(vfs.pathless_file_present());
+  while (TakeValue(vm.Step()) == VmStep::kRow) {
+  }
+  EXPECT_FALSE(vfs.pathless_file_present());
+
+  vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
+  Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  const auto failed = failing.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
 TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
   const BytecodeProgram zero_program = BuildTopNProgram(*pager_, 0);
   const TemporaryStorageFactory normal = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
