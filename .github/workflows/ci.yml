@@ -217,12 +217,10 @@ jobs:
       - name: Validate committed ORDER BY baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
-          if test -d benchmarks/order-by-baseline-v1; then
-            python3 tools/order_by_performance.py validate-baseline \
-              --repository-root . \
-              --workloads tests/performance/order-by-workloads-v1.json \
-              --baseline benchmarks/order-by-baseline-v1
-          fi
+          python3 tools/order_by_performance.py validate-baseline \
+            --repository-root . \
+            --workloads tests/performance/order-by-workloads-v1.json \
+            --baseline benchmarks/order-by-baseline-v1
       - name: Validate committed write workloads
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >

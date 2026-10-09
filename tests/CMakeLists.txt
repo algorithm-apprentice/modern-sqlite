@@ -1071,25 +1071,23 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/index-baseline-v1/aggregate.json")
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endif()
-if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/order-by-baseline-v1/aggregate.json")
-  add_test(
-    NAME performance.order_by_baseline_validation
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tools/order_by_performance.py"
-      validate-baseline
-      --repository-root "${PROJECT_SOURCE_DIR}"
-      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/order-by-workloads-v1.json"
-      --baseline "${PROJECT_SOURCE_DIR}/benchmarks/order-by-baseline-v1"
-  )
-  set_tests_properties(
-    performance.order_by_baseline_validation
-    PROPERTIES
-      LABELS performance
-      TIMEOUT 30
-      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-  )
-endif()
+add_test(
+  NAME performance.order_by_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/order_by_performance.py"
+    validate-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads "${PROJECT_SOURCE_DIR}/tests/performance/order-by-workloads-v1.json"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/order-by-baseline-v1"
+)
+set_tests_properties(
+  performance.order_by_baseline_validation
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 if(TARGET modern_sqlite_benchmark_sqlite)
   add_executable(
     modern_sqlite_write_pager_sqlite_compatibility
