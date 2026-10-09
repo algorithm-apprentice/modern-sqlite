@@ -1931,7 +1931,8 @@ class StatementBinder final {
         return std::unexpected(std::move(parts.error()));
       }
       if (parts->size() == 1U) {
-        requested = parts->front();
+        owned_name = std::string{parts->front()};
+        requested = owned_name;
       }
     } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
                literal != nullptr && literal->kind == LiteralKind::kString &&
