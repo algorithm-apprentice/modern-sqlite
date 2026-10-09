@@ -170,16 +170,11 @@ class PlanLowerer final {
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
-    if (auto sorter = AddSorterDescriptor(); !sorter.has_value()) {
-      return std::unexpected(std::move(sorter.error()));
+    if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
+      return std::unexpected(std::move(ordering.error()));
     }
     if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
-    }
-    if (sorter_.has_value()) {
-      if (auto opened = Append(OpenSorterInstruction{.sorter = *sorter_}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
     }
     if (auto emitted = EmitPlan(); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
@@ -698,11 +693,17 @@ class PlanLowerer final {
         (sort_ == nullptr) != (projection_ != nullptr)) {
       return std::unexpected(InternalFailure("physical output shape is inconsistent"));
     }
-    if (sort_ != nullptr &&
-        (sort_->strategy != PhysicalSortStrategy::kExternal || sort_->input_order_satisfied ||
-         sort_->schedule != OrderEvaluationSchedule::kPayloadThenKeys || limit_ != nullptr)) {
-      return std::unexpected(
-          UnsupportedFailure("ORDER BY with runtime LIMIT strategy is not supported"));
+    if (sort_ != nullptr && sort_->input_order_satisfied) {
+      return std::unexpected(UnsupportedFailure("ORDER BY input-order elimination is unsupported"));
+    }
+    if (sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kExternal &&
+        (sort_->schedule != OrderEvaluationSchedule::kPayloadThenKeys || limit_ != nullptr)) {
+      return std::unexpected(InternalFailure("external ORDER BY plan shape is invalid"));
+    }
+    if (sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit &&
+        (sort_->schedule != OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
+         limit_ == nullptr)) {
+      return std::unexpected(InternalFailure("runtime LIMIT ORDER BY plan shape is invalid"));
     }
     if (!std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) &&
@@ -819,7 +820,7 @@ class PlanLowerer final {
         comparison_register_ = *comparison_register;
       }
 
-      if (IsRowLoopAccess()) {
+      if (IsRowLoopAccess() || sort_ != nullptr) {
         if (!zero_register_.has_value()) {
           auto zero_register = AllocateRegisters(1);
           if (!zero_register.has_value()) {
@@ -839,6 +840,26 @@ class PlanLowerer final {
           return std::unexpected(std::move(negative_register.error()));
         }
         negative_limit_register_ = *negative_register;
+      }
+
+      if (sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+        auto top_n_bound = AllocateRegisters(1);
+        if (!top_n_bound.has_value()) {
+          return std::unexpected(std::move(top_n_bound.error()));
+        }
+        top_n_bound_register_ = *top_n_bound;
+        if (limit_->offset.has_value()) {
+          auto maximum_integer = AllocateRegisters(1);
+          auto bound_room = AllocateRegisters(1);
+          if (!maximum_integer.has_value()) {
+            return std::unexpected(std::move(maximum_integer.error()));
+          }
+          if (!bound_room.has_value()) {
+            return std::unexpected(std::move(bound_room.error()));
+          }
+          maximum_integer_register_ = *maximum_integer;
+          bound_room_register_ = *bound_room;
+        }
       }
     }
 
@@ -1021,9 +1042,9 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> AddSorterDescriptor() {
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderingDescriptor() {
     if (sort_ == nullptr) {
-      return {};
+      return std::unexpected(InternalFailure("ordering descriptor has no physical sort"));
     }
     const std::size_t field_count = sort_->terms.size() + sort_->payload_expressions.size();
     if (field_count > std::numeric_limits<std::uint32_t>::max() ||
@@ -1052,12 +1073,37 @@ class PlanLowerer final {
                                 : BytecodeNullPlacement::kFirst,
       });
     }
-    auto added = ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(descriptor)),
-                                      "unable to add sorter descriptor");
-    if (!added.has_value()) {
-      return std::unexpected(std::move(added.error()));
+    return descriptor;
+  }
+
+  [[nodiscard]] LoweringResult<void> AddOrderingDescriptors() {
+    if (sort_ == nullptr) {
+      return {};
     }
-    sorter_ = *added;
+    auto sorter_descriptor = BuildOrderingDescriptor();
+    if (!sorter_descriptor.has_value()) {
+      return std::unexpected(std::move(sorter_descriptor.error()));
+    }
+    auto added_sorter =
+        ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*sorter_descriptor)),
+                             "unable to add sorter descriptor");
+    if (!added_sorter.has_value()) {
+      return std::unexpected(std::move(added_sorter.error()));
+    }
+    sorter_ = *added_sorter;
+    if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+      auto top_n_descriptor = BuildOrderingDescriptor();
+      if (!top_n_descriptor.has_value()) {
+        return std::unexpected(std::move(top_n_descriptor.error()));
+      }
+      auto added_top_n =
+          ConvertProgramResult(AssumeValue(builder_).AddTopN(std::move(*top_n_descriptor)),
+                               "unable to add top-N descriptor");
+      if (!added_top_n.has_value()) {
+        return std::unexpected(std::move(added_top_n.error()));
+      }
+      top_n_ = *added_top_n;
+    }
     return {};
   }
 
@@ -1789,6 +1835,17 @@ class PlanLowerer final {
     return *one_constant_;
   }
 
+  [[nodiscard]] LoweringResult<ConstantId> EnsureMaximumIntegerConstant() {
+    if (!maximum_integer_constant_.has_value()) {
+      auto constant = AddConstant(SqlValue::Integer(std::numeric_limits<std::int64_t>::max()));
+      if (!constant.has_value()) {
+        return std::unexpected(std::move(constant.error()));
+      }
+      maximum_integer_constant_ = *constant;
+    }
+    return *maximum_integer_constant_;
+  }
+
   [[nodiscard]] LoweringResult<SymbolId> EnsureBinarySymbol() {
     if (!binary_symbol_.has_value()) {
       auto symbol = SymbolForName("BINARY");
@@ -2296,7 +2353,7 @@ class PlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitLimitInitialization(std::optional<Label> completion) {
-    if (limit_ == nullptr) {
+    if (limit_ == nullptr || limit_initialized_) {
       return {};
     }
     if (!completion.has_value() || !limit_register_.has_value()) {
@@ -2409,15 +2466,19 @@ class PlanLowerer final {
       if (!binary.has_value()) {
         return std::unexpected(std::move(binary.error()));
       }
-      return Append(CompareInstruction{
-          .comparison = SqlComparison::kLess,
-          .affinity = TypeAffinity::kNumeric,
-          .collation = *binary,
-          .left = AssumeValue(limit_register_),
-          .right = AssumeValue(zero_register_),
-          .output = AssumeValue(negative_limit_register_),
-      });
+      if (auto compared = Append(CompareInstruction{
+              .comparison = SqlComparison::kLess,
+              .affinity = TypeAffinity::kNumeric,
+              .collation = *binary,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(zero_register_),
+              .output = AssumeValue(negative_limit_register_),
+          });
+          !compared.has_value()) {
+        return compared;
+      }
     }
+    limit_initialized_ = true;
     return {};
   }
 
@@ -2448,8 +2509,11 @@ class PlanLowerer final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitOffset(Label skipped) {
+  [[nodiscard]] LoweringResult<void> EmitOffset(Label skipped, bool ordered_drain = false) {
     if (limit_ == nullptr || !limit_->offset.has_value()) {
+      return {};
+    }
+    if (sort_ != nullptr && !ordered_drain) {
       return {};
     }
     if (!offset_register_.has_value() || !one_register_.has_value()) {
@@ -2478,11 +2542,31 @@ class PlanLowerer final {
     return BindLabel(*project);
   }
 
-  [[nodiscard]] LoweringResult<void> EmitSorterCandidate() {
-    if (sort_ == nullptr || !sorter_.has_value() || !sorter_record_first_.has_value()) {
-      return std::unexpected(InternalFailure("ordered candidate has no sorter resources"));
+  [[nodiscard]] LoweringResult<void> EmitOrderingKeys() {
+    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+      return std::unexpected(InternalFailure("ordering keys have no record registers"));
     }
-    const SorterId sorter = AssumeValue(sorter_);
+    const RegisterId record_first = AssumeValue(sorter_record_first_);
+    for (std::size_t index = 0; index < sort_->terms.size(); ++index) {
+      const BoundExpressionId expression = sort_->terms[index].expression;
+      if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
+        return emitted;
+      }
+      if (auto copied = Append(CopyInstruction{
+              .input = Home(expression),
+              .output = RegisterId{record_first.value() + static_cast<std::uint32_t>(index)},
+          });
+          !copied.has_value()) {
+        return copied;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderingPayload() {
+    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+      return std::unexpected(InternalFailure("ordering payload has no record registers"));
+    }
     const RegisterId record_first = AssumeValue(sorter_record_first_);
     const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
     for (std::size_t index = 0; index < sort_->payload_expressions.size(); ++index) {
@@ -2499,24 +2583,60 @@ class PlanLowerer final {
         return copied;
       }
     }
-    for (std::size_t index = 0; index < sort_->terms.size(); ++index) {
-      const BoundExpressionId expression = sort_->terms[index].expression;
-      if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
-        return emitted;
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedCandidate(Label rejected) {
+    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+      return std::unexpected(InternalFailure("ordered candidate has no record registers"));
+    }
+    const RegisterId record_first = AssumeValue(sorter_record_first_);
+    const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
+    const auto value_count =
+        static_cast<std::uint32_t>(sort_->terms.size() + sort_->payload_expressions.size());
+
+    if (sort_->schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
+      if (auto payload = EmitOrderingPayload(); !payload.has_value()) {
+        return payload;
       }
-      if (auto copied = Append(CopyInstruction{
-              .input = Home(expression),
-              .output = RegisterId{record_first.value() + static_cast<std::uint32_t>(index)},
-          });
-          !copied.has_value()) {
-        return copied;
+      if (auto keys = EmitOrderingKeys(); !keys.has_value()) {
+        return keys;
+      }
+    } else {
+      if (auto keys = EmitOrderingKeys(); !keys.has_value()) {
+        return keys;
+      }
+      if (ordering_runtime_ == OrderingRuntime::kTopN) {
+        if (!top_n_.has_value()) {
+          return std::unexpected(InternalFailure("top-N candidate has no descriptor"));
+        }
+        auto checked =
+            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(
+                                     AssumeValue(top_n_), record_first, key_count, rejected),
+                                 "unable to emit top-N admission");
+        if (!checked.has_value()) {
+          return std::unexpected(std::move(checked.error()));
+        }
+      }
+      if (auto payload = EmitOrderingPayload(); !payload.has_value()) {
+        return payload;
       }
     }
+
+    if (ordering_runtime_ == OrderingRuntime::kTopN) {
+      return Append(InsertTopNInstruction{
+          .top_n = AssumeValue(top_n_),
+          .first_value = record_first,
+          .value_count = value_count,
+      });
+    }
+    if (ordering_runtime_ != OrderingRuntime::kSorter || !sorter_.has_value()) {
+      return std::unexpected(InternalFailure("ordered candidate has no active capability"));
+    }
     return Append(InsertSorterInstruction{
-        .sorter = sorter,
+        .sorter = AssumeValue(sorter_),
         .first_value = record_first,
-        .value_count =
-            static_cast<std::uint32_t>(sort_->terms.size() + sort_->payload_expressions.size()),
+        .value_count = value_count,
     });
   }
 
@@ -2524,27 +2644,47 @@ class PlanLowerer final {
     if (sort_ == nullptr) {
       return Append(HaltInstruction{});
     }
-    if (!sorter_.has_value() || output_ == nullptr ||
-        sort_->output_fields.size() != bound_select_->result_columns().size()) {
+    if (output_ == nullptr ||
+        sort_->output_fields.size() != bound_select_->result_columns().size() ||
+        ordering_runtime_ == OrderingRuntime::kNone) {
       return std::unexpected(InternalFailure("ordered completion has invalid output metadata"));
     }
-    const SorterId sorter = AssumeValue(sorter_);
 
     auto empty = CreateLabel();
     auto row = CreateLabel();
+    auto advance = CreateLabel();
+    std::optional<Label> positioned_completion;
     if (!empty.has_value()) {
       return std::unexpected(std::move(empty.error()));
     }
     if (!row.has_value()) {
       return std::unexpected(std::move(row.error()));
     }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(sorter, *empty),
-                                        "unable to emit sorter rewind");
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_completion = *label;
+    }
+    ProgramResult<InstructionAddress> rewind_result =
+        ordering_runtime_ == OrderingRuntime::kSorter
+            ? AssumeValue(builder_).EmitRewindSorter(AssumeValue(sorter_), *empty)
+            : AssumeValue(builder_).EmitRewindTopN(AssumeValue(top_n_), *empty);
+    auto rewound = ConvertProgramResult(std::move(rewind_result), "unable to emit ordering rewind");
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
     }
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
+    }
+    if (limit_ != nullptr) {
+      if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
+        return offset;
+      }
     }
     for (std::size_t index = 0; index < sort_->output_fields.size(); ++index) {
       const SortOutputField& output = sort_->output_fields[index];
@@ -2552,13 +2692,22 @@ class PlanLowerer final {
           output.kind == SortOutputFieldKind::kKey
               ? output.field_index
               : static_cast<std::uint32_t>(sort_->terms.size()) + output.field_index;
-      if (auto read = Append(ReadSorterFieldInstruction{
-              .sorter = sorter,
-              .field = field,
-              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
-          });
-          !read.has_value()) {
-        return read;
+      const Instruction read =
+          ordering_runtime_ == OrderingRuntime::kSorter
+              ? Instruction{ReadSorterFieldInstruction{
+                    .sorter = AssumeValue(sorter_),
+                    .field = field,
+                    .output =
+                        RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+                }}
+              : Instruction{ReadTopNFieldInstruction{
+                    .top_n = AssumeValue(top_n_),
+                    .field = field,
+                    .output =
+                        RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+                }};
+      if (auto read_result = Append(read); !read_result.has_value()) {
+        return read_result;
       }
     }
     if (auto result = Append(ResultRowInstruction{
@@ -2568,23 +2717,74 @@ class PlanLowerer final {
         !result.has_value()) {
       return result;
     }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(sorter, *row),
-                                     "unable to emit sorter advance");
+    if (limit_ != nullptr) {
+      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
+          !one_register_.has_value()) {
+        return std::unexpected(InternalFailure("ordered LIMIT drain has no counters"));
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+          !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto decremented = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(one_register_),
+              .output = AssumeValue(limit_register_),
+          });
+          !decremented.has_value()) {
+        return decremented;
+      }
+      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
+                                   AssumeValue(positioned_completion));
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    ProgramResult<InstructionAddress> next_result =
+        ordering_runtime_ == OrderingRuntime::kSorter
+            ? AssumeValue(builder_).EmitNextSorter(AssumeValue(sorter_), *row)
+            : AssumeValue(builder_).EmitNextTopN(AssumeValue(top_n_), *row);
+    auto next = ConvertProgramResult(std::move(next_result), "unable to emit ordering advance");
     if (!next.has_value()) {
       return std::unexpected(std::move(next.error()));
     }
     if (auto bound = BindLabel(*empty); !bound.has_value()) {
       return bound;
     }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = sorter}); !closed.has_value()) {
+    const Instruction close =
+        ordering_runtime_ == OrderingRuntime::kSorter
+            ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(sorter_)}}
+            : Instruction{CloseTopNInstruction{.top_n = AssumeValue(top_n_)}};
+    if (auto closed = Append(close); !closed.has_value()) {
       return closed;
     }
-    return Append(HaltInstruction{});
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (positioned_completion.has_value()) {
+      if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
+        return bound;
+      }
+      const Instruction positioned_close =
+          ordering_runtime_ == OrderingRuntime::kSorter
+              ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(sorter_)}}
+              : Instruction{CloseTopNInstruction{.top_n = AssumeValue(top_n_)}};
+      if (auto closed = Append(positioned_close); !closed.has_value()) {
+        return closed;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitProjection() {
+  [[nodiscard]] LoweringResult<void> EmitProjection(Label rejected) {
     if (sort_ != nullptr) {
-      return EmitSorterCandidate();
+      return EmitOrderedCandidate(rejected);
     }
     const LogicalNode& logical_projection = logical_plan_->node(projection_->logical_projection);
     const auto* projection = std::get_if<LogicalProjectionNode>(&logical_projection.payload);
@@ -2607,7 +2807,7 @@ class PlanLowerer final {
   }
 
   [[nodiscard]] bool NeedsPreopenCompletion() const noexcept {
-    return limit_ != nullptr || guard_ != nullptr;
+    return guard_ != nullptr || (limit_ != nullptr && !limit_initialized_);
   }
 
   [[nodiscard]] LoweringResult<void> EmitEmpty() {
@@ -2644,7 +2844,7 @@ class PlanLowerer final {
     if (auto offset = EmitOffset(*completion); !offset.has_value()) {
       return offset;
     }
-    if (auto projection = EmitProjection(); !projection.has_value()) {
+    if (auto projection = EmitProjection(*completion); !projection.has_value()) {
       return projection;
     }
     if (auto bound = BindLabel(*completion); !bound.has_value()) {
@@ -2848,7 +3048,7 @@ class PlanLowerer final {
     }
 
     std::optional<Label> positioned_completion;
-    if (has_end_key || limit_ != nullptr) {
+    if (has_end_key || (limit_ != nullptr && sort_ == nullptr)) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -2877,11 +3077,11 @@ class PlanLowerer final {
     if (auto offset = EmitOffset(*advance); !offset.has_value()) {
       return offset;
     }
-    if (auto projection = EmitProjection(); !projection.has_value()) {
+    if (auto projection = EmitProjection(*advance); !projection.has_value()) {
       return projection;
     }
 
-    if (limit_ != nullptr) {
+    if (limit_ != nullptr && sort_ == nullptr) {
       if (!positioned_completion.has_value() || !negative_limit_register_.has_value() ||
           !limit_register_.has_value() || !one_register_.has_value()) {
         return std::unexpected(InternalFailure("covering index LIMIT has no loop registers"));
@@ -3045,7 +3245,7 @@ class PlanLowerer final {
       }
       first_end = *first;
       positioned_completion = *positioned;
-    } else if (limit_ != nullptr) {
+    } else if (limit_ != nullptr && sort_ == nullptr) {
       auto positioned = CreateLabel();
       if (!positioned.has_value()) {
         return std::unexpected(std::move(positioned.error()));
@@ -3146,10 +3346,10 @@ class PlanLowerer final {
     if (auto offset = EmitOffset(*advance); !offset.has_value()) {
       return offset;
     }
-    if (auto projection = EmitProjection(); !projection.has_value()) {
+    if (auto projection = EmitProjection(*advance); !projection.has_value()) {
       return projection;
     }
-    if (limit_ != nullptr) {
+    if (limit_ != nullptr && sort_ == nullptr) {
       if (!positioned_completion.has_value() || !negative_limit_register_.has_value() ||
           !limit_register_.has_value() || !one_register_.has_value()) {
         return std::unexpected(InternalFailure("noncovering index LIMIT has no loop registers"));
@@ -3273,12 +3473,12 @@ class PlanLowerer final {
     if (auto offset = EmitOffset(*advance); !offset.has_value()) {
       return offset;
     }
-    if (auto projection = EmitProjection(); !projection.has_value()) {
+    if (auto projection = EmitProjection(*advance); !projection.has_value()) {
       return projection;
     }
 
     std::optional<Label> positioned_completion;
-    if (limit_ != nullptr) {
+    if (limit_ != nullptr && sort_ == nullptr) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -3390,7 +3590,7 @@ class PlanLowerer final {
     if (auto offset = EmitOffset(*positioned); !offset.has_value()) {
       return offset;
     }
-    if (auto projection = EmitProjection(); !projection.has_value()) {
+    if (auto projection = EmitProjection(*positioned); !projection.has_value()) {
       return projection;
     }
     if (auto bound = BindLabel(*positioned); !bound.has_value()) {
@@ -4789,7 +4989,7 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
-  [[nodiscard]] LoweringResult<void> EmitPlan() {
+  [[nodiscard]] LoweringResult<void> EmitAccessPlan() {
     if (std::holds_alternative<PhysicalEmptyNode>(leaf_->payload)) {
       return EmitEmpty();
     }
@@ -4809,6 +5009,141 @@ class PlanLowerer final {
     return std::unexpected(InternalFailure("physical access node is unsupported"));
   }
 
+  [[nodiscard]] LoweringResult<void> EmitRuntimeLimitOrderedPlan() {
+    if (sort_ == nullptr || limit_ == nullptr ||
+        sort_->strategy != PhysicalSortStrategy::kRuntimeLimit || !sorter_.has_value() ||
+        !top_n_.has_value() || !top_n_bound_register_.has_value() || !limit_register_.has_value() ||
+        !negative_limit_register_.has_value()) {
+      return std::unexpected(InternalFailure("runtime LIMIT ORDER BY resources are incomplete"));
+    }
+
+    auto external = CreateLabel();
+    auto completion = CreateLabel();
+    if (!external.has_value()) {
+      return std::unexpected(std::move(external.error()));
+    }
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto initialized = EmitLimitInitialization(*completion); !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto jumped =
+            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+        !jumped.has_value()) {
+      return jumped;
+    }
+
+    if (limit_->offset.has_value()) {
+      if (!offset_register_.has_value() || !maximum_integer_register_.has_value() ||
+          !bound_room_register_.has_value() || !comparison_register_.has_value()) {
+        return std::unexpected(InternalFailure("runtime LIMIT bound has incomplete registers"));
+      }
+      auto maximum = EnsureMaximumIntegerConstant();
+      if (!maximum.has_value()) {
+        return std::unexpected(std::move(maximum.error()));
+      }
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = *maximum,
+              .output = AssumeValue(maximum_integer_register_),
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+      if (auto room = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = AssumeValue(maximum_integer_register_),
+              .right = AssumeValue(offset_register_),
+              .output = AssumeValue(bound_room_register_),
+          });
+          !room.has_value()) {
+        return room;
+      }
+      auto binary = EnsureBinarySymbol();
+      if (!binary.has_value()) {
+        return std::unexpected(std::move(binary.error()));
+      }
+      if (auto overflow = Append(CompareInstruction{
+              .comparison = SqlComparison::kLess,
+              .affinity = TypeAffinity::kNumeric,
+              .collation = *binary,
+              .left = AssumeValue(bound_room_register_),
+              .right = AssumeValue(limit_register_),
+              .output = AssumeValue(comparison_register_),
+          });
+          !overflow.has_value()) {
+        return overflow;
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(comparison_register_), JumpCondition::kIfTrue, *external);
+          !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto bound = Append(BinaryInstruction{
+              .operation = BinaryOperation::kAdd,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(offset_register_),
+              .output = AssumeValue(top_n_bound_register_),
+          });
+          !bound.has_value()) {
+        return bound;
+      }
+    } else if (auto copied = Append(CopyInstruction{
+                   .input = AssumeValue(limit_register_),
+                   .output = AssumeValue(top_n_bound_register_),
+               });
+               !copied.has_value()) {
+      return copied;
+    }
+
+    ordering_runtime_ = OrderingRuntime::kTopN;
+    if (auto opened = Append(OpenTopNInstruction{
+            .top_n = AssumeValue(top_n_),
+            .bound = AssumeValue(top_n_bound_register_),
+        });
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto emitted = EmitAccessPlan(); !emitted.has_value()) {
+      return emitted;
+    }
+
+    if (auto bound = BindLabel(*external); !bound.has_value()) {
+      return bound;
+    }
+    ordering_runtime_ = OrderingRuntime::kSorter;
+    if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto emitted = EmitAccessPlan(); !emitted.has_value()) {
+      return emitted;
+    }
+
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    return Append(HaltInstruction{});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitPlan() {
+    if (sort_ == nullptr) {
+      return EmitAccessPlan();
+    }
+    if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+      return EmitRuntimeLimitOrderedPlan();
+    }
+    if (!sorter_.has_value()) {
+      return std::unexpected(InternalFailure("external ORDER BY has no sorter descriptor"));
+    }
+    ordering_runtime_ = OrderingRuntime::kSorter;
+    if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+        !opened.has_value()) {
+      return opened;
+    }
+    return EmitAccessPlan();
+  }
+
   [[nodiscard]] bool IsRowLoopAccess() const noexcept {
     return table_scan_ != nullptr || index_scan_ != nullptr;
   }
@@ -4820,6 +5155,12 @@ class PlanLowerer final {
   struct NamedSymbol {
     std::string name;
     SymbolId id;
+  };
+
+  enum class OrderingRuntime : std::uint8_t {
+    kNone,
+    kSorter,
+    kTopN,
   };
 
   const PhysicalPlan* read_plan_ = nullptr;
@@ -4865,12 +5206,16 @@ class PlanLowerer final {
   std::uint32_t index_key_capacity_ = 0;
   std::optional<RegisterId> index_rowid_register_;
   std::optional<RegisterId> sorter_record_first_;
+  std::optional<RegisterId> top_n_bound_register_;
+  std::optional<RegisterId> maximum_integer_register_;
+  std::optional<RegisterId> bound_room_register_;
 
   std::optional<ProgramBuilder> builder_;
   std::vector<std::optional<ConstantId>> literal_constants_;
   std::optional<ConstantId> null_constant_;
   std::optional<ConstantId> zero_constant_;
   std::optional<ConstantId> one_constant_;
+  std::optional<ConstantId> maximum_integer_constant_;
   std::vector<SymbolId> collation_symbols_;
   std::vector<SymbolId> function_symbols_;
   std::vector<NamedSymbol> symbol_names_;
@@ -4878,6 +5223,7 @@ class PlanLowerer final {
   std::optional<CursorId> cursor_;
   std::optional<CursorId> index_cursor_;
   std::optional<SorterId> sorter_;
+  std::optional<TopNId> top_n_;
   std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
   std::optional<CursorFieldId> source_rowid_cursor_field_;
   std::vector<bool> source_field_real_affinity_;
@@ -4900,6 +5246,8 @@ class PlanLowerer final {
   std::optional<WriteCursorId> stat1_write_cursor_;
   std::vector<CursorId> analyze_index_cursors_;
   std::vector<CursorId> analyze_table_cursors_;
+  OrderingRuntime ordering_runtime_ = OrderingRuntime::kNone;
+  bool limit_initialized_ = false;
 };
 
 }  // namespace

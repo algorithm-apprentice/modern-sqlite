@@ -266,6 +266,12 @@ struct GeneratedValueInput {
              << ",direction=" << (words[2] % 2U == 0U ? "ascending" : "descending")
              << ",nulls=" << (words[3] % 2U == 0U ? "first" : "last");
       break;
+    case 6:
+      output << "limit=" << (words[1] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[1] % 9U))
+             << ",offset=" << words[2] % 6U
+             << ",direction=" << (words[2] % 2U == 0U ? "ascending" : "descending")
+             << ",nulls=" << (words[3] % 2U == 0U ? "first" : "last");
+      break;
     default:
       output << "unreachable";
       break;
@@ -400,12 +406,60 @@ void RunOrderedScan(ReadSession& session, const std::array<std::uint64_t, 4>& wo
   RequireStatus(statement.Finalize());
 }
 
+void RunOrderedLimit(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const std::int64_t limit = words[1] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[1] % 9U);
+  const auto offset = static_cast<std::size_t>(words[2] % 6U);
+  const bool descending = words[2] % 2U != 0U;
+  const bool nulls_first = words[3] % 2U == 0U;
+  const std::string sql = "SELECT id, value, label, nullable FROM model_rows ORDER BY nullable " +
+                          std::string{descending ? "DESC" : "ASC"} +
+                          (nulls_first ? " NULLS FIRST" : " NULLS LAST") +
+                          ", value DESC, id LIMIT ?1 OFFSET ?2";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(limit)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(static_cast<std::int64_t>(offset))));
+
+  std::vector<const ModelRow*> ordered;
+  ordered.reserve(kRows.size());
+  for (const ModelRow& row : kRows) {
+    ordered.push_back(&row);
+  }
+  std::ranges::sort(ordered, [=](const ModelRow* left, const ModelRow* right) {
+    if (left->nullable.has_value() != right->nullable.has_value()) {
+      return left->nullable.has_value() != nulls_first;
+    }
+    if (left->nullable != right->nullable) {
+      return descending ? left->nullable > right->nullable : left->nullable < right->nullable;
+    }
+    if (left->value != right->value) {
+      return left->value > right->value;
+    }
+    return left->id < right->id;
+  });
+
+  const std::size_t begin = std::min(offset, ordered.size());
+  const std::size_t available = ordered.size() - begin;
+  const std::size_t count =
+      limit < 0 ? available : std::min(available, static_cast<std::size_t>(limit));
+  for (std::size_t index = begin; index < begin + count; ++index) {
+    const ModelRow& expected = *ordered[index];
+    ExpectRowStep(statement);
+    ASSERT_EQ(4U, statement.row().size());
+    ExpectInteger(statement.row()[0], expected.id);
+    ExpectInteger(statement.row()[1], expected.value);
+    ExpectText(statement.row()[2], expected.label);
+    ExpectNullable(statement.row()[3], expected.nullable);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 6> templates{
-      "predicate-scan", "rowid-lookup",       "typed-rebinding",
-      "limit-offset",   "repeated-execution", "ordered-scan",
+  constexpr std::array<std::string_view, 7> templates{
+      "predicate-scan",     "rowid-lookup", "typed-rebinding", "limit-offset",
+      "repeated-execution", "ordered-scan", "ordered-limit",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
@@ -430,6 +484,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 5:
         RunOrderedScan(session, words);
+        break;
+      case 6:
+        RunOrderedLimit(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

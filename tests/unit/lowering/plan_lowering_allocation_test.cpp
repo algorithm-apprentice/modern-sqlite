@@ -298,7 +298,7 @@ int main() try {
   using namespace modern_sqlite;
   const CatalogSnapshotPtr catalog = TestCatalog();
   const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
-  const std::array<PhysicalPlan, 7> physical_plans{
+  const std::array<PhysicalPlan, 8> physical_plans{
       PhysicalFixture(catalog, "SELECT 1"),
       PhysicalFixture(catalog, "SELECT Name FROM Items"),
       PhysicalFixture(catalog, "SELECT Name FROM Items WHERE rowid=?1"),
@@ -307,8 +307,11 @@ int main() try {
       PhysicalFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name=?1"),
       PhysicalFixture(indexed_catalog,
                       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC"),
+      PhysicalFixture(indexed_catalog,
+                      "SELECT Payload, Name FROM Items WHERE Name=?1 "
+                      "ORDER BY id DESC LIMIT ?2 OFFSET ?3"),
   };
-  constexpr std::array<std::size_t, 7> kExpectedAllocations{17U, 28U, 27U, 34U, 34U, 39U, 46U};
+  constexpr std::array<std::size_t, 8> kExpectedAllocations{17U, 28U, 27U, 34U, 34U, 39U, 46U, 59U};
   std::unique_ptr<BytecodeProgram> published;
   for (std::size_t plan_index = 0; plan_index < physical_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {

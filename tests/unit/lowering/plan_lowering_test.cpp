@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -403,7 +404,18 @@ void RequireStatus(Status status) {
   const PhysicalPlan plan = OptimizeOrThrow(sql, catalog, environment);
   LowerPlanResult lowered = LowerPlan(plan);
   if (!lowered.has_value()) {
-    throw std::runtime_error(lowered.error().detail);
+    std::string detail = lowered.error().detail;
+    if (lowered.error().program_error.has_value()) {
+      const ProgramError program_error =
+          TakeOptional(lowered.error().program_error, "missing nested program error");
+      detail.append(": ");
+      detail.append(std::to_string(static_cast<unsigned>(program_error.code)));
+      detail.append(" at ");
+      detail.append(std::to_string(program_error.instruction));
+      detail.append(" detail ");
+      detail.append(std::to_string(program_error.detail));
+    }
+    throw std::runtime_error(std::string{sql} + ": " + detail);
   }
   return std::move(*lowered);
 }
@@ -446,8 +458,12 @@ void RequireStatus(Status status) {
 [[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(
     const BytecodeProgram& program, Pager& pager, std::uint64_t catalog_generation,
     VmEnvironment environment = VmEnvironment::Core(),
-    const TemporaryStorageFactory* temporary_storage = nullptr) {
+    const TemporaryStorageFactory* temporary_storage = nullptr,
+    std::span<const SqlValue> parameters = {}) {
   Vm vm = TakeValue(Vm::Create(program, environment));
+  for (std::size_t index = 0; index < parameters.size(); ++index) {
+    RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
+  }
   if (temporary_storage == nullptr) {
     RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
   } else {
@@ -690,16 +706,22 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
-TEST(ReadLowering, KeepsRuntimeLimitOrderByExplicitlyUnsupported) {
+TEST(ReadLowering, LowersRuntimeLimitOrderByIntoTopNAndExternalFallbackBytecode) {
   const CatalogSnapshotPtr catalog = TestCatalog();
-  const PhysicalPlan plan =
-      OptimizeOrThrow("SELECT name FROM items ORDER BY name LIMIT ?", catalog);
+  const BytecodeProgram program =
+      LowerOrThrow("SELECT id, name FROM items ORDER BY name LIMIT ?1 OFFSET ?2", catalog);
 
-  LowerPlanResult lowered = LowerPlan(plan);
-  ASSERT_FALSE(lowered.has_value());
-  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
-  EXPECT_EQ(ErrorCode::kGeneric, lowered.error().base_error_code());
-  EXPECT_EQ("ORDER BY with runtime LIMIT strategy is not supported", lowered.error().detail);
+  ASSERT_EQ(1U, program.sorters().size());
+  ASSERT_EQ(1U, program.top_ns().size());
+  EXPECT_EQ(program.sorters()[0].field_count, program.top_ns()[0].field_count);
+  EXPECT_EQ(program.sorters()[0].key_field_count, program.top_ns()[0].key_field_count);
+  const std::vector<InstructionKind> kinds = InstructionKinds(program);
+  EXPECT_EQ(1U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenSorter)));
+  EXPECT_EQ(1U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenTopN)));
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kCheckTopN), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kInsertTopN), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kRewindTopN), kinds.end());
+  EXPECT_NE(std::ranges::find(kinds, InstructionKind::kRewindSorter), kinds.end());
 }
 
 TEST(ReadLowering, LowersExternalOrderByIntoVerifiedSorterBytecode) {
@@ -828,6 +850,15 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
   EXPECT_EQ(2U, callback_count);
 
   callback_count = 0;
+  const BytecodeProgram source_free_limited = LowerOrThrow(
+      "SELECT volatile_counter() AS value ORDER BY value LIMIT 1", catalog, custom.Binder());
+  const auto source_free_limited_rows = ExecuteRows(
+      source_free_limited, *pager, catalog->version().generation, custom.Vm(), &temporary_storage);
+  ASSERT_EQ(1U, source_free_limited_rows.size());
+  EXPECT_EQ(1, source_free_limited_rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
   const BytecodeProgram evaluation_order = LowerOrThrow(
       "SELECT volatile_counter() AS payload FROM items "
       "WHERE rowid=1 ORDER BY volatile_counter()+0",
@@ -843,10 +874,21 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
   EXPECT_TRUE(ExecuteRows(rejected_guard, *pager, catalog->version().generation, custom.Vm(),
                           &temporary_storage)
                   .empty());
+  const BytecodeProgram rejected_guard_limited =
+      LowerOrThrow("SELECT name FROM items WHERE stable_guard(1)=0 ORDER BY name LIMIT 1", catalog,
+                   custom.Binder());
+  EXPECT_TRUE(ExecuteRows(rejected_guard_limited, *pager, catalog->version().generation,
+                          custom.Vm(), &temporary_storage)
+                  .empty());
 
   const BytecodeProgram rejected_filter =
       LowerOrThrow("SELECT name FROM items WHERE id<0 ORDER BY name", catalog);
   EXPECT_TRUE(ExecuteRows(rejected_filter, *pager, catalog->version().generation,
+                          VmEnvironment::Core(), &temporary_storage)
+                  .empty());
+  const BytecodeProgram rejected_filter_limited =
+      LowerOrThrow("SELECT name FROM items WHERE id<0 ORDER BY name LIMIT 1", catalog);
+  EXPECT_TRUE(ExecuteRows(rejected_filter_limited, *pager, catalog->version().generation,
                           VmEnvironment::Core(), &temporary_storage)
                   .empty());
 
@@ -857,6 +899,13 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
   ASSERT_EQ(1U, lookup_rows.size());
   EXPECT_EQ(2, lookup_rows[0][0].integer_value());
   EXPECT_EQ("beta", TextBytes(lookup_rows[0][1]));
+  const BytecodeProgram limited_lookup =
+      LowerOrThrow("SELECT id, name FROM items WHERE rowid=2 ORDER BY name DESC LIMIT 1", catalog);
+  const auto limited_lookup_rows =
+      ExecuteRows(limited_lookup, *pager, catalog->version().generation, VmEnvironment::Core(),
+                  &temporary_storage);
+  ASSERT_EQ(1U, limited_lookup_rows.size());
+  EXPECT_EQ("beta", TextBytes(limited_lookup_rows[0][1]));
 }
 
 TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans) {
@@ -900,6 +949,101 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
     EXPECT_EQ(13 - static_cast<std::int64_t>(index), noncovering_rows[index][0].integer_value());
     EXPECT_EQ(128U, BlobBytes(noncovering_rows[index][1]).size());
   }
+
+  const BytecodeProgram limited_covering = LowerOrThrow(
+      "SELECT id, score FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' "
+      "ORDER BY id DESC LIMIT 2 OFFSET 1",
+      catalog);
+  ASSERT_EQ(1U, limited_covering.cursors().size());
+  const auto limited_covering_rows =
+      ExecuteRows(limited_covering, *pager, catalog->version().generation, VmEnvironment::Core(),
+                  &temporary_storage);
+  ASSERT_EQ(2U, limited_covering_rows.size());
+  EXPECT_EQ(12, limited_covering_rows[0][0].integer_value());
+  EXPECT_EQ(11, limited_covering_rows[1][0].integer_value());
+
+  const BytecodeProgram limited_noncovering = LowerOrThrow(
+      "SELECT id, payload FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' "
+      "ORDER BY id DESC LIMIT 2 OFFSET 1",
+      catalog);
+  ASSERT_EQ(2U, limited_noncovering.cursors().size());
+  const auto limited_noncovering_rows =
+      ExecuteRows(limited_noncovering, *pager, catalog->version().generation, VmEnvironment::Core(),
+                  &temporary_storage);
+  ASSERT_EQ(2U, limited_noncovering_rows.size());
+  EXPECT_EQ(12, limited_noncovering_rows[0][0].integer_value());
+  EXPECT_EQ(11, limited_noncovering_rows[1][0].integer_value());
+}
+
+TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+  const TemporaryStorageFactory memory_storage =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1U << 20U},
+                                                }));
+  const CustomEnvironment custom;
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT volatile_counter() AS payload, name FROM items "
+      "ORDER BY name LIMIT ?1 OFFSET ?2",
+      catalog, custom.Binder());
+
+  callback_count = 0;
+  std::array<SqlValue, 2> bounded_parameters{
+      SqlValue::Integer(1),
+      SqlValue::Integer(1),
+  };
+  const auto bounded = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
+                                   &memory_storage, bounded_parameters);
+  ASSERT_EQ(1U, bounded.size());
+  EXPECT_EQ(2, bounded[0][0].integer_value());
+  EXPECT_EQ("beta", TextBytes(bounded[0][1]));
+  EXPECT_EQ(2U, callback_count);
+
+  callback_count = 0;
+  std::array<SqlValue, 2> negative_parameters{
+      SqlValue::Integer(-1),
+      SqlValue::Integer(1),
+  };
+  const auto negative = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
+                                    &memory_storage, negative_parameters);
+  ASSERT_EQ(2U, negative.size());
+  EXPECT_EQ(2, negative[0][0].integer_value());
+  EXPECT_EQ("beta", TextBytes(negative[0][1]));
+  EXPECT_EQ(3, negative[1][0].integer_value());
+  EXPECT_EQ("gamma", TextBytes(negative[1][1]));
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  std::array<SqlValue, 2> overflow_parameters{
+      SqlValue::Integer(std::numeric_limits<std::int64_t>::max()),
+      SqlValue::Integer(1),
+  };
+  const auto overflow = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
+                                    &memory_storage, overflow_parameters);
+  ASSERT_EQ(2U, overflow.size());
+  EXPECT_EQ("beta", TextBytes(overflow[0][1]));
+  EXPECT_EQ("gamma", TextBytes(overflow[1][1]));
+  EXPECT_EQ(3U, callback_count);
+
+  const BytecodeProgram zero =
+      LowerOrThrow("SELECT failing() FROM items ORDER BY name LIMIT 0 OFFSET failing()", catalog,
+                   custom.Binder());
+  callback_count = 0;
+  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm(), &memory_storage)
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+  Vm zero_without_storage = TakeValue(Vm::Create(zero, custom.Vm()));
+  RequireStatus(zero_without_storage.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(zero_without_storage.Step()));
 }
 
 TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
@@ -2460,6 +2604,11 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
   sorter_limit.maximum_sorters = 0;
   expect_limit("SELECT name FROM items ORDER BY name", sorter_limit,
                ProgramErrorCode::kSorterLimitExceeded);
+
+  ProgramLimits top_n_limit;
+  top_n_limit.maximum_top_ns = 0;
+  expect_limit("SELECT name FROM items ORDER BY name LIMIT 1", top_n_limit,
+               ProgramErrorCode::kTopNLimitExceeded);
 
   ProgramLimits result_limit;
   result_limit.maximum_result_columns = 0;
