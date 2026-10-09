@@ -765,10 +765,10 @@ struct BoundedTopN::Impl {
     std::unique_ptr<Entry> next;
   };
 
-  Impl(RecordSorterDescriptor owned_descriptor, std::size_t maximum_records,
+  Impl(RecordSorterDescriptor owned_descriptor, std::size_t retained_limit,
        ByteCount threshold) noexcept
       : descriptor(std::move(owned_descriptor)),
-        maximum_records(maximum_records),
+        maximum_records(retained_limit),
         memory_threshold(threshold) {}
 
   ~Impl() { Clear(); }
