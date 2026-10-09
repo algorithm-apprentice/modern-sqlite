@@ -28,6 +28,7 @@
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
@@ -444,9 +445,15 @@ void RequireStatus(Status status) {
 
 [[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(
     const BytecodeProgram& program, Pager& pager, std::uint64_t catalog_generation,
-    VmEnvironment environment = VmEnvironment::Core()) {
+    VmEnvironment environment = VmEnvironment::Core(),
+    const TemporaryStorageFactory* temporary_storage = nullptr) {
   Vm vm = TakeValue(Vm::Create(program, environment));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
+  if (temporary_storage == nullptr) {
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
+  } else {
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{pager, catalog_generation, *temporary_storage}));
+  }
   std::vector<std::vector<SqlValue>> rows;
   while (true) {
     const VmStep step = TakeValue(vm.Step());
@@ -683,7 +690,7 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
-TEST(ReadLowering, RejectsOrderByUntilSorterBytecodeIsImplemented) {
+TEST(ReadLowering, KeepsRuntimeLimitOrderByExplicitlyUnsupported) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT name FROM items ORDER BY name LIMIT ?", catalog);
@@ -692,7 +699,207 @@ TEST(ReadLowering, RejectsOrderByUntilSorterBytecodeIsImplemented) {
   ASSERT_FALSE(lowered.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
   EXPECT_EQ(ErrorCode::kGeneric, lowered.error().base_error_code());
-  EXPECT_EQ("ORDER BY lowering is not supported", lowered.error().detail);
+  EXPECT_EQ("ORDER BY with runtime LIMIT strategy is not supported", lowered.error().detail);
+}
+
+TEST(ReadLowering, LowersExternalOrderByIntoVerifiedSorterBytecode) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BytecodeProgram program =
+      LowerOrThrow("SELECT id, name FROM items ORDER BY name DESC NULLS FIRST", catalog);
+
+  ASSERT_EQ(1U, program.sorters().size());
+  const OrderingRecordDescriptor& sorter = program.sorters().front();
+  EXPECT_EQ(2U, sorter.field_count);
+  EXPECT_EQ(1U, sorter.key_field_count);
+  ASSERT_EQ(1U, sorter.key_columns.size());
+  EXPECT_EQ("BINARY", program.symbol(sorter.key_columns[0].collation));
+  EXPECT_EQ(BytecodeSortOrder::kDescending, sorter.key_columns[0].order);
+  EXPECT_EQ(BytecodeNullPlacement::kFirst, sorter.key_columns[0].null_placement);
+
+  const std::vector<InstructionKind> kinds = InstructionKinds(program);
+  EXPECT_EQ(1U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenSorter)));
+  EXPECT_EQ(1U,
+            static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kInsertSorter)));
+  EXPECT_EQ(1U,
+            static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kRewindSorter)));
+  EXPECT_EQ(2U,
+            static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kReadSorterField)));
+  EXPECT_EQ(1U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kNextSorter)));
+  EXPECT_EQ(1U, static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kCloseSorter)));
+
+  const auto insert = std::ranges::find_if(program.instructions(), [](const Instruction& value) {
+    return std::holds_alternative<InsertSorterInstruction>(value);
+  });
+  ASSERT_NE(program.instructions().end(), insert);
+  const auto& insert_operation = std::get<InsertSorterInstruction>(*insert);
+  std::optional<std::size_t> payload_copy;
+  std::optional<std::size_t> key_copy;
+  std::size_t insert_index = 0;
+  for (auto current = program.instructions().begin(); current != insert;
+       ++current, ++insert_index) {
+    const auto* copy = std::get_if<CopyInstruction>(&*current);
+    if (copy == nullptr) {
+      continue;
+    }
+    if (copy->output.value() == insert_operation.first_value.value()) {
+      key_copy = insert_index;
+    } else if (copy->output.value() == insert_operation.first_value.value() + 1U) {
+      payload_copy = insert_index;
+    }
+  }
+  ASSERT_TRUE(payload_copy.has_value());
+  ASSERT_TRUE(key_copy.has_value());
+  EXPECT_LT(*payload_copy, *key_copy);
+  const auto rewind = std::ranges::find(kinds, InstructionKind::kRewindSorter) - kinds.begin();
+  EXPECT_LT(insert_index, static_cast<std::size_t>(rewind));
+
+  std::vector<std::uint32_t> output_fields;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* read = std::get_if<ReadSorterFieldInstruction>(&instruction); read != nullptr) {
+      output_fields.push_back(read->field);
+    }
+  }
+  EXPECT_EQ((std::vector<std::uint32_t>{1, 0}), output_fields);
+}
+
+TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 83}));
+  const TemporaryStorageFactory temporary_storage =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+
+  const BytecodeProgram ordered =
+      LowerOrThrow("SELECT id, name FROM items ORDER BY name DESC", catalog);
+  const auto rows = ExecuteRows(ordered, *pager, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary_storage);
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ("gamma", TextBytes(rows[0][1]));
+  EXPECT_EQ(2, rows[1][0].integer_value());
+  EXPECT_EQ("beta", TextBytes(rows[1][1]));
+  EXPECT_EQ(1, rows[2][0].integer_value());
+  EXPECT_EQ("alpha", TextBytes(rows[2][1]));
+
+  const BytecodeProgram empty =
+      LowerOrThrow("SELECT name FROM items WHERE 0 ORDER BY name", catalog);
+  EXPECT_TRUE(ExecuteRows(empty, *pager, catalog->version().generation, VmEnvironment::Core(),
+                          &temporary_storage)
+                  .empty());
+}
+
+TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 89}));
+  const TemporaryStorageFactory temporary_storage =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1U << 20U},
+                                                }));
+  const CustomEnvironment custom;
+
+  callback_count = 0;
+  const BytecodeProgram source_free = LowerOrThrow(
+      "SELECT volatile_counter() AS value ORDER BY value, value DESC", catalog, custom.Binder());
+  ASSERT_FALSE(source_free.requires_database_snapshot());
+  ASSERT_EQ(1U, source_free.sorters().size());
+  EXPECT_EQ(2U, source_free.sorters()[0].field_count);
+  std::vector<std::uint32_t> source_free_output_fields;
+  for (const Instruction& instruction : source_free.instructions()) {
+    if (const auto* read = std::get_if<ReadSorterFieldInstruction>(&instruction); read != nullptr) {
+      source_free_output_fields.push_back(read->field);
+    }
+  }
+  EXPECT_EQ((std::vector<std::uint32_t>{1}), source_free_output_fields);
+  const auto source_free_rows = ExecuteRows(source_free, *pager, catalog->version().generation,
+                                            custom.Vm(), &temporary_storage);
+  ASSERT_EQ(1U, source_free_rows.size());
+  EXPECT_EQ(2, source_free_rows[0][0].integer_value());
+  EXPECT_EQ(2U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram evaluation_order = LowerOrThrow(
+      "SELECT volatile_counter() AS payload FROM items "
+      "WHERE rowid=1 ORDER BY volatile_counter()+0",
+      catalog, custom.Binder());
+  const auto evaluation_rows = ExecuteRows(evaluation_order, *pager, catalog->version().generation,
+                                           custom.Vm(), &temporary_storage);
+  ASSERT_EQ(1U, evaluation_rows.size());
+  EXPECT_EQ(1, evaluation_rows[0][0].integer_value());
+  EXPECT_EQ(2U, callback_count);
+
+  const BytecodeProgram rejected_guard = LowerOrThrow(
+      "SELECT name FROM items WHERE stable_guard(1)=0 ORDER BY name", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(rejected_guard, *pager, catalog->version().generation, custom.Vm(),
+                          &temporary_storage)
+                  .empty());
+
+  const BytecodeProgram rejected_filter =
+      LowerOrThrow("SELECT name FROM items WHERE id<0 ORDER BY name", catalog);
+  EXPECT_TRUE(ExecuteRows(rejected_filter, *pager, catalog->version().generation,
+                          VmEnvironment::Core(), &temporary_storage)
+                  .empty());
+
+  const BytecodeProgram lookup =
+      LowerOrThrow("SELECT id, name FROM items WHERE rowid=2 ORDER BY name DESC", catalog);
+  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation,
+                                       VmEnvironment::Core(), &temporary_storage);
+  ASSERT_EQ(1U, lookup_rows.size());
+  EXPECT_EQ(2, lookup_rows[0][0].integer_value());
+  EXPECT_EQ("beta", TextBytes(lookup_rows[0][1]));
+}
+
+TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+  const TemporaryStorageFactory temporary_storage =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1U << 20U},
+                                                }));
+
+  const BytecodeProgram covering = LowerOrThrow(
+      "SELECT id, score FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' "
+      "ORDER BY id DESC",
+      catalog);
+  ASSERT_EQ(1U, covering.cursors().size());
+  const auto covering_rows = ExecuteRows(covering, *pager, catalog->version().generation,
+                                         VmEnvironment::Core(), &temporary_storage);
+  ASSERT_EQ(4U, covering_rows.size());
+  for (std::size_t index = 0; index < covering_rows.size(); ++index) {
+    const std::int64_t expected = 13 - static_cast<std::int64_t>(index);
+    EXPECT_EQ(expected, covering_rows[index][0].integer_value());
+    EXPECT_EQ(expected, covering_rows[index][1].integer_value());
+  }
+
+  const BytecodeProgram noncovering = LowerOrThrow(
+      "SELECT id, payload FROM items "
+      "WHERE category>='category-000a' AND category<'category-000e' "
+      "ORDER BY id DESC",
+      catalog);
+  ASSERT_EQ(2U, noncovering.cursors().size());
+  const auto noncovering_rows = ExecuteRows(noncovering, *pager, catalog->version().generation,
+                                            VmEnvironment::Core(), &temporary_storage);
+  ASSERT_EQ(4U, noncovering_rows.size());
+  for (std::size_t index = 0; index < noncovering_rows.size(); ++index) {
+    EXPECT_EQ(13 - static_cast<std::int64_t>(index), noncovering_rows[index][0].integer_value());
+    EXPECT_EQ(128U, BlobBytes(noncovering_rows[index][1]).size());
+  }
 }
 
 TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
@@ -2248,6 +2455,11 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
   ProgramLimits cursor_limit;
   cursor_limit.maximum_cursors = 0;
   expect_limit("SELECT name FROM items", cursor_limit, ProgramErrorCode::kCursorLimitExceeded);
+
+  ProgramLimits sorter_limit;
+  sorter_limit.maximum_sorters = 0;
+  expect_limit("SELECT name FROM items ORDER BY name", sorter_limit,
+               ProgramErrorCode::kSorterLimitExceeded);
 
   ProgramLimits result_limit;
   result_limit.maximum_result_columns = 0;

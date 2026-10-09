@@ -308,23 +308,58 @@ TEST(ReadSession, OpensLazilyAndReportsMissingCorruptAndEmptyDatabases) {
 }
 
 TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
-  const ReadSessionOptions options{
+  const ReadSessionOptions memory_options{
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kMemory,
               .sorter_memory_threshold = ByteCount{4096},
           },
   };
-  ReadSession path_session = TakeValue(ReadSession::Open(FixturePath().string(), options));
-  ReadStatement path_statement = PrepareStatement(path_session, "SELECT 1");
+  ReadSession path_session = TakeValue(ReadSession::Open(FixturePath().string(), memory_options));
+  ReadStatement path_statement =
+      PrepareStatement(path_session, "SELECT id, name FROM items ORDER BY name DESC");
   EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
+  EXPECT_EQ(3, IntegerValue(path_statement.row()[0]));
+  EXPECT_EQ("gamma", TextValue(path_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
+  EXPECT_EQ(2, IntegerValue(path_statement.row()[0]));
+  EXPECT_EQ("beta", TextValue(path_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
+  EXPECT_EQ(1, IntegerValue(path_statement.row()[0]));
+  EXPECT_EQ("alpha", TextValue(path_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(path_statement.Step()));
+  RequireStatus(path_statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(path_statement.Step()));
+  EXPECT_EQ(3, IntegerValue(path_statement.row()[0]));
+  RequireStatus(path_statement.Finalize());
 
-  ReadSession vfs_session =
-      TakeValue(ReadSession::Open(std::make_unique<PosixVfs>(), FixturePath().string(), options));
-  ReadStatement vfs_statement = PrepareStatement(vfs_session, "SELECT 2");
+  const ReadSessionOptions file_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = ByteCount{1},
+          },
+  };
+  ReadSession vfs_session = TakeValue(
+      ReadSession::Open(std::make_unique<PosixVfs>(), FixturePath().string(), file_options));
+  ReadStatement vfs_statement =
+      PrepareStatement(vfs_session, "SELECT id, name FROM items ORDER BY name");
   EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
+  EXPECT_EQ(1, IntegerValue(vfs_statement.row()[0]));
+  EXPECT_EQ("alpha", TextValue(vfs_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
+  EXPECT_EQ(2, IntegerValue(vfs_statement.row()[0]));
+  EXPECT_EQ("beta", TextValue(vfs_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
+  EXPECT_EQ(3, IntegerValue(vfs_statement.row()[0]));
+  EXPECT_EQ("gamma", TextValue(vfs_statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(vfs_statement.Step()));
+  RequireStatus(vfs_statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));
+  EXPECT_EQ(1, IntegerValue(vfs_statement.row()[0]));
+  RequireStatus(vfs_statement.Finalize());
 
-  ReadSessionOptions invalid = options;
+  ReadSessionOptions invalid = memory_options;
   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
   invalid.temporary_storage.mode = static_cast<TemporaryStoreMode>(2);
   const auto rejected = ReadSession::Open(FixturePath().string(), invalid);
@@ -351,11 +386,11 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   ASSERT_FALSE(syntax.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, syntax.error().code());
 
-  const auto order_by = session.Prepare(Utf8View{"SELECT Name FROM Items ORDER BY Name"});
+  const auto order_by = session.Prepare(Utf8View{"SELECT Name FROM Items ORDER BY Name LIMIT 1"});
   ASSERT_FALSE(order_by.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, order_by.error().code());
-  EXPECT_NE(std::string_view::npos,
-            order_by.error().message().find("ORDER BY lowering is not supported"));
+  EXPECT_NE(std::string_view::npos, order_by.error().message().find(
+                                        "ORDER BY with runtime LIMIT strategy is not supported"));
 }
 
 TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {
