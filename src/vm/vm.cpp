@@ -2066,6 +2066,27 @@ struct Vm::Impl {
     return VmStep::kRow;
   }
 
+  template <typename Operation>
+    requires(std::is_same_v<Operation, OpenSorterInstruction> ||
+             std::is_same_v<Operation, InsertSorterInstruction> ||
+             std::is_same_v<Operation, RewindSorterInstruction> ||
+             std::is_same_v<Operation, ReadSorterFieldInstruction> ||
+             std::is_same_v<Operation, NextSorterInstruction> ||
+             std::is_same_v<Operation, ResetSorterInstruction> ||
+             std::is_same_v<Operation, CloseSorterInstruction> ||
+             std::is_same_v<Operation, OpenTopNInstruction> ||
+             std::is_same_v<Operation, CheckTopNInstruction> ||
+             std::is_same_v<Operation, InsertTopNInstruction> ||
+             std::is_same_v<Operation, RewindTopNInstruction> ||
+             std::is_same_v<Operation, ReadTopNFieldInstruction> ||
+             std::is_same_v<Operation, NextTopNInstruction> ||
+             std::is_same_v<Operation, ResetTopNInstruction> ||
+             std::is_same_v<Operation, CloseTopNInstruction>)
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const Operation&) {
+    return std::unexpected(
+        VmError(ErrorCode::kGeneric, "ordering bytecode execution is not implemented"));
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
     CloseAllCursors();
     ClearRow();

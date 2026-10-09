@@ -2551,6 +2551,37 @@ TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
   EXPECT_FALSE(vm.has_execution_context());
 }
 
+TEST_F(VmTest, RejectsOrderingBytecodeUntilRuntimeSupportLands) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.symbols.emplace_back("BINARY");
+  input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = Symbol(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  input.instructions = {
+      OpenSorterInstruction{.sorter = SorterId(0)},
+      HaltInstruction{},
+  };
+  const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
+  const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+
+  const auto stepped = vm.Step();
+  ASSERT_FALSE(stepped.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, stepped.error().code());
+}
+
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
 TEST_F(VmTest, RecordsExecutedInstructionsWhenInstrumentationIsEnabled) {
   const BytecodeProgram program =

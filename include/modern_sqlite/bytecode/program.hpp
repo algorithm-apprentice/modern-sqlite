@@ -35,6 +35,8 @@ struct InstructionAddressTag;
 struct RegisterIdTag;
 struct CursorIdTag;
 struct WriteCursorIdTag;
+struct SorterIdTag;
+struct TopNIdTag;
 struct ParameterIdTag;
 struct ConstantIdTag;
 struct SymbolIdTag;
@@ -45,6 +47,8 @@ using InstructionAddress = BytecodeId<InstructionAddressTag>;
 using RegisterId = BytecodeId<RegisterIdTag>;
 using CursorId = BytecodeId<CursorIdTag>;
 using WriteCursorId = BytecodeId<WriteCursorIdTag>;
+using SorterId = BytecodeId<SorterIdTag>;
+using TopNId = BytecodeId<TopNIdTag>;
 using ParameterId = BytecodeId<ParameterIdTag>;
 using ConstantId = BytecodeId<ConstantIdTag>;
 using SymbolId = BytecodeId<SymbolIdTag>;
@@ -97,6 +101,11 @@ enum class BytecodeSortOrder : std::uint8_t {
   kDescending,
 };
 
+enum class BytecodeNullPlacement : std::uint8_t {
+  kFirst,
+  kLast,
+};
+
 enum class UnaryOperation : std::uint8_t {
   kNegate,
   kBitwiseNot,
@@ -145,6 +154,20 @@ struct IndexColumnMetadata {
   BytecodeSortOrder order;
 
   constexpr auto operator<=>(const IndexColumnMetadata&) const noexcept = default;
+};
+
+struct OrderingColumnMetadata {
+  SymbolId collation;
+  BytecodeSortOrder order = BytecodeSortOrder::kAscending;
+  BytecodeNullPlacement null_placement = BytecodeNullPlacement::kFirst;
+
+  constexpr auto operator<=>(const OrderingColumnMetadata&) const noexcept = default;
+};
+
+struct OrderingRecordDescriptor {
+  std::uint32_t field_count = 0;
+  std::uint32_t key_field_count = 0;
+  std::vector<OrderingColumnMetadata> key_columns;
 };
 
 struct ReadCursorDescriptor {
@@ -498,6 +521,82 @@ struct ResultRowInstruction {
   std::uint32_t count;
 };
 
+struct OpenSorterInstruction {
+  SorterId sorter;
+};
+
+struct InsertSorterInstruction {
+  SorterId sorter;
+  RegisterId first_value;
+  std::uint32_t value_count;
+};
+
+struct RewindSorterInstruction {
+  SorterId sorter;
+  InstructionAddress empty_target;
+};
+
+struct ReadSorterFieldInstruction {
+  SorterId sorter;
+  std::uint32_t field;
+  RegisterId output;
+};
+
+struct NextSorterInstruction {
+  SorterId sorter;
+  InstructionAddress next_target;
+};
+
+struct ResetSorterInstruction {
+  SorterId sorter;
+};
+
+struct CloseSorterInstruction {
+  SorterId sorter;
+};
+
+struct OpenTopNInstruction {
+  TopNId top_n;
+  RegisterId bound;
+};
+
+struct CheckTopNInstruction {
+  TopNId top_n;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress rejected_target;
+};
+
+struct InsertTopNInstruction {
+  TopNId top_n;
+  RegisterId first_value;
+  std::uint32_t value_count;
+};
+
+struct RewindTopNInstruction {
+  TopNId top_n;
+  InstructionAddress empty_target;
+};
+
+struct ReadTopNFieldInstruction {
+  TopNId top_n;
+  std::uint32_t field;
+  RegisterId output;
+};
+
+struct NextTopNInstruction {
+  TopNId top_n;
+  InstructionAddress next_target;
+};
+
+struct ResetTopNInstruction {
+  TopNId top_n;
+};
+
+struct CloseTopNInstruction {
+  TopNId top_n;
+};
+
 using Instruction = std::variant<
     HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
     UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
@@ -514,7 +613,11 @@ using Instruction = std::variant<
     EnsureDatabaseInitializedInstruction, CreateTableRootInstruction, CreateIndexRootInstruction,
     ClearStat1Instruction, ComputeIndexStat1Instruction, ComputeTableStat1Instruction,
     IncrementSchemaCookieInstruction, CompareInstruction, CallScalarInstruction, JumpInstruction,
-    JumpIfInstruction, ResultRowInstruction>;
+    JumpIfInstruction, ResultRowInstruction, OpenSorterInstruction, InsertSorterInstruction,
+    RewindSorterInstruction, ReadSorterFieldInstruction, NextSorterInstruction,
+    ResetSorterInstruction, CloseSorterInstruction, OpenTopNInstruction, CheckTopNInstruction,
+    InsertTopNInstruction, RewindTopNInstruction, ReadTopNFieldInstruction, NextTopNInstruction,
+    ResetTopNInstruction, CloseTopNInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -571,6 +674,21 @@ enum class InstructionKind : std::uint8_t {
   kJump,
   kJumpIf,
   kResultRow,
+  kOpenSorter,
+  kInsertSorter,
+  kRewindSorter,
+  kReadSorterField,
+  kNextSorter,
+  kResetSorter,
+  kCloseSorter,
+  kOpenTopN,
+  kCheckTopN,
+  kInsertTopN,
+  kRewindTopN,
+  kReadTopNField,
+  kNextTopN,
+  kResetTopN,
+  kCloseTopN,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -589,6 +707,8 @@ struct ProgramInput {
   std::vector<std::string> symbols;
   std::vector<ReadCursorDescriptor> cursors;
   std::vector<WriteCursorDescriptor> write_cursors;
+  std::vector<OrderingRecordDescriptor> sorters;
+  std::vector<OrderingRecordDescriptor> top_ns;
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
 };
@@ -597,6 +717,8 @@ struct ProgramLimits {
   std::size_t maximum_instructions = 250'000'000;
   std::size_t maximum_registers = 1'000'000;
   std::size_t maximum_cursors = 100'000;
+  std::size_t maximum_sorters = 100'000;
+  std::size_t maximum_top_ns = 100'000;
   std::size_t maximum_parameters = 32'766;
   std::size_t maximum_constants = 1'000'000;
   std::size_t maximum_symbols = 1'000'000;
@@ -612,6 +734,8 @@ enum class ProgramErrorCode : std::uint8_t {
   kInstructionLimitExceeded,
   kRegisterLimitExceeded,
   kCursorLimitExceeded,
+  kSorterLimitExceeded,
+  kTopNLimitExceeded,
   kParameterLimitExceeded,
   kConstantLimitExceeded,
   kSymbolLimitExceeded,
@@ -629,6 +753,9 @@ enum class ProgramErrorCode : std::uint8_t {
   kInvalidConstant,
   kInvalidSymbol,
   kInvalidCursor,
+  kInvalidSorter,
+  kInvalidTopN,
+  kInvalidOrderingDescriptor,
   kInvalidField,
   kInvalidBranchTarget,
   kInvalidEnumValue,
@@ -647,6 +774,14 @@ enum class ProgramErrorCode : std::uint8_t {
   kCursorNotOpen,
   kCursorNotPositioned,
   kCursorStateConflict,
+  kCapabilityAlreadyOpen,
+  kCapabilityAlreadyClosed,
+  kCapabilityNotOpen,
+  kCapabilityNotWriting,
+  kCapabilityNotPositioned,
+  kCapabilityStateConflict,
+  kTopNCandidatePending,
+  kTopNCandidateRequired,
   kRowIdOperationRequiresRowIdTable,
   kIndexOperationRequiresIndex,
   kFallthroughPastEnd,
@@ -717,6 +852,12 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const WriteCursorDescriptor> write_cursors() const noexcept {
     return input_.write_cursors;
   }
+  [[nodiscard]] std::span<const OrderingRecordDescriptor> sorters() const noexcept {
+    return input_.sorters;
+  }
+  [[nodiscard]] std::span<const OrderingRecordDescriptor> top_ns() const noexcept {
+    return input_.top_ns;
+  }
   [[nodiscard]] std::span<const ResultColumnMetadata> result_columns() const noexcept {
     return input_.result_columns;
   }
@@ -731,6 +872,8 @@ class BytecodeProgram final {
   [[nodiscard]] std::string_view symbol(SymbolId id) const noexcept;
   [[nodiscard]] const ReadCursorDescriptor& cursor(CursorId id) const noexcept;
   [[nodiscard]] const WriteCursorDescriptor& write_cursor(WriteCursorId id) const noexcept;
+  [[nodiscard]] const OrderingRecordDescriptor& sorter(SorterId id) const noexcept;
+  [[nodiscard]] const OrderingRecordDescriptor& top_n(TopNId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
 
  private:
@@ -771,6 +914,8 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<SymbolId> AddSymbol(std::string symbol);
   [[nodiscard]] ProgramResult<CursorId> AddCursor(ReadCursorDescriptor cursor);
   [[nodiscard]] ProgramResult<WriteCursorId> AddWriteCursor(WriteCursorDescriptor cursor);
+  [[nodiscard]] ProgramResult<SorterId> AddSorter(OrderingRecordDescriptor sorter);
+  [[nodiscard]] ProgramResult<TopNId> AddTopN(OrderingRecordDescriptor top_n);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
@@ -786,6 +931,15 @@ class ProgramBuilder final {
                                                                       Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRowIdList(RegisterId output,
                                                                     Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindSorter(SorterId sorter,
+                                                                   Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitNextSorter(SorterId sorter,
+                                                                 Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitCheckTopN(TopNId top_n, RegisterId first_key,
+                                                                std::uint32_t key_count,
+                                                                Label rejected_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindTopN(TopNId top_n, Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitNextTopN(TopNId top_n, Label next_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
@@ -819,6 +973,28 @@ class ProgramBuilder final {
   };
   struct PendingNextRowIdList {
     RegisterId output;
+    Label target;
+  };
+  struct PendingRewindSorter {
+    SorterId sorter;
+    Label target;
+  };
+  struct PendingNextSorter {
+    SorterId sorter;
+    Label target;
+  };
+  struct PendingCheckTopN {
+    TopNId top_n;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+  };
+  struct PendingRewindTopN {
+    TopNId top_n;
+    Label target;
+  };
+  struct PendingNextTopN {
+    TopNId top_n;
     Label target;
   };
   struct PendingSeekRowId {
@@ -856,8 +1032,9 @@ class ProgramBuilder final {
 
   using PendingInstruction =
       std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
-                   PendingNextRowIdList, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
-                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
+                   PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
+                   PendingRewindTopN, PendingNextTopN, PendingSeekRowId, PendingSeekIndex,
+                   PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

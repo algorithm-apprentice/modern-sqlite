@@ -42,6 +42,30 @@ int main() try {
   };
   input.constants.push_back(SqlValue::Text("payload"));
   input.symbols.emplace_back("BINARY");
+  input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  input.top_ns.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kDescending,
+                  .null_placement = BytecodeNullPlacement::kLast,
+              },
+          },
+  });
   input.write_cursors.push_back(WriteCursorDescriptor{
       .root_page = RootPageNumber(2),
       .columns =
@@ -85,6 +109,18 @@ int main() try {
     checksum += cursor.root_page.value();
     checksum += cursor.columns.size();
   }
+  for (const OrderingRecordDescriptor& sorter : program.sorters()) {
+    checksum += sorter.field_count;
+    checksum += sorter.key_field_count;
+    checksum += sorter.key_columns.size();
+  }
+  for (const OrderingRecordDescriptor& top_n : program.top_ns()) {
+    checksum += top_n.field_count;
+    checksum += top_n.key_field_count;
+    checksum += top_n.key_columns.size();
+  }
+  checksum += program.sorter(SorterId(0)).field_count;
+  checksum += program.top_n(TopNId(0)).field_count;
   checksum += static_cast<std::size_t>(program.statement_kind());
   checksum += static_cast<std::size_t>(program.transaction_access());
   checksum += static_cast<std::size_t>(program.rollback_mode());
