@@ -285,6 +285,84 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] BytecodeProgram BuildTopNProgram(const Pager& pager, std::int64_t bound = 2) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(bound));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(30));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(10));
+  input.constants.push_back(SqlValue::Integer(4));
+  input.constants.push_back(SqlValue::Integer(40));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Integer(20));
+  input.top_ns.push_back(SorterDescriptor());
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "key",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+      ResultColumnMetadata{
+          .name = "payload",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+  };
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenTopNInstruction{.top_n = TopNId(0), .bound = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      CheckTopNInstruction{
+          .top_n = TopNId(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(6),
+      },
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      InsertTopNInstruction{.top_n = TopNId(0), .first_value = Reg(1), .value_count = 2},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(1)},
+      CheckTopNInstruction{
+          .top_n = TopNId(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(10),
+      },
+      LoadConstantInstruction{.constant = Constant(4), .output = Reg(2)},
+      InsertTopNInstruction{.top_n = TopNId(0), .first_value = Reg(1), .value_count = 2},
+      LoadConstantInstruction{.constant = Constant(5), .output = Reg(1)},
+      CheckTopNInstruction{
+          .top_n = TopNId(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(14),
+      },
+      LoadConstantInstruction{.constant = Constant(6), .output = Reg(2)},
+      InsertTopNInstruction{.top_n = TopNId(0), .first_value = Reg(1), .value_count = 2},
+      LoadConstantInstruction{.constant = Constant(7), .output = Reg(1)},
+      CheckTopNInstruction{
+          .top_n = TopNId(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(18),
+      },
+      LoadConstantInstruction{.constant = Constant(8), .output = Reg(2)},
+      InsertTopNInstruction{.top_n = TopNId(0), .first_value = Reg(1), .value_count = 2},
+      RewindTopNInstruction{.top_n = TopNId(0), .empty_target = Address(23)},
+      ReadTopNFieldInstruction{.top_n = TopNId(0), .field = 0, .output = Reg(1)},
+      ReadTopNFieldInstruction{.top_n = TopNId(0), .field = 1, .output = Reg(2)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      NextTopNInstruction{.top_n = TopNId(0), .next_target = Address(19)},
+      ResetTopNInstruction{.top_n = TopNId(0)},
+      CloseTopNInstruction{.top_n = TopNId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
   if (pager == nullptr) {
@@ -2693,7 +2771,7 @@ TEST(Vm, SorterBytecodeRequiresTemporaryStorageFactoryAndCleansIoFailures) {
   RequireStatus(pager->EndRead());
 }
 
-TEST_F(VmTest, ResolvesSorterCollationsAndKeepsTopNExplicitlyUnsupported) {
+TEST_F(VmTest, ResolvesOrderingCapabilityCollations) {
   ProgramInput missing_collation;
   missing_collation.schema_version = CurrentSchema(*pager_);
   missing_collation.symbols.emplace_back("missing");
@@ -2707,27 +2785,61 @@ TEST_F(VmTest, ResolvesSorterCollationsAndKeepsTopNExplicitlyUnsupported) {
   const auto unresolved = Vm::Create(missing_program, VmEnvironment::Core());
   ASSERT_FALSE(unresolved.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, unresolved.error().code());
+}
 
-  ProgramInput input;
-  input.schema_version = CurrentSchema(*pager_);
-  input.register_count = 1;
-  input.symbols.emplace_back("BINARY");
-  input.constants.push_back(SqlValue::Integer(1));
-  input.top_ns.push_back(SorterDescriptor());
-  input.instructions = {
-      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
-      OpenTopNInstruction{.top_n = TopNId(0), .bound = Reg(0)},
-      HaltInstruction{},
-  };
-  const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
+TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
+  const BytecodeProgram program = BuildTopNProgram(*pager_);
   const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(
       vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
 
-  const auto stepped = vm.Step();
-  ASSERT_FALSE(stepped.has_value());
-  EXPECT_EQ(ErrorCode::kGeneric, stepped.error().code());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  EXPECT_EQ(1, vm.row()[0].integer_value());
+  EXPECT_EQ(10, vm.row()[1].integer_value());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(2, vm.row()[0].integer_value());
+  EXPECT_EQ(20, vm.row()[1].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_EQ(28U, vm.executed_instruction_count());
+}
+
+TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
+  const BytecodeProgram zero_program = BuildTopNProgram(*pager_, 0);
+  const TemporaryStorageFactory normal = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
+  Vm missing = TakeValue(Vm::Create(zero_program, VmEnvironment::Core()));
+  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  const auto missing_factory = missing.Step();
+  ASSERT_FALSE(missing_factory.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
+
+  Vm zero = TakeValue(Vm::Create(zero_program, VmEnvironment::Core()));
+  RequireStatus(
+      zero.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, normal}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(zero.Step()));
+
+  const BytecodeProgram bounded_program = BuildTopNProgram(*pager_);
+  const TemporaryStorageFactory tiny =
+      TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  Vm failing = TakeValue(Vm::Create(bounded_program, VmEnvironment::Core()));
+  RequireStatus(
+      failing.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, tiny}));
+  const auto failed = failing.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+
+  const BytecodeProgram negative_program = BuildTopNProgram(*pager_, -1);
+  Vm negative = TakeValue(Vm::Create(negative_program, VmEnvironment::Core()));
+  RequireStatus(
+      negative.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, normal}));
+  const auto rejected_bound = negative.Step();
+  ASSERT_FALSE(rejected_bound.has_value());
+  EXPECT_EQ(ErrorCode::kTypeMismatch, rejected_bound.error().code());
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION

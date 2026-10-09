@@ -754,6 +754,303 @@ Status RecordSorter::Reset() {
 
 void RecordSorter::Close() noexcept { impl_.reset(); }
 
+struct BoundedTopN::Impl {
+  struct Entry {
+    Entry(ByteBuffer owned_record, RecordView record_view, std::size_t owned_bytes) noexcept
+        : record(std::move(owned_record)), view(record_view), memory_bytes(owned_bytes) {}
+
+    ByteBuffer record;
+    RecordView view;
+    std::size_t memory_bytes;
+    std::unique_ptr<Entry> next;
+  };
+
+  Impl(RecordSorterDescriptor owned_descriptor, std::size_t maximum_records,
+       ByteCount threshold) noexcept
+      : descriptor(std::move(owned_descriptor)),
+        maximum_records(maximum_records),
+        memory_threshold(threshold) {}
+
+  ~Impl() { Clear(); }
+
+  void Clear() noexcept {
+    while (head != nullptr) {
+      std::unique_ptr<Entry> next = std::move(head->next);
+      head.reset();
+      head = std::move(next);
+    }
+    current = nullptr;
+    pending_record.reset();
+    pending_view.reset();
+    pending_bytes = 0;
+    count = 0;
+    memory_bytes = 0;
+  }
+
+  [[nodiscard]] std::weak_ordering Compare(const RecordView& left,
+                                           const RecordView& right) const noexcept {
+    const auto comparison = CompareRecordPrefixes(left, right, descriptor.key_columns);
+    if (!comparison.has_value()) {
+      std::terminate();
+    }
+    return *comparison;
+  }
+
+  [[nodiscard]] Entry* Largest() const noexcept {
+    Entry* result = head.get();
+    if (result == nullptr) {
+      return nullptr;
+    }
+    while (result->next != nullptr) {
+      result = result->next.get();
+    }
+    return result;
+  }
+
+  [[nodiscard]] std::size_t RemoveLargest() noexcept {
+    std::unique_ptr<Entry>* link = &head;
+    while ((*link)->next != nullptr) {
+      link = &((*link)->next);
+    }
+    std::unique_ptr<Entry> removed = std::move(*link);
+    const std::size_t removed_bytes = removed->memory_bytes;
+    memory_bytes -= removed_bytes;
+    --count;
+    return removed_bytes;
+  }
+
+  void InsertSorted(std::unique_ptr<Entry> entry) noexcept {
+    std::unique_ptr<Entry>* link = &head;
+    while (*link != nullptr && Compare((*link)->view, entry->view) != std::weak_ordering::greater) {
+      link = &((*link)->next);
+    }
+    entry->next = std::move(*link);
+    *link = std::move(entry);
+  }
+
+  RecordSorterDescriptor descriptor;
+  std::size_t maximum_records;
+  ByteCount memory_threshold;
+  std::unique_ptr<Entry> head;
+  Entry* current = nullptr;
+  std::optional<ByteBuffer> pending_record;
+  std::optional<RecordView> pending_view;
+  std::size_t pending_bytes = 0;
+  std::size_t count = 0;
+  std::size_t memory_bytes = 0;
+  BoundedTopNState state = BoundedTopNState::kWriting;
+};
+
+std::string_view BoundedTopNStateName(BoundedTopNState state) noexcept {
+  switch (state) {
+    case BoundedTopNState::kWriting:
+      return "writing";
+    case BoundedTopNState::kCandidatePending:
+      return "candidate_pending";
+    case BoundedTopNState::kPositioned:
+      return "positioned";
+    case BoundedTopNState::kExhausted:
+      return "exhausted";
+    case BoundedTopNState::kClosed:
+      return "closed";
+  }
+  return "unknown";
+}
+
+BoundedTopN::BoundedTopN(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+BoundedTopN::BoundedTopN(BoundedTopN&&) noexcept = default;
+
+BoundedTopN& BoundedTopN::operator=(BoundedTopN&&) noexcept = default;
+
+BoundedTopN::~BoundedTopN() = default;
+
+Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor, std::size_t bound,
+                                        ByteCount memory_threshold) {
+  auto validated = ValidateRecordSorterDescriptor(descriptor);
+  if (!validated.has_value()) {
+    return std::unexpected(std::move(validated.error()));
+  }
+  try {
+    auto impl = std::make_unique<Impl>(descriptor, bound, memory_threshold);
+    return BoundedTopN{std::move(impl)};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+bool BoundedTopN::valid() const noexcept { return impl_ != nullptr; }
+
+BoundedTopNState BoundedTopN::state() const noexcept {
+  return impl_ == nullptr ? BoundedTopNState::kClosed : impl_->state;
+}
+
+std::size_t BoundedTopN::bound() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->maximum_records;
+}
+
+std::size_t BoundedTopN::record_count() const noexcept {
+  return impl_ == nullptr ? 0U : impl_->count;
+}
+
+ByteCount BoundedTopN::memory_usage() const noexcept {
+  return ByteCount{impl_ == nullptr ? 0U : impl_->memory_bytes};
+}
+
+bool BoundedTopN::has_pending_candidate() const noexcept {
+  return impl_ != nullptr && impl_->state == BoundedTopNState::kCandidatePending;
+}
+
+Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
+  if (impl_ == nullptr || impl_->state != BoundedTopNState::kWriting) {
+    return std::unexpected(Misuse("top-N admission requires the writing state"));
+  }
+  auto view = RecordView::Parse(key.view(), impl_->descriptor.record_options);
+  if (!view.has_value()) {
+    return std::unexpected(std::move(view.error()));
+  }
+  if (view->field_count() != impl_->descriptor.key_field_count) {
+    return std::unexpected(Misuse("top-N candidate key shape does not match the descriptor"));
+  }
+  if (impl_->maximum_records == 0U) {
+    return TopNCheckResult::kRejected;
+  }
+
+  std::size_t removed_bytes = 0;
+  const bool full = impl_->count == impl_->maximum_records;
+  if (full) {
+    const Impl::Entry* largest = impl_->Largest();
+    if (largest == nullptr) {
+      std::terminate();
+    }
+    if (impl_->Compare(*view, largest->view) != std::weak_ordering::less) {
+      return TopNCheckResult::kRejected;
+    }
+    removed_bytes = largest->memory_bytes;
+  }
+
+  const std::size_t key_bytes = key.capacity().value();
+  if (impl_->memory_bytes < removed_bytes ||
+      key_bytes > std::numeric_limits<std::size_t>::max() - (impl_->memory_bytes - removed_bytes)) {
+    return std::unexpected(TooLarge("top-N candidate memory accounting overflowed"));
+  }
+  const std::size_t projected = impl_->memory_bytes - removed_bytes + key_bytes;
+  if (projected > impl_->memory_threshold.value()) {
+    return std::unexpected(TooLarge("top-N memory threshold exceeded before spill support"));
+  }
+
+  if (full) {
+    static_cast<void>(impl_->RemoveLargest());
+  }
+  impl_->pending_record.emplace(std::move(key));
+  impl_->pending_view = *view;
+  impl_->pending_bytes = key_bytes;
+  impl_->memory_bytes += key_bytes;
+  impl_->state = BoundedTopNState::kCandidatePending;
+  return TopNCheckResult::kAccepted;
+}
+
+Status BoundedTopN::Insert(ByteBuffer record) {
+  if (impl_ == nullptr || impl_->state != BoundedTopNState::kCandidatePending ||
+      !impl_->pending_view.has_value()) {
+    return std::unexpected(Misuse("top-N insertion requires a pending candidate"));
+  }
+  auto view = RecordView::Parse(record.view(), impl_->descriptor.record_options);
+  if (!view.has_value()) {
+    return std::unexpected(std::move(view.error()));
+  }
+  if (view->field_count() != impl_->descriptor.field_count) {
+    return std::unexpected(Misuse("top-N record shape does not match the descriptor"));
+  }
+  auto key_comparison =
+      CompareRecordPrefixes(*view, *impl_->pending_view, impl_->descriptor.key_columns);
+  if (!key_comparison.has_value()) {
+    return std::unexpected(std::move(key_comparison.error()));
+  }
+  if (*key_comparison != std::weak_ordering::equivalent) {
+    return std::unexpected(Misuse("top-N record key does not match the pending candidate"));
+  }
+
+  const std::size_t record_bytes = record.capacity().value();
+  if (record_bytes > std::numeric_limits<std::size_t>::max() - sizeof(Impl::Entry)) {
+    Error error = TooLarge("top-N record memory accounting overflowed");
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
+  const std::size_t retained_bytes = impl_->memory_bytes - impl_->pending_bytes;
+  if (entry_bytes > std::numeric_limits<std::size_t>::max() - retained_bytes ||
+      retained_bytes + entry_bytes > impl_->memory_threshold.value()) {
+    Error error = TooLarge("top-N memory threshold exceeded before spill support");
+    Close();
+    return std::unexpected(std::move(error));
+  }
+
+  try {
+    auto entry = std::make_unique<Impl::Entry>(std::move(record), *view, entry_bytes);
+    impl_->InsertSorted(std::move(entry));
+    impl_->memory_bytes = retained_bytes + entry_bytes;
+    ++impl_->count;
+    impl_->pending_record.reset();
+    impl_->pending_view.reset();
+    impl_->pending_bytes = 0;
+    impl_->state = BoundedTopNState::kWriting;
+    return {};
+  } catch (const std::bad_alloc&) {
+    Error error = Error::OutOfMemory();
+    Close();
+    return std::unexpected(std::move(error));
+  } catch (const std::length_error&) {
+    Error error = Error::OutOfMemory();
+    Close();
+    return std::unexpected(std::move(error));
+  }
+}
+
+Status BoundedTopN::Rewind() {
+  if (impl_ == nullptr || impl_->state != BoundedTopNState::kWriting) {
+    return std::unexpected(Misuse("top-N rewind requires the writing state"));
+  }
+  impl_->current = impl_->head.get();
+  impl_->state =
+      impl_->current == nullptr ? BoundedTopNState::kExhausted : BoundedTopNState::kPositioned;
+  return {};
+}
+
+Result<RecordView> BoundedTopN::current_record() const {
+  if (impl_ == nullptr || impl_->state != BoundedTopNState::kPositioned ||
+      impl_->current == nullptr) {
+    return std::unexpected(Misuse("top-N has no current record"));
+  }
+  return impl_->current->view;
+}
+
+Result<bool> BoundedTopN::Next() {
+  if (impl_ == nullptr || impl_->state != BoundedTopNState::kPositioned ||
+      impl_->current == nullptr) {
+    return std::unexpected(Misuse("top-N next requires a current record"));
+  }
+  impl_->current = impl_->current->next.get();
+  if (impl_->current == nullptr) {
+    impl_->state = BoundedTopNState::kExhausted;
+    return false;
+  }
+  return true;
+}
+
+Status BoundedTopN::Reset() {
+  if (impl_ == nullptr) {
+    return std::unexpected(Misuse("cannot reset a closed top-N relation"));
+  }
+  impl_->Clear();
+  impl_->state = BoundedTopNState::kWriting;
+  return {};
+}
+
+void BoundedTopN::Close() noexcept { impl_.reset(); }
+
 Result<void> ValidateTemporaryStorageOptions(TemporaryStorageOptions options) {
   if (!IsValid(options.mode)) {
     return std::unexpected(Misuse("temporary storage mode is invalid"));
@@ -798,6 +1095,11 @@ ByteCount TemporaryStorageFactory::sorter_memory_threshold() const noexcept {
 Result<RecordSorter> TemporaryStorageFactory::CreateRecordSorter(
     const RecordSorterDescriptor& descriptor) const {
   return RecordSorter::Create(descriptor, sorter_memory_threshold(), *this);
+}
+
+Result<BoundedTopN> TemporaryStorageFactory::CreateTopN(const RecordSorterDescriptor& descriptor,
+                                                        std::size_t bound) const {
+  return BoundedTopN::Create(descriptor, bound, sorter_memory_threshold());
 }
 
 Result<std::unique_ptr<File>> TemporaryStorageFactory::CreateTemporaryFile() const {

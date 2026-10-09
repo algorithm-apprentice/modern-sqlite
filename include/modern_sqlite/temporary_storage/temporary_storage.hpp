@@ -88,6 +88,56 @@ class RecordSorter final {
   std::unique_ptr<Impl> impl_;
 };
 
+enum class BoundedTopNState : std::uint8_t {
+  kWriting,
+  kCandidatePending,
+  kPositioned,
+  kExhausted,
+  kClosed,
+};
+
+enum class TopNCheckResult : std::uint8_t {
+  kRejected,
+  kAccepted,
+};
+
+[[nodiscard]] std::string_view BoundedTopNStateName(BoundedTopNState state) noexcept;
+
+class BoundedTopN final {
+ public:
+  BoundedTopN(const BoundedTopN&) = delete;
+  BoundedTopN& operator=(const BoundedTopN&) = delete;
+  BoundedTopN(BoundedTopN&&) noexcept;
+  BoundedTopN& operator=(BoundedTopN&&) noexcept;
+  ~BoundedTopN();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] BoundedTopNState state() const noexcept;
+  [[nodiscard]] std::size_t bound() const noexcept;
+  [[nodiscard]] std::size_t record_count() const noexcept;
+  [[nodiscard]] ByteCount memory_usage() const noexcept;
+  [[nodiscard]] bool has_pending_candidate() const noexcept;
+
+  [[nodiscard]] Result<TopNCheckResult> CheckCandidate(ByteBuffer key);
+  [[nodiscard]] Status Insert(ByteBuffer record);
+  [[nodiscard]] Status Rewind();
+  [[nodiscard]] Result<RecordView> current_record() const;
+  [[nodiscard]] Result<bool> Next();
+  [[nodiscard]] Status Reset();
+  void Close() noexcept;
+
+ private:
+  friend class TemporaryStorageFactory;
+
+  struct Impl;
+
+  explicit BoundedTopN(std::unique_ptr<Impl> impl) noexcept;
+  [[nodiscard]] static Result<BoundedTopN> Create(const RecordSorterDescriptor& descriptor,
+                                                  std::size_t bound, ByteCount memory_threshold);
+
+  std::unique_ptr<Impl> impl_;
+};
+
 // Borrows the VFS and pager. Both must outlive the factory and every temporary
 // file created through it.
 class TemporaryStorageFactory final {
@@ -107,6 +157,8 @@ class TemporaryStorageFactory final {
   [[nodiscard]] ByteCount sorter_memory_threshold() const noexcept;
   [[nodiscard]] Result<RecordSorter> CreateRecordSorter(
       const RecordSorterDescriptor& descriptor) const;
+  [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
+                                               std::size_t bound) const;
   [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;
 
  private:
