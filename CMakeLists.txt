@@ -762,6 +762,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_allocation_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/lexer_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/syntax/parser_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/temporary_storage/record_sorter_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/temporary_storage/record_sorter_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/temporary_storage/temporary_storage_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/text/text_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/transaction/transaction_coordinator_oom_test.cpp"
