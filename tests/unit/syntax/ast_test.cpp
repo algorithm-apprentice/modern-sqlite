@@ -1491,7 +1491,7 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     ExpectMisuse(SyntaxTree::Create("SELECT 1", {}, std::move(statement)));
   }
   {
-    std::string source = "SELECT 1 ORDER BY 1";
+    const std::string source = "SELECT 1 ORDER BY 1";
     const SourceSpan result = FindSpan(source, "1");
     const SourceSpan ordering = FindSpan(source, "1", result.end().value());
     std::vector<Expression> expressions{
@@ -1530,7 +1530,7 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
   }
   {
-    std::string source = "SELECT 1 LIMIT 2 ORDER BY 3";
+    const std::string source = "SELECT 1 LIMIT 2 ORDER BY 3";
     const SourceSpan result = FindSpan(source, "1");
     const SourceSpan limit = FindSpan(source, "2");
     const SourceSpan ordering = FindSpan(source, "3");

@@ -1170,7 +1170,7 @@ class Parser final {
     if (!first.has_value()) {
       return std::unexpected(first.error());
     }
-    terms.push_back(std::move(*first));
+    terms.push_back(*first);
     while (ConsumeIf(TokenKind::kComma)) {
       if (terms.size() >= options_.maximum_columns) {
         return std::unexpected(ResourceLimit(Peek()));
@@ -1179,7 +1179,7 @@ class Parser final {
       if (!term.has_value()) {
         return std::unexpected(term.error());
       }
-      terms.push_back(std::move(*term));
+      terms.push_back(*term);
     }
     return terms;
   }
