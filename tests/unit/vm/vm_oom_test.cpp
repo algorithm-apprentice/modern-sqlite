@@ -11,6 +11,7 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
+#include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
@@ -320,6 +321,63 @@ int main() try {
     return 1;
   }
   if (!rowid_list_vm->DetachExecutionContext().has_value()) {
+    return 1;
+  }
+
+  ProgramInput sorter_input;
+  sorter_input.schema_version = input.schema_version;
+  sorter_input.register_count = 2;
+  sorter_input.constants.push_back(SqlValue::Integer(1));
+  sorter_input.constants.push_back(SqlValue::Text(std::string(256, 's')));
+  sorter_input.symbols.emplace_back("BINARY");
+  sorter_input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  sorter_input.instructions = {
+      OpenSorterInstruction{.sorter = SorterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      InsertSorterInstruction{
+          .sorter = SorterId(0),
+          .first_value = RegisterId(0),
+          .value_count = 2,
+      },
+      HaltInstruction{},
+  };
+  auto sorter_program = BytecodeProgram::Create(sorter_input);
+  if (!sorter_program.has_value()) {
+    return 1;
+  }
+  auto sorter_factory_result =
+      TemporaryStorageFactory::Create(vfs, **opened,
+                                      TemporaryStorageOptions{
+                                          .mode = TemporaryStoreMode::kMemory,
+                                          .sorter_memory_threshold = ByteCount{1U << 20U},
+                                      });
+  if (!sorter_factory_result.has_value()) {
+    return 1;
+  }
+  const TemporaryStorageFactory sorter_factory = std::move(*sorter_factory_result);
+  auto sorter_vm = Vm::Create(*sorter_program, VmEnvironment::Core());
+  if (!sorter_vm.has_value() ||
+      !sorter_vm->AttachExecutionContext(VmExecutionContext{**opened, 17, sorter_factory})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto sorter_failure = sorter_vm->Step();
+  fail_allocations = false;
+  if (sorter_failure.has_value() || sorter_failure.error().code() != ErrorCode::kOutOfMemory ||
+      sorter_vm->state() != VmState::kError) {
     return 1;
   }
 

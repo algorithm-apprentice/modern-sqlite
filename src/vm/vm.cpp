@@ -266,6 +266,7 @@ struct Vm::Impl {
         parameters_(program.parameter_count()),
         cursors_(program.cursors().size()),
         write_cursors_(program.write_cursors().size()),
+        sorters_(program.sorters().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
@@ -306,6 +307,24 @@ struct Vm::Impl {
           return std::unexpected(std::move(collation.error()));
         }
       }
+    }
+    const auto resolve_ordering_collations =
+        [&](std::span<const OrderingRecordDescriptor> descriptors) -> Status {
+      for (const OrderingRecordDescriptor& descriptor : descriptors) {
+        for (const OrderingColumnMetadata& column : descriptor.key_columns) {
+          auto collation = ResolveCollation(column.collation);
+          if (!collation.has_value()) {
+            return std::unexpected(std::move(collation.error()));
+          }
+        }
+      }
+      return {};
+    };
+    if (auto resolved = resolve_ordering_collations(program_->sorters()); !resolved.has_value()) {
+      return resolved;
+    }
+    if (auto resolved = resolve_ordering_collations(program_->top_ns()); !resolved.has_value()) {
+      return resolved;
     }
 
     const std::span<const Instruction> instructions = program_->instructions();
@@ -2066,15 +2085,127 @@ struct Vm::Impl {
     return VmStep::kRow;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenSorterInstruction& operation) {
+    if (temporary_storage_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "sorter bytecode requires temporary storage"));
+    }
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is already open"));
+    }
+
+    const OrderingRecordDescriptor& descriptor = program_->sorter(operation.sorter);
+    RecordSorterDescriptor runtime_descriptor{
+        .field_count = descriptor.field_count,
+        .key_field_count = descriptor.key_field_count,
+    };
+    runtime_descriptor.key_columns.reserve(descriptor.key_columns.size());
+    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
+      runtime_descriptor.key_columns.emplace_back(
+          CollationFor(column.collation),
+          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
+                                                         : IndexSortDirection::kAscending,
+          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
+                                                                : IndexNullPlacement::kFirst);
+    }
+    runtime_descriptor.record_options = record_options_;
+    auto created = temporary_storage_->CreateRecordSorter(runtime_descriptor);
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    runtime.emplace(std::move(*created));
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertSorterInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    const auto values = std::span<const SqlValue>{registers_}.subspan(operation.first_value.value(),
+                                                                      operation.value_count);
+    auto encoded = EncodeRecord(values, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto inserted = runtime->Insert(std::move(*encoded));
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindSorterInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    auto rewound = runtime->Rewind();
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (runtime->state() == RecordSorterState::kExhausted) {
+      program_counter_ = operation.empty_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadSorterFieldInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    auto record = runtime->current_record();
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    auto field = record->field(operation.field);
+    if (!field.has_value()) {
+      return std::unexpected(std::move(field.error()));
+    }
+    return SetRegister(operation.output, field->ToOwned());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextSorterInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    auto advanced = runtime->Next();
+    if (!advanced.has_value()) {
+      return std::unexpected(std::move(advanced.error()));
+    }
+    if (*advanced) {
+      program_counter_ = operation.next_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResetSorterInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    auto reset = runtime->Reset();
+    if (!reset.has_value()) {
+      return std::unexpected(std::move(reset.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseSorterInstruction& operation) {
+    std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    runtime->Close();
+    runtime.reset();
+    return std::nullopt;
+  }
+
   template <typename Operation>
-    requires(std::is_same_v<Operation, OpenSorterInstruction> ||
-             std::is_same_v<Operation, InsertSorterInstruction> ||
-             std::is_same_v<Operation, RewindSorterInstruction> ||
-             std::is_same_v<Operation, ReadSorterFieldInstruction> ||
-             std::is_same_v<Operation, NextSorterInstruction> ||
-             std::is_same_v<Operation, ResetSorterInstruction> ||
-             std::is_same_v<Operation, CloseSorterInstruction> ||
-             std::is_same_v<Operation, OpenTopNInstruction> ||
+    requires(std::is_same_v<Operation, OpenTopNInstruction> ||
              std::is_same_v<Operation, CheckTopNInstruction> ||
              std::is_same_v<Operation, InsertTopNInstruction> ||
              std::is_same_v<Operation, RewindTopNInstruction> ||
@@ -2228,6 +2359,9 @@ struct Vm::Impl {
       cursor.table.reset();
       cursor.index.reset();
     }
+    for (std::optional<RecordSorter>& sorter : sorters_) {
+      sorter.reset();
+    }
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -2244,6 +2378,7 @@ struct Vm::Impl {
   std::vector<SqlValue> parameters_;
   std::vector<RuntimeCursor> cursors_;
   std::vector<RuntimeWriteCursor> write_cursors_;
+  std::vector<std::optional<RecordSorter>> sorters_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;

@@ -223,6 +223,68 @@ class TemporaryDatabase final {
   return vm;
 }
 
+[[nodiscard]] OrderingRecordDescriptor SorterDescriptor(SymbolId collation = Symbol(0)) {
+  return OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = collation,
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  };
+}
+
+[[nodiscard]] BytecodeProgram BuildSorterProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Text("three"));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Text("one"));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Text("two"));
+  input.sorters.push_back(SorterDescriptor());
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "key",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+      ResultColumnMetadata{
+          .name = "payload",
+          .declared_type = "TEXT",
+          .affinity = TypeAffinity::kText,
+      },
+  };
+  input.instructions = {
+      OpenSorterInstruction{.sorter = SorterId(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      InsertSorterInstruction{.sorter = SorterId(0), .first_value = Reg(0), .value_count = 2},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(1)},
+      InsertSorterInstruction{.sorter = SorterId(0), .first_value = Reg(0), .value_count = 2},
+      LoadConstantInstruction{.constant = Constant(4), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(5), .output = Reg(1)},
+      InsertSorterInstruction{.sorter = SorterId(0), .first_value = Reg(0), .value_count = 2},
+      RewindSorterInstruction{.sorter = SorterId(0), .empty_target = Address(15)},
+      ReadSorterFieldInstruction{.sorter = SorterId(0), .field = 0, .output = Reg(0)},
+      ReadSorterFieldInstruction{.sorter = SorterId(0), .field = 1, .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(0), .count = 2},
+      NextSorterInstruction{.sorter = SorterId(0), .next_target = Address(11)},
+      ResetSorterInstruction{.sorter = SorterId(0)},
+      CloseSorterInstruction{.sorter = SorterId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
   if (pager == nullptr) {
@@ -2551,24 +2613,110 @@ TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
   EXPECT_FALSE(vm.has_execution_context());
 }
 
-TEST_F(VmTest, RejectsOrderingBytecodeUntilRuntimeSupportLands) {
+TEST_F(VmTest, ExecutesSorterBytecodeAndCanResetForAnotherRun) {
+  const BytecodeProgram program = BuildSorterProgram(*pager_);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1U << 20U},
+                                                }));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+
+  const std::array<std::string_view, 3> payloads{"one", "two", "three"};
+  for (std::int64_t expected = 1; expected <= 3; ++expected) {
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(2U, vm.row().size());
+    EXPECT_EQ(expected, vm.row()[0].integer_value());
+    EXPECT_EQ(payloads[static_cast<std::size_t>(expected - 1)],
+              vm.row()[1].text_value().value_or(Utf8View{}).bytes());
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(1, vm.row()[0].integer_value());
+}
+
+TEST(Vm, SpillsSorterBytecodeAndDeletesTemporaryFilesAtHalt) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = BuildSorterProgram(*pager);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_TRUE(vfs.pathless_file_present());
+  while (TakeValue(vm.Step()) == VmStep::kRow) {
+  }
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
+TEST(Vm, SorterBytecodeRequiresTemporaryStorageFactoryAndCleansIoFailures) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = BuildSorterProgram(*pager);
+
+  Vm missing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  const auto missing_factory = missing.Step();
+  ASSERT_FALSE(missing_factory.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
+
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
+  Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  const auto failed = failing.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
+TEST_F(VmTest, ResolvesSorterCollationsAndKeepsTopNExplicitlyUnsupported) {
+  ProgramInput missing_collation;
+  missing_collation.schema_version = CurrentSchema(*pager_);
+  missing_collation.symbols.emplace_back("missing");
+  missing_collation.sorters.push_back(SorterDescriptor());
+  missing_collation.instructions = {
+      OpenSorterInstruction{.sorter = SorterId(0)},
+      HaltInstruction{},
+  };
+  const BytecodeProgram missing_program =
+      TakeProgramValue(BytecodeProgram::Create(missing_collation));
+  const auto unresolved = Vm::Create(missing_program, VmEnvironment::Core());
+  ASSERT_FALSE(unresolved.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, unresolved.error().code());
+
   ProgramInput input;
   input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
   input.symbols.emplace_back("BINARY");
-  input.sorters.push_back(OrderingRecordDescriptor{
-      .field_count = 1,
-      .key_field_count = 1,
-      .key_columns =
-          {
-              OrderingColumnMetadata{
-                  .collation = Symbol(0),
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
-              },
-          },
-  });
+  input.constants.push_back(SqlValue::Integer(1));
+  input.top_ns.push_back(SorterDescriptor());
   input.instructions = {
-      OpenSorterInstruction{.sorter = SorterId(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenTopNInstruction{.top_n = TopNId(0), .bound = Reg(0)},
       HaltInstruction{},
   };
   const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
