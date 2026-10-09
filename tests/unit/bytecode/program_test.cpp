@@ -21,6 +21,8 @@ namespace {
 [[nodiscard]] constexpr WriteCursorId WriteCursor(std::uint32_t value) {
   return WriteCursorId(value);
 }
+[[nodiscard]] constexpr SorterId Sorter(std::uint32_t value) { return SorterId(value); }
+[[nodiscard]] constexpr TopNId TopN(std::uint32_t value) { return TopNId(value); }
 [[nodiscard]] constexpr ParameterId Parameter(std::uint32_t value) { return ParameterId(value); }
 [[nodiscard]] constexpr ConstantId Constant(std::uint32_t value) { return ConstantId(value); }
 [[nodiscard]] constexpr SymbolId Symbol(std::uint32_t value) { return SymbolId(value); }
@@ -124,6 +126,21 @@ namespace {
       .unique = true,
       .unique_not_null = false,
       .storage = WriteCursorStorageKind::kIndex,
+  };
+}
+
+[[nodiscard]] OrderingRecordDescriptor OrderingDescriptor() {
+  return OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = Symbol(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
   };
 }
 
@@ -818,6 +835,283 @@ TEST(BytecodeProgramTest, VerifiesTypedAnalyzeInstructions) {
   EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedSorterLifecycleAndDataflow) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Text("payload"));
+  input.sorters.push_back(OrderingDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      InsertSorterInstruction{.sorter = Sorter(0), .first_value = Reg(0), .value_count = 2},
+      RewindSorterInstruction{.sorter = Sorter(0), .empty_target = Address(7)},
+      ReadSorterFieldInstruction{.sorter = Sorter(0), .field = 0, .output = Reg(0)},
+      NextSorterInstruction{.sorter = Sorter(0), .next_target = Address(5)},
+      ResetSorterInstruction{.sorter = Sorter(0)},
+      CloseSorterInstruction{.sorter = Sorter(0)},
+      HaltInstruction{},
+  };
+
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  const auto created = BytecodeProgram::Create(input);
+  ASSERT_TRUE(created.has_value());
+  EXPECT_FALSE(created->requires_database_snapshot());
+  const std::array<std::string_view, 7> names{
+      "open_sorter", "insert_sorter", "rewind_sorter", "read_sorter_field",
+      "next_sorter", "reset_sorter",  "close_sorter",
+  };
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    EXPECT_EQ(names[index], InstructionKindName(InstructionKindOf(input.instructions[index + 2U])));
+  }
+}
+
+TEST(BytecodeProgramTest, VerifiesTypedTopNLifecyclePendingCandidateAndBranches) {
+  ProgramInput input;
+  input.register_count = 3;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(4));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Text("payload"));
+  input.top_ns.push_back(OrderingDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+      CheckTopNInstruction{
+          .top_n = TopN(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(6),
+      },
+      InsertTopNInstruction{.top_n = TopN(0), .first_value = Reg(1), .value_count = 2},
+      RewindTopNInstruction{.top_n = TopN(0), .empty_target = Address(9)},
+      ReadTopNFieldInstruction{.top_n = TopN(0), .field = 1, .output = Reg(2)},
+      NextTopNInstruction{.top_n = TopN(0), .next_target = Address(7)},
+      ResetTopNInstruction{.top_n = TopN(0)},
+      CloseTopNInstruction{.top_n = TopN(0)},
+      HaltInstruction{},
+  };
+
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  const std::array<std::string_view, 8> names{
+      "open_top_n",       "check_top_n", "insert_top_n", "rewind_top_n",
+      "read_top_n_field", "next_top_n",  "reset_top_n",  "close_top_n",
+  };
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    EXPECT_EQ(names[index], InstructionKindName(InstructionKindOf(input.instructions[index + 3U])));
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsInvalidOrderingDescriptorsAndIds) {
+  ProgramInput invalid_descriptor;
+  invalid_descriptor.symbols.emplace_back("BINARY");
+  invalid_descriptor.sorters.push_back(OrderingRecordDescriptor{});
+  invalid_descriptor.instructions = {HaltInstruction{}};
+  EXPECT_EQ(VerifyError(invalid_descriptor), ProgramErrorCode::kInvalidOrderingDescriptor);
+
+  ProgramInput invalid_column;
+  invalid_column.symbols.emplace_back("BINARY");
+  auto descriptor = OrderingDescriptor();
+  descriptor.key_columns[0].null_placement = static_cast<BytecodeNullPlacement>(2);  // NOLINT
+  invalid_column.top_ns.push_back(std::move(descriptor));
+  invalid_column.instructions = {HaltInstruction{}};
+  EXPECT_EQ(VerifyError(invalid_column), ProgramErrorCode::kInvalidOrderingDescriptor);
+
+  ProgramInput invalid_sorter;
+  invalid_sorter.instructions = {
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(invalid_sorter), ProgramErrorCode::kInvalidSorter);
+
+  ProgramInput invalid_top_n;
+  invalid_top_n.register_count = 1;
+  invalid_top_n.constants.push_back(SqlValue::Integer(1));
+  invalid_top_n.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(invalid_top_n), ProgramErrorCode::kInvalidTopN);
+}
+
+TEST(BytecodeProgramTest, RejectsSorterAndTopNRegisterAndLifecycleViolations) {
+  ProgramInput uninitialized_sorter;
+  uninitialized_sorter.register_count = 2;
+  uninitialized_sorter.symbols.emplace_back("BINARY");
+  uninitialized_sorter.sorters.push_back(OrderingDescriptor());
+  uninitialized_sorter.instructions = {
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      InsertSorterInstruction{.sorter = Sorter(0), .first_value = Reg(0), .value_count = 2},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(uninitialized_sorter), ProgramErrorCode::kUninitializedRegister);
+
+  ProgramInput wrong_sorter_range;
+  wrong_sorter_range.register_count = 2;
+  wrong_sorter_range.symbols.emplace_back("BINARY");
+  wrong_sorter_range.sorters.push_back(OrderingDescriptor());
+  wrong_sorter_range.constants.push_back(SqlValue::Integer(1));
+  wrong_sorter_range.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      InsertSorterInstruction{.sorter = Sorter(0), .first_value = Reg(0), .value_count = 1},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(wrong_sorter_range), ProgramErrorCode::kInvalidRegisterRange);
+
+  ProgramInput read_before_rewind;
+  read_before_rewind.register_count = 1;
+  read_before_rewind.symbols.emplace_back("BINARY");
+  read_before_rewind.sorters.push_back(OrderingDescriptor());
+  read_before_rewind.instructions = {
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      ReadSorterFieldInstruction{.sorter = Sorter(0), .field = 0, .output = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(read_before_rewind), ProgramErrorCode::kCapabilityNotPositioned);
+
+  ProgramInput pending_required;
+  pending_required.register_count = 3;
+  pending_required.symbols.emplace_back("BINARY");
+  pending_required.constants.push_back(SqlValue::Integer(1));
+  pending_required.top_ns.push_back(OrderingDescriptor());
+  pending_required.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(2)},
+      OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+      InsertTopNInstruction{.top_n = TopN(0), .first_value = Reg(1), .value_count = 2},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(pending_required), ProgramErrorCode::kTopNCandidateRequired);
+
+  ProgramInput pending_conflict = std::move(pending_required);
+  pending_conflict.instructions[4] = CheckTopNInstruction{
+      .top_n = TopN(0),
+      .first_key = Reg(1),
+      .key_count = 1,
+      .rejected_target = Address(6),
+  };
+  pending_conflict.instructions[5] = JumpInstruction{.target = Address(6)};
+  pending_conflict.instructions.emplace_back(HaltInstruction{});
+  EXPECT_EQ(VerifyError(pending_conflict), ProgramErrorCode::kCapabilityStateConflict);
+
+  ProgramInput sorter_open_twice;
+  sorter_open_twice.symbols.emplace_back("BINARY");
+  sorter_open_twice.sorters.push_back(OrderingDescriptor());
+  sorter_open_twice.instructions = {
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(sorter_open_twice), ProgramErrorCode::kCapabilityAlreadyOpen);
+
+  ProgramInput sorter_close_closed;
+  sorter_close_closed.symbols.emplace_back("BINARY");
+  sorter_close_closed.sorters.push_back(OrderingDescriptor());
+  sorter_close_closed.instructions = {
+      CloseSorterInstruction{.sorter = Sorter(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(sorter_close_closed), ProgramErrorCode::kCapabilityAlreadyClosed);
+
+  ProgramInput top_n_pending;
+  top_n_pending.register_count = 2;
+  top_n_pending.symbols.emplace_back("BINARY");
+  top_n_pending.constants.push_back(SqlValue::Integer(1));
+  top_n_pending.top_ns.push_back(OrderingDescriptor());
+  top_n_pending.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+      CheckTopNInstruction{
+          .top_n = TopN(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(5),
+      },
+      CheckTopNInstruction{
+          .top_n = TopN(0),
+          .first_key = Reg(1),
+          .key_count = 1,
+          .rejected_target = Address(5),
+      },
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(top_n_pending), ProgramErrorCode::kTopNCandidatePending);
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesSorterAndTopNBranchLabels) {
+  auto sorter_created = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(sorter_created.has_value());
+  ProgramBuilder sorter_builder = std::move(*sorter_created);
+  ASSERT_TRUE(sorter_builder.AddSymbol("BINARY").has_value());
+  ASSERT_TRUE(sorter_builder.AddSorter(OrderingDescriptor()).has_value());
+  const auto empty_sorter = sorter_builder.CreateLabel();
+  const auto next_sorter = sorter_builder.CreateLabel();
+  ASSERT_TRUE(empty_sorter.has_value());
+  ASSERT_TRUE(next_sorter.has_value());
+  ASSERT_TRUE(sorter_builder.Append(OpenSorterInstruction{.sorter = Sorter(0)}).has_value());
+  ASSERT_TRUE(sorter_builder.EmitRewindSorter(Sorter(0), *empty_sorter).has_value());
+  ASSERT_TRUE(sorter_builder.BindLabel(*next_sorter).has_value());
+  ASSERT_TRUE(sorter_builder.EmitNextSorter(Sorter(0), *next_sorter).has_value());
+  ASSERT_TRUE(sorter_builder.BindLabel(*empty_sorter).has_value());
+  ASSERT_TRUE(sorter_builder.Append(ResetSorterInstruction{.sorter = Sorter(0)}).has_value());
+  ASSERT_TRUE(sorter_builder.Append(CloseSorterInstruction{.sorter = Sorter(0)}).has_value());
+  ASSERT_TRUE(sorter_builder.Append(HaltInstruction{}).has_value());
+
+  auto sorter_program = std::move(sorter_builder).Build({});
+  ASSERT_TRUE(sorter_program.has_value());
+  EXPECT_EQ(Address(3),
+            std::get<RewindSorterInstruction>(sorter_program->instructions()[1]).empty_target);
+  EXPECT_EQ(Address(2),
+            std::get<NextSorterInstruction>(sorter_program->instructions()[2]).next_target);
+
+  auto top_n_created = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(top_n_created.has_value());
+  ProgramBuilder top_n_builder = std::move(*top_n_created);
+  ASSERT_TRUE(top_n_builder.AddSymbol("BINARY").has_value());
+  OrderingRecordDescriptor top_n_descriptor = OrderingDescriptor();
+  top_n_descriptor.field_count = 1;
+  ASSERT_TRUE(top_n_builder.AddTopN(std::move(top_n_descriptor)).has_value());
+  ASSERT_TRUE(top_n_builder.AddConstant(SqlValue::Integer(1)).has_value());
+  const auto rejected = top_n_builder.CreateLabel();
+  const auto empty_top_n = top_n_builder.CreateLabel();
+  const auto next_top_n = top_n_builder.CreateLabel();
+  ASSERT_TRUE(rejected.has_value());
+  ASSERT_TRUE(empty_top_n.has_value());
+  ASSERT_TRUE(next_top_n.has_value());
+  ASSERT_TRUE(
+      top_n_builder.Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)}));
+  ASSERT_TRUE(top_n_builder.Append(OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)}));
+  ASSERT_TRUE(top_n_builder.EmitCheckTopN(TopN(0), Reg(0), 1, *rejected).has_value());
+  ASSERT_TRUE(top_n_builder.Append(
+      InsertTopNInstruction{.top_n = TopN(0), .first_value = Reg(0), .value_count = 1}));
+  ASSERT_TRUE(top_n_builder.BindLabel(*rejected).has_value());
+  ASSERT_TRUE(top_n_builder.EmitRewindTopN(TopN(0), *empty_top_n).has_value());
+  ASSERT_TRUE(top_n_builder.BindLabel(*next_top_n).has_value());
+  ASSERT_TRUE(top_n_builder.EmitNextTopN(TopN(0), *next_top_n).has_value());
+  ASSERT_TRUE(top_n_builder.BindLabel(*empty_top_n).has_value());
+  ASSERT_TRUE(top_n_builder.Append(ResetTopNInstruction{.top_n = TopN(0)}).has_value());
+  ASSERT_TRUE(top_n_builder.Append(CloseTopNInstruction{.top_n = TopN(0)}).has_value());
+  ASSERT_TRUE(top_n_builder.Append(HaltInstruction{}).has_value());
+
+  auto top_n_program = std::move(top_n_builder).Build({});
+  ASSERT_TRUE(top_n_program.has_value());
+  EXPECT_EQ(Address(4),
+            std::get<CheckTopNInstruction>(top_n_program->instructions()[2]).rejected_target);
+  EXPECT_EQ(Address(6),
+            std::get<RewindTopNInstruction>(top_n_program->instructions()[4]).empty_target);
+  EXPECT_EQ(Address(5),
+            std::get<NextTopNInstruction>(top_n_program->instructions()[5]).next_target);
+}
+
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
   auto created = BytecodeProgram::Create(ScalarProgramInput());
   ASSERT_TRUE(created.has_value());
@@ -1187,6 +1481,18 @@ TEST(BytecodeProgramTest, BuilderRejectsDirectNumericBranchesAndForeignLabels) {
   });
   ASSERT_FALSE(direct_index_range.has_value());
   EXPECT_EQ(direct_index_range.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  const auto direct_sorter =
+      first->Append(RewindSorterInstruction{.sorter = Sorter(0), .empty_target = Address(0)});
+  ASSERT_FALSE(direct_sorter.has_value());
+  EXPECT_EQ(direct_sorter.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  const auto direct_top_n = first->Append(CheckTopNInstruction{
+      .top_n = TopN(0),
+      .first_key = Reg(0),
+      .key_count = 1,
+      .rejected_target = Address(0),
+  });
+  ASSERT_FALSE(direct_top_n.has_value());
+  EXPECT_EQ(direct_top_n.error().code, ProgramErrorCode::kBranchRequiresLabel);
 
   auto foreign = second->EmitJump(*label);
   ASSERT_FALSE(foreign.has_value());
@@ -1567,6 +1873,19 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   auto second_instruction = builder.Append(HaltInstruction{});
   ASSERT_FALSE(second_instruction.has_value());
   EXPECT_EQ(second_instruction.error().code, ProgramErrorCode::kInstructionLimitExceeded);
+
+  ProgramLimits ordering_limits;
+  ordering_limits.maximum_sorters = 0;
+  ordering_limits.maximum_top_ns = 0;
+  auto ordering_created = ProgramBuilder::Create({}, Resources(0), ordering_limits);
+  ASSERT_TRUE(ordering_created.has_value());
+  ProgramBuilder ordering_builder = std::move(*ordering_created);
+  const auto sorter_limit = ordering_builder.AddSorter(OrderingDescriptor());
+  const auto top_n_limit = ordering_builder.AddTopN(OrderingDescriptor());
+  ASSERT_FALSE(sorter_limit.has_value());
+  ASSERT_FALSE(top_n_limit.has_value());
+  EXPECT_EQ(sorter_limit.error().code, ProgramErrorCode::kSorterLimitExceeded);
+  EXPECT_EQ(top_n_limit.error().code, ProgramErrorCode::kTopNLimitExceeded);
 }
 
 TEST(BytecodeProgramTest, EnforcesOwnedAndAnalysisMemoryForDirectInput) {

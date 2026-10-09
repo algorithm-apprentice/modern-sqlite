@@ -27,6 +27,14 @@ enum class CursorState : std::uint8_t {
   kPositioned = 2,
 };
 
+enum class CapabilityState : std::uint8_t {
+  kClosed = 0,
+  kWriting = 1,
+  kCandidatePending = 2,
+  kPositioned = 3,
+  kExhausted = 4,
+};
+
 [[nodiscard]] constexpr ProgramError MakeProgramError(ProgramErrorCode code) noexcept {
   return ProgramError{.code = code};
 }
@@ -195,6 +203,15 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(BytecodeNullPlacement placement) noexcept {
+  switch (placement) {
+    case BytecodeNullPlacement::kFirst:
+    case BytecodeNullPlacement::kLast:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(RowIdSeekMode mode) noexcept {
   switch (mode) {
     case RowIdSeekMode::kEqual:
@@ -353,6 +370,28 @@ template <typename T>
     }
   }
 
+  if (!AddArrayBytes<OrderingRecordDescriptor>(ElementCount(input.sorters, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  for (const auto& sorter : input.sorters) {
+    if (!AddArrayBytes<OrderingColumnMetadata>(ElementCount(sorter.key_columns, measure), &total) ||
+        total > limits.maximum_owned_bytes) {
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+    }
+  }
+
+  if (!AddArrayBytes<OrderingRecordDescriptor>(ElementCount(input.top_ns, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  for (const auto& top_n : input.top_ns) {
+    if (!AddArrayBytes<OrderingColumnMetadata>(ElementCount(top_n.key_columns, measure), &total) ||
+        total > limits.maximum_owned_bytes) {
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+    }
+  }
+
   if (!AddArrayBytes<ResultColumnMetadata>(ElementCount(input.result_columns, measure), &total) ||
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
@@ -425,6 +464,26 @@ template <typename T>
     });
   }
 
+  clone.sorters.reserve(input.sorters.size());
+  for (const auto& sorter : input.sorters) {
+    clone.sorters.push_back(OrderingRecordDescriptor{
+        .field_count = sorter.field_count,
+        .key_field_count = sorter.key_field_count,
+        .key_columns = std::vector<OrderingColumnMetadata>(sorter.key_columns.begin(),
+                                                           sorter.key_columns.end()),
+    });
+  }
+
+  clone.top_ns.reserve(input.top_ns.size());
+  for (const auto& top_n : input.top_ns) {
+    clone.top_ns.push_back(OrderingRecordDescriptor{
+        .field_count = top_n.field_count,
+        .key_field_count = top_n.key_field_count,
+        .key_columns =
+            std::vector<OrderingColumnMetadata>(top_n.key_columns.begin(), top_n.key_columns.end()),
+    });
+  }
+
   clone.result_columns.reserve(input.result_columns.size());
   for (const auto& column : input.result_columns) {
     clone.result_columns.push_back(ResultColumnMetadata{
@@ -456,6 +515,14 @@ template <typename T>
       input.cursors.size() > std::numeric_limits<std::uint32_t>::max() ||
       input.write_cursors.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kCursorLimitExceeded));
+  }
+  if (input.sorters.size() > limits.maximum_sorters ||
+      input.sorters.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kSorterLimitExceeded));
+  }
+  if (input.top_ns.size() > limits.maximum_top_ns ||
+      input.top_ns.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kTopNLimitExceeded));
   }
   if (static_cast<std::size_t>(input.parameter_count) > limits.maximum_parameters) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kParameterLimitExceeded));
@@ -508,6 +575,24 @@ template <typename T>
 }
 
 [[nodiscard]] ProgramResult<void> CheckDescriptors(const ProgramInput& input) {
+  const auto check_ordering_descriptor = [&](const OrderingRecordDescriptor& descriptor,
+                                             std::size_t descriptor_index) -> ProgramResult<void> {
+    if (descriptor.field_count == 0U || descriptor.key_field_count == 0U ||
+        descriptor.key_field_count > descriptor.field_count ||
+        descriptor.key_columns.size() != descriptor.key_field_count) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
+                                     ProgramError::kNoInstruction, descriptor_index));
+    }
+    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
+      if (column.collation.value() >= input.symbols.size() || !IsValid(column.order) ||
+          !IsValid(column.null_placement)) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
+                                       ProgramError::kNoInstruction, descriptor_index));
+      }
+    }
+    return {};
+  };
+
   for (std::size_t cursor_index = 0; cursor_index < input.cursors.size(); ++cursor_index) {
     const auto& cursor = input.cursors[cursor_index];
     if (cursor.root_page.value() == 0) {
@@ -623,6 +708,18 @@ template <typename T>
       }
     }
   }
+  for (std::size_t sorter_index = 0; sorter_index < input.sorters.size(); ++sorter_index) {
+    if (auto checked = check_ordering_descriptor(input.sorters[sorter_index], sorter_index);
+        !checked) {
+      return checked;
+    }
+  }
+  for (std::size_t top_n_index = 0; top_n_index < input.top_ns.size(); ++top_n_index) {
+    if (auto checked = check_ordering_descriptor(input.top_ns[top_n_index], top_n_index);
+        !checked) {
+      return checked;
+    }
+  }
   return {};
 }
 
@@ -674,6 +771,18 @@ template <typename T>
                                       std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.write_cursors.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursor, instruction, id.value()));
+    }
+    return {};
+  };
+  const auto check_sorter = [&](SorterId id, std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.sorters.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSorter, instruction, id.value()));
+    }
+    return {};
+  };
+  const auto check_top_n = [&](TopNId id, std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.top_ns.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidTopN, instruction, id.value()));
     }
     return {};
   };
@@ -1170,6 +1279,93 @@ template <typename T>
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
             return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, OpenSorterInstruction> ||
+                               std::is_same_v<Operation, ResetSorterInstruction> ||
+                               std::is_same_v<Operation, CloseSorterInstruction>) {
+            return check_sorter(operation.sorter, index);
+          } else if constexpr (std::is_same_v<Operation, InsertSorterInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            const OrderingRecordDescriptor& descriptor = input.sorters[operation.sorter.value()];
+            if (operation.value_count != descriptor.field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.value_count));
+            }
+            return check_range(operation.first_value, operation.value_count,
+                               InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, RewindSorterInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            return check_target(operation.empty_target, index);
+          } else if constexpr (std::is_same_v<Operation, ReadSorterFieldInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            if (operation.field >= input.sorters[operation.sorter.value()].field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidField, index, operation.field));
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, NextSorterInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            return check_target(operation.next_target, index);
+          } else if constexpr (std::is_same_v<Operation, OpenTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return check_register(operation.bound, index);
+          } else if constexpr (std::is_same_v<Operation, CheckTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            const OrderingRecordDescriptor& descriptor = input.top_ns[operation.top_n.value()];
+            if (operation.key_count != descriptor.key_field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.key_count));
+            }
+            if (auto result = check_range(operation.first_key, operation.key_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return check_target(operation.rejected_target, index);
+          } else if constexpr (std::is_same_v<Operation, InsertTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            const OrderingRecordDescriptor& descriptor = input.top_ns[operation.top_n.value()];
+            if (operation.value_count != descriptor.field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.value_count));
+            }
+            return check_range(operation.first_value, operation.value_count,
+                               InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, RewindTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return check_target(operation.empty_target, index);
+          } else if constexpr (std::is_same_v<Operation, ReadTopNFieldInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            if (operation.field >= input.top_ns[operation.top_n.value()].field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidField, index, operation.field));
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, NextTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return check_target(operation.next_target, index);
+          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction> ||
+                               std::is_same_v<Operation, CloseTopNInstruction>) {
+            return check_top_n(operation.top_n, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1207,8 +1403,7 @@ template <typename T>
               return result;
             }
             return check_target(operation.target, index);
-          } else {
-            static_assert(std::is_same_v<Operation, ResultRowInstruction>);
+          } else if constexpr (std::is_same_v<Operation, ResultRowInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kSelect) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
             }
@@ -1218,6 +1413,8 @@ template <typename T>
             }
             return check_range(operation.first, operation.count,
                                InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else {
+            static_assert(std::is_same_v<Operation, void>);
           }
         },
         input.instructions[index]);
@@ -1282,7 +1479,10 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   const std::size_t state_cursor_count = storage_cursor_count + (has_rowid_list ? 1U : 0U);
   const std::size_t rowid_list_state_index = storage_cursor_count;
   const std::size_t cursor_words = CeilingDivide(state_cursor_count, kCursorsPerWord);
-  const std::size_t state_words = register_words + cursor_words;
+  const std::size_t capability_count = input.sorters.size() + input.top_ns.size();
+  const std::size_t capability_offset = register_words + cursor_words;
+  const std::size_t top_n_offset = capability_offset + input.sorters.size();
+  const std::size_t state_words = capability_offset + capability_count;
 
   std::size_t stored_state_words = 0;
   if (!CheckedMultiply(instruction_count, state_words, &stored_state_words)) {
@@ -1352,6 +1552,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               ErrorAt(ProgramErrorCode::kCursorStateConflict, target, cursor_index));
         }
       }
+      for (std::size_t capability = 0; capability < capability_count; ++capability) {
+        const std::size_t index = capability_offset + capability;
+        if (current[index] != incoming[index]) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::kCapabilityStateConflict, target, capability));
+        }
+      }
       for (std::size_t word = 0; word < register_words; ++word) {
         const std::uint64_t merged = current[word] & incoming[word];
         if (merged != current[word]) {
@@ -1415,6 +1622,18 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     const auto set_rowid_list_state = [&](CursorState value) noexcept {
       SetCursorState(state, register_words, rowid_list_state_index, value);
     };
+    const auto sorter_state = [&](SorterId sorter) noexcept {
+      return static_cast<CapabilityState>(state[capability_offset + sorter.value()]);
+    };
+    const auto set_sorter_state = [&](SorterId sorter, CapabilityState value) noexcept {
+      state[capability_offset + sorter.value()] = static_cast<std::uint64_t>(value);
+    };
+    const auto top_n_state = [&](TopNId top_n) noexcept {
+      return static_cast<CapabilityState>(state[top_n_offset + top_n.value()]);
+    };
+    const auto set_top_n_state = [&](TopNId top_n, CapabilityState value) noexcept {
+      state[top_n_offset + top_n.value()] = static_cast<std::uint64_t>(value);
+    };
     const auto fallthrough = [&]() -> ProgramResult<void> {
       if (instruction_index + 1 >= instruction_count) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kFallthroughPastEnd, instruction_index));
@@ -1456,6 +1675,48 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       }
       return {};
     };
+    const auto require_sorter_open = [&](SorterId sorter) -> ProgramResult<void> {
+      if (sorter_state(sorter) == CapabilityState::kClosed) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotOpen, instruction_index, sorter.value()));
+      }
+      return {};
+    };
+    const auto require_sorter_writing = [&](SorterId sorter) -> ProgramResult<void> {
+      if (sorter_state(sorter) != CapabilityState::kWriting) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotWriting, instruction_index, sorter.value()));
+      }
+      return {};
+    };
+    const auto require_sorter_positioned = [&](SorterId sorter) -> ProgramResult<void> {
+      if (sorter_state(sorter) != CapabilityState::kPositioned) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotPositioned, instruction_index, sorter.value()));
+      }
+      return {};
+    };
+    const auto require_top_n_open = [&](TopNId top_n) -> ProgramResult<void> {
+      if (top_n_state(top_n) == CapabilityState::kClosed) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotOpen, instruction_index, top_n.value()));
+      }
+      return {};
+    };
+    const auto require_top_n_writing = [&](TopNId top_n) -> ProgramResult<void> {
+      if (top_n_state(top_n) != CapabilityState::kWriting) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotWriting, instruction_index, top_n.value()));
+      }
+      return {};
+    };
+    const auto require_top_n_positioned = [&](TopNId top_n) -> ProgramResult<void> {
+      if (top_n_state(top_n) != CapabilityState::kPositioned) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotPositioned, instruction_index, top_n.value()));
+      }
+      return {};
+    };
 
     const auto transferred = std::visit(
         [&](const auto& operation) -> ProgramResult<void> {
@@ -1468,6 +1729,136 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
                                std::is_same_v<Operation, ComputeTableStat1Instruction> ||
                                std::is_same_v<Operation, IncrementSchemaCookieInstruction>) {
             initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OpenSorterInstruction>) {
+            if (sorter_state(operation.sorter) != CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyOpen,
+                                             instruction_index, operation.sorter.value()));
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, InsertSorterInstruction>) {
+            if (auto result = require_sorter_writing(operation.sorter); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_value, operation.value_count);
+                !result) {
+              return result;
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, RewindSorterInstruction>) {
+            if (auto result = require_sorter_writing(operation.sorter); !result) {
+              return result;
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kPositioned);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kExhausted);
+            return merge_state(operation.empty_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, ReadSorterFieldInstruction>) {
+            if (auto result = require_sorter_positioned(operation.sorter); !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, NextSorterInstruction>) {
+            if (auto result = require_sorter_positioned(operation.sorter); !result) {
+              return result;
+            }
+            if (auto result = merge_state(operation.next_target.value(), state); !result) {
+              return result;
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kExhausted);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResetSorterInstruction>) {
+            if (auto result = require_sorter_open(operation.sorter); !result) {
+              return result;
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CloseSorterInstruction>) {
+            if (sorter_state(operation.sorter) == CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
+                                             instruction_index, operation.sorter.value()));
+            }
+            set_sorter_state(operation.sorter, CapabilityState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OpenTopNInstruction>) {
+            if (top_n_state(operation.top_n) != CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyOpen,
+                                             instruction_index, operation.top_n.value()));
+            }
+            if (auto result = require_initialized(operation.bound); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CheckTopNInstruction>) {
+            if (top_n_state(operation.top_n) == CapabilityState::kCandidatePending) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kTopNCandidatePending,
+                                             instruction_index, operation.top_n.value()));
+            }
+            if (auto result = require_top_n_writing(operation.top_n); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kCandidatePending);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kWriting);
+            return merge_state(operation.rejected_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, InsertTopNInstruction>) {
+            if (top_n_state(operation.top_n) != CapabilityState::kCandidatePending) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kTopNCandidateRequired,
+                                             instruction_index, operation.top_n.value()));
+            }
+            if (auto result = require_range(operation.first_value, operation.value_count);
+                !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, RewindTopNInstruction>) {
+            if (auto result = require_top_n_writing(operation.top_n); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kPositioned);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kExhausted);
+            return merge_state(operation.empty_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, ReadTopNFieldInstruction>) {
+            if (auto result = require_top_n_positioned(operation.top_n); !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, NextTopNInstruction>) {
+            if (auto result = require_top_n_positioned(operation.top_n); !result) {
+              return result;
+            }
+            if (auto result = merge_state(operation.next_target.value(), state); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kExhausted);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction>) {
+            if (auto result = require_top_n_open(operation.top_n); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CloseTopNInstruction>) {
+            if (top_n_state(operation.top_n) == CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
+                                             instruction_index, operation.top_n.value()));
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kClosed);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CreateTableRootInstruction>) {
             if (operation.cursor.has_value()) {
@@ -1810,12 +2201,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
               return result;
             }
             return fallthrough();
-          } else {
-            static_assert(std::is_same_v<Operation, ResultRowInstruction>);
+          } else if constexpr (std::is_same_v<Operation, ResultRowInstruction>) {
             if (auto result = require_range(operation.first, operation.count); !result) {
               return result;
             }
             return fallthrough();
+          } else {
+            static_assert(std::is_same_v<Operation, void>);
           }
         },
         input.instructions[instruction_index]);
@@ -1857,6 +2249,16 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   if (!CheckedMultiply(cursor.columns.size(), sizeof(WriteColumnDescriptor), &columns) ||
       !CheckedMultiply(cursor.index_columns.size(), sizeof(IndexColumnMetadata), &index_columns) ||
       !CheckedAdd(columns, &result) || !CheckedAdd(index_columns, &result)) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return result;
+}
+
+[[nodiscard]] std::size_t OrderingOwnedBytes(const OrderingRecordDescriptor& descriptor) noexcept {
+  std::size_t result = sizeof(OrderingRecordDescriptor);
+  std::size_t columns = 0;
+  if (!CheckedMultiply(descriptor.key_columns.size(), sizeof(OrderingColumnMetadata), &columns) ||
+      !CheckedAdd(columns, &result)) {
     return std::numeric_limits<std::size_t>::max();
   }
   return result;
@@ -1985,6 +2387,36 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "jump_if";
     case InstructionKind::kResultRow:
       return "result_row";
+    case InstructionKind::kOpenSorter:
+      return "open_sorter";
+    case InstructionKind::kInsertSorter:
+      return "insert_sorter";
+    case InstructionKind::kRewindSorter:
+      return "rewind_sorter";
+    case InstructionKind::kReadSorterField:
+      return "read_sorter_field";
+    case InstructionKind::kNextSorter:
+      return "next_sorter";
+    case InstructionKind::kResetSorter:
+      return "reset_sorter";
+    case InstructionKind::kCloseSorter:
+      return "close_sorter";
+    case InstructionKind::kOpenTopN:
+      return "open_top_n";
+    case InstructionKind::kCheckTopN:
+      return "check_top_n";
+    case InstructionKind::kInsertTopN:
+      return "insert_top_n";
+    case InstructionKind::kRewindTopN:
+      return "rewind_top_n";
+    case InstructionKind::kReadTopNField:
+      return "read_top_n_field";
+    case InstructionKind::kNextTopN:
+      return "next_top_n";
+    case InstructionKind::kResetTopN:
+      return "reset_top_n";
+    case InstructionKind::kCloseTopN:
+      return "close_top_n";
   }
   return "unknown";
 }
@@ -1994,6 +2426,8 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kInstructionLimitExceeded:
     case ProgramErrorCode::kRegisterLimitExceeded:
     case ProgramErrorCode::kCursorLimitExceeded:
+    case ProgramErrorCode::kSorterLimitExceeded:
+    case ProgramErrorCode::kTopNLimitExceeded:
     case ProgramErrorCode::kParameterLimitExceeded:
     case ProgramErrorCode::kConstantLimitExceeded:
     case ProgramErrorCode::kSymbolLimitExceeded:
@@ -2013,6 +2447,9 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kInvalidConstant:
     case ProgramErrorCode::kInvalidSymbol:
     case ProgramErrorCode::kInvalidCursor:
+    case ProgramErrorCode::kInvalidSorter:
+    case ProgramErrorCode::kInvalidTopN:
+    case ProgramErrorCode::kInvalidOrderingDescriptor:
     case ProgramErrorCode::kInvalidField:
     case ProgramErrorCode::kInvalidBranchTarget:
     case ProgramErrorCode::kInvalidEnumValue:
@@ -2031,6 +2468,14 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kCursorNotOpen:
     case ProgramErrorCode::kCursorNotPositioned:
     case ProgramErrorCode::kCursorStateConflict:
+    case ProgramErrorCode::kCapabilityAlreadyOpen:
+    case ProgramErrorCode::kCapabilityAlreadyClosed:
+    case ProgramErrorCode::kCapabilityNotOpen:
+    case ProgramErrorCode::kCapabilityNotWriting:
+    case ProgramErrorCode::kCapabilityNotPositioned:
+    case ProgramErrorCode::kCapabilityStateConflict:
+    case ProgramErrorCode::kTopNCandidatePending:
+    case ProgramErrorCode::kTopNCandidateRequired:
     case ProgramErrorCode::kRowIdOperationRequiresRowIdTable:
     case ProgramErrorCode::kIndexOperationRequiresIndex:
     case ProgramErrorCode::kFallthroughPastEnd:
@@ -2108,6 +2553,14 @@ const ReadCursorDescriptor& BytecodeProgram::cursor(CursorId id) const noexcept 
 
 const WriteCursorDescriptor& BytecodeProgram::write_cursor(WriteCursorId id) const noexcept {
   return input_.write_cursors[id.value()];
+}
+
+const OrderingRecordDescriptor& BytecodeProgram::sorter(SorterId id) const noexcept {
+  return input_.sorters[id.value()];
+}
+
+const OrderingRecordDescriptor& BytecodeProgram::top_n(TopNId id) const noexcept {
+  return input_.top_ns[id.value()];
 }
 
 const Instruction& BytecodeProgram::instruction(InstructionAddress address) const noexcept {
@@ -2272,6 +2725,54 @@ ProgramResult<WriteCursorId> ProgramBuilder::AddWriteCursor(WriteCursorDescripto
   return WriteCursorId(static_cast<std::uint32_t>(input_.write_cursors.size() - 1));
 }
 
+ProgramResult<SorterId> ProgramBuilder::AddSorter(OrderingRecordDescriptor sorter) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.sorters.size() >= limits_.maximum_sorters ||
+      input_.sorters.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kSorterLimitExceeded));
+  }
+  const std::size_t bytes = OrderingOwnedBytes(sorter);
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(bytes); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.sorters.push_back(std::move(sorter));
+  } catch (...) {
+    owned_bytes_ -= bytes;
+    throw;
+  }
+  return SorterId(static_cast<std::uint32_t>(input_.sorters.size() - 1U));
+}
+
+ProgramResult<TopNId> ProgramBuilder::AddTopN(OrderingRecordDescriptor top_n) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.top_ns.size() >= limits_.maximum_top_ns ||
+      input_.top_ns.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kTopNLimitExceeded));
+  }
+  const std::size_t bytes = OrderingOwnedBytes(top_n);
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(bytes); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.top_ns.push_back(std::move(top_n));
+  } catch (...) {
+    owned_bytes_ -= bytes;
+    throw;
+  }
+  return TopNId(static_cast<std::uint32_t>(input_.top_ns.size() - 1U));
+}
+
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
     ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
     ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result) {
@@ -2368,6 +2869,11 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<NextInstruction>(instruction) ||
       std::holds_alternative<RewindRowIdListInstruction>(instruction) ||
       std::holds_alternative<NextRowIdListInstruction>(instruction) ||
+      std::holds_alternative<RewindSorterInstruction>(instruction) ||
+      std::holds_alternative<NextSorterInstruction>(instruction) ||
+      std::holds_alternative<CheckTopNInstruction>(instruction) ||
+      std::holds_alternative<RewindTopNInstruction>(instruction) ||
+      std::holds_alternative<NextTopNInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
       std::holds_alternative<SeekIndexInstruction>(instruction) ||
       std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
@@ -2407,6 +2913,50 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitNextRowIdList(RegisterId o
     return std::unexpected(checked.error());
   }
   return AppendPending(PendingNextRowIdList{.output = output, .target = next_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitRewindSorter(SorterId sorter,
+                                                                   Label empty_target) {
+  if (auto checked = CheckLabel(empty_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingRewindSorter{.sorter = sorter, .target = empty_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitNextSorter(SorterId sorter,
+                                                                 Label next_target) {
+  if (auto checked = CheckLabel(next_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingNextSorter{.sorter = sorter, .target = next_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitCheckTopN(TopNId top_n, RegisterId first_key,
+                                                                std::uint32_t key_count,
+                                                                Label rejected_target) {
+  if (auto checked = CheckLabel(rejected_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingCheckTopN{
+      .top_n = top_n,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = rejected_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitRewindTopN(TopNId top_n, Label empty_target) {
+  if (auto checked = CheckLabel(empty_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingRewindTopN{.top_n = top_n, .target = empty_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitNextTopN(TopNId top_n, Label next_target) {
+  if (auto checked = CheckLabel(next_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingNextTopN{.top_n = top_n, .target = next_target});
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor, RegisterId key,
@@ -2535,6 +3085,33 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
           } else if constexpr (std::is_same_v<Operation, PendingNextRowIdList>) {
             return NextRowIdListInstruction{
                 .output = operation.output,
+                .next_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingRewindSorter>) {
+            return RewindSorterInstruction{
+                .sorter = operation.sorter,
+                .empty_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingNextSorter>) {
+            return NextSorterInstruction{
+                .sorter = operation.sorter,
+                .next_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingCheckTopN>) {
+            return CheckTopNInstruction{
+                .top_n = operation.top_n,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
+                .rejected_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingRewindTopN>) {
+            return RewindTopNInstruction{
+                .top_n = operation.top_n,
+                .empty_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingNextTopN>) {
+            return NextTopNInstruction{
+                .top_n = operation.top_n,
                 .next_target = target(operation.target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingSeekRowId>) {
