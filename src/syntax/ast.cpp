@@ -112,6 +112,16 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
   return false;
 }
 
+[[nodiscard]] constexpr bool IsValid(NullOrder value) noexcept {
+  switch (value) {
+    case NullOrder::kDefault:
+    case NullOrder::kFirst:
+    case NullOrder::kLast:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] constexpr bool IsValid(ConflictAction value) noexcept {
   switch (value) {
     case ConflictAction::kDefault:
@@ -589,19 +599,48 @@ class Validator final {
       }
       previous_end = column.span.end();
     }
+    ByteOffset clause_end = previous_end;
     if (select.from.has_value()) {
       const Status source_status = ValidateTableSource(*select.from, select.span);
       if (!source_status.has_value()) {
         return source_status;
       }
+      if (select.from->span.begin() < clause_end) {
+        return Misuse("select FROM clause is out of order");
+      }
+      clause_end = select.from->span.end();
     }
     if (select.where.has_value()) {
       const Status where_status = ReferenceExpression(*select.where, select.span, std::nullopt);
       if (!where_status.has_value()) {
         return where_status;
       }
+      const SourceSpan where_span = expressions_[select.where->value].span;
+      if (where_span.begin() < clause_end) {
+        return Misuse("select WHERE clause is out of order");
+      }
+      clause_end = where_span.end();
+    }
+    ByteOffset previous_order_end = clause_end;
+    for (const OrderingTerm& term : select.order_by) {
+      if (!Contains(select.span, term.span) || !IsValid(term.order) || !IsValid(term.null_order)) {
+        return Misuse("select ORDER BY term is invalid");
+      }
+      if (term.span.begin() < previous_order_end) {
+        return Misuse("select ORDER BY terms overlap or are out of order");
+      }
+      const Status expression_status =
+          ReferenceExpression(term.expression, term.span, std::nullopt);
+      if (!expression_status.has_value()) {
+        return expression_status;
+      }
+      previous_order_end = term.span.end();
+      clause_end = term.span.end();
     }
     if (select.limit.has_value()) {
+      if (select.limit->span.begin() < clause_end) {
+        return Misuse("select LIMIT clause is out of order");
+      }
       return ValidateLimit(*select.limit, select.span);
     }
     return {};

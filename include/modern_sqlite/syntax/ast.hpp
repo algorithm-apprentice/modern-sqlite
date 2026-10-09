@@ -147,6 +147,12 @@ enum class SortOrder : std::uint8_t {
   kDescending,
 };
 
+enum class NullOrder : std::uint8_t {
+  kDefault,
+  kFirst,
+  kLast,
+};
+
 enum class ConflictAction : std::uint8_t {
   kDefault,
   kRollback,
@@ -181,12 +187,20 @@ struct LimitClause {
   LimitSyntax syntax = LimitSyntax::kLimitOnly;
 };
 
+struct OrderingTerm {
+  SourceSpan span;
+  ExpressionId expression;
+  SortOrder order = SortOrder::kDefault;
+  NullOrder null_order = NullOrder::kDefault;
+};
+
 struct SelectStatement {
   SourceSpan span;
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
   std::vector<ResultColumn> result_columns;
   std::optional<TableSource> from{};
   std::optional<ExpressionId> where{};
+  std::vector<OrderingTerm> order_by{};
   std::optional<LimitClause> limit{};
 };
 

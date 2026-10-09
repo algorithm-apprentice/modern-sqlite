@@ -1491,6 +1491,94 @@ TEST(SyntaxTree, RejectsInvalidStatementShapes) {
     ExpectMisuse(SyntaxTree::Create("SELECT 1", {}, std::move(statement)));
   }
   {
+    const std::string source = "SELECT 1 ORDER BY 1";
+    const SourceSpan result = FindSpan(source, "1");
+    const SourceSpan ordering = FindSpan(source, "1", result.end().value());
+    std::vector<Expression> expressions{
+        Expression{
+            .span = result,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = result,
+                },
+        },
+        Expression{
+            .span = ordering,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = ordering,
+                },
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .result_columns =
+            {
+                ResultColumn{.span = result, .expression = ExpressionId{0}},
+            },
+        .order_by =
+            {
+                OrderingTerm{
+                    .span = ordering,
+                    .expression = ExpressionId{1},
+                    .null_order = InvalidEnumValue<NullOrder>(255),
+                },
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
+    const std::string source = "SELECT 1 LIMIT 2 ORDER BY 3";
+    const SourceSpan result = FindSpan(source, "1");
+    const SourceSpan limit = FindSpan(source, "2");
+    const SourceSpan ordering = FindSpan(source, "3");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = result,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = result,
+                },
+        },
+        Expression{
+            .span = limit,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = limit,
+                },
+        },
+        Expression{
+            .span = ordering,
+            .payload =
+                LiteralExpression{
+                    .kind = LiteralKind::kInteger,
+                    .token = ordering,
+                },
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .result_columns =
+            {
+                ResultColumn{.span = result, .expression = ExpressionId{0}},
+            },
+        .order_by =
+            {
+                OrderingTerm{.span = ordering, .expression = ExpressionId{2}},
+            },
+        .limit =
+            LimitClause{
+                .span = FindSpan(source, "LIMIT 2"),
+                .limit = ExpressionId{1},
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+  {
     Statement statement = CreateTableStatement{
         .span = Span(0, 16),
         .name = Name(Span(13, 14), {Span(13, 14)}),
