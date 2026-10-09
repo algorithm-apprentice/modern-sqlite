@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -33,6 +34,12 @@ template <typename T>
   return std::move(*result);
 }
 
+void RequireStatus(Status status) {
+  if (!status.has_value()) {
+    throw std::runtime_error(status.error().ToString());
+  }
+}
+
 class TopNEnvironment final {
  public:
   explicit TopNEnvironment(ByteCount threshold = ByteCount{1U << 20U})
@@ -44,6 +51,32 @@ class TopNEnvironment final {
                                                            }))) {}
 
   [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+
+ private:
+  test::WritePagerFixedVfs vfs_;
+  std::unique_ptr<Pager> pager_;
+  TemporaryStorageFactory factory_;
+};
+
+class FileTopNEnvironment final {
+ public:
+  explicit FileTopNEnvironment(ByteCount threshold = ByteCount{1})
+      : pager_(TakeValue(
+            Pager::Open(vfs_, test::kWritePagerInputPath,
+                        PagerOptions{
+                            .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                            .cache_capacity_pages = 64,
+                        }))),
+        factory_(TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                           TemporaryStorageOptions{
+                                                               .mode = TemporaryStoreMode::kFile,
+                                                               .sorter_memory_threshold = threshold,
+                                                           }))) {
+    RequireStatus(pager_->BeginRead());
+  }
+
+  [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+  [[nodiscard]] test::WritePagerFixedVfs& vfs() noexcept { return vfs_; }
 
  private:
   test::WritePagerFixedVfs vfs_;
@@ -79,8 +112,28 @@ class TopNEnvironment final {
   return Encode(values);
 }
 
+struct BlobRowSpec {
+  std::int64_t key;
+  std::size_t payload_size;
+  std::byte fill;
+};
+
+[[nodiscard]] ByteBuffer BlobRow(BlobRowSpec spec) {
+  ByteBuffer payload{ByteCount{spec.payload_size}};
+  std::ranges::fill(payload.mutable_view(), spec.fill);
+  std::array<SqlValue, 2> values{
+      SqlValue::Integer(spec.key),
+      SqlValue::Blob(std::move(payload)),
+  };
+  return Encode(values);
+}
+
 [[nodiscard]] std::int64_t IntegerField(const RecordView& record, std::size_t field) {
   return TakeValue(record.field(field)).integer_value().value_or(-1);
+}
+
+[[nodiscard]] ByteView BlobField(const RecordView& record, std::size_t field) {
+  return TakeValue(record.field(field)).blob_value().value_or(ByteView{});
 }
 
 TEST(BoundedTopNApi, PublishesMoveOnlyLifecycleAndAdmissionResults) {
@@ -184,6 +237,108 @@ TEST(BoundedTopN, EnforcesMemoryThresholdWithoutPublishingPartialRows) {
   EXPECT_TRUE(top_n.valid());
   EXPECT_EQ(0U, top_n.record_count());
   EXPECT_FALSE(top_n.has_pending_candidate());
+}
+
+TEST(BoundedTopN, FileModeSpillsStableRowsAndClearsTheEphemeralTreeOnReset) {
+  FileTopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 3));
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  const std::optional<FileOpenOptions> open_options =
+      environment.vfs().last_pathless_open_options();
+  ASSERT_TRUE(open_options.has_value());
+  EXPECT_EQ((FileOpenOptions{
+                .kind = FileKind::kTransientDatabase,
+                .access = FileAccessMode::kReadWrite,
+                .create = true,
+                .exclusive_create = true,
+                .delete_on_close = true,
+            }),
+            open_options.value_or(FileOpenOptions{}));
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 700U, .fill = std::byte{0x20}})));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 700U, .fill = std::byte{0x11}})));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 700U, .fill = std::byte{0x12}})));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  EXPECT_EQ(2U, top_n.record_count());
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 700U, .fill = std::byte{0x13}})));
+  EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(top_n.CheckCandidate(Key(1))));
+  EXPECT_GT(environment.vfs().total_subjournal_writes(), 0U);
+
+  RequireStatus(top_n.Rewind());
+  for (const std::byte expected : {std::byte{0x11}, std::byte{0x12}, std::byte{0x13}}) {
+    const RecordView current = TakeValue(top_n.current_record());
+    EXPECT_EQ(1, IntegerField(current, 0));
+    const ByteView payload = BlobField(current, 1);
+    ASSERT_EQ(700U, payload.size());
+    EXPECT_EQ(expected, payload.front());
+    const bool advanced = TakeValue(top_n.Next());
+    EXPECT_EQ(expected != std::byte{0x13}, advanced);
+  }
+
+  RequireStatus(top_n.Reset());
+  EXPECT_EQ(BoundedTopNState::kWriting, top_n.state());
+  EXPECT_EQ(0U, top_n.record_count());
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(4))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 4, .payload_size = 900U, .fill = std::byte{0x44}})));
+  RequireStatus(top_n.Rewind());
+  EXPECT_EQ(4, IntegerField(TakeValue(top_n.current_record()), 0));
+  RequireStatus(top_n.Reset());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(5))));
+  RequireStatus(top_n.Reset());
+  EXPECT_FALSE(top_n.has_pending_candidate());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(6))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 6, .payload_size = 16U, .fill = std::byte{0x66}})));
+  RequireStatus(top_n.Rewind());
+  EXPECT_EQ(6, IntegerField(TakeValue(top_n.current_record()), 0));
+
+  top_n.Close();
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(BoundedTopN, FileModePropagatesOpenWriteAndReadFailuresAndDeletesTheFile) {
+  FileTopNEnvironment open_failure;
+  open_failure.vfs().FailNextPathlessOpen(ErrorCode::kIo);
+  const auto failed_open = open_failure.factory().CreateTopN(Descriptor(), 2);
+  ASSERT_FALSE(failed_open.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_open.error().code());
+  EXPECT_FALSE(open_failure.vfs().pathless_file_present());
+
+  FileTopNEnvironment write_failure;
+  BoundedTopN writing = TakeValue(write_failure.factory().CreateTopN(Descriptor(), 2));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(writing.CheckCandidate(Key(1))));
+  write_failure.vfs().FailPathlessWriteAfter(0, ErrorCode::kIo);
+  const Status failed_insert =
+      writing.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 700U, .fill = std::byte{0x11}}));
+  ASSERT_FALSE(failed_insert.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_insert.error().code());
+  EXPECT_FALSE(writing.valid());
+  EXPECT_FALSE(write_failure.vfs().pathless_file_present());
+
+  FileTopNEnvironment read_failure;
+  BoundedTopN reading = TakeValue(read_failure.factory().CreateTopN(Descriptor(), 4));
+  for (std::int64_t key = 4; key >= 1; --key) {
+    EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(reading.CheckCandidate(Key(key))));
+    RequireStatus(reading.Insert(
+        BlobRow(BlobRowSpec{.key = key,
+                            .payload_size = 900U,
+                            .fill = static_cast<std::byte>(static_cast<std::uint8_t>(key))})));
+  }
+  read_failure.vfs().FailPathlessReadAfter(0, ErrorCode::kIo);
+  const Status failed_rewind = reading.Rewind();
+  ASSERT_FALSE(failed_rewind.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_rewind.error().code());
+  EXPECT_FALSE(reading.valid());
+  EXPECT_FALSE(read_failure.vfs().pathless_file_present());
 }
 
 }  // namespace
