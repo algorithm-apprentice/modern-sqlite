@@ -100,6 +100,18 @@ bool fail_allocations = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundSelect BindOrderedFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
+      ParseTree("SELECT Name, abs(?), id FROM Items WHERE id > ? "
+                "ORDER BY Name, id, Name DESC LIMIT ?"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind ordered logical-plan allocation fixture"};
+  }
+  return std::move(*bound);
+}
+
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   modern_sqlite::BindStatementResult bound =
@@ -155,6 +167,16 @@ int main() try {
     return 1;
   }
 
+  BoundSelect ordered_bound = BindOrderedFixture(catalog);
+  allocation_count.store(0, std::memory_order_relaxed);
+  count_allocations = true;
+  BuildLogicalPlanResult ordered_result = BuildLogicalPlan(std::move(ordered_bound));
+  count_allocations = false;
+  if (!ordered_result.has_value() || allocation_count.load(std::memory_order_relaxed) != 5U) {
+    return 1;
+  }
+  std::unique_ptr<LogicalPlan> ordered = std::make_unique<LogicalPlan>(std::move(*ordered_result));
+
   const LogicalPlan& plan = *published;
   BoundStatement mutation_bound = BindMutationFixture(catalog);
   allocation_count.store(0, std::memory_order_relaxed);
@@ -184,6 +206,11 @@ int main() try {
     checksum += LogicalNodeKindName(LogicalNodeKindOf(node)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
   }
+  checksum += ordered->nodes().size();
+  const auto& order = std::get<LogicalOrderNode>(ordered->nodes()[2].payload);
+  checksum += order.terms.size();
+  checksum += order.payload_expressions.size();
+  checksum += order.output_fields.size();
   const LogicalMutationPlan& mutation = std::get<LogicalMutationPlan>(mutation_plan);
   checksum += static_cast<std::uint64_t>(LogicalMutationKindOf(mutation.payload()));
   checksum += LogicalMutationKindName(LogicalMutationKindOf(mutation.payload())).size();

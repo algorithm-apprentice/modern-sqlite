@@ -240,6 +240,11 @@ int main() try {
   if (noncovering_allocations != 14U) {
     return 1;
   }
+  const std::size_t ordered_allocations =
+      OptimizeAllocationCount("SELECT Name, Payload FROM Items ORDER BY Name LIMIT ?1", catalog);
+  if (ordered_allocations != 7U) {
+    return 1;
+  }
 
   LogicalStatementPlan mutation_logical = LogicalMutationFixture(catalog);
   allocation_count.store(0, std::memory_order_relaxed);
@@ -262,6 +267,13 @@ int main() try {
     return 1;
   }
   std::unique_ptr<PhysicalPlan> published = std::make_unique<PhysicalPlan>(std::move(*built));
+  LogicalPlan ordered_logical =
+      LogicalFixture("SELECT Name, Payload FROM Items ORDER BY Name LIMIT ?1", catalog);
+  OptimizeLogicalPlanResult ordered_built = OptimizeLogicalPlan(std::move(ordered_logical));
+  if (!ordered_built.has_value()) {
+    return 1;
+  }
+  std::unique_ptr<PhysicalPlan> ordered = std::make_unique<PhysicalPlan>(std::move(*ordered_built));
 
   std::uint64_t checksum = 0;
   fail_allocations = true;
@@ -277,6 +289,10 @@ int main() try {
     checksum += PhysicalNodeKindName(PhysicalNodeKindOf(node)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
   }
+  const auto& sort = std::get<PhysicalSortNode>(ordered->nodes()[1].payload);
+  checksum += sort.terms.size();
+  checksum += sort.payload_expressions.size();
+  checksum += sort.output_fields.size();
   const PhysicalMutationPlan& mutation = std::get<PhysicalMutationPlan>(mutation_plan);
   const auto& update = std::get<PhysicalUpdateMutation>(mutation.payload());
   checksum += static_cast<std::uint64_t>(update.access.kind);

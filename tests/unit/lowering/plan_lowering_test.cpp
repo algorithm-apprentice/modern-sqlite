@@ -683,6 +683,18 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(ReadLowering, RejectsOrderByUntilSorterBytecodeIsImplemented) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT name FROM items ORDER BY name LIMIT ?", catalog);
+
+  LowerPlanResult lowered = LowerPlan(plan);
+  ASSERT_FALSE(lowered.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
+  EXPECT_EQ(ErrorCode::kGeneric, lowered.error().base_error_code());
+  EXPECT_EQ("ORDER BY lowering is not supported", lowered.error().detail);
+}
+
 TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan plan = OptimizeOrThrow("SELECT 1 AS answer", catalog);

@@ -596,6 +596,8 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("index_scan", PhysicalNodeKindName(PhysicalNodeKind::kIndexScan));
   EXPECT_EQ("guard", PhysicalNodeKindName(PhysicalNodeKind::kGuard));
   EXPECT_EQ("projection", PhysicalNodeKindName(PhysicalNodeKind::kProjection));
+  EXPECT_EQ("sort", PhysicalNodeKindName(PhysicalNodeKind::kSort));
+  EXPECT_EQ("output", PhysicalNodeKindName(PhysicalNodeKind::kOutput));
   EXPECT_EQ("unknown",
             PhysicalNodeKindName(static_cast<PhysicalNodeKind>(255)));  // NOLINT
 
@@ -969,6 +971,84 @@ TEST(PhysicalPlan, OrdersGuardLookupResidualLimitAndProjection) {
   const auto& projection = std::get<PhysicalProjectionNode>(plan.nodes()[4].payload);
   EXPECT_EQ(PhysicalNodeId{3}, projection.input);
   EXPECT_EQ(plan.logical_plan().root(), projection.logical_projection);
+}
+
+TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT Name, abs(?) FROM Items WHERE id > ? "
+      "ORDER BY Name DESC NULLS FIRST LIMIT ? OFFSET ?",
+      catalog);
+
+  ASSERT_EQ(5U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(plan.nodes()[1].payload));
+
+  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[2].payload);
+  EXPECT_EQ(PhysicalNodeId{1}, sort.input);
+  EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, sort.schedule);
+  EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
+  EXPECT_FALSE(sort.input_order_satisfied);
+  ASSERT_EQ(1U, sort.terms.size());
+  EXPECT_EQ(SortOrder::kDescending, sort.terms[0].order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, sort.terms[0].null_placement);
+  ASSERT_EQ(1U, sort.payload_expressions.size());
+  ASSERT_EQ(2U, sort.output_fields.size());
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 0}),
+            sort.output_fields[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 0}),
+            sort.output_fields[1]);
+
+  const auto& logical_order = std::get<LogicalOrderNode>(plan.logical_plan().nodes()[2].payload);
+  EXPECT_EQ(logical_order.terms[0].expression, sort.terms[0].expression);
+  EXPECT_EQ(logical_order.payload_expressions, sort.payload_expressions);
+  EXPECT_EQ(logical_order.output_fields, sort.output_fields);
+
+  const auto& limit = std::get<PhysicalLimitNode>(plan.nodes()[3].payload);
+  EXPECT_EQ(PhysicalNodeId{2}, limit.input);
+  const auto& output = std::get<PhysicalOutputNode>(plan.nodes()[4].payload);
+  EXPECT_EQ(PhysicalNodeId{3}, output.input);
+  EXPECT_EQ(plan.logical_plan().root(), output.logical_output);
+}
+
+TEST(PhysicalPlan, KeepsSorterForMatchingIndexOrderAndExplainsTerms) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT Category, Score FROM Items WHERE Category=?1 "
+      "ORDER BY Score DESC LIMIT ?2",
+      catalog);
+
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate().kind);
+  ASSERT_EQ(4U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes()[0].payload));
+  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
+  EXPECT_EQ(PhysicalNodeId{0}, sort.input);
+  EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
+  EXPECT_FALSE(sort.input_order_satisfied);
+  EXPECT_EQ(
+      "SEARCH \"Items\" USING COVERING INDEX \"items_category_score\" (\"Category\"=?)\n"
+      "SORT 1 TERM (COLLATE \"BINARY\" DESC NULLS LAST) USING SORTER",
+      ExplainPhysicalPlan(plan));
+}
+
+TEST(PhysicalPlan, UsesExternalStrategyWithoutSyntacticLimit) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT Name, id FROM Items "
+      "ORDER BY Name COLLATE NOCASE DESC NULLS FIRST, id",
+      catalog);
+
+  ASSERT_EQ(3U, plan.nodes().size());
+  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
+  EXPECT_EQ(PhysicalSortStrategy::kExternal, sort.strategy);
+  EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, sort.schedule);
+  EXPECT_FALSE(sort.input_order_satisfied);
+  EXPECT_TRUE(std::holds_alternative<PhysicalOutputNode>(plan.nodes()[2].payload));
+  EXPECT_EQ(
+      "SCAN \"Items\"\n"
+      "SORT 2 TERMS (COLLATE \"NOCASE\" DESC NULLS FIRST, "
+      "COLLATE \"BINARY\" ASC NULLS FIRST) USING SORTER",
+      ExplainPhysicalPlan(plan));
 }
 
 TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {

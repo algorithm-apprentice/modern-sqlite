@@ -93,6 +93,18 @@ bool inject_failure = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundSelect BindOrderedFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
+      ParseTree("SELECT Name, abs(?), id FROM Items WHERE id > ? "
+                "ORDER BY Name, id, Name DESC LIMIT ?"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind ordered logical-plan OOM fixture"};
+  }
+  return std::move(*bound);
+}
+
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   modern_sqlite::BindStatementResult bound = modern_sqlite::BindStatement(
@@ -157,6 +169,37 @@ int main() try {
   BoundSelect recovered_bound = BindFixture(catalog);
   const BuildLogicalPlanResult recovered = BuildLogicalPlan(std::move(recovered_bound));
   if (!recovered.has_value()) {
+    return 1;
+  }
+
+  BoundSelect ordered_baseline_bound = BindOrderedFixture(catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const BuildLogicalPlanResult ordered_baseline =
+      BuildLogicalPlan(std::move(ordered_baseline_bound));
+  if (!ordered_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t ordered_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (ordered_allocation_count != 5U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < ordered_allocation_count; ++failure) {
+    BoundSelect bound = BindOrderedFixture(catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const BuildLogicalPlanResult unexpected = BuildLogicalPlan(std::move(bound));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  if (!BuildLogicalPlan(BindOrderedFixture(catalog)).has_value()) {
     return 1;
   }
 
