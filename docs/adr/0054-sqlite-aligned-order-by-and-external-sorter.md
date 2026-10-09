@@ -357,7 +357,8 @@ payload as data. Its retained row count never exceeds the runtime bound, but
 large positive parameterized bounds and large payloads may exceed memory and
 therefore use temporary pager pages. Memory mode remains subject to the same
 allocation/value limits. Deterministic tests cover in-memory and file-backed
-top-N relations.
+top-N relations. ADR-0055 fixes the exact discard-only Pager mode, encoded
+key-prefix mutation contract, queue-record layout, and failure lifecycle.
 
 ### 7. Reuse the canonical record comparator
 
