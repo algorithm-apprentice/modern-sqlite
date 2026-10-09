@@ -260,6 +260,57 @@ void VerifyCrashCuts(const CrashFixture& fixture, CrashOperation operation,
   }
 }
 
+TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
+  test::WritePagerFixedVfs vfs{false};
+  auto opened = Pager::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 1,
+           });
+  ASSERT_TRUE(opened.has_value()) << opened.error().ToString();
+  std::unique_ptr<Pager> pager = std::move(*opened);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  PageNumber root;
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{BinaryCollation()},
+  };
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    EXPECT_EQ(PageNumber{2}, root);
+    for (std::int64_t value = 63; value >= 0; --value) {
+      std::array<SqlValue, 1> key{SqlValue::Integer(value)};
+      RequireStatus(index.Insert(key));
+    }
+  }
+
+  {
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+    bool present = TakeValue(cursor.First());
+    std::int64_t expected = 0;
+    while (present) {
+      const ByteBuffer record = TakeValue(cursor.CopyPayload());
+      const std::vector<SqlValue> values = TakeValue(DecodeRecord(record.view()));
+      ASSERT_EQ(1U, values.size());
+      EXPECT_EQ(expected, values[0].integer_value());
+      ++expected;
+      present = TakeValue(cursor.Next());
+    }
+    EXPECT_EQ(64, expected);
+  }
+
+  EXPECT_GT(vfs.total_subjournal_writes(), 0U);
+  EXPECT_FALSE(vfs.journal_present());
+  EXPECT_EQ(DatabaseLock::kNone, vfs.database_lock());
+  ASSERT_TRUE(vfs.pathless_file_present());
+  pager.reset();
+  EXPECT_FALSE(vfs.pathless_file_present());
+}
+
 TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);

@@ -169,6 +169,12 @@ class Pager final {
     kRollback,
   };
 
+  enum class StorageMode : std::uint8_t {
+    kReadOnly,
+    kRollbackJournal,
+    kEphemeral,
+  };
+
   struct Snapshot {
     std::optional<DatabaseHeader> header;
     ByteCount page_size;
@@ -181,9 +187,12 @@ class Pager final {
                                                            PagerOptions options = {});
   [[nodiscard]] static Result<std::unique_ptr<Pager>> OpenWritable(
       Vfs& vfs, std::string_view path, WritablePagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<Pager>> OpenEphemeral(Vfs& vfs,
+                                                                    PagerOptions options = {});
 
   Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
-        PagerOptions options, std::optional<FileProperties> file_properties = std::nullopt,
+        PagerOptions options, StorageMode storage_mode,
+        std::optional<FileProperties> file_properties = std::nullopt,
         std::unique_ptr<RollbackJournal> rollback_journal = nullptr,
         ByteCount journal_sector_size = {});
   Pager(const Pager&) = delete;
@@ -251,6 +260,8 @@ class Pager final {
   [[nodiscard]] Result<PageCache::Pin> AcquirePage(PageNumber page_number, bool exclusive);
   [[nodiscard]] Status MaintainCachePressure();
   [[nodiscard]] Status EnsureJournalTransaction();
+  [[nodiscard]] Status PreparePageWrite(PageNumber page_number, const PageCache::Pin& target,
+                                        std::uint32_t logical_page_count);
   [[nodiscard]] Status CaptureSector(PageNumber page_number, const PageCache::Pin& target,
                                      std::uint32_t logical_page_count);
   [[nodiscard]] Status EnsureExclusiveLock();
@@ -270,6 +281,7 @@ class Pager final {
   std::string wal_path_;
   std::unique_ptr<File> file_;
   PagerOptions options_;
+  StorageMode storage_mode_;
   std::optional<FileProperties> file_properties_;
   std::unique_ptr<RollbackJournal> rollback_journal_;
   ByteCount journal_sector_size_;

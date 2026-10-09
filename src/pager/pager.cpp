@@ -161,7 +161,7 @@ Result<std::unique_ptr<Pager>> Pager::Open(Vfs& vfs, std::string_view path, Page
     }
 
     return std::make_unique<Pager>(ConstructionKey{}, vfs, std::move(*full_path),
-                                   std::move(opened->file), options);
+                                   std::move(opened->file), options, StorageMode::kReadOnly);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
@@ -200,16 +200,41 @@ Result<std::unique_ptr<Pager>> Pager::OpenWritable(Vfs& vfs, std::string_view pa
       return std::unexpected(std::move(rollback.error()));
     }
 
-    return std::make_unique<Pager>(ConstructionKey{}, vfs, std::move(*full_path),
-                                   std::move(opened->file), options.pager, *properties,
-                                   std::move(*rollback), *sector_size);
+    return std::make_unique<Pager>(
+        ConstructionKey{}, vfs, std::move(*full_path), std::move(opened->file), options.pager,
+        StorageMode::kRollbackJournal, *properties, std::move(*rollback), *sector_size);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Result<std::unique_ptr<Pager>> Pager::OpenEphemeral(Vfs& vfs, PagerOptions options) {
+  try {
+    if (!IsValidPageSize(options.empty_database_page_size)) {
+      return std::unexpected(
+          Misuse("empty-database page size must be a power of two from 512 through 65536"));
+    }
+
+    auto opened = vfs.Open(std::nullopt, FileOpenOptions{
+                                             .kind = FileKind::kTransientDatabase,
+                                             .access = FileAccessMode::kReadWrite,
+                                             .create = true,
+                                             .exclusive_create = true,
+                                             .delete_on_close = true,
+                                         });
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    return std::make_unique<Pager>(ConstructionKey{}, vfs, std::string{}, std::move(opened->file),
+                                   options, StorageMode::kEphemeral);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
 }
 
 Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
-             PagerOptions options, std::optional<FileProperties> file_properties,
+             PagerOptions options, StorageMode storage_mode,
+             std::optional<FileProperties> file_properties,
              std::unique_ptr<RollbackJournal> rollback_journal, ByteCount journal_sector_size)
     : vfs_(&vfs),
       path_(std::move(path)),
@@ -217,11 +242,16 @@ Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> 
       wal_path_(path_ + "-wal"),
       file_(std::move(file)),
       options_(options),
+      storage_mode_(storage_mode),
       file_properties_(file_properties),
       rollback_journal_(std::move(rollback_journal)),
       journal_sector_size_(journal_sector_size),
       lifetime_token_(std::make_shared<pager_internal::PagerLifetime>(
-          pager_internal::PagerLifetime{.pager = this})) {}
+          pager_internal::PagerLifetime{.pager = this})) {
+  assert(file_ != nullptr);
+  assert((storage_mode_ == StorageMode::kRollbackJournal) == (rollback_journal_ != nullptr));
+  assert(storage_mode_ != StorageMode::kEphemeral || path_.empty());
+}
 
 Pager::~Pager() {
   lifetime_token_->pager = nullptr;
@@ -236,6 +266,23 @@ Status Pager::BeginRead() {
   }
   if (state_ != PagerState::kOpen) {
     return std::unexpected(Misuse("a read transaction is already active"));
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    try {
+      auto applied = ApplySnapshot(Snapshot{
+          .header = std::nullopt,
+          .page_size = options_.empty_database_page_size,
+          .page_count = 0,
+          .change_token = std::nullopt,
+      });
+      if (!applied.has_value()) {
+        return applied;
+      }
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+    state_ = PagerState::kReader;
+    return {};
   }
   auto retained_cleanup = ReleaseRetainedLock();
   if (!retained_cleanup.has_value()) {
@@ -290,6 +337,15 @@ Status Pager::CleanupReadState() {
   }
   if (in_write_transaction()) {
     return std::unexpected(Misuse("cannot clean up read state during a write transaction"));
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    if (cache_ != nullptr && cache_->pin_count() != 0) {
+      return std::unexpected(Busy("cannot clean up read state with pinned pages"));
+    }
+    state_ = PagerState::kOpen;
+    current_header_.reset();
+    current_page_count_ = 0;
+    return {};
   }
   if (database_lock_ == DatabaseLock::kNone) {
     return {};
@@ -578,7 +634,7 @@ Result<PageCache::Pin> Pager::AcquirePage(PageNumber page_number, bool exclusive
 
 PagerState Pager::state() const noexcept { return state_; }
 
-bool Pager::writable() const noexcept { return rollback_journal_ != nullptr; }
+bool Pager::writable() const noexcept { return storage_mode_ != StorageMode::kReadOnly; }
 
 bool Pager::in_read_transaction() const noexcept {
   return state_ != PagerState::kOpen && state_ != PagerState::kError;

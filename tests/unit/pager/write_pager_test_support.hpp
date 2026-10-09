@@ -513,6 +513,12 @@ class WritePagerMemoryVfs final : public Vfs {
           .access = options.access,
       };
     } catch (const std::bad_alloc&) {
+      if (options.delete_on_close) {
+        state->present = false;
+        state->size = 0;
+        state->durable_present = false;
+        state->durable_size = 0;
+      }
       return std::unexpected(Error::OutOfMemory());
     }
   }
