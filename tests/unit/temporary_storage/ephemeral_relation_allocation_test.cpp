@@ -110,10 +110,11 @@ int main() try {
   const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
   const TemporaryStorageFactory memory_factory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  StatementTemporaryStorage memory_storage = TakeValue(memory_factory.CreateStatementStorage());
 
   allocation_count.store(0, std::memory_order_relaxed);
   count_allocations = true;
-  Result<EphemeralRelation> memory_created = memory_factory.CreateEphemeralRelation(Descriptor());
+  Result<EphemeralRelation> memory_created = memory_storage.CreateEphemeralRelation(Descriptor());
   count_allocations = false;
   if (!memory_created.has_value()) {
     return 1;
@@ -203,12 +204,18 @@ int main() try {
                                 .cache_capacity_pages = 1,
                             }));
   RequireStatus(file_pager->BeginRead());
-  const TemporaryStorageFactory file_factory = TakeValue(TemporaryStorageFactory::Create(
-      file_vfs, *file_pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile}));
+  const TemporaryStorageFactory file_factory =
+      TakeValue(TemporaryStorageFactory::Create(file_vfs, *file_pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{16},
+                                                }));
+  std::optional<StatementTemporaryStorage> file_storage;
+  file_storage.emplace(TakeValue(file_factory.CreateStatementStorage()));
 
   allocation_count.store(0, std::memory_order_relaxed);
   count_allocations = true;
-  Result<EphemeralRelation> file_created = file_factory.CreateEphemeralRelation(Descriptor());
+  Result<EphemeralRelation> file_created = file_storage->CreateEphemeralRelation(Descriptor());
   count_allocations = false;
   if (!file_created.has_value()) {
     return 1;
@@ -245,6 +252,7 @@ int main() try {
   }
   checksum += file_current->field_count();
   file.Close();
+  file_storage.reset();
   fail_allocations = false;
 
   return checksum == 0U || file_vfs.pathless_file_present() ? 1 : 0;

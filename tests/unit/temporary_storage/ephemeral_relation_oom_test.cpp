@@ -120,6 +120,7 @@ enum class FileOperation : std::uint8_t {
   const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
   const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
   const EphemeralRelationDescriptor descriptor = Descriptor();
 
   allocation_index.store(0, std::memory_order_relaxed);
@@ -127,7 +128,7 @@ enum class FileOperation : std::uint8_t {
     failing_allocation = *failure;
     inject_failure = true;
   }
-  Result<EphemeralRelation> created = factory.CreateEphemeralRelation(descriptor);
+  Result<EphemeralRelation> created = storage.CreateEphemeralRelation(descriptor);
   inject_failure = false;
   const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
   const bool succeeded = created.has_value();
@@ -150,7 +151,8 @@ enum class FileOperation : std::uint8_t {
   const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
   const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
-  EphemeralRelation relation = TakeValue(factory.CreateEphemeralRelation(Descriptor()));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+  EphemeralRelation relation = TakeValue(storage.CreateEphemeralRelation(Descriptor()));
   ByteBuffer row = Row(RowSpec{.key = 1, .payload_size = 16U});
 
   allocation_index.store(0, std::memory_order_relaxed);
@@ -187,8 +189,14 @@ enum class FileOperation : std::uint8_t {
                                 .cache_capacity_pages = 1,
                             }));
   RequireStatus(pager->BeginRead());
-  const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(
-      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile}));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1024},
+                                                }));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
   const EphemeralRelationDescriptor descriptor = Descriptor();
 
   if (operation == FileOperation::kCreate) {
@@ -197,7 +205,7 @@ enum class FileOperation : std::uint8_t {
       failing_allocation = *failure;
       inject_failure = true;
     }
-    Result<EphemeralRelation> created = factory.CreateEphemeralRelation(descriptor);
+    Result<EphemeralRelation> created = storage->CreateEphemeralRelation(descriptor);
     inject_failure = false;
     const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
     const bool succeeded = created.has_value();
@@ -205,6 +213,7 @@ enum class FileOperation : std::uint8_t {
     if (created.has_value()) {
       created->Close();
     }
+    storage.reset();
     return Outcome{
         .allocations = allocations,
         .succeeded = succeeded,
@@ -213,21 +222,26 @@ enum class FileOperation : std::uint8_t {
     };
   }
 
-  EphemeralRelation relation = TakeValue(factory.CreateEphemeralRelation(descriptor));
+  EphemeralRelation relation = TakeValue(storage->CreateEphemeralRelation(descriptor));
   if (operation != FileOperation::kInsert) {
     auto first = relation.Insert(Row(RowSpec{.key = 1}), EphemeralInsertMode::kKeepExisting);
     if (!first.has_value() || *first != EphemeralInsertResult::kInserted) {
       return {};
     }
-  }
-  if (operation == FileOperation::kNext) {
     auto second = relation.Insert(Row(RowSpec{.key = 2}), EphemeralInsertMode::kKeepExisting);
-    if (!second.has_value() || *second != EphemeralInsertResult::kInserted ||
-        !relation.Rewind().has_value()) {
+    if (!second.has_value() || *second != EphemeralInsertResult::kInserted) {
       return {};
     }
   }
-  ByteBuffer row = Row(RowSpec{.key = operation == FileOperation::kReplace ? 1 : 3});
+  if (operation == FileOperation::kNext) {
+    if (!relation.Rewind().has_value()) {
+      return {};
+    }
+  }
+  ByteBuffer row = Row(RowSpec{
+      .key = operation == FileOperation::kReplace ? 1 : 3,
+      .payload_size = operation == FileOperation::kInsert ? 1100U : 900U,
+  });
   const ByteBuffer key = Key(1);
 
   allocation_index.store(0, std::memory_order_relaxed);
@@ -289,6 +303,60 @@ enum class FileOperation : std::uint8_t {
   if (relation.valid()) {
     relation.Close();
   }
+  storage.reset();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] Outcome RunFileReuse(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 1,
+                            }));
+  RequireStatus(pager->BeginRead());
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1024},
+                                                }));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+
+  EphemeralRelation first = TakeValue(storage->CreateEphemeralRelation(Descriptor()));
+  for (std::int64_t key = 1; key <= 2; ++key) {
+    auto inserted = first.Insert(Row(RowSpec{.key = key}), EphemeralInsertMode::kKeepExisting);
+    if (!inserted.has_value() || *inserted != EphemeralInsertResult::kInserted) {
+      return {};
+    }
+  }
+  first.Close();
+  EphemeralRelation reused = TakeValue(storage->CreateEphemeralRelation(Descriptor()));
+  ByteBuffer row = Row(RowSpec{.key = 3, .payload_size = 1100U});
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  auto inserted = reused.Insert(std::move(row), EphemeralInsertMode::kKeepExisting);
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = inserted.has_value() && *inserted == EphemeralInsertResult::kInserted;
+  const ErrorCode error = inserted.has_value() ? ErrorCode::kGeneric : inserted.error().code();
+  if (reused.valid()) {
+    reused.Close();
+  }
+  storage.reset();
   return Outcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -351,6 +419,9 @@ int main() try {
         })) {
       return static_cast<int>(20U + index);
     }
+  }
+  if (!ExhaustAllocations(RunFileReuse)) {
+    return 30;
   }
   return 0;
 } catch (...) {

@@ -2373,15 +2373,15 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenRelationInstruction& operation) {
-    if (temporary_storage_ == nullptr) {
-      return std::unexpected(
-          VmError(ErrorCode::kMisuse, "relation bytecode requires temporary storage"));
-    }
     std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
     if (runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is already open"));
     }
-    auto created = temporary_storage_->CreateEphemeralRelation(
+    auto storage = EnsureStatementTemporaryStorage();
+    if (!storage.has_value()) {
+      return std::unexpected(std::move(storage.error()));
+    }
+    auto created = (*storage)->CreateEphemeralRelation(
         RuntimeRelationDescriptor(program_->relation(operation.relation)));
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));
@@ -2688,6 +2688,21 @@ struct Vm::Impl {
     row_count_ = 0;
   }
 
+  [[nodiscard]] Result<StatementTemporaryStorage*> EnsureStatementTemporaryStorage() {
+    if (temporary_storage_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "temporary bytecode requires temporary storage"));
+    }
+    if (!statement_temporary_storage_.has_value()) {
+      auto created = temporary_storage_->CreateStatementStorage();
+      if (!created.has_value()) {
+        return std::unexpected(std::move(created.error()));
+      }
+      statement_temporary_storage_.emplace(std::move(*created));
+    }
+    return &*statement_temporary_storage_;
+  }
+
   void CloseAllCursors() noexcept {
     for (RuntimeCursor& cursor : cursors_) {
       cursor.ClearRecordCache();
@@ -2706,6 +2721,7 @@ struct Vm::Impl {
     for (std::optional<EphemeralRelation>& relation : relations_) {
       relation.reset();
     }
+    statement_temporary_storage_.reset();
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -2722,6 +2738,7 @@ struct Vm::Impl {
   std::vector<SqlValue> parameters_;
   std::vector<RuntimeCursor> cursors_;
   std::vector<RuntimeWriteCursor> write_cursors_;
+  std::optional<StatementTemporaryStorage> statement_temporary_storage_;
   std::vector<std::optional<RecordSorter>> sorters_;
   std::vector<std::optional<BoundedTopN>> top_ns_;
   std::vector<std::optional<EphemeralRelation>> relations_;

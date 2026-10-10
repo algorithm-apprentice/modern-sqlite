@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -22,10 +23,12 @@ class TemporaryStorageFactory;
 class TemporaryMemoryAccount;
 class TemporaryFileLease;
 class StatementTemporaryStorage;
+struct EphemeralRelationDescriptor;
 
 namespace temporary_storage_detail {
 struct MemoryRegistration;
 struct StatementState;
+class RelationArenaAccess;
 }  // namespace temporary_storage_detail
 
 enum class TemporaryStoreMode : std::uint8_t {
@@ -117,9 +120,13 @@ class StatementTemporaryStorage final {
   [[nodiscard]] Result<TemporaryMemoryAccount> RegisterMemoryOwner(
       TemporaryStorageSpillTarget& target);
   [[nodiscard]] Result<TemporaryFileLease> AcquireFileLease();
+  // The returned relation borrows the underlying state, which must outlive it.
+  [[nodiscard]] Result<EphemeralRelation> CreateEphemeralRelation(
+      const EphemeralRelationDescriptor& descriptor);
 
  private:
   friend class TemporaryStorageFactory;
+  friend class temporary_storage_detail::RelationArenaAccess;
 
   explicit StatementTemporaryStorage(
       std::unique_ptr<temporary_storage_detail::StatementState> state) noexcept;
@@ -174,6 +181,7 @@ class EphemeralRelation final {
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] EphemeralRelationState state() const noexcept;
   [[nodiscard]] std::size_t record_count() const noexcept;
+  [[nodiscard]] ByteCount memory_usage() const noexcept;
   [[nodiscard]] bool file_backed() const noexcept;
 
   [[nodiscard]] Result<EphemeralInsertResult> Insert(ByteBuffer record, EphemeralInsertMode mode);
@@ -188,13 +196,13 @@ class EphemeralRelation final {
   void Close() noexcept;
 
  private:
-  friend class TemporaryStorageFactory;
+  friend class StatementTemporaryStorage;
 
   struct Impl;
 
   explicit EphemeralRelation(std::unique_ptr<Impl> impl) noexcept;
   [[nodiscard]] static Result<EphemeralRelation> Create(
-      const EphemeralRelationDescriptor& descriptor, const TemporaryStorageFactory& factory);
+      const EphemeralRelationDescriptor& descriptor, StatementTemporaryStorage& storage);
 
   std::unique_ptr<Impl> impl_;
 };
@@ -298,8 +306,8 @@ class BoundedTopN final {
   std::unique_ptr<Impl> impl_;
 };
 
-// Borrows the VFS and pager. Both must outlive the factory and every temporary
-// file created through it.
+// Borrows the VFS and pager. Both must outlive the factory, statement storage,
+// and every temporary capability created through them.
 class TemporaryStorageFactory final {
  public:
   [[nodiscard]] static Result<TemporaryStorageFactory> Create(Vfs& vfs, const Pager& pager,
@@ -320,13 +328,11 @@ class TemporaryStorageFactory final {
       const RecordSorterDescriptor& descriptor) const;
   [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
                                                std::size_t bound) const;
-  [[nodiscard]] Result<EphemeralRelation> CreateEphemeralRelation(
-      const EphemeralRelationDescriptor& descriptor) const;
   [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;
 
  private:
   friend class BoundedTopN;
-  friend class EphemeralRelation;
+  friend struct temporary_storage_detail::StatementState;
 
   TemporaryStorageFactory(Vfs& vfs, const Pager& pager, TemporaryStorageOptions options) noexcept
       : vfs_(&vfs), pager_(&pager), options_(options) {}

@@ -3241,6 +3241,7 @@ TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{64},
                                                 }));
 
   Vm reset = TakeValue(Vm::Create(program, VmEnvironment::Core()));
@@ -3289,6 +3290,7 @@ TEST(Vm, RelationDrainCanFailAfterRowsAndStillDeletesItsTransientFile) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1024},
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
