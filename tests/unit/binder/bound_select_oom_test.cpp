@@ -111,6 +111,9 @@ int main() try {
                        "x'00112233445566778899AABBCCDDEEFF' AS payload "
                        "FROM Items WHERE Name=? AND id>0 "
                        "ORDER BY payload DESC NULLS FIRST,+id LIMIT ?"},
+      std::string_view{"VALUES(?1,?2 IS NULL),(?3,?4) "
+                       "UNION SELECT Name,id FROM Items "
+                       "ORDER BY 1 COLLATE NOCASE LIMIT ?5"},
       std::string_view{"INSERT INTO Items(Name,id) VALUES(abs(?1),?2)"},
       std::string_view{"UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Name=?2"},
       std::string_view{"DELETE FROM Items WHERE id=?1"},

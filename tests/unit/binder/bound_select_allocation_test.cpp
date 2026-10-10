@@ -162,6 +162,13 @@ int main() try {
   if (repeated_name_allocations > one_name_allocations + 16U) {
     return 1;
   }
+  const std::size_t compound_allocations = BindAllocationCount(
+      "VALUES(?1,?2 IS NULL),(?3,?4) "
+      "UNION SELECT Name,id FROM Items ORDER BY 1 COLLATE NOCASE LIMIT ?5",
+      catalog);
+  if (compound_allocations == 0 || compound_allocations > 512U) {
+    return 1;
+  }
   const std::size_t update_allocations = BindStatementAllocationCount(
       "UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Score>?2", catalog);
   const std::size_t create_allocations = BindStatementAllocationCount(

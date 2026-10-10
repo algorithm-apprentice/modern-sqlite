@@ -267,6 +267,14 @@ class LogicalPlanBuilder final {
       return std::unexpected{
           PlanError(LogicalPlanErrorCode::kInvalidInput, "bound select is invalid")};
     }
+    if (bound_select.query_cores().size() != 1U ||
+        !std::holds_alternative<BoundSelectCore>(bound_select.query_cores().front()) ||
+        std::get<BoundSelectCore>(bound_select.query_cores().front()).quantifier ==
+            SelectQuantifier::kDistinct) {
+      return std::unexpected{
+          PlanError(LogicalPlanErrorCode::kUnsupportedFeature,
+                    "DISTINCT, VALUES, and compound SELECT planning is not supported")};
+    }
     const bool ordered = !bound_select.order_by().empty();
     const std::size_t node_count =
         2U + static_cast<std::size_t>(bound_select.where_expression().has_value()) +
