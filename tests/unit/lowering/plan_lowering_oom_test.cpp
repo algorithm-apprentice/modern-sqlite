@@ -161,6 +161,24 @@ bool inject_failure = false;
   return std::move(*physical);
 }
 
+[[nodiscard]] modern_sqlite::PhysicalPlan DistinctFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql) {
+  using namespace modern_sqlite;
+  BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog, TestEnvironment());
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind DISTINCT lowering OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan DISTINCT lowering OOM fixture"};
+  }
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  if (!physical.has_value()) {
+    throw std::runtime_error{"failed to optimize DISTINCT lowering OOM fixture"};
+  }
+  return std::move(*physical);
+}
+
 [[nodiscard]] modern_sqlite::PhysicalPlan PhysicalIndexFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog,
     std::string_view sql = "SELECT id, Name FROM Items WHERE Name=?1") {
@@ -353,6 +371,10 @@ int main() try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
+  const PhysicalPlan distinct =
+      DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");
+  const PhysicalPlan ordered_distinct = DistinctFixture(
+      catalog, "SELECT DISTINCT Name FROM Items ORDER BY stable_guard(?) LIMIT ? OFFSET ?");
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
@@ -397,7 +419,8 @@ int main() try {
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
                  verify_oom(ordered_index) && verify_oom(ordered_limit_index) &&
-                 verify_oom(mutation) && verify_oom(indexed_insert) && verify_oom(deletion) &&
+                 verify_oom(distinct) && verify_oom(ordered_distinct) && verify_oom(mutation) &&
+                 verify_oom(indexed_insert) && verify_oom(deletion) &&
                  verify_oom(indexed_deletion) && verify_oom(update) && verify_oom(indexed_update) &&
                  verify_oom(stable_update) && verify_oom(indexed_stable_update) &&
                  verify_oom(create) && verify_oom(create_index) && verify_oom(analyze)

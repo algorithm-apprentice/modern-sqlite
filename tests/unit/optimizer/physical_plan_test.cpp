@@ -662,6 +662,16 @@ TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
       "CORE 0 SCAN \"Items\"\n"
       "DISTINCT CORE 0 USING EPHEMERAL RELATION",
       ExplainPhysicalPlan(distinct));
+
+  const PhysicalPlan guarded = OptimizeOrThrow(
+      "SELECT DISTINCT Name FROM Items WHERE id<0 AND abs(-9223372036854775808)", catalog);
+  const auto filter = std::ranges::find_if(guarded.nodes(), [](const PhysicalNode& physical) {
+    return std::holds_alternative<PhysicalFilterNode>(physical.payload);
+  });
+  ASSERT_NE(guarded.nodes().end(), filter);
+  const auto& guarded_filter = std::get<PhysicalFilterNode>(filter->payload);
+  ASSERT_EQ(1U, guarded_filter.predicates.size());
+  ASSERT_EQ(1U, guarded_filter.guards.size());
 }
 
 TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {

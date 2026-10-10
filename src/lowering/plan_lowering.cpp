@@ -136,7 +136,9 @@ class PlanLowerer final {
     if (auto inspected = InspectPlan(); !inspected.has_value()) {
       return std::unexpected(std::move(inspected.error()));
     }
-    if (auto layout = BuildReadRegisterLayout(); !layout.has_value()) {
+    LoweringResult<void> layout =
+        distinct_ != nullptr ? BuildDistinctRegisterLayout() : BuildReadRegisterLayout();
+    if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
 
@@ -170,13 +172,18 @@ class PlanLowerer final {
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
-    if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
+    if (distinct_ != nullptr) {
+      if (auto descriptors = AddDistinctDescriptors(); !descriptors.has_value()) {
+        return std::unexpected(std::move(descriptors.error()));
+      }
+    } else if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
       return std::unexpected(std::move(ordering.error()));
     }
     if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
-    if (auto emitted = EmitPlan(); !emitted.has_value()) {
+    LoweringResult<void> emitted = distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan();
+    if (!emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
 
@@ -640,7 +647,82 @@ class PlanLowerer final {
     return std::move(*built);
   }
 
+  [[nodiscard]] LoweringResult<void> InspectDistinctPlan() {
+    const std::span<const PhysicalNode> nodes = read_plan_->nodes();
+    if (nodes.size() < 3U || bound_select_->query_cores().size() != 1U ||
+        !bound_select_->compound_operators().empty()) {
+      return std::unexpected(InternalFailure("simple DISTINCT plan shape is invalid"));
+    }
+    const auto* core = std::get_if<BoundSelectCore>(&bound_select_->query_cores().front());
+    if (core == nullptr || core->quantifier != SelectQuantifier::kDistinct) {
+      return std::unexpected(InternalFailure("simple DISTINCT bound core is invalid"));
+    }
+
+    leaf_ = &nodes.front();
+    table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
+    if (!std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) && table_scan_ == nullptr) {
+      return std::unexpected(UnsupportedFailure("simple DISTINCT access kind is not implemented"));
+    }
+
+    for (std::size_t index = 1; index < nodes.size(); ++index) {
+      const PhysicalNode& node = nodes[index];
+      if (const auto* filter = std::get_if<PhysicalFilterNode>(&node.payload); filter != nullptr) {
+        if (filter_ != nullptr) {
+          return std::unexpected(InternalFailure("DISTINCT plan has duplicate filters"));
+        }
+        filter_ = filter;
+      } else if (const auto* projection = std::get_if<PhysicalProjectionNode>(&node.payload);
+                 projection != nullptr) {
+        if (projection_ != nullptr || projection->core_index != 0U) {
+          return std::unexpected(InternalFailure("DISTINCT projection metadata is invalid"));
+        }
+        projection_ = projection;
+      } else if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&node.payload);
+                 distinct != nullptr) {
+        if (distinct_ != nullptr || projection_ == nullptr || distinct->core_index != 0U ||
+            distinct->input.value() != projection_->logical_projection.value()) {
+          return std::unexpected(InternalFailure("DISTINCT membership metadata is invalid"));
+        }
+        distinct_ = distinct;
+      } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&node.payload);
+                 order != nullptr) {
+        if (advanced_order_ != nullptr || distinct_ == nullptr || order->set_then_order ||
+            order->core_plans.size() != 1U || order->core_plans[0].layout.core_index != 0U ||
+            order->core_plans[0].strategy != PhysicalSortStrategy::kExternal ||
+            order->final_strategy != PhysicalSortStrategy::kExternal) {
+          return std::unexpected(InternalFailure("DISTINCT ordering metadata is invalid"));
+        }
+        advanced_order_ = order;
+      } else if (const auto* limit = std::get_if<PhysicalLimitNode>(&node.payload);
+                 limit != nullptr) {
+        if (limit_ != nullptr || distinct_ == nullptr) {
+          return std::unexpected(InternalFailure("DISTINCT LIMIT metadata is invalid"));
+        }
+        limit_ = limit;
+      } else if (const auto* output = std::get_if<PhysicalOutputNode>(&node.payload);
+                 output != nullptr) {
+        if (output_ != nullptr || advanced_order_ == nullptr || index + 1U != nodes.size()) {
+          return std::unexpected(InternalFailure("DISTINCT output metadata is invalid"));
+        }
+        output_ = output;
+      } else {
+        return std::unexpected(InternalFailure("DISTINCT plan contains an unexpected node"));
+      }
+    }
+    if (projection_ == nullptr || distinct_ == nullptr ||
+        distinct_->collations.size() != bound_select_->result_columns().size() ||
+        (advanced_order_ == nullptr) != (output_ == nullptr)) {
+      return std::unexpected(InternalFailure("DISTINCT plan is incomplete"));
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> InspectPlan() {
+    if (std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
+          return std::holds_alternative<PhysicalDistinctNode>(node.payload);
+        })) {
+      return InspectDistinctPlan();
+    }
     const std::span<const PhysicalNode> nodes = read_plan_->nodes();
     if (nodes.size() < 2U) {
       return std::unexpected(InternalFailure("physical plan has no lowering chain"));
@@ -885,6 +967,86 @@ class PlanLowerer final {
     return FinishRegisterLayout();
   }
 
+  [[nodiscard]] LoweringResult<void> BuildDistinctRegisterLayout() {
+    if (distinct_ == nullptr || projection_ == nullptr) {
+      return std::unexpected(InternalFailure("DISTINCT register layout has no plan metadata"));
+    }
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+
+    auto result_block = AllocateRegisters(bound_select_->result_columns().size());
+    if (!result_block.has_value()) {
+      return std::unexpected(std::move(result_block.error()));
+    }
+    result_block_first_ = *result_block;
+
+    if (advanced_order_ != nullptr) {
+      const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+      const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
+      auto sorter_record = AllocateRegisters(field_count);
+      if (!sorter_record.has_value()) {
+        return std::unexpected(std::move(sorter_record.error()));
+      }
+      sorter_record_first_ = *sorter_record;
+    }
+
+    if (limit_ != nullptr) {
+      auto limit_register = AllocateRegisters(1);
+      if (!limit_register.has_value()) {
+        return std::unexpected(std::move(limit_register.error()));
+      }
+      limit_register_ = *limit_register;
+
+      if (limit_->offset.has_value()) {
+        auto offset_register = AllocateRegisters(1);
+        auto zero_register = AllocateRegisters(1);
+        auto one_register = AllocateRegisters(1);
+        auto comparison_register = AllocateRegisters(1);
+        if (!offset_register.has_value()) {
+          return std::unexpected(std::move(offset_register.error()));
+        }
+        if (!zero_register.has_value()) {
+          return std::unexpected(std::move(zero_register.error()));
+        }
+        if (!one_register.has_value()) {
+          return std::unexpected(std::move(one_register.error()));
+        }
+        if (!comparison_register.has_value()) {
+          return std::unexpected(std::move(comparison_register.error()));
+        }
+        offset_register_ = *offset_register;
+        zero_register_ = *zero_register;
+        one_register_ = *one_register;
+        comparison_register_ = *comparison_register;
+      }
+
+      if (table_scan_ != nullptr || advanced_order_ != nullptr) {
+        if (!zero_register_.has_value()) {
+          auto zero_register = AllocateRegisters(1);
+          if (!zero_register.has_value()) {
+            return std::unexpected(std::move(zero_register.error()));
+          }
+          zero_register_ = *zero_register;
+        }
+        if (!one_register_.has_value()) {
+          auto one_register = AllocateRegisters(1);
+          if (!one_register.has_value()) {
+            return std::unexpected(std::move(one_register.error()));
+          }
+          one_register_ = *one_register;
+        }
+        auto negative_register = AllocateRegisters(1);
+        if (!negative_register.has_value()) {
+          return std::unexpected(std::move(negative_register.error()));
+        }
+        negative_limit_register_ = *negative_register;
+      }
+    }
+
+    return FinishRegisterLayout();
+  }
+
   [[nodiscard]] LoweringResult<void> BuildInsertRegisterLayout() {
     if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
       return expressions;
@@ -1104,6 +1266,81 @@ class PlanLowerer final {
       }
       top_n_ = *added_top_n;
     }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddDistinctDescriptors() {
+    if (distinct_ == nullptr ||
+        distinct_->collations.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(InternalFailure("DISTINCT descriptor metadata is invalid"));
+    }
+    if (bound_select_->result_columns().size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "DISTINCT descriptor exceeds bytecode field identities"));
+    }
+
+    OrderingRecordDescriptor relation_descriptor{
+        .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        .key_field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        .key_columns = {},
+    };
+    relation_descriptor.key_columns.reserve(distinct_->collations.size());
+    for (const BoundCollationId collation : distinct_->collations) {
+      if (collation.value() >= collation_symbols_.size()) {
+        return std::unexpected(InternalFailure("DISTINCT collation is not published"));
+      }
+      relation_descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = collation_symbols_[collation.value()],
+          .order = BytecodeSortOrder::kAscending,
+          .null_placement = BytecodeNullPlacement::kFirst,
+      });
+    }
+    auto relation =
+        ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(relation_descriptor)),
+                             "unable to add DISTINCT relation descriptor");
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    distinct_relation_ = *relation;
+
+    if (advanced_order_ == nullptr) {
+      return {};
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
+    if (field_count > std::numeric_limits<std::uint32_t>::max() ||
+        advanced_order_->terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "DISTINCT ordering descriptor exceeds bytecode field identities"));
+    }
+    OrderingRecordDescriptor sorter_descriptor{
+        .field_count = static_cast<std::uint32_t>(field_count),
+        .key_field_count = static_cast<std::uint32_t>(advanced_order_->terms.size()),
+        .key_columns = {},
+    };
+    sorter_descriptor.key_columns.reserve(advanced_order_->terms.size());
+    for (const BoundOrderingTerm& term : advanced_order_->terms) {
+      if (term.collation.value() >= collation_symbols_.size()) {
+        return std::unexpected(InternalFailure("DISTINCT order collation is not published"));
+      }
+      sorter_descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = collation_symbols_[term.collation.value()],
+          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                        : BytecodeSortOrder::kAscending,
+          .null_placement = term.null_placement == BoundNullPlacement::kLast
+                                ? BytecodeNullPlacement::kLast
+                                : BytecodeNullPlacement::kFirst,
+      });
+    }
+    auto sorter =
+        ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(sorter_descriptor)),
+                             "unable to add DISTINCT ordering descriptor");
+    if (!sorter.has_value()) {
+      return std::unexpected(std::move(sorter.error()));
+    }
+    sorter_ = *sorter;
     return {};
   }
 
@@ -2503,6 +2740,21 @@ class PlanLowerer final {
     }
     for (const BoundExpressionId predicate : filter_->predicates) {
       if (auto emitted = EmitPredicate(predicate, rejected); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctGuards(std::optional<Label> completion) {
+    if (filter_ == nullptr || filter_->guards.empty()) {
+      return {};
+    }
+    if (!completion.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT guard has no completion label"));
+    }
+    for (const BoundExpressionId predicate : filter_->guards) {
+      if (auto emitted = EmitPredicate(predicate, *completion); !emitted.has_value()) {
         return emitted;
       }
     }
@@ -4989,6 +5241,495 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitDistinctProjection() {
+    if (projection_ == nullptr) {
+      return std::unexpected(InternalFailure("DISTINCT projection is unavailable"));
+    }
+    const LogicalNode& logical_projection = logical_plan_->node(projection_->logical_projection);
+    const auto* projection = std::get_if<LogicalProjectionNode>(&logical_projection.payload);
+    if (projection == nullptr || projection->core_index != 0U ||
+        projection->expressions.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(InternalFailure("DISTINCT projection shape is invalid"));
+    }
+    for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
+      if (auto emitted = EmitExpression(
+              projection->expressions[index],
+              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctMembership(Label duplicate) {
+    if (!distinct_relation_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT relation descriptor is unavailable"));
+    }
+    auto inserted =
+        ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
+                                 *distinct_relation_, result_block_first_,
+                                 static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+                                 RelationInsertMode::kKeepExisting, duplicate),
+                             "unable to emit DISTINCT membership insertion");
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctOrderValue(const LogicalOrderValue& value,
+                                                            RegisterId destination) {
+    if (value.kind == LogicalOrderValueKind::kInputField) {
+      if (value.expression.has_value() ||
+          value.field_index >= bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("DISTINCT order input field is invalid"));
+      }
+      return Append(CopyInstruction{
+          .input = RegisterId{result_block_first_.value() + value.field_index},
+          .output = destination,
+      });
+    }
+    if (!value.expression.has_value() || value.field_index != 0U) {
+      return std::unexpected(InternalFailure("DISTINCT order expression is invalid"));
+    }
+    const BoundExpressionId expression = *value.expression;
+    if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
+      return emitted;
+    }
+    return Append(CopyInstruction{
+        .input = Home(expression),
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctOrderedCandidate() {
+    if (advanced_order_ == nullptr || !sorter_.has_value() || !sorter_record_first_.has_value() ||
+        advanced_order_->core_plans.size() != 1U) {
+      return std::unexpected(InternalFailure("DISTINCT ordered candidate is incomplete"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    if (layout.schedule != OrderEvaluationSchedule::kPayloadThenKeys ||
+        layout.key_values.size() != advanced_order_->terms.size()) {
+      return std::unexpected(InternalFailure("DISTINCT order schedule is invalid"));
+    }
+    const RegisterId first = AssumeValue(sorter_record_first_);
+    const SorterId sorter = AssumeValue(sorter_);
+    const auto key_count = static_cast<std::uint32_t>(layout.key_values.size());
+    for (std::size_t index = 0; index < layout.payload_values.size(); ++index) {
+      if (auto emitted = EmitDistinctOrderValue(
+              layout.payload_values[index],
+              RegisterId{first.value() + key_count + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    for (std::size_t index = 0; index < layout.key_values.size(); ++index) {
+      if (auto emitted =
+              EmitDistinctOrderValue(layout.key_values[index],
+                                     RegisterId{first.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return Append(InsertSorterInstruction{
+        .sorter = sorter,
+        .first_value = first,
+        .value_count =
+            static_cast<std::uint32_t>(layout.key_values.size() + layout.payload_values.size()),
+    });
+  }
+
+  struct DistinctLimitTargets {
+    Label advance;
+    Label completion;
+  };
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctLimitAfterRow(DistinctLimitTargets targets) {
+    if (limit_ == nullptr) {
+      return {};
+    }
+    if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
+        !one_register_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT LIMIT has no row-loop counters"));
+    }
+    const RegisterId negative = AssumeValue(negative_limit_register_);
+    const RegisterId limit = AssumeValue(limit_register_);
+    const RegisterId one = AssumeValue(one_register_);
+    if (auto jumped = EmitJumpIf(negative, JumpCondition::kIfTrue, targets.advance);
+        !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto decremented = Append(BinaryInstruction{
+            .operation = BinaryOperation::kSubtract,
+            .left = limit,
+            .right = one,
+            .output = limit,
+        });
+        !decremented.has_value()) {
+      return decremented;
+    }
+    return EmitJumpIf(limit, JumpCondition::kIfFalse, targets.completion);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctSorterDrain() {
+    if (advanced_order_ == nullptr || !sorter_.has_value() ||
+        advanced_order_->core_plans.size() != 1U) {
+      return std::unexpected(InternalFailure("DISTINCT sorter drain is incomplete"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    if (layout.output_fields.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(InternalFailure("DISTINCT sorter output shape is invalid"));
+    }
+    const SorterId sorter = AssumeValue(sorter_);
+
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    std::optional<Label> positioned_completion;
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_completion = *label;
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(sorter, *empty),
+                                        "unable to emit DISTINCT sorter rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (limit_ != nullptr) {
+      if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
+        return offset;
+      }
+    }
+    for (std::size_t index = 0; index < layout.output_fields.size(); ++index) {
+      const SortOutputField& output = layout.output_fields[index];
+      const std::uint32_t field =
+          output.kind == SortOutputFieldKind::kKey
+              ? output.field_index
+              : static_cast<std::uint32_t>(layout.key_values.size()) + output.field_index;
+      if (auto read = Append(ReadSorterFieldInstruction{
+              .sorter = sorter,
+              .field = field,
+              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(layout.output_fields.size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (limit_ != nullptr) {
+      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
+          !one_register_.has_value() || !positioned_completion.has_value()) {
+        return std::unexpected(InternalFailure("DISTINCT ordered LIMIT has no counters"));
+      }
+      const RegisterId negative = AssumeValue(negative_limit_register_);
+      const RegisterId limit = AssumeValue(limit_register_);
+      const RegisterId one = AssumeValue(one_register_);
+      const Label completion = AssumeValue(positioned_completion);
+      if (auto jumped = EmitJumpIf(negative, JumpCondition::kIfTrue, *advance);
+          !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto decremented = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = limit,
+              .right = one,
+              .output = limit,
+          });
+          !decremented.has_value()) {
+        return decremented;
+      }
+      if (auto jumped = EmitJumpIf(limit, JumpCondition::kIfFalse, completion);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(sorter, *row),
+                                     "unable to emit DISTINCT sorter advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = sorter}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    if (positioned_completion.has_value()) {
+      if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = sorter}); !closed.has_value()) {
+        return closed;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctOpenedCompletion(std::optional<CursorId> cursor) {
+    if (cursor.has_value()) {
+      if (auto closed = Append(CloseCursorInstruction{.cursor = *cursor}); !closed.has_value()) {
+        return closed;
+      }
+    }
+    if (!distinct_relation_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT completion has no relation"));
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = AssumeValue(distinct_relation_)});
+        !closed.has_value()) {
+      return closed;
+    }
+    return advanced_order_ == nullptr ? Append(HaltInstruction{}) : EmitDistinctSorterDrain();
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctTableScan() {
+    if (table_scan_ == nullptr || !cursor_.has_value() || !distinct_relation_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT table scan resources are incomplete"));
+    }
+    const CursorId cursor = AssumeValue(cursor_);
+    const RelationId relation = AssumeValue(distinct_relation_);
+    std::optional<Label> closed_completion;
+    if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      closed_completion = *label;
+    }
+    if (auto limit = EmitLimitInitialization(closed_completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto guards = EmitDistinctGuards(closed_completion); !guards.has_value()) {
+      return guards;
+    }
+    if (auto opened = Append(OpenRelationInstruction{.relation = relation}); !opened.has_value()) {
+      return opened;
+    }
+    if (advanced_order_ != nullptr) {
+      if (!sorter_.has_value()) {
+        return std::unexpected(InternalFailure("DISTINCT order has no sorter"));
+      }
+      if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+      return opened;
+    }
+
+    auto unpositioned_completion = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    std::optional<Label> positioned_completion;
+    if (!unpositioned_completion.has_value()) {
+      return std::unexpected(std::move(unpositioned_completion.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (limit_ != nullptr && advanced_order_ == nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_completion = *label;
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *unpositioned_completion),
+                             "unable to emit DISTINCT table rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto filters = EmitFilters(*advance); !filters.has_value()) {
+      return filters;
+    }
+    if (auto projected = EmitDistinctProjection(); !projected.has_value()) {
+      return projected;
+    }
+    if (auto inserted = EmitDistinctMembership(*advance); !inserted.has_value()) {
+      return inserted;
+    }
+    if (advanced_order_ != nullptr) {
+      if (auto ordered = EmitDistinctOrderedCandidate(); !ordered.has_value()) {
+        return ordered;
+      }
+    } else {
+      if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+        return offset;
+      }
+      if (auto result = Append(ResultRowInstruction{
+              .first = result_block_first_,
+              .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+          });
+          !result.has_value()) {
+        return result;
+      }
+      if (limit_ != nullptr) {
+        if (!positioned_completion.has_value()) {
+          return std::unexpected(InternalFailure("DISTINCT LIMIT completion is unavailable"));
+        }
+        if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
+                .advance = *advance,
+                .completion = AssumeValue(positioned_completion),
+            });
+            !limited.has_value()) {
+          return limited;
+        }
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                     "unable to emit DISTINCT table advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*unpositioned_completion); !bound.has_value()) {
+      return bound;
+    }
+    if (auto completed = EmitDistinctOpenedCompletion(cursor); !completed.has_value()) {
+      return completed;
+    }
+    if (positioned_completion.has_value()) {
+      if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto completed = EmitDistinctOpenedCompletion(cursor); !completed.has_value()) {
+        return completed;
+      }
+    }
+    if (closed_completion.has_value()) {
+      if (auto bound = BindLabel(*closed_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+        return halted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctSingleRow() {
+    if (!distinct_relation_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT single row has no relation"));
+    }
+    const RelationId relation = AssumeValue(distinct_relation_);
+    std::optional<Label> closed_completion;
+    if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      closed_completion = *label;
+    }
+    if (auto limit = EmitLimitInitialization(closed_completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto guards = EmitDistinctGuards(closed_completion); !guards.has_value()) {
+      return guards;
+    }
+    if (auto opened = Append(OpenRelationInstruction{.relation = relation}); !opened.has_value()) {
+      return opened;
+    }
+    if (advanced_order_ != nullptr) {
+      if (!sorter_.has_value()) {
+        return std::unexpected(InternalFailure("DISTINCT order has no sorter"));
+      }
+      if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto filters = EmitFilters(*completion); !filters.has_value()) {
+      return filters;
+    }
+    if (auto projected = EmitDistinctProjection(); !projected.has_value()) {
+      return projected;
+    }
+    if (auto inserted = EmitDistinctMembership(*completion); !inserted.has_value()) {
+      return inserted;
+    }
+    if (advanced_order_ != nullptr) {
+      if (auto ordered = EmitDistinctOrderedCandidate(); !ordered.has_value()) {
+        return ordered;
+      }
+    } else {
+      if (auto offset = EmitOffset(*completion); !offset.has_value()) {
+        return offset;
+      }
+      if (auto result = Append(ResultRowInstruction{
+              .first = result_block_first_,
+              .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+          });
+          !result.has_value()) {
+        return result;
+      }
+    }
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    if (auto completed = EmitDistinctOpenedCompletion(std::nullopt); !completed.has_value()) {
+      return completed;
+    }
+    if (closed_completion.has_value()) {
+      if (auto bound = BindLabel(*closed_completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDistinctPlan() {
+    if (table_scan_ != nullptr) {
+      return EmitDistinctTableScan();
+    }
+    if (std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload)) {
+      return EmitDistinctSingleRow();
+    }
+    return std::unexpected(UnsupportedFailure("DISTINCT access plan is not implemented"));
+  }
+
   [[nodiscard]] LoweringResult<void> EmitAccessPlan() {
     if (std::holds_alternative<PhysicalEmptyNode>(leaf_->payload)) {
       return EmitEmpty();
@@ -5190,6 +5931,8 @@ class PlanLowerer final {
   const PhysicalProjectionNode* projection_ = nullptr;
   const PhysicalSortNode* sort_ = nullptr;
   const PhysicalOutputNode* output_ = nullptr;
+  const PhysicalDistinctNode* distinct_ = nullptr;
+  const PhysicalAdvancedOrderNode* advanced_order_ = nullptr;
 
   std::size_t next_register_ = 0;
   std::uint32_t register_count_ = 0;
@@ -5224,6 +5967,7 @@ class PlanLowerer final {
   std::optional<CursorId> index_cursor_;
   std::optional<SorterId> sorter_;
   std::optional<TopNId> top_n_;
+  std::optional<RelationId> distinct_relation_;
   std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
   std::optional<CursorFieldId> source_rowid_cursor_field_;
   std::vector<bool> source_field_real_affinity_;
@@ -5289,13 +6033,11 @@ LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
   }
   if (std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
         return std::holds_alternative<PhysicalValuesNode>(node.payload) ||
-               std::holds_alternative<PhysicalDistinctNode>(node.payload) ||
-               std::holds_alternative<PhysicalCompoundNode>(node.payload) ||
-               std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+               std::holds_alternative<PhysicalCompoundNode>(node.payload);
       })) {
     return std::unexpected(PlanLoweringError{
         .code = PlanLoweringErrorCode::kUnsupportedPlan,
-        .detail = "DISTINCT, VALUES, and compound SELECT lowering is not supported",
+        .detail = "VALUES and compound SELECT lowering is not supported",
     });
   }
   return PlanLowerer(plan, limits).Run();

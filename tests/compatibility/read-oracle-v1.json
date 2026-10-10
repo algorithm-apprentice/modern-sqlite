@@ -4817,12 +4817,112 @@
       }
     },
     {
-      "boundary": {
-        "first_step": "row",
-        "prepare": "statement"
-      },
-      "expectation": "unsupported",
-      "id": "unsupported-distinct"
+      "expectation": "compare",
+      "id": "distinct-select",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 28,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "distinct-order-limit",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "73636f7265204953204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "73636f7265204953204e554c4c"
+            }
+          ],
+          "next_offset": 64,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     },
     {
       "boundary": {
@@ -5636,7 +5736,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "0f523440ced22ad99601c4cbe49ae56398cd0f90da33c64053cb3c091217c96a",
+  "corpus_sha256": "b1a652541c2f6b0fdf335d2d7c9ae920549e89005dda8ab73f6d74e8177dbd59",
   "databases": [
     {
       "id": "core",
