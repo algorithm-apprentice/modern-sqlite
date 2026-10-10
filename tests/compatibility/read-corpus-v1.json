@@ -1005,6 +1005,26 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "compound-leftmost-metadata",
+      "operations": [
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542069642c276c656674272046524f4d206974656d7320554e494f4e2053454c4543542073636f72652c6e616d652046524f4d206974656d73204f524445522042592032"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "set-then-order-rightmost-metadata",
+      "operations": [
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542069642c276c656674272046524f4d206974656d7320554e494f4e2053454c4543542073636f72652c6e616d652046524f4d206974656d73204f52444552204259203220434f4c4c4154452042494e415259"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "aggregate-function",
       "id": "unsupported-aggregate",

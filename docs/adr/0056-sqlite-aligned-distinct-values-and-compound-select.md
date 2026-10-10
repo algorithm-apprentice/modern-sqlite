@@ -246,8 +246,12 @@ width. Report:
 - `SELECTs to the left and right of <operator> do not have the same number of
   result columns`.
 
-Result names and declared-type metadata come from the leftmost core. A VALUES
-core publishes `column1`, `column2`, and so on.
+Result names come from the leftmost core. Declared-type and affinity metadata
+normally come from that core as well. When an explicit compound ORDER BY
+COLLATE term selects the set-then-order rewrite, pinned SQLite's outer ordered
+projection keeps the leftmost names but publishes declared types and affinities
+from the rightmost core. A VALUES core publishes `column1`, `column2`, and so
+on.
 
 No affinity is applied while comparing compound or DISTINCT keys. Runtime
 storage classes remain those produced by each arm.

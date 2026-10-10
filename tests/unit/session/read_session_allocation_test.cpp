@@ -87,6 +87,8 @@ int main() try {
   ReadStatement constant = Prepare(session, "SELECT 1");
   ReadStatement lookup = Prepare(session, "SELECT id FROM items WHERE rowid=?1");
   ReadStatement ordered = Prepare(session, "SELECT id FROM items ORDER BY id DESC");
+  ReadStatement compound =
+      Prepare(session, "SELECT id FROM items UNION SELECT id FROM items ORDER BY 1");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -169,6 +171,34 @@ int main() try {
   }
   ResetCount();
   if (!ordered.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto compound_first = compound.Step();
+  if (!compound_first.has_value() || *compound_first != ReadStep::kRow ||
+      compound.row()[0].integer_value().value_or(0) != 1 || !AtMostAllocations(256U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto compound_second = compound.Step();
+  if (!compound_second.has_value() || *compound_second != ReadStep::kRow ||
+      compound.row()[0].integer_value().value_or(0) != 2 || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  const auto compound_third = compound.Step();
+  if (!compound_third.has_value() || *compound_third != ReadStep::kRow ||
+      compound.row()[0].integer_value().value_or(0) != 3 || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  const auto compound_done = compound.Step();
+  if (!compound_done.has_value() || *compound_done != ReadStep::kDone || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!compound.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 
