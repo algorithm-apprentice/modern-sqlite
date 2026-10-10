@@ -3009,7 +3009,7 @@ TEST(Vm, SpillsSorterBytecodeAndDeletesTemporaryFilesAtHalt) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
@@ -3038,7 +3038,7 @@ TEST(Vm, SorterBytecodeRequiresTemporaryStorageFactoryAndCleansIoFailures) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
   vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
   Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));

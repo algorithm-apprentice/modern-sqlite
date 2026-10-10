@@ -2133,16 +2133,16 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenSorterInstruction& operation) {
-    if (temporary_storage_ == nullptr) {
-      return std::unexpected(
-          VmError(ErrorCode::kMisuse, "sorter bytecode requires temporary storage"));
-    }
     std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
     if (runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "sorter is already open"));
     }
 
-    auto created = temporary_storage_->CreateRecordSorter(
+    auto storage = EnsureStatementTemporaryStorage();
+    if (!storage.has_value()) {
+      return std::unexpected(std::move(storage.error()));
+    }
+    auto created = (*storage)->CreateRecordSorter(
         RuntimeOrderingDescriptor(program_->sorter(operation.sorter)));
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));

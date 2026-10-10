@@ -545,5 +545,37 @@ TEST(StatementTemporaryStorage, BoundsAndReleasesTemporaryFileLeases) {
   EXPECT_EQ(ErrorCode::kMisuse, memory_file.error().code());
 }
 
+TEST(StatementTemporaryStorage, TracksBoundedFileWorkingSetsBeyondTheSpillBudget) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  const TemporaryStorageFactory file_factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{8},
+                                                }));
+  StatementTemporaryStorage file = TakeValue(file_factory.CreateStatementStorage());
+  TemporaryMemoryAccount file_owner = TakeValue(file.RegisterMemoryOwner());
+  ASSERT_TRUE(file_owner.Reserve(ByteCount{8}).has_value());
+  ASSERT_TRUE(file_owner.ReserveWorkingSet(ByteCount{5}).has_value());
+  EXPECT_EQ(ByteCount{13}, file_owner.retained_bytes());
+  EXPECT_EQ(ByteCount{13}, file.retained_bytes());
+  EXPECT_EQ(ByteCount{13}, file.peak_retained_bytes());
+  EXPECT_TRUE(file_owner.Release(ByteCount{13}).has_value());
+
+  const TemporaryStorageFactory memory_factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{8},
+                                                }));
+  StatementTemporaryStorage memory = TakeValue(memory_factory.CreateStatementStorage());
+  TemporaryMemoryAccount memory_owner = TakeValue(memory.RegisterMemoryOwner());
+  const auto rejected = memory_owner.ReserveWorkingSet(ByteCount{1});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_EQ(ByteCount{0}, memory.retained_bytes());
+}
+
 }  // namespace
 }  // namespace modern_sqlite

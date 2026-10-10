@@ -104,7 +104,8 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
   Impl(EphemeralRelationDescriptor owned_descriptor,
        StatementTemporaryStorage& statement_storage) noexcept
       : descriptor(std::move(owned_descriptor)),
-        statement_state(&temporary_storage_detail::RelationArenaAccess::State(statement_storage)),
+        statement_state(
+            &temporary_storage_detail::StatementStorageAccess::State(statement_storage)),
         memory_threshold(statement_storage.memory_budget()),
         spill_enabled(statement_storage.file_spill_enabled()) {}
 
@@ -186,7 +187,7 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
   }
 
   [[nodiscard]] Result<void> CheckStorage() const {
-    if (temporary_storage_detail::RelationArenaAccess::Failed(*statement_state)) {
+    if (temporary_storage_detail::StatementStorageAccess::Failed(*statement_state)) {
       return std::unexpected(Misuse("statement temporary storage is failed"));
     }
     return {};
@@ -281,6 +282,9 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
     }
     const std::size_t copied_bytes = copied->capacity().value();
     auto reserved = Account().Reserve(ByteCount{copied_bytes});
+    if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge) {
+      reserved = Account().ReserveWorkingSet(ByteCount{copied_bytes});
+    }
     if (!reserved.has_value()) {
       return std::unexpected(std::move(reserved.error()));
     }
@@ -664,7 +668,7 @@ Result<EphemeralInsertResult> EphemeralRelation::Insert(ByteBuffer record,
     if (!replaced.has_value()) {
       Error error = std::move(replaced.error());
       if (error.code() != ErrorCode::kTooLarge ||
-          temporary_storage_detail::RelationArenaAccess::Failed(*impl_->statement_state)) {
+          temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
         Close();
       }
       return std::unexpected(std::move(error));
@@ -675,7 +679,7 @@ Result<EphemeralInsertResult> EphemeralRelation::Insert(ByteBuffer record,
   if (!inserted.has_value()) {
     Error error = std::move(inserted.error());
     if (error.code() != ErrorCode::kTooLarge ||
-        temporary_storage_detail::RelationArenaAccess::Failed(*impl_->statement_state)) {
+        temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
       Close();
     }
     return std::unexpected(std::move(error));
@@ -869,6 +873,10 @@ Result<RecordView> EphemeralRelation::current_record() const {
   if (impl_ == nullptr || impl_->state != EphemeralRelationState::kPositioned ||
       !impl_->current_view.has_value()) {
     return std::unexpected(Misuse("ephemeral relation has no current record"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    return std::unexpected(std::move(usable.error()));
   }
   return *impl_->current_view;
 }

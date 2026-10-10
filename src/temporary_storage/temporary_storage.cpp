@@ -134,6 +134,201 @@ struct RelationArena {
   std::size_t root_count = 0;
 };
 
+struct SorterExtentNode {
+  std::uint64_t begin = 0;
+  std::uint64_t size = 0;
+  std::uint64_t sorter_ordinal = 0;
+  std::uint64_t run_ordinal = 0;
+  std::unique_ptr<SorterExtentNode> next;
+};
+
+struct SorterArena;
+
+class SorterExtentLease final {
+ public:
+  SorterExtentLease(const SorterExtentLease&) = delete;
+  SorterExtentLease& operator=(const SorterExtentLease&) = delete;
+  SorterExtentLease(SorterExtentLease&& other) noexcept
+      : arena_(std::exchange(other.arena_, nullptr)), extent_(std::move(other.extent_)) {}
+  SorterExtentLease& operator=(SorterExtentLease&& other) noexcept;
+  ~SorterExtentLease();
+
+  [[nodiscard]] bool valid() const noexcept { return arena_ != nullptr && extent_ != nullptr; }
+  [[nodiscard]] File& file() const noexcept;
+  [[nodiscard]] std::uint64_t begin() const noexcept;
+  [[nodiscard]] std::uint64_t size() const noexcept;
+
+ private:
+  friend struct SorterArena;
+
+  SorterExtentLease(SorterArena& arena, std::unique_ptr<SorterExtentNode> extent) noexcept
+      : arena_(&arena), extent_(std::move(extent)) {}
+
+  void Release() noexcept;
+
+  SorterArena* arena_ = nullptr;
+  std::unique_ptr<SorterExtentNode> extent_;
+};
+
+struct SorterArena {
+  SorterArena(TemporaryFileLease owned_file_lease, std::unique_ptr<File> owned_file) noexcept
+      : file_lease(std::move(owned_file_lease)), file(std::move(owned_file)) {}
+
+  ~SorterArena() {
+    if (live_extents != 0U) {
+      std::terminate();
+    }
+    while (free_extents != nullptr) {
+      std::unique_ptr<SorterExtentNode> next = std::move(free_extents->next);
+      free_extents = std::move(next);
+    }
+  }
+
+  [[nodiscard]] Result<SorterExtentLease> Allocate(std::uint64_t size, std::uint64_t sorter_ordinal,
+                                                   std::uint64_t run_ordinal) {
+    if (size == 0U) {
+      return std::unexpected(Misuse("temporary sorter extent cannot be empty"));
+    }
+    std::unique_ptr<SorterExtentNode>* link = &free_extents;
+    while (*link != nullptr && (*link)->size < size) {
+      link = &((*link)->next);
+    }
+
+    std::unique_ptr<SorterExtentNode> extent;
+    if (*link != nullptr && (*link)->size == size) {
+      extent = std::move(*link);
+      *link = std::move(extent->next);
+      extent->next.reset();
+      extent->sorter_ordinal = sorter_ordinal;
+      extent->run_ordinal = run_ordinal;
+    } else if (*link != nullptr) {
+      try {
+        extent = std::make_unique<SorterExtentNode>(SorterExtentNode{
+            .begin = (*link)->begin,
+            .size = size,
+            .sorter_ordinal = sorter_ordinal,
+            .run_ordinal = run_ordinal,
+            .next = nullptr,
+        });
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      (*link)->begin += size;
+      (*link)->size -= size;
+      ++extent_node_count;
+    } else {
+      if (size > std::numeric_limits<std::uint64_t>::max() - high_water) {
+        return std::unexpected(TooLarge("temporary sorter file extent overflows"));
+      }
+      try {
+        extent = std::make_unique<SorterExtentNode>(SorterExtentNode{
+            .begin = high_water,
+            .size = size,
+            .sorter_ordinal = sorter_ordinal,
+            .run_ordinal = run_ordinal,
+            .next = nullptr,
+        });
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      high_water += size;
+      ++extent_node_count;
+    }
+    ++live_extents;
+    return SorterExtentLease{*this, std::move(extent)};
+  }
+
+  void Release(std::unique_ptr<SorterExtentNode> extent) noexcept {
+    if (extent == nullptr || live_extents == 0U) {
+      std::terminate();
+    }
+    extent->sorter_ordinal = 0;
+    extent->run_ordinal = 0;
+    SorterExtentNode* previous = nullptr;
+    std::unique_ptr<SorterExtentNode>* link = &free_extents;
+    while (*link != nullptr && (*link)->begin < extent->begin) {
+      previous = link->get();
+      link = &((*link)->next);
+    }
+    extent->next = std::move(*link);
+    *link = std::move(extent);
+    SorterExtentNode* current = link->get();
+
+    if (current->next != nullptr && current->begin + current->size == current->next->begin) {
+      std::unique_ptr<SorterExtentNode> next = std::move(current->next);
+      current->size += next->size;
+      current->next = std::move(next->next);
+      --extent_node_count;
+    }
+    if (previous != nullptr && previous->begin + previous->size == current->begin) {
+      previous->size += current->size;
+      previous->next = std::move(current->next);
+      --extent_node_count;
+    }
+    --live_extents;
+
+    while (free_extents != nullptr) {
+      std::unique_ptr<SorterExtentNode>* tail_link = &free_extents;
+      while ((*tail_link)->next != nullptr) {
+        tail_link = &((*tail_link)->next);
+      }
+      const SorterExtentNode* tail = tail_link->get();
+      if (tail->begin + tail->size != high_water) {
+        break;
+      }
+      high_water = tail->begin;
+      tail_link->reset();
+      --extent_node_count;
+    }
+  }
+
+  TemporaryFileLease file_lease;
+  std::unique_ptr<File> file;
+  std::unique_ptr<SorterExtentNode> free_extents;
+  std::uint64_t high_water = 0;
+  std::size_t live_extents = 0;
+  std::size_t extent_node_count = 0;
+};
+
+SorterExtentLease& SorterExtentLease::operator=(SorterExtentLease&& other) noexcept {
+  if (this != &other) {
+    Release();
+    arena_ = std::exchange(other.arena_, nullptr);
+    extent_ = std::move(other.extent_);
+  }
+  return *this;
+}
+
+SorterExtentLease::~SorterExtentLease() { Release(); }
+
+File& SorterExtentLease::file() const noexcept {
+  if (!valid() || arena_->file == nullptr) {
+    std::terminate();
+  }
+  return *arena_->file;
+}
+
+std::uint64_t SorterExtentLease::begin() const noexcept {
+  if (!valid()) {
+    std::terminate();
+  }
+  return extent_->begin;
+}
+
+std::uint64_t SorterExtentLease::size() const noexcept {
+  if (!valid()) {
+    std::terminate();
+  }
+  return extent_->size;
+}
+
+void SorterExtentLease::Release() noexcept {
+  if (arena_ != nullptr) {
+    arena_->Release(std::move(extent_));
+    arena_ = nullptr;
+  }
+}
+
 struct MemoryRegistration {
   ~MemoryRegistration();
 
@@ -154,9 +349,11 @@ struct StatementState {
         file_spill(owning_factory.file_spill_enabled()) {}
 
   ~StatementState() {
-    if (owners != nullptr || owner_count != 0U || live_relation_roots != 0U) {
+    if (owners != nullptr || owner_count != 0U || live_relation_roots != 0U ||
+        (sorter_arena != nullptr && sorter_arena->live_extents != 0U)) {
       std::terminate();
     }
+    sorter_arena.reset();
     relation_arena.reset();
     if (live_files != 0U) {
       std::terminate();
@@ -291,6 +488,26 @@ struct StatementState {
     }
     registration.retained_bytes -= amount;
     retained -= amount;
+    return {};
+  }
+
+  [[nodiscard]] Status ReserveWorkingSet(MemoryRegistration& registration, std::size_t amount) {
+    if (registration.state != this) {
+      return std::unexpected(Misuse("temporary memory account is detached"));
+    }
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (!file_spill) {
+      return std::unexpected(TooLarge("temporary working set exceeds the memory-mode budget"));
+    }
+    if (amount > std::numeric_limits<std::size_t>::max() - registration.retained_bytes ||
+        amount > std::numeric_limits<std::size_t>::max() - retained) {
+      return std::unexpected(TooLarge("temporary working-set accounting overflowed"));
+    }
+    registration.retained_bytes += amount;
+    retained += amount;
+    peak_retained = std::max(peak_retained, retained);
     return {};
   }
 
@@ -444,6 +661,60 @@ struct StatementState {
     --live_relation_roots;
   }
 
+  [[nodiscard]] Result<std::uint64_t> AllocateSorterOrdinal() {
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (next_sorter_ordinal == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("temporary sorter ordinal is exhausted"));
+    }
+    return next_sorter_ordinal++;
+  }
+
+  [[nodiscard]] Result<SorterArena*> EnsureSorterArena() {
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (sorter_arena != nullptr) {
+      return sorter_arena.get();
+    }
+    auto file_lease = AcquireFile();
+    if (!file_lease.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(file_lease.error()));
+    }
+    auto file = factory->CreateTemporaryFile();
+    if (!file.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(file.error()));
+    }
+    try {
+      sorter_arena = std::make_unique<SorterArena>(std::move(*file_lease), std::move(*file));
+      return sorter_arena.get();
+    } catch (const std::bad_alloc&) {
+      failed = true;
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      failed = true;
+      return std::unexpected(Error::OutOfMemory());
+    }
+  }
+
+  [[nodiscard]] Result<SorterExtentLease> AllocateSorterExtent(std::uint64_t size,
+                                                               std::uint64_t sorter_ordinal,
+                                                               std::uint64_t run_ordinal) {
+    auto arena = EnsureSorterArena();
+    if (!arena.has_value()) {
+      return std::unexpected(std::move(arena.error()));
+    }
+    auto extent = (*arena)->Allocate(size, sorter_ordinal, run_ordinal);
+    if (!extent.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(extent.error()));
+    }
+    return extent;
+  }
+
   [[nodiscard]] std::size_t OverheadBytes() const noexcept {
     std::size_t overhead = sizeof(StatementState);
     const auto add = [&overhead](std::size_t count, std::size_t size) {
@@ -457,6 +728,10 @@ struct StatementState {
     if (relation_arena != nullptr) {
       add(1U, sizeof(RelationArena));
       add(relation_arena->root_count, sizeof(RelationRoot));
+    }
+    if (sorter_arena != nullptr) {
+      add(1U, sizeof(SorterArena));
+      add(sorter_arena->extent_node_count, sizeof(SorterExtentNode));
     }
     return overhead;
   }
@@ -473,8 +748,10 @@ struct StatementState {
   std::size_t owner_count = 0;
   std::size_t live_relation_roots = 0;
   std::uint64_t next_ordinal = 0;
+  std::uint64_t next_sorter_ordinal = 0;
   MemoryRegistration* owners = nullptr;
   std::unique_ptr<RelationArena> relation_arena;
+  std::unique_ptr<SorterArena> sorter_arena;
 };
 
 MemoryRegistration::~MemoryRegistration() {
@@ -521,6 +798,13 @@ Status TemporaryMemoryAccount::Reserve(ByteCount amount) {
     return std::unexpected(Misuse("temporary memory account is invalid"));
   }
   return registration_->state->Reserve(*registration_, amount.value());
+}
+
+Status TemporaryMemoryAccount::ReserveWorkingSet(ByteCount amount) {
+  if (!valid()) {
+    return std::unexpected(Misuse("temporary memory account is invalid"));
+  }
+  return registration_->state->ReserveWorkingSet(*registration_, amount.value());
 }
 
 Status TemporaryMemoryAccount::Release(ByteCount amount) {
@@ -617,7 +901,7 @@ temporary_storage_detail::RelationArenaAccess::Acquire(StatementState& state,
   }
 }
 
-temporary_storage_detail::StatementState& temporary_storage_detail::RelationArenaAccess::State(
+temporary_storage_detail::StatementState& temporary_storage_detail::StatementStorageAccess::State(
     StatementTemporaryStorage& storage) noexcept {
   if (storage.state_ == nullptr) {
     std::terminate();
@@ -625,7 +909,8 @@ temporary_storage_detail::StatementState& temporary_storage_detail::RelationAren
   return *storage.state_;
 }
 
-bool temporary_storage_detail::RelationArenaAccess::Failed(const StatementState& state) noexcept {
+bool temporary_storage_detail::StatementStorageAccess::Failed(
+    const StatementState& state) noexcept {
   return state.failed;
 }
 
@@ -694,167 +979,332 @@ Result<TemporaryFileLease> StatementTemporaryStorage::AcquireFileLease() {
   return state_->AcquireFile();
 }
 
-struct RecordSorter::Impl {
+struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
   struct Entry {
-    Entry(ByteBuffer owned_record, RecordView record_view) noexcept
-        : record(std::move(owned_record)), view(record_view) {}
+    Entry(ByteBuffer owned_record, RecordView record_view, std::size_t owned_bytes) noexcept
+        : record(std::move(owned_record)), view(record_view), memory_bytes(owned_bytes) {}
 
     ByteBuffer record;
     RecordView view;
+    std::size_t memory_bytes;
     std::unique_ptr<Entry> next;
   };
 
   using Run = std::unique_ptr<Entry>;
 
   struct PmaRun {
-    std::uint64_t begin = 0;
-    std::uint64_t end = 0;
-    std::size_t ordinal = 0;
+    PmaRun(temporary_storage_detail::SorterExtentLease owned_extent,
+           std::uint64_t run_ordinal) noexcept
+        : extent(std::move(owned_extent)), ordinal(run_ordinal) {}
+
+    temporary_storage_detail::SorterExtentLease extent;
+    std::uint64_t ordinal;
+    std::unique_ptr<PmaRun> next;
   };
 
+  static_assert(sizeof(PmaRun) <= sizeof(Entry));
+
   struct PmaReader {
-    PmaReader(File& input, PmaRun input_run) noexcept
-        : file(&input), run(input_run), offset(input_run.begin) {}
-
-    [[nodiscard]] Result<void> Advance(RecordCodecOptions options) {
-      view.reset();
-      record = ByteBuffer{};
-      if (offset == run.end) {
-        exhausted = true;
-        return {};
-      }
-      if (offset > run.end) {
-        return std::unexpected(Corruption("PMA reader advanced beyond its run"));
-      }
-
-      try {
-        std::array<std::byte, 9> header{};
-        const std::size_t header_size =
-            static_cast<std::size_t>(std::min<std::uint64_t>(header.size(), run.end - offset));
-        auto header_read =
-            file->ReadAt(MutableByteView{header}.first(header_size), FileOffset{offset});
-        if (!header_read.has_value()) {
-          return std::unexpected(std::move(header_read.error()));
-        }
-        if (!header_read->complete()) {
-          return std::unexpected(Corruption("PMA record-size varint is truncated"));
-        }
-        auto decoded = DecodeSqliteVarint(ByteView{header}.first(header_size));
-        if (!decoded.has_value()) {
-          return std::unexpected(Corruption("PMA record-size varint is malformed"));
-        }
-
-        const std::uint64_t size = decoded->value;
-        const std::uint64_t header_bytes = decoded->bytes_consumed.value();
-        if (header_bytes > run.end - offset) {
-          return std::unexpected(Corruption("PMA record-size varint crosses the run boundary"));
-        }
-        const std::uint64_t payload_offset = offset + header_bytes;
-        if (size > run.end - payload_offset || size > std::numeric_limits<std::size_t>::max()) {
-          return std::unexpected(Corruption("PMA record payload crosses the run boundary"));
-        }
-
-        ByteBuffer next_record{ByteCount{static_cast<std::size_t>(size)}};
-        auto payload_read = file->ReadAt(next_record.mutable_view(), FileOffset{payload_offset});
-        if (!payload_read.has_value()) {
-          return std::unexpected(std::move(payload_read.error()));
-        }
-        if (!payload_read->complete()) {
-          return std::unexpected(Corruption("PMA record payload is truncated"));
-        }
-        offset = payload_offset + size;
-        record = std::move(next_record);
-        auto parsed = RecordView::Parse(record.view(), options);
-        if (!parsed.has_value()) {
-          return std::unexpected(std::move(parsed.error()));
-        }
-        view = *parsed;
-        exhausted = false;
-        return {};
-      } catch (const std::bad_alloc&) {
-        return std::unexpected(Error::OutOfMemory());
-      } catch (const std::length_error&) {
-        return std::unexpected(Error::OutOfMemory());
-      }
-    }
+    PmaReader(File& input, const PmaRun& input_run) noexcept
+        : file(&input),
+          begin(input_run.extent.begin()),
+          end(begin + input_run.extent.size()),
+          offset(begin),
+          ordinal(input_run.ordinal) {}
 
     File* file;
-    PmaRun run;
+    std::uint64_t begin;
+    std::uint64_t end;
     std::uint64_t offset;
+    std::uint64_t ordinal;
     ByteBuffer record;
     std::optional<RecordView> view;
     bool exhausted = false;
   };
 
   struct MergeCursor {
-    explicit MergeCursor(const RecordSorterDescriptor& sorter_descriptor) noexcept
-        : descriptor(&sorter_descriptor) {}
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    using ReaderArray = std::unique_ptr<std::optional<PmaReader>[]>;
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    using HeapArray = std::unique_ptr<std::size_t[]>;
 
-    [[nodiscard]] static Result<std::unique_ptr<MergeCursor>> Create(
-        File& file, std::span<const PmaRun> runs, const RecordSorterDescriptor& descriptor) {
-      try {
-        auto cursor = std::make_unique<MergeCursor>(descriptor);
-        cursor->readers.reserve(runs.size());
-        cursor->heap.reserve(runs.size());
-        for (const PmaRun& run : runs) {
-          cursor->readers.emplace_back(file, run);
-          auto advanced = cursor->readers.back().Advance(descriptor.record_options);
-          if (!advanced.has_value()) {
-            return std::unexpected(std::move(advanced.error()));
-          }
-          if (!cursor->readers.back().exhausted) {
-            cursor->heap.push_back(cursor->readers.size() - 1U);
-          }
+    MergeCursor(const RecordSorterDescriptor& sorter_descriptor,
+                TemporaryMemoryAccount* memory_account, ReaderArray owned_readers,
+                HeapArray owned_heap, std::size_t input_count) noexcept
+        : descriptor(&sorter_descriptor),
+          account(memory_account),
+          readers(std::move(owned_readers)),
+          heap(std::move(owned_heap)),
+          reader_count(input_count) {}
+
+    ~MergeCursor() {
+      for (std::size_t index = 0; index < reader_count; ++index) {
+        std::optional<PmaReader>& reader = readers[index];
+        if (reader.has_value()) {
+          reader->view.reset();
+          reader->record = ByteBuffer{};
         }
-        if (!cursor->heap.empty()) {
-          for (std::size_t index = cursor->heap.size() / 2U; index > 0U; --index) {
-            cursor->SiftDown(index - 1U);
-          }
+      }
+      if (account != nullptr && charged_bytes != 0U) {
+        const auto released = account->Release(ByteCount{charged_bytes});
+        if (!released.has_value()) {
+          std::terminate();
         }
-        return cursor;
-      } catch (const std::bad_alloc&) {
-        return std::unexpected(Error::OutOfMemory());
-      } catch (const std::length_error&) {
-        return std::unexpected(Error::OutOfMemory());
       }
     }
 
-    [[nodiscard]] bool empty() const noexcept { return heap.empty(); }
+    [[nodiscard]] static Result<std::unique_ptr<MergeCursor>> Create(
+        File& file, std::span<PmaRun* const> runs, const RecordSorterDescriptor& descriptor,
+        TemporaryMemoryAccount* account) {
+      if (runs.empty() || runs.size() > kMergeFanIn) {
+        return std::unexpected(Misuse("PMA merge fan-in is invalid"));
+      }
+      if (runs.size() >
+              std::numeric_limits<std::size_t>::max() / sizeof(std::optional<PmaReader>) ||
+          runs.size() > std::numeric_limits<std::size_t>::max() / sizeof(std::size_t)) {
+        return std::unexpected(TooLarge("PMA merge allocation size overflows"));
+      }
+      const std::size_t reader_bytes = runs.size() * sizeof(std::optional<PmaReader>);
+      const std::size_t heap_bytes = runs.size() * sizeof(std::size_t);
+      if (reader_bytes > std::numeric_limits<std::size_t>::max() - sizeof(MergeCursor) ||
+          heap_bytes >
+              std::numeric_limits<std::size_t>::max() - sizeof(MergeCursor) - reader_bytes) {
+        return std::unexpected(TooLarge("PMA merge memory accounting overflows"));
+      }
+      const std::size_t base_bytes = sizeof(MergeCursor) + reader_bytes + heap_bytes;
+      if (account != nullptr) {
+        auto reserved = account->Reserve(ByteCount{base_bytes});
+        if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge) {
+          reserved = account->ReserveWorkingSet(ByteCount{base_bytes});
+        }
+        if (!reserved.has_value()) {
+          return std::unexpected(std::move(reserved.error()));
+        }
+      }
+      std::unique_ptr<MergeCursor> cursor;
+      try {
+        // Exact-size arrays avoid charging the unused portion of the 16-way fan-in.
+        // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+        auto readers = std::make_unique<std::optional<PmaReader>[]>(runs.size());
+        // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+        auto heap = std::make_unique<std::size_t[]>(runs.size());
+        cursor = std::make_unique<MergeCursor>(descriptor, account, std::move(readers),
+                                               std::move(heap), runs.size());
+      } catch (const std::bad_alloc&) {
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{base_bytes});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{base_bytes});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        return std::unexpected(Error::OutOfMemory());
+      }
+      cursor->charged_bytes = account == nullptr ? 0U : base_bytes;
+      for (std::size_t index = 0; index < runs.size(); ++index) {
+        cursor->readers[index].emplace(file, *runs[index]);
+        auto advanced = cursor->AdvanceReader(index);
+        if (!advanced.has_value()) {
+          return std::unexpected(std::move(advanced.error()));
+        }
+        if (!cursor->Reader(index).exhausted) {
+          cursor->heap[cursor->heap_size++] = index;
+        }
+      }
+      for (std::size_t index = cursor->heap_size / 2U; index > 0U; --index) {
+        cursor->SiftDown(index - 1U);
+      }
+      return cursor;
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return heap_size == 0U; }
 
     [[nodiscard]] const RecordView& current() const noexcept {
-      if (heap.empty()) {
+      if (empty()) {
         std::terminate();
       }
-      const std::optional<RecordView>& record_view = readers[heap.front()].view;
-      if (!record_view.has_value()) {
+      const std::optional<PmaReader>& reader = readers[heap[0]];
+      if (!reader.has_value() || !reader->view.has_value()) {
         std::terminate();
       }
-      return *record_view;  // NOLINT(bugprone-unchecked-optional-access)
+      return *reader->view;  // NOLINT(bugprone-unchecked-optional-access)
     }
 
     [[nodiscard]] Result<bool> Next() {
-      if (heap.empty()) {
+      if (empty()) {
         return std::unexpected(Misuse("PMA merge cursor is exhausted"));
       }
-      PmaReader& reader = readers[heap.front()];
-      auto advanced = reader.Advance(descriptor->record_options);
+      auto advanced = AdvanceReader(heap[0]);
       if (!advanced.has_value()) {
         return std::unexpected(std::move(advanced.error()));
       }
-      if (reader.exhausted) {
-        heap.front() = heap.back();
-        heap.pop_back();
+      if (Reader(heap[0]).exhausted) {
+        heap[0] = heap[heap_size - 1U];
+        --heap_size;
       }
-      if (!heap.empty()) {
+      if (!empty()) {
         SiftDown(0);
       }
-      return !heap.empty();
+      return !empty();
     }
 
    private:
+    [[nodiscard]] PmaReader& Reader(std::size_t index) noexcept {
+      if (index >= reader_count || !readers[index].has_value()) {
+        std::terminate();
+      }
+      return *readers[index];  // NOLINT(bugprone-unchecked-optional-access)
+    }
+
+    [[nodiscard]] const PmaReader& Reader(std::size_t index) const noexcept {
+      if (index >= reader_count || !readers[index].has_value()) {
+        std::terminate();
+      }
+      return *readers[index];  // NOLINT(bugprone-unchecked-optional-access)
+    }
+
+    [[nodiscard]] Result<void> AdvanceReader(std::size_t index) {
+      PmaReader& reader = Reader(index);
+      reader.view.reset();
+      const std::size_t old_bytes = reader.record.capacity().value();
+      if (old_bytes != 0U) {
+        reader.record = ByteBuffer{};
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{old_bytes});
+          if (!released.has_value() || old_bytes > charged_bytes) {
+            std::terminate();
+          }
+          charged_bytes -= old_bytes;
+        }
+      }
+      if (reader.offset == reader.end) {
+        reader.exhausted = true;
+        return {};
+      }
+      if (reader.offset < reader.begin || reader.offset > reader.end) {
+        return std::unexpected(Corruption("PMA reader advanced beyond its extent"));
+      }
+
+      std::array<std::byte, 9> header{};
+      const std::size_t header_size = static_cast<std::size_t>(
+          std::min<std::uint64_t>(header.size(), reader.end - reader.offset));
+      auto header_read = reader.file->ReadAt(MutableByteView{header}.first(header_size),
+                                             FileOffset{reader.offset});
+      if (!header_read.has_value()) {
+        return std::unexpected(std::move(header_read.error()));
+      }
+      if (!header_read->complete()) {
+        return std::unexpected(Corruption("PMA record-size varint is truncated"));
+      }
+      auto decoded = DecodeSqliteVarint(ByteView{header}.first(header_size));
+      if (!decoded.has_value()) {
+        return std::unexpected(Corruption("PMA record-size varint is malformed"));
+      }
+      const std::uint64_t size = decoded->value;
+      const std::uint64_t header_bytes = decoded->bytes_consumed.value();
+      if (header_bytes > reader.end - reader.offset) {
+        return std::unexpected(Corruption("PMA record-size varint crosses its extent"));
+      }
+      const std::uint64_t payload_offset = reader.offset + header_bytes;
+      if (size > reader.end - payload_offset || size > std::numeric_limits<std::size_t>::max()) {
+        return std::unexpected(Corruption("PMA record payload crosses its extent"));
+      }
+      const auto allocation_size = static_cast<std::size_t>(size);
+      if (account != nullptr) {
+        auto reserved = ReserveRecordBytes(allocation_size);
+        if (!reserved.has_value()) {
+          return std::unexpected(std::move(reserved.error()));
+        }
+      }
+      ByteBuffer next_record;
+      try {
+        next_record = ByteBuffer{ByteCount{allocation_size}};
+      } catch (const std::bad_alloc&) {
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{allocation_size});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{allocation_size});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        return std::unexpected(Error::OutOfMemory());
+      }
+      const std::size_t actual_bytes = next_record.capacity().value();
+      if (account != nullptr && actual_bytes > allocation_size) {
+        auto additional = ReserveRecordBytes(actual_bytes - allocation_size);
+        if (!additional.has_value()) {
+          next_record = ByteBuffer{};
+          const auto released = account->Release(ByteCount{allocation_size});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+          return std::unexpected(std::move(additional.error()));
+        }
+      }
+      auto payload_read =
+          reader.file->ReadAt(next_record.mutable_view(), FileOffset{payload_offset});
+      if (!payload_read.has_value() || !payload_read->complete()) {
+        next_record = ByteBuffer{};
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{actual_bytes});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        if (!payload_read.has_value()) {
+          return std::unexpected(std::move(payload_read.error()));
+        }
+        return std::unexpected(Corruption("PMA record payload is truncated"));
+      }
+      auto parsed = RecordView::Parse(next_record.view(), descriptor->record_options);
+      if (!parsed.has_value()) {
+        next_record = ByteBuffer{};
+        if (account != nullptr) {
+          const auto released = account->Release(ByteCount{actual_bytes});
+          if (!released.has_value()) {
+            std::terminate();
+          }
+        }
+        return std::unexpected(std::move(parsed.error()));
+      }
+      reader.offset = payload_offset + size;
+      reader.record = std::move(next_record);
+      reader.view = *parsed;
+      reader.exhausted = false;
+      if (account != nullptr) {
+        charged_bytes += actual_bytes;
+      }
+      return {};
+    }
+
+    [[nodiscard]] Status ReserveRecordBytes(std::size_t amount) {
+      if (account == nullptr) {
+        return {};
+      }
+      auto reserved = account->Reserve(ByteCount{amount});
+      if (reserved.has_value() || reserved.error().code() != ErrorCode::kTooLarge) {
+        return reserved;
+      }
+      return account->ReserveWorkingSet(ByteCount{amount});
+    }
+
     [[nodiscard]] bool ComesBefore(std::size_t left_index, std::size_t right_index) const noexcept {
-      const PmaReader& left = readers[left_index];
-      const PmaReader& right = readers[right_index];
+      const PmaReader& left = Reader(left_index);
+      const PmaReader& right = Reader(right_index);
       if (!left.view.has_value() || !right.view.has_value()) {
         std::terminate();
       }
@@ -864,44 +1314,92 @@ struct RecordSorter::Impl {
         std::terminate();
       }
       if (*comparison == std::weak_ordering::equivalent) {
-        return left.run.ordinal < right.run.ordinal;
+        return left.ordinal < right.ordinal;
       }
       return *comparison == std::weak_ordering::less;
     }
 
     void SiftDown(std::size_t parent) noexcept {
       while (true) {
-        const std::size_t left = (parent * 2U) + 1U;
-        if (left >= heap.size()) {
+        const std::size_t left = parent * 2U + 1U;
+        if (left >= heap_size) {
           return;
         }
         const std::size_t right = left + 1U;
         std::size_t selected = left;
-        if (right < heap.size() && ComesBefore(heap[right], heap[left])) {
+        if (right < heap_size && ComesBefore(heap[right], heap[left])) {
           selected = right;
         }
         if (!ComesBefore(heap[selected], heap[parent])) {
           return;
         }
-        std::swap(heap[parent], heap[selected]);
+        std::swap(heap[selected], heap[parent]);
         parent = selected;
       }
     }
 
     const RecordSorterDescriptor* descriptor;
-    std::vector<PmaReader> readers;
-    std::vector<std::size_t> heap;
+    TemporaryMemoryAccount* account;
+    ReaderArray readers;
+    HeapArray heap;
+    std::size_t reader_count = 0;
+    std::size_t heap_size = 0;
+    std::size_t charged_bytes = 0;
   };
 
-  Impl(RecordSorterDescriptor owned_descriptor, ByteCount threshold,
-       const TemporaryStorageFactory& owning_factory) noexcept
+  Impl(RecordSorterDescriptor owned_descriptor,
+       temporary_storage_detail::StatementState& owning_state, ByteCount threshold,
+       std::uint64_t owned_sorter_ordinal) noexcept
       : descriptor(std::move(owned_descriptor)),
+        statement_state(&owning_state),
         memory_threshold(threshold),
-        factory(&owning_factory) {}
+        sorter_ordinal(owned_sorter_ordinal) {}
 
-  ~Impl() { ClearAll(); }
+  ~Impl() override { ClearAll(); }
 
-  void ClearList() noexcept {
+  [[nodiscard]] TemporaryMemoryAccount& Account() noexcept {
+    if (!memory_account.has_value()) {
+      std::terminate();
+    }
+    return *memory_account;
+  }
+
+  [[nodiscard]] Result<void> CheckStorage() const {
+    if (statement_state->failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    return {};
+  }
+
+  void MarkFailed() noexcept { statement_state->failed = true; }
+
+  [[nodiscard]] ByteCount reclaimable_bytes() const noexcept override {
+    if (state != RecordSorterState::kWriting) {
+      return ByteCount{0};
+    }
+    if (head != nullptr) {
+      return ByteCount{entry_memory_bytes > sizeof(PmaRun) ? entry_memory_bytes - sizeof(PmaRun)
+                                                           : 0U};
+    }
+    return ByteCount{run_count > 1U && run_memory_bytes > sizeof(PmaRun)
+                         ? run_memory_bytes - sizeof(PmaRun)
+                         : 0U};
+  }
+
+  [[nodiscard]] Status SpillForPressure() override {
+    if (state != RecordSorterState::kWriting) {
+      return std::unexpected(Misuse("temporary sorter cannot spill outside the writing state"));
+    }
+    if (head != nullptr) {
+      return SpillCurrentRun();
+    }
+    if (run_count > 1U) {
+      return BuildMergeLevels(1U);
+    }
+    return {};
+  }
+
+  void DestroyListWithoutAccounting() noexcept {
     while (head != nullptr) {
       Run next = std::move(head->next);
       head.reset();
@@ -909,18 +1407,46 @@ struct RecordSorter::Impl {
     }
     tail = nullptr;
     current = nullptr;
-    memory_bytes = 0;
+    entry_memory_bytes = 0;
+  }
+
+  void ClearList() noexcept {
+    const std::size_t released_bytes = entry_memory_bytes;
+    DestroyListWithoutAccounting();
+    if (released_bytes != 0U) {
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
+  }
+
+  void ClearRuns() noexcept {
+    while (runs != nullptr) {
+      std::unique_ptr<PmaRun> next = std::move(runs->next);
+      runs.reset();
+      runs = std::move(next);
+    }
+    run_tail = nullptr;
+    run_count = 0;
+    const std::size_t released_bytes = run_memory_bytes;
+    run_memory_bytes = 0;
+    if (released_bytes != 0U) {
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
   }
 
   void ClearAll() noexcept {
     merge.reset();
     ClearList();
-    spill_file.reset();
-    std::vector<PmaRun>{}.swap(runs);
+    ClearRuns();
     count = 0;
-    spill_size = 0;
     next_run_ordinal = 0;
     merge_levels = 0;
+    spilled = false;
   }
 
   [[nodiscard]] Run MergeRuns(Run left, Run right) const noexcept {
@@ -977,8 +1503,7 @@ struct RecordSorter::Impl {
     tail = nullptr;
   }
 
-  [[nodiscard]] static Result<std::uint64_t> WriteRecord(File& file, std::uint64_t offset,
-                                                         ByteView record) {
+  [[nodiscard]] static Result<std::uint64_t> RecordStorageSize(ByteView record) {
     if (record.size() > std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(TooLarge("PMA record size is not representable"));
     }
@@ -989,144 +1514,302 @@ struct RecordSorter::Impl {
     }
     const std::uint64_t header_size = encoded->value();
     const auto record_size = static_cast<std::uint64_t>(record.size());
-    if (header_size > std::numeric_limits<std::uint64_t>::max() - offset ||
-        record_size > std::numeric_limits<std::uint64_t>::max() - offset - header_size) {
-      return std::unexpected(TooLarge("PMA file offset is not representable"));
+    if (record_size > std::numeric_limits<std::uint64_t>::max() - header_size) {
+      return std::unexpected(TooLarge("PMA record size overflows"));
+    }
+    return header_size + record_size;
+  }
+
+  [[nodiscard]] static Result<std::uint64_t> WriteRecord(File& file, std::uint64_t offset,
+                                                         std::uint64_t limit, ByteView record) {
+    auto storage_size = RecordStorageSize(record);
+    if (!storage_size.has_value()) {
+      return std::unexpected(std::move(storage_size.error()));
+    }
+    if (offset > limit || *storage_size > limit - offset) {
+      return std::unexpected(Internal("PMA record exceeds its allocated extent"));
+    }
+    std::array<std::byte, 9> header{};
+    auto encoded = EncodeSqliteVarint(static_cast<std::uint64_t>(record.size()), header);
+    if (!encoded.has_value()) {
+      std::terminate();
     }
     auto header_write = file.WriteAt(ByteView{header}.first(encoded->value()), FileOffset{offset});
     if (!header_write.has_value()) {
       return std::unexpected(std::move(header_write.error()));
     }
-    auto record_write = file.WriteAt(record, FileOffset{offset + header_size});
+    auto record_write = file.WriteAt(record, FileOffset{offset + encoded->value()});
     if (!record_write.has_value()) {
       return std::unexpected(std::move(record_write.error()));
     }
-    return offset + header_size + record_size;
+    return offset + *storage_size;
   }
 
-  [[nodiscard]] Result<void> EnsureSpillFile() {
-    if (spill_file != nullptr) {
-      return {};
+  [[nodiscard]] Result<std::uint64_t> CurrentRunStorageSize() const {
+    std::uint64_t total = 0;
+    for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
+      auto size = RecordStorageSize(entry->record.view());
+      if (!size.has_value()) {
+        return std::unexpected(std::move(size.error()));
+      }
+      if (*size > std::numeric_limits<std::uint64_t>::max() - total) {
+        return std::unexpected(TooLarge("PMA run size overflows"));
+      }
+      total += *size;
     }
-    auto opened = factory->CreateTemporaryFile();
-    if (!opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
+    return total;
+  }
+
+  void AppendRun(std::unique_ptr<PmaRun> run) noexcept {
+    PmaRun* inserted = run.get();
+    if (run_tail == nullptr) {
+      runs = std::move(run);
+    } else {
+      run_tail->next = std::move(run);
     }
-    spill_file = std::move(*opened);
-    spill_size = 0;
-    return {};
+    run_tail = inserted;
+    ++run_count;
   }
 
   [[nodiscard]] Result<void> SpillCurrentRun() {
     if (head == nullptr) {
       return std::unexpected(Misuse("cannot spill an empty sorter run"));
     }
+    if (next_run_ordinal == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("temporary sorter run ordinal is exhausted"));
+    }
     Sort();
-    try {
-      runs.reserve(runs.size() + 1U);
-    } catch (const std::bad_alloc&) {
-      return std::unexpected(Error::OutOfMemory());
-    } catch (const std::length_error&) {
-      return std::unexpected(Error::OutOfMemory());
+    auto size = CurrentRunStorageSize();
+    if (!size.has_value()) {
+      return std::unexpected(std::move(size.error()));
     }
-    auto file_ready = EnsureSpillFile();
-    if (!file_ready.has_value()) {
-      return file_ready;
+    auto extent = statement_state->AllocateSorterExtent(*size, sorter_ordinal, next_run_ordinal);
+    if (!extent.has_value()) {
+      return std::unexpected(std::move(extent.error()));
     }
-
-    const std::uint64_t begin = spill_size;
-    std::uint64_t offset = begin;
+    const std::uint64_t limit = extent->begin() + extent->size();
+    std::uint64_t offset = extent->begin();
     for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
-      auto written = WriteRecord(*spill_file, offset, entry->record.view());
+      auto written = WriteRecord(extent->file(), offset, limit, entry->record.view());
       if (!written.has_value()) {
+        MarkFailed();
         return std::unexpected(std::move(written.error()));
       }
       offset = *written;
     }
-    runs.push_back(PmaRun{
-        .begin = begin,
-        .end = offset,
-        .ordinal = next_run_ordinal++,
-    });
-    spill_size = offset;
-    ClearList();
+    if (offset != limit) {
+      MarkFailed();
+      return std::unexpected(Internal("PMA run did not fill its allocated extent"));
+    }
+    std::unique_ptr<PmaRun> run;
+    try {
+      run = std::make_unique<PmaRun>(std::move(*extent), next_run_ordinal);
+    } catch (const std::bad_alloc&) {
+      MarkFailed();
+      return std::unexpected(Error::OutOfMemory());
+    }
+    if (entry_memory_bytes < sizeof(PmaRun)) {
+      MarkFailed();
+      return std::unexpected(Internal("sorter run metadata exceeds its reclaimed entries"));
+    }
+    const std::size_t released_bytes = entry_memory_bytes - sizeof(PmaRun);
+    AppendRun(std::move(run));
+    ++next_run_ordinal;
+    DestroyListWithoutAccounting();
+    run_memory_bytes += sizeof(PmaRun);
+    if (released_bytes != 0U) {
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
+    spilled = true;
     return {};
   }
 
-  [[nodiscard]] Result<PmaRun> MergeGroupToFile(std::span<const PmaRun> group, File& output,
-                                                std::uint64_t begin) const {
-    auto cursor = MergeCursor::Create(*spill_file, group, descriptor);
+  [[nodiscard]] Result<void> SpillDirect(ByteBuffer record) {
+    if (next_run_ordinal == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("temporary sorter run ordinal is exhausted"));
+    }
+    auto size = RecordStorageSize(record.view());
+    if (!size.has_value()) {
+      return std::unexpected(std::move(size.error()));
+    }
+    auto extent = statement_state->AllocateSorterExtent(*size, sorter_ordinal, next_run_ordinal);
+    if (!extent.has_value()) {
+      return std::unexpected(std::move(extent.error()));
+    }
+    auto written = WriteRecord(extent->file(), extent->begin(), extent->begin() + extent->size(),
+                               record.view());
+    if (!written.has_value()) {
+      MarkFailed();
+      return std::unexpected(std::move(written.error()));
+    }
+    if (*written != extent->begin() + extent->size()) {
+      MarkFailed();
+      return std::unexpected(Internal("direct PMA run did not fill its allocated extent"));
+    }
+    std::unique_ptr<PmaRun> run;
+    try {
+      run = std::make_unique<PmaRun>(std::move(*extent), next_run_ordinal);
+    } catch (const std::bad_alloc&) {
+      MarkFailed();
+      return std::unexpected(Error::OutOfMemory());
+    }
+    auto reserved = Account().Reserve(ByteCount{sizeof(PmaRun)});
+    if (!reserved.has_value()) {
+      return std::unexpected(std::move(reserved.error()));
+    }
+    AppendRun(std::move(run));
+    run_memory_bytes += sizeof(PmaRun);
+    ++next_run_ordinal;
+    ++count;
+    spilled = true;
+    return {};
+  }
+
+  [[nodiscard]] Result<std::unique_ptr<PmaRun>> MergeGroup(std::span<PmaRun* const> group) {
+    std::uint64_t size = 0;
+    for (const PmaRun* run : group) {
+      if (run->extent.size() > std::numeric_limits<std::uint64_t>::max() - size) {
+        return std::unexpected(TooLarge("merged PMA extent size overflows"));
+      }
+      size += run->extent.size();
+    }
+    auto output =
+        statement_state->AllocateSorterExtent(size, sorter_ordinal, group.front()->ordinal);
+    if (!output.has_value()) {
+      return std::unexpected(std::move(output.error()));
+    }
+    auto cursor = MergeCursor::Create(group.front()->extent.file(), group, descriptor, nullptr);
     if (!cursor.has_value()) {
+      MarkFailed();
       return std::unexpected(std::move(cursor.error()));
     }
-    std::uint64_t offset = begin;
+    const std::uint64_t limit = output->begin() + output->size();
+    std::uint64_t offset = output->begin();
     while (!(*cursor)->empty()) {
-      auto written = WriteRecord(output, offset, (*cursor)->current().encoded());
+      auto written = WriteRecord(output->file(), offset, limit, (*cursor)->current().encoded());
       if (!written.has_value()) {
+        MarkFailed();
         return std::unexpected(std::move(written.error()));
       }
       offset = *written;
       auto advanced = (*cursor)->Next();
       if (!advanced.has_value()) {
+        MarkFailed();
         return std::unexpected(std::move(advanced.error()));
       }
     }
-    return PmaRun{
-        .begin = begin,
-        .end = offset,
-        .ordinal = group.front().ordinal,
-    };
+    if (offset != limit) {
+      MarkFailed();
+      return std::unexpected(Internal("merged PMA did not fill its allocated extent"));
+    }
+    try {
+      return std::make_unique<PmaRun>(std::move(*output), group.front()->ordinal);
+    } catch (const std::bad_alloc&) {
+      MarkFailed();
+      return std::unexpected(Error::OutOfMemory());
+    }
   }
 
-  [[nodiscard]] Result<void> BuildMergeLevels() {
-    while (runs.size() > kMergeFanIn) {
-      auto next_file = factory->CreateTemporaryFile();
-      if (!next_file.has_value()) {
-        return std::unexpected(std::move(next_file.error()));
-      }
-      std::vector<PmaRun> next_runs;
-      try {
-        next_runs.reserve((runs.size() + kMergeFanIn - 1U) / kMergeFanIn);
-      } catch (const std::bad_alloc&) {
-        return std::unexpected(Error::OutOfMemory());
-      } catch (const std::length_error&) {
-        return std::unexpected(Error::OutOfMemory());
-      }
+  [[nodiscard]] Result<void> BuildMergeLevels(std::size_t target_run_count = kMergeFanIn) {
+    if (target_run_count == 0U || target_run_count > kMergeFanIn) {
+      return std::unexpected(Misuse("temporary sorter merge target is invalid"));
+    }
+    while (run_count > target_run_count) {
+      const std::size_t old_count = run_count;
+      std::unique_ptr<PmaRun> input = std::move(runs);
+      run_tail = nullptr;
+      std::unique_ptr<PmaRun> output;
+      PmaRun* output_tail = nullptr;
+      std::size_t output_count = 0;
 
-      std::uint64_t next_size = 0;
-      for (std::size_t begin = 0; begin < runs.size(); begin += kMergeFanIn) {
-        const std::size_t group_count = std::min(kMergeFanIn, runs.size() - begin);
-        auto merged = MergeGroupToFile(std::span<const PmaRun>{runs}.subspan(begin, group_count),
-                                       **next_file, next_size);
+      while (input != nullptr) {
+        std::array<PmaRun*, kMergeFanIn> group{};
+        std::size_t group_count = 0;
+        PmaRun* scan = input.get();
+        while (scan != nullptr && group_count < kMergeFanIn) {
+          group[group_count++] = scan;
+          scan = scan->next.get();
+        }
+        auto merged = MergeGroup(std::span<PmaRun* const>{group}.first(group_count));
         if (!merged.has_value()) {
           return std::unexpected(std::move(merged.error()));
         }
-        next_size = merged->end;
-        next_runs.push_back(*merged);
+
+        const std::unique_ptr<PmaRun> consumed = std::move(input);
+        PmaRun* consumed_tail = consumed.get();
+        for (std::size_t index = 1; index < group_count; ++index) {
+          consumed_tail = consumed_tail->next.get();
+        }
+        input = std::move(consumed_tail->next);
+        consumed_tail->next.reset();
+
+        PmaRun* inserted = merged->get();
+        if (output_tail == nullptr) {
+          output = std::move(*merged);
+        } else {
+          output_tail->next = std::move(*merged);
+        }
+        output_tail = inserted;
+        ++output_count;
       }
-      spill_file = std::move(*next_file);
-      spill_size = next_size;
-      runs = std::move(next_runs);
+
+      runs = std::move(output);
+      run_tail = output_tail;
+      run_count = output_count;
+      const std::size_t released_nodes = old_count - output_count;
+      const std::size_t released_bytes = released_nodes * sizeof(PmaRun);
+      if (released_bytes > run_memory_bytes) {
+        std::terminate();
+      }
+      run_memory_bytes -= released_bytes;
+      if (released_bytes != 0U) {
+        const auto released = Account().Release(ByteCount{released_bytes});
+        if (!released.has_value()) {
+          std::terminate();
+        }
+      }
       ++merge_levels;
     }
     return {};
   }
 
+  [[nodiscard]] Result<std::unique_ptr<MergeCursor>> CreateFinalMerge() {
+    std::array<PmaRun*, kMergeFanIn> group{};
+    std::size_t index = 0;
+    for (PmaRun* run = runs.get(); run != nullptr; run = run->next.get()) {
+      if (index == group.size()) {
+        return std::unexpected(Internal("final PMA merge exceeds its fan-in"));
+      }
+      group[index++] = run;
+    }
+    if (index == 0U) {
+      return std::unexpected(Internal("final PMA merge has no runs"));
+    }
+    return MergeCursor::Create(runs->extent.file(), std::span<PmaRun* const>{group}.first(index),
+                               descriptor, &Account());
+  }
+
   RecordSorterDescriptor descriptor;
+  temporary_storage_detail::StatementState* statement_state;
   ByteCount memory_threshold;
-  const TemporaryStorageFactory* factory;
+  std::uint64_t sorter_ordinal;
+  std::optional<TemporaryMemoryAccount> memory_account;
   Run head;
-  // Non-owning positions into the list rooted at head.
   Entry* tail = nullptr;
   Entry* current = nullptr;
   std::size_t count = 0;
-  std::size_t memory_bytes = 0;
-  std::unique_ptr<File> spill_file;
-  std::vector<PmaRun> runs;
-  std::uint64_t spill_size = 0;
-  std::size_t next_run_ordinal = 0;
+  std::size_t entry_memory_bytes = 0;
+  std::unique_ptr<PmaRun> runs;
+  PmaRun* run_tail = nullptr;
+  std::size_t run_count = 0;
+  std::size_t run_memory_bytes = 0;
+  std::uint64_t next_run_ordinal = 0;
   std::size_t merge_levels = 0;
   std::unique_ptr<MergeCursor> merge;
+  bool spilled = false;
   RecordSorterState state = RecordSorterState::kWriting;
 };
 
@@ -1153,14 +1836,26 @@ RecordSorter& RecordSorter::operator=(RecordSorter&&) noexcept = default;
 RecordSorter::~RecordSorter() = default;
 
 Result<RecordSorter> RecordSorter::Create(const RecordSorterDescriptor& descriptor,
-                                          ByteCount memory_threshold,
-                                          const TemporaryStorageFactory& factory) {
+                                          StatementTemporaryStorage& storage) {
   auto validated = ValidateRecordSorterDescriptor(descriptor);
   if (!validated.has_value()) {
     return std::unexpected(std::move(validated.error()));
   }
   try {
-    auto impl = std::make_unique<Impl>(descriptor, memory_threshold, factory);
+    temporary_storage_detail::StatementState& state =
+        temporary_storage_detail::StatementStorageAccess::State(storage);
+    auto ordinal = state.AllocateSorterOrdinal();
+    if (!ordinal.has_value()) {
+      return std::unexpected(std::move(ordinal.error()));
+    }
+    auto impl = std::make_unique<Impl>(descriptor, state, storage.memory_budget(), *ordinal);
+    Result<TemporaryMemoryAccount> account = storage.file_spill_enabled()
+                                                 ? storage.RegisterMemoryOwner(*impl)
+                                                 : storage.RegisterMemoryOwner();
+    if (!account.has_value()) {
+      return std::unexpected(std::move(account.error()));
+    }
+    impl->memory_account.emplace(std::move(*account));
     return RecordSorter{std::move(impl)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
@@ -1180,15 +1875,13 @@ std::size_t RecordSorter::record_count() const noexcept {
 }
 
 ByteCount RecordSorter::memory_usage() const noexcept {
-  return ByteCount{impl_ == nullptr ? 0U : impl_->memory_bytes};
+  return impl_ == nullptr ? ByteCount{0} : impl_->Account().retained_bytes();
 }
 
-bool RecordSorter::has_spilled() const noexcept {
-  return impl_ != nullptr && impl_->spill_file != nullptr;
-}
+bool RecordSorter::has_spilled() const noexcept { return impl_ != nullptr && impl_->spilled; }
 
 std::size_t RecordSorter::spilled_run_count() const noexcept {
-  return impl_ == nullptr ? 0U : impl_->runs.size();
+  return impl_ == nullptr ? 0U : impl_->run_count;
 }
 
 std::size_t RecordSorter::merge_level_count() const noexcept {
@@ -1198,6 +1891,12 @@ std::size_t RecordSorter::merge_level_count() const noexcept {
 Status RecordSorter::Insert(ByteBuffer record) {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("records can only be inserted while the sorter is writing"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
   }
   auto view = RecordView::Parse(record.view(), impl_->descriptor.record_options);
   if (!view.has_value()) {
@@ -1212,11 +1911,34 @@ Status RecordSorter::Insert(ByteBuffer record) {
     return std::unexpected(TooLarge("sorter record memory accounting overflowed"));
   }
   const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
+  if (impl_->count == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(TooLarge("sorter record count is exhausted"));
+  }
+  if (entry_bytes > impl_->memory_threshold.value()) {
+    if (!impl_->statement_state->file_spill) {
+      return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
+    }
+    if (impl_->head != nullptr) {
+      auto current_spill = impl_->SpillCurrentRun();
+      if (!current_spill.has_value()) {
+        Error error = std::move(current_spill.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+    }
+    auto spilled = impl_->SpillDirect(std::move(record));
+    if (!spilled.has_value()) {
+      Error error = std::move(spilled.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    return {};
+  }
   const bool exceeds_threshold =
       entry_bytes > impl_->memory_threshold.value() ||
-      impl_->memory_bytes > impl_->memory_threshold.value() - entry_bytes;
+      impl_->entry_memory_bytes > impl_->memory_threshold.value() - entry_bytes;
   if (exceeds_threshold && impl_->head != nullptr) {
-    if (!impl_->factory->file_spill_enabled()) {
+    if (!impl_->statement_state->file_spill) {
       return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
     }
     auto spilled = impl_->SpillCurrentRun();
@@ -1225,15 +1947,19 @@ Status RecordSorter::Insert(ByteBuffer record) {
       Close();
       return std::unexpected(std::move(error));
     }
-  } else if (exceeds_threshold && !impl_->factory->file_spill_enabled()) {
+  } else if (exceeds_threshold && !impl_->statement_state->file_spill) {
     return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
   }
-  if (impl_->count == std::numeric_limits<std::size_t>::max()) {
-    return std::unexpected(TooLarge("sorter record count is exhausted"));
+  auto reserved = impl_->Account().Reserve(ByteCount{entry_bytes});
+  if (!reserved.has_value()) {
+    Error error = std::move(reserved.error());
+    if (impl_->statement_state->failed) {
+      Close();
+    }
+    return std::unexpected(std::move(error));
   }
-
   try {
-    auto entry = std::make_unique<Impl::Entry>(std::move(record), *view);
+    auto entry = std::make_unique<Impl::Entry>(std::move(record), *view, entry_bytes);
     Impl::Entry* const inserted = entry.get();
     if (impl_->tail == nullptr) {
       impl_->head = std::move(entry);
@@ -1242,13 +1968,21 @@ Status RecordSorter::Insert(ByteBuffer record) {
     }
     impl_->tail = inserted;
     ++impl_->count;
-    impl_->memory_bytes += entry_bytes;
+    impl_->entry_memory_bytes += entry_bytes;
     return {};
   } catch (const std::bad_alloc&) {
+    const auto released = impl_->Account().Release(ByteCount{entry_bytes});
+    if (!released.has_value()) {
+      std::terminate();
+    }
     Error error = Error::OutOfMemory();
     Close();
     return std::unexpected(std::move(error));
   } catch (const std::length_error&) {
+    const auto released = impl_->Account().Release(ByteCount{entry_bytes});
+    if (!released.has_value()) {
+      std::terminate();
+    }
     Error error = Error::OutOfMemory();
     Close();
     return std::unexpected(std::move(error));
@@ -1259,7 +1993,13 @@ Status RecordSorter::Rewind() {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("sorter rewind requires the writing state"));
   }
-  if (impl_->runs.empty()) {
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  if (impl_->runs == nullptr) {
     impl_->Sort();
     impl_->current = impl_->head.get();
     impl_->state =
@@ -1281,21 +2021,37 @@ Status RecordSorter::Rewind() {
     Close();
     return std::unexpected(std::move(error));
   }
-  auto merge = Impl::MergeCursor::Create(*impl_->spill_file, impl_->runs, impl_->descriptor);
+  // Final merge buffers may trigger statement pressure. The published runs
+  // must not be rewritten while their pointers seed the merge cursor.
+  impl_->state = RecordSorterState::kPositioned;
+  auto merge = impl_->CreateFinalMerge();
   if (!merge.has_value()) {
     Error error = std::move(merge.error());
+    if (error.code() != ErrorCode::kOutOfMemory && error.code() != ErrorCode::kTooLarge &&
+        error.code() != ErrorCode::kMisuse) {
+      impl_->MarkFailed();
+    }
     Close();
     return std::unexpected(std::move(error));
   }
   impl_->merge = std::move(*merge);
-  impl_->state =
-      impl_->merge->empty() ? RecordSorterState::kExhausted : RecordSorterState::kPositioned;
+  if (impl_->merge->empty()) {
+    impl_->merge.reset();
+    impl_->ClearRuns();
+    impl_->state = RecordSorterState::kExhausted;
+  } else {
+    impl_->state = RecordSorterState::kPositioned;
+  }
   return {};
 }
 
 Result<RecordView> RecordSorter::current_record() const {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kPositioned) {
     return std::unexpected(Misuse("sorter has no current record"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    return std::unexpected(std::move(usable.error()));
   }
   if (impl_->merge != nullptr) {
     return impl_->merge->current();
@@ -1314,10 +2070,16 @@ Result<bool> RecordSorter::Next() {
     auto advanced = impl_->merge->Next();
     if (!advanced.has_value()) {
       Error error = std::move(advanced.error());
+      if (error.code() != ErrorCode::kOutOfMemory && error.code() != ErrorCode::kTooLarge &&
+          error.code() != ErrorCode::kMisuse) {
+        impl_->MarkFailed();
+      }
       Close();
       return std::unexpected(std::move(error));
     }
     if (!*advanced) {
+      impl_->merge.reset();
+      impl_->ClearRuns();
       impl_->state = RecordSorterState::kExhausted;
     }
     return *advanced;
@@ -1348,12 +2110,26 @@ Status RecordSorter::Reset() {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed sorter"));
   }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
   impl_->ClearAll();
   impl_->state = RecordSorterState::kWriting;
   return {};
 }
 
 void RecordSorter::Close() noexcept { impl_.reset(); }
+
+Result<RecordSorter> StatementTemporaryStorage::CreateRecordSorter(
+    const RecordSorterDescriptor& descriptor) {
+  if (!valid()) {
+    return std::unexpected(Misuse("statement temporary storage is invalid"));
+  }
+  return RecordSorter::Create(descriptor, *this);
+}
 
 struct BoundedTopN::Impl {
   struct Entry {
@@ -2078,11 +2854,6 @@ Result<StatementTemporaryStorage> TemporaryStorageFactory::CreateStatementStorag
   } catch (const std::length_error&) {
     return std::unexpected(Error::OutOfMemory());
   }
-}
-
-Result<RecordSorter> TemporaryStorageFactory::CreateRecordSorter(
-    const RecordSorterDescriptor& descriptor) const {
-  return RecordSorter::Create(descriptor, sorter_memory_threshold(), *this);
 }
 
 Result<BoundedTopN> TemporaryStorageFactory::CreateTopN(const RecordSorterDescriptor& descriptor,

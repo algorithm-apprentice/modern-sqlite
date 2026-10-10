@@ -1078,7 +1078,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
   const BytecodeProgram file_program = LowerOrThrow(
       "SELECT 8 UNION ALL SELECT 3 UNION ALL SELECT 6 UNION ALL SELECT 1 "
@@ -1749,7 +1749,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
   const BytecodeProgram file_program =
       LowerOrThrow("SELECT DISTINCT name FROM items ORDER BY name", catalog);
@@ -1897,7 +1897,7 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
 
   const BytecodeProgram ordered =
