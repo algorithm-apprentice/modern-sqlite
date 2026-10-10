@@ -1061,6 +1061,20 @@ set_tests_properties(
     TIMEOUT 30
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+add_test(
+  NAME performance.distinct_compound_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest
+    tests.performance.distinct_compound_performance_tool_test
+)
+set_tests_properties(
+  performance.distinct_compound_performance_tool
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
   add_test(
     NAME performance.read_baseline_validation
@@ -1111,6 +1125,25 @@ add_test(
 )
 set_tests_properties(
   performance.order_by_baseline_validation
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
+  NAME performance.distinct_compound_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/distinct_compound_performance.py"
+    validate-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads
+      "${PROJECT_SOURCE_DIR}/tests/performance/distinct-compound-workloads-v1.json"
+    --baseline
+      "${PROJECT_SOURCE_DIR}/benchmarks/distinct-compound-baseline-v1"
+)
+set_tests_properties(
+  performance.distinct_compound_baseline_validation
   PROPERTIES
     LABELS performance
     TIMEOUT 30
@@ -1377,6 +1410,28 @@ if(TARGET modern_sqlite_read_benchmark AND
     )
     set_tests_properties(
       performance.order_by_benchmark_cli
+      PROPERTIES
+        LABELS performance
+        TIMEOUT 300
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+  if(TARGET modern_sqlite_distinct_compound_benchmark AND
+     TARGET modern_sqlite_distinct_compound_diagnostics AND
+     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/order_by_performance/ordered.db")
+    add_test(
+      NAME performance.distinct_compound_benchmark_cli
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/performance/distinct_compound_benchmark_cli_test.py"
+        --timing-binary "$<TARGET_FILE:modern_sqlite_distinct_compound_benchmark>"
+        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_distinct_compound_diagnostics>"
+        --repository-root "${PROJECT_SOURCE_DIR}"
+        --workloads
+          "${PROJECT_SOURCE_DIR}/tests/performance/distinct-compound-workloads-v1.json"
+    )
+    set_tests_properties(
+      performance.distinct_compound_benchmark_cli
       PROPERTIES
         LABELS performance
         TIMEOUT 300

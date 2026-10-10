@@ -50,6 +50,26 @@ TEST(Instrumentation, RecordsCountersOnlyInsideActiveScope) {
   EXPECT_EQ(4096U, counters.Value(Counter::kBytesCopied));
 }
 
+TEST(Instrumentation, RecordsProbeCallsOnlyInsideActiveScope) {
+  ProbeCounterCollection probes;
+
+  MODERN_SQLITE_RECORD_PROBE_CALL(1);
+  {
+    const ScopedProbeCounterCollection scope{probes};
+    MODERN_SQLITE_RECORD_PROBE_CALL(1);
+    MODERN_SQLITE_RECORD_PROBE_CALL(2);
+    MODERN_SQLITE_RECORD_PROBE_CALL(2);
+  }
+  MODERN_SQLITE_RECORD_PROBE_CALL(2);
+
+  EXPECT_EQ(1U, probes.Value(1));
+  EXPECT_EQ(2U, probes.Value(2));
+  EXPECT_EQ(0U, probes.Value(kProbeTagCount));
+  probes.Reset();
+  EXPECT_EQ(0U, probes.Value(1));
+  EXPECT_EQ(0U, probes.Value(2));
+}
+
 TEST(Instrumentation, RestoresNestedCollection) {
   CounterCollection outer;
   CounterCollection inner;
