@@ -37,6 +37,8 @@ struct CursorIdTag;
 struct WriteCursorIdTag;
 struct SorterIdTag;
 struct TopNIdTag;
+struct RelationIdTag;
+struct RecordComparisonIdTag;
 struct ParameterIdTag;
 struct ConstantIdTag;
 struct SymbolIdTag;
@@ -49,6 +51,8 @@ using CursorId = BytecodeId<CursorIdTag>;
 using WriteCursorId = BytecodeId<WriteCursorIdTag>;
 using SorterId = BytecodeId<SorterIdTag>;
 using TopNId = BytecodeId<TopNIdTag>;
+using RelationId = BytecodeId<RelationIdTag>;
+using RecordComparisonId = BytecodeId<RecordComparisonIdTag>;
 using ParameterId = BytecodeId<ParameterIdTag>;
 using ConstantId = BytecodeId<ConstantIdTag>;
 using SymbolId = BytecodeId<SymbolIdTag>;
@@ -138,6 +142,11 @@ enum class Stat1ClearScope : std::uint8_t {
   kDatabase,
   kTable,
   kIndex,
+};
+
+enum class RelationInsertMode : std::uint8_t {
+  kKeepExisting,
+  kReplaceExisting,
 };
 
 struct CursorFieldSource {
@@ -597,6 +606,62 @@ struct CloseTopNInstruction {
   TopNId top_n;
 };
 
+struct OpenRelationInstruction {
+  RelationId relation;
+};
+
+struct InsertRelationInstruction {
+  RelationId relation;
+  RegisterId first_value;
+  std::uint32_t value_count;
+  RelationInsertMode mode = RelationInsertMode::kKeepExisting;
+  InstructionAddress duplicate_target;
+};
+
+struct ContainsRelationInstruction {
+  RelationId relation;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress found_target;
+};
+
+struct DeleteRelationInstruction {
+  RelationId relation;
+  RegisterId first_key;
+  std::uint32_t key_count;
+};
+
+struct RewindRelationInstruction {
+  RelationId relation;
+  InstructionAddress empty_target;
+};
+
+struct ReadRelationFieldInstruction {
+  RelationId relation;
+  std::uint32_t field;
+  RegisterId output;
+};
+
+struct NextRelationInstruction {
+  RelationId relation;
+  InstructionAddress next_target;
+};
+
+struct ResetRelationInstruction {
+  RelationId relation;
+};
+
+struct CloseRelationInstruction {
+  RelationId relation;
+};
+
+struct CompareRecordsInstruction {
+  RecordComparisonId comparison;
+  RegisterId left_first;
+  RegisterId right_first;
+  RegisterId output;
+};
+
 using Instruction = std::variant<
     HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
     UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
@@ -617,7 +682,10 @@ using Instruction = std::variant<
     RewindSorterInstruction, ReadSorterFieldInstruction, NextSorterInstruction,
     ResetSorterInstruction, CloseSorterInstruction, OpenTopNInstruction, CheckTopNInstruction,
     InsertTopNInstruction, RewindTopNInstruction, ReadTopNFieldInstruction, NextTopNInstruction,
-    ResetTopNInstruction, CloseTopNInstruction>;
+    ResetTopNInstruction, CloseTopNInstruction, OpenRelationInstruction, InsertRelationInstruction,
+    ContainsRelationInstruction, DeleteRelationInstruction, RewindRelationInstruction,
+    ReadRelationFieldInstruction, NextRelationInstruction, ResetRelationInstruction,
+    CloseRelationInstruction, CompareRecordsInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -689,6 +757,16 @@ enum class InstructionKind : std::uint8_t {
   kNextTopN,
   kResetTopN,
   kCloseTopN,
+  kOpenRelation,
+  kInsertRelation,
+  kContainsRelation,
+  kDeleteRelation,
+  kRewindRelation,
+  kReadRelationField,
+  kNextRelation,
+  kResetRelation,
+  kCloseRelation,
+  kCompareRecords,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -709,6 +787,8 @@ struct ProgramInput {
   std::vector<WriteCursorDescriptor> write_cursors;
   std::vector<OrderingRecordDescriptor> sorters;
   std::vector<OrderingRecordDescriptor> top_ns;
+  std::vector<OrderingRecordDescriptor> relations;
+  std::vector<OrderingRecordDescriptor> record_comparisons;
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
 };
@@ -719,6 +799,8 @@ struct ProgramLimits {
   std::size_t maximum_cursors = 100'000;
   std::size_t maximum_sorters = 100'000;
   std::size_t maximum_top_ns = 100'000;
+  std::size_t maximum_relations = 100'000;
+  std::size_t maximum_record_comparisons = 100'000;
   std::size_t maximum_parameters = 32'766;
   std::size_t maximum_constants = 1'000'000;
   std::size_t maximum_symbols = 1'000'000;
@@ -736,6 +818,8 @@ enum class ProgramErrorCode : std::uint8_t {
   kCursorLimitExceeded,
   kSorterLimitExceeded,
   kTopNLimitExceeded,
+  kRelationLimitExceeded,
+  kRecordComparisonLimitExceeded,
   kParameterLimitExceeded,
   kConstantLimitExceeded,
   kSymbolLimitExceeded,
@@ -755,6 +839,8 @@ enum class ProgramErrorCode : std::uint8_t {
   kInvalidCursor,
   kInvalidSorter,
   kInvalidTopN,
+  kInvalidRelation,
+  kInvalidRecordComparison,
   kInvalidOrderingDescriptor,
   kInvalidField,
   kInvalidBranchTarget,
@@ -858,6 +944,12 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const OrderingRecordDescriptor> top_ns() const noexcept {
     return input_.top_ns;
   }
+  [[nodiscard]] std::span<const OrderingRecordDescriptor> relations() const noexcept {
+    return input_.relations;
+  }
+  [[nodiscard]] std::span<const OrderingRecordDescriptor> record_comparisons() const noexcept {
+    return input_.record_comparisons;
+  }
   [[nodiscard]] std::span<const ResultColumnMetadata> result_columns() const noexcept {
     return input_.result_columns;
   }
@@ -874,6 +966,9 @@ class BytecodeProgram final {
   [[nodiscard]] const WriteCursorDescriptor& write_cursor(WriteCursorId id) const noexcept;
   [[nodiscard]] const OrderingRecordDescriptor& sorter(SorterId id) const noexcept;
   [[nodiscard]] const OrderingRecordDescriptor& top_n(TopNId id) const noexcept;
+  [[nodiscard]] const OrderingRecordDescriptor& relation(RelationId id) const noexcept;
+  [[nodiscard]] const OrderingRecordDescriptor& record_comparison(
+      RecordComparisonId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
 
  private:
@@ -916,6 +1011,9 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<WriteCursorId> AddWriteCursor(WriteCursorDescriptor cursor);
   [[nodiscard]] ProgramResult<SorterId> AddSorter(OrderingRecordDescriptor sorter);
   [[nodiscard]] ProgramResult<TopNId> AddTopN(OrderingRecordDescriptor top_n);
+  [[nodiscard]] ProgramResult<RelationId> AddRelation(OrderingRecordDescriptor relation);
+  [[nodiscard]] ProgramResult<RecordComparisonId> AddRecordComparison(
+      OrderingRecordDescriptor comparison);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
@@ -940,6 +1038,19 @@ class ProgramBuilder final {
                                                                 Label rejected_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindTopN(TopNId top_n, Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNextTopN(TopNId top_n, Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitInsertRelation(RelationId relation,
+                                                                     RegisterId first_value,
+                                                                     std::uint32_t value_count,
+                                                                     RelationInsertMode mode,
+                                                                     Label duplicate_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitContainsRelation(RelationId relation,
+                                                                       RegisterId first_key,
+                                                                       std::uint32_t key_count,
+                                                                       Label found_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindRelation(RelationId relation,
+                                                                     Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRelation(RelationId relation,
+                                                                   Label next_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
@@ -997,6 +1108,27 @@ class ProgramBuilder final {
     TopNId top_n;
     Label target;
   };
+  struct PendingInsertRelation {
+    RelationId relation;
+    RegisterId first_value;
+    std::uint32_t value_count;
+    RelationInsertMode mode;
+    Label target;
+  };
+  struct PendingContainsRelation {
+    RelationId relation;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+  };
+  struct PendingRewindRelation {
+    RelationId relation;
+    Label target;
+  };
+  struct PendingNextRelation {
+    RelationId relation;
+    Label target;
+  };
   struct PendingSeekRowId {
     CursorId cursor;
     RegisterId key;
@@ -1033,8 +1165,10 @@ class ProgramBuilder final {
   using PendingInstruction =
       std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
                    PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
-                   PendingRewindTopN, PendingNextTopN, PendingSeekRowId, PendingSeekIndex,
-                   PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
+                   PendingRewindTopN, PendingNextTopN, PendingInsertRelation,
+                   PendingContainsRelation, PendingRewindRelation, PendingNextRelation,
+                   PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
+                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

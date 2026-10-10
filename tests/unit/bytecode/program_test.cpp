@@ -23,6 +23,10 @@ namespace {
 }
 [[nodiscard]] constexpr SorterId Sorter(std::uint32_t value) { return SorterId(value); }
 [[nodiscard]] constexpr TopNId TopN(std::uint32_t value) { return TopNId(value); }
+[[nodiscard]] constexpr RelationId Relation(std::uint32_t value) { return RelationId(value); }
+[[nodiscard]] constexpr RecordComparisonId RecordComparison(std::uint32_t value) {
+  return RecordComparisonId(value);
+}
 [[nodiscard]] constexpr ParameterId Parameter(std::uint32_t value) { return ParameterId(value); }
 [[nodiscard]] constexpr ConstantId Constant(std::uint32_t value) { return ConstantId(value); }
 [[nodiscard]] constexpr SymbolId Symbol(std::uint32_t value) { return SymbolId(value); }
@@ -142,6 +146,17 @@ namespace {
               },
           },
   };
+}
+
+[[nodiscard]] OrderingRecordDescriptor RecordComparisonDescriptor() {
+  OrderingRecordDescriptor descriptor = OrderingDescriptor();
+  descriptor.key_field_count = 2;
+  descriptor.key_columns.push_back(OrderingColumnMetadata{
+      .collation = Symbol(0),
+      .order = BytecodeSortOrder::kDescending,
+      .null_placement = BytecodeNullPlacement::kLast,
+  });
+  return descriptor;
 }
 
 [[nodiscard]] ProgramErrorCode VerifyError(const ProgramInput& input, ProgramLimits limits = {}) {
@@ -906,6 +921,160 @@ TEST(BytecodeProgramTest, VerifiesTypedTopNLifecyclePendingCandidateAndBranches)
   }
 }
 
+TEST(BytecodeProgramTest, VerifiesTypedRelationLifecycleBranchesAndRecordComparison) {
+  ProgramInput input;
+  input.register_count = 5;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(10));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Integer(20));
+  input.relations.push_back(OrderingDescriptor());
+  input.record_comparisons.push_back(RecordComparisonDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(3)},
+      OpenRelationInstruction{.relation = Relation(0)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(6),
+      },
+      ContainsRelationInstruction{
+          .relation = Relation(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .found_target = Address(7),
+      },
+      DeleteRelationInstruction{
+          .relation = Relation(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+      },
+      RewindRelationInstruction{.relation = Relation(0), .empty_target = Address(11)},
+      ReadRelationFieldInstruction{.relation = Relation(0), .field = 0, .output = Reg(4)},
+      NextRelationInstruction{.relation = Relation(0), .next_target = Address(9)},
+      ResetRelationInstruction{.relation = Relation(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+      CompareRecordsInstruction{
+          .comparison = RecordComparison(0),
+          .left_first = Reg(0),
+          .right_first = Reg(2),
+          .output = Reg(4),
+      },
+      HaltInstruction{},
+  };
+
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  const std::array expected_names{
+      std::string_view{"open_relation"},     std::string_view{"insert_relation"},
+      std::string_view{"contains_relation"}, std::string_view{"delete_relation"},
+      std::string_view{"rewind_relation"},   std::string_view{"read_relation_field"},
+      std::string_view{"next_relation"},     std::string_view{"reset_relation"},
+      std::string_view{"close_relation"},    std::string_view{"compare_records"},
+  };
+  for (std::size_t index = 0; index < expected_names.size(); ++index) {
+    EXPECT_EQ(expected_names[index],
+              InstructionKindName(InstructionKindOf(input.instructions[index + 4U])));
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsInvalidRelationDescriptorsRangesEnumsAndLifecycle) {
+  ProgramInput invalid_relation;
+  invalid_relation.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kInvalidRelation, VerifyError(invalid_relation));
+
+  ProgramInput invalid_comparison;
+  invalid_comparison.register_count = 1;
+  invalid_comparison.instructions = {
+      CompareRecordsInstruction{
+          .comparison = RecordComparison(0),
+          .left_first = Reg(0),
+          .right_first = Reg(0),
+          .output = Reg(0),
+      },
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kInvalidRecordComparison, VerifyError(invalid_comparison));
+
+  ProgramInput malformed_comparison;
+  malformed_comparison.symbols.emplace_back("BINARY");
+  malformed_comparison.record_comparisons.push_back(OrderingDescriptor());
+  malformed_comparison.instructions = {HaltInstruction{}};
+  EXPECT_EQ(ProgramErrorCode::kInvalidOrderingDescriptor, VerifyError(malformed_comparison));
+
+  ProgramInput invalid_mode;
+  invalid_mode.register_count = 2;
+  invalid_mode.symbols.emplace_back("BINARY");
+  invalid_mode.constants.push_back(SqlValue::Integer(1));
+  invalid_mode.relations.push_back(OrderingDescriptor());
+  invalid_mode.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      OpenRelationInstruction{.relation = Relation(0)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = static_cast<RelationInsertMode>(255),  // NOLINT
+          .duplicate_target = Address(4),
+      },
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(invalid_mode));
+
+  ProgramInput read_before_rewind;
+  read_before_rewind.register_count = 1;
+  read_before_rewind.symbols.emplace_back("BINARY");
+  read_before_rewind.relations.push_back(OrderingDescriptor());
+  read_before_rewind.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      ReadRelationFieldInstruction{.relation = Relation(0), .field = 0, .output = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityNotPositioned, VerifyError(read_before_rewind));
+
+  ProgramInput write_after_rewind;
+  write_after_rewind.register_count = 2;
+  write_after_rewind.symbols.emplace_back("BINARY");
+  write_after_rewind.constants.push_back(SqlValue::Integer(1));
+  write_after_rewind.relations.push_back(OrderingDescriptor());
+  write_after_rewind.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      OpenRelationInstruction{.relation = Relation(0)},
+      RewindRelationInstruction{.relation = Relation(0), .empty_target = Address(5)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(5),
+      },
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityNotWriting, VerifyError(write_after_rewind));
+
+  ProgramInput state_conflict;
+  state_conflict.symbols.emplace_back("BINARY");
+  state_conflict.relations.push_back(OrderingDescriptor());
+  state_conflict.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      RewindRelationInstruction{.relation = Relation(0), .empty_target = Address(3)},
+      ResetRelationInstruction{.relation = Relation(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(state_conflict));
+}
+
 TEST(BytecodeProgramTest, RejectsInvalidOrderingDescriptorsAndIds) {
   ProgramInput invalid_descriptor;
   invalid_descriptor.symbols.emplace_back("BINARY");
@@ -1110,6 +1279,59 @@ TEST(BytecodeProgramTest, BuilderResolvesSorterAndTopNBranchLabels) {
             std::get<RewindTopNInstruction>(top_n_program->instructions()[4]).empty_target);
   EXPECT_EQ(Address(5),
             std::get<NextTopNInstruction>(top_n_program->instructions()[5]).next_target);
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesRelationBranchLabelsAndDescriptors) {
+  auto created = ProgramBuilder::Create({}, Resources(2));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  ASSERT_TRUE(builder.AddSymbol("BINARY").has_value());
+  ASSERT_TRUE(builder.AddRelation(OrderingDescriptor()).has_value());
+  ASSERT_TRUE(builder.AddRecordComparison(RecordComparisonDescriptor()).has_value());
+  ASSERT_TRUE(builder.AddConstant(SqlValue::Integer(1)).has_value());
+  const auto duplicate = builder.CreateLabel();
+  const auto found = builder.CreateLabel();
+  const auto empty = builder.CreateLabel();
+  const auto next = builder.CreateLabel();
+  ASSERT_TRUE(duplicate.has_value());
+  ASSERT_TRUE(found.has_value());
+  ASSERT_TRUE(empty.has_value());
+  ASSERT_TRUE(next.has_value());
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)}));
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)}));
+  ASSERT_TRUE(builder.Append(OpenRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(
+      builder
+          .EmitInsertRelation(Relation(0), Reg(0), 2, RelationInsertMode::kKeepExisting, *duplicate)
+          .has_value());
+  ASSERT_TRUE(builder.BindLabel(*duplicate).has_value());
+  ASSERT_TRUE(builder.EmitContainsRelation(Relation(0), Reg(0), 1, *found).has_value());
+  ASSERT_TRUE(builder.BindLabel(*found).has_value());
+  ASSERT_TRUE(builder.EmitRewindRelation(Relation(0), *empty).has_value());
+  ASSERT_TRUE(builder.BindLabel(*next).has_value());
+  ASSERT_TRUE(builder.EmitNextRelation(Relation(0), *next).has_value());
+  ASSERT_TRUE(builder.BindLabel(*empty).has_value());
+  ASSERT_TRUE(builder.Append(ResetRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(builder.Append(CloseRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(builder.Append(CompareRecordsInstruction{
+      .comparison = RecordComparison(0),
+      .left_first = Reg(0),
+      .right_first = Reg(0),
+      .output = Reg(0),
+  }));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(Address(4),
+            std::get<InsertRelationInstruction>(program->instructions()[3]).duplicate_target);
+  EXPECT_EQ(Address(5),
+            std::get<ContainsRelationInstruction>(program->instructions()[4]).found_target);
+  EXPECT_EQ(Address(7),
+            std::get<RewindRelationInstruction>(program->instructions()[5]).empty_target);
+  EXPECT_EQ(Address(6), std::get<NextRelationInstruction>(program->instructions()[6]).next_target);
+  EXPECT_EQ(2U, program->relation(Relation(0)).field_count);
+  EXPECT_EQ(2U, program->record_comparison(RecordComparison(0)).field_count);
 }
 
 TEST(BytecodeProgramTest, PublishesDirectInputAsImmutableContiguousStorage) {
@@ -1877,15 +2099,21 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   ProgramLimits ordering_limits;
   ordering_limits.maximum_sorters = 0;
   ordering_limits.maximum_top_ns = 0;
+  ordering_limits.maximum_relations = 0;
+  ordering_limits.maximum_record_comparisons = 0;
   auto ordering_created = ProgramBuilder::Create({}, Resources(0), ordering_limits);
   ASSERT_TRUE(ordering_created.has_value());
   ProgramBuilder ordering_builder = std::move(*ordering_created);
   const auto sorter_limit = ordering_builder.AddSorter(OrderingDescriptor());
   const auto top_n_limit = ordering_builder.AddTopN(OrderingDescriptor());
+  const auto relation_limit = ordering_builder.AddRelation(OrderingDescriptor());
+  const auto comparison_limit = ordering_builder.AddRecordComparison(RecordComparisonDescriptor());
   ASSERT_FALSE(sorter_limit.has_value());
   ASSERT_FALSE(top_n_limit.has_value());
   EXPECT_EQ(sorter_limit.error().code, ProgramErrorCode::kSorterLimitExceeded);
   EXPECT_EQ(top_n_limit.error().code, ProgramErrorCode::kTopNLimitExceeded);
+  EXPECT_EQ(relation_limit.error().code, ProgramErrorCode::kRelationLimitExceeded);
+  EXPECT_EQ(comparison_limit.error().code, ProgramErrorCode::kRecordComparisonLimitExceeded);
 }
 
 TEST(BytecodeProgramTest, EnforcesOwnedAndAnalysisMemoryForDirectInput) {
