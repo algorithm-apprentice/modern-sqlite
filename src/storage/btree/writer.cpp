@@ -48,6 +48,10 @@ namespace {
   return MakeError(ErrorCode::kCorruption, message);
 }
 
+[[nodiscard]] Error NotFound(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kNotFound, message);
+}
+
 [[nodiscard]] Error SchemaChanged(std::string_view message) noexcept {
   return MakeError(ErrorCode::kSchemaChanged, message);
 }
@@ -913,6 +917,70 @@ Status IndexBtreeWriter::InsertEncoded(ByteView record) {
   std::vector<std::byte> scratch;
   return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
                                    btree_internal::BtreeInsertMode::kInsertOnly, scratch,
+                                   core_->workspace());
+}
+
+Result<bool> IndexBtreeWriter::ContainsEncoded(ByteView key) {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto key_view = RecordView::Parse(key, core_->record_options());
+  if (!key_view.has_value()) {
+    return std::unexpected(std::move(key_view.error()));
+  }
+  if (key_view->field_count() < columns_.size()) {
+    return std::unexpected(
+        Misuse("encoded index key has fewer fields than its comparison metadata"));
+  }
+  btree_internal::MutationPageOwner owner{core_->pager()};
+  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  std::vector<std::byte> scratch;
+  auto seek = cursor->SeekIndexRecord(*key_view, columns_, core_->record_options(), scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  return seek->exact;
+}
+
+Status IndexBtreeWriter::ReplaceEncoded(ByteView record) {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return valid;
+  }
+  auto record_view = RecordView::Parse(record, core_->record_options());
+  if (!record_view.has_value()) {
+    return std::unexpected(std::move(record_view.error()));
+  }
+  if (record_view->field_count() < columns_.size()) {
+    return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
+  }
+  btree_internal::MutationPageOwner owner{core_->pager()};
+  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  std::vector<std::byte> scratch;
+  auto seek = cursor->SeekIndexRecord(*record_view, columns_, core_->record_options(), scratch);
+  if (!seek.has_value()) {
+    return std::unexpected(std::move(seek.error()));
+  }
+  if (!seek->exact) {
+    return std::unexpected(NotFound("encoded index key does not exist"));
+  }
+  return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
+                                   btree_internal::BtreeInsertMode::kReplace, scratch,
                                    core_->workspace());
 }
 

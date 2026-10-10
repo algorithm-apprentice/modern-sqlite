@@ -414,6 +414,61 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
             actual);
 }
 
+TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 4,
+           }));
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  const std::array<IndexColumnOrder, 1> columns{
+      IndexColumnOrder{NoCaseCollation()},
+  };
+  const auto record = [](std::string_view key, std::int64_t payload) {
+    const std::array<SqlValue, 2> values{
+        SqlValue::Text(std::string{key}),
+        SqlValue::Integer(payload),
+    };
+    return TakeValue(EncodeRecord(values));
+  };
+  const auto key = [](std::string_view value) {
+    const std::array<SqlValue, 1> fields{
+        SqlValue::Text(std::string{value}),
+    };
+    return TakeValue(EncodeRecord(fields));
+  };
+
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    const ByteBuffer original = record("Alpha", 1);
+    RequireStatus(index.InsertEncoded(original.view()));
+    const ByteBuffer equivalent = key("aLPHa");
+    const ByteBuffer missing = key("beta");
+    EXPECT_TRUE(TakeValue(index.ContainsEncoded(equivalent.view())));
+    EXPECT_FALSE(TakeValue(index.ContainsEncoded(missing.view())));
+    const ByteBuffer replacement = record("ALPHA", 2);
+    RequireStatus(index.ReplaceEncoded(replacement.view()));
+  }
+
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
+  const std::vector<SqlValue> fields = TakeValue(DecodeRecord(encoded.view()));
+  ASSERT_EQ(2U, fields.size());
+  const std::optional<Utf8View> text = fields[0].text_value();
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ("ALPHA", text->bytes());
+  EXPECT_EQ(2, fields[1].integer_value());
+  EXPECT_FALSE(TakeValue(cursor.Next()));
+}
+
 TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
   test::WritePagerFixedVfs vfs{false};
   auto opened = Pager::OpenEphemeral(
