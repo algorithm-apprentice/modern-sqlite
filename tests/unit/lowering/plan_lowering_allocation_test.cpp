@@ -329,6 +329,34 @@ int main() try {
     }
   }
 
+  const std::array<PhysicalPlan, 2> distinct_plans{
+      PhysicalFixture(catalog, "SELECT DISTINCT Name FROM Items LIMIT ?1"),
+      PhysicalFixture(catalog, "SELECT DISTINCT Name FROM Items ORDER BY id LIMIT ?1 OFFSET ?2"),
+  };
+  std::array<std::size_t, 2> distinct_allocations{};
+  std::unique_ptr<BytecodeProgram> distinct_published;
+  for (std::size_t plan_index = 0; plan_index < distinct_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(distinct_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations == 0U || allocations > 128U ||
+          (distinct_allocations[plan_index] != 0U &&
+           allocations != distinct_allocations[plan_index])) {
+        return 1;
+      }
+      distinct_allocations[plan_index] = allocations;
+      if (plan_index == 1U && distinct_published == nullptr) {
+        distinct_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   constexpr std::size_t kExpectedMutationAllocations = 21U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -479,7 +507,7 @@ int main() try {
       return 1;
     }
   }
-  if (published == nullptr) {
+  if (published == nullptr || distinct_published == nullptr) {
     return 1;
   }
 
@@ -499,6 +527,11 @@ int main() try {
     checksum += static_cast<std::uint64_t>(kind);
     checksum += InstructionKindName(kind).size();
   }
+  checksum += distinct_published->relations().size();
+  checksum += distinct_published->sorters().size();
+  checksum += distinct_published->instructions().size();
+  checksum += distinct_published->relation(RelationId{0}).field_count;
+  checksum += distinct_published->sorter(SorterId{0}).field_count;
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

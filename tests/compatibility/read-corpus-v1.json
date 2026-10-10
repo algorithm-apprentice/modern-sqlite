@@ -707,14 +707,27 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
+      "expectation": "compare",
       "feature": "distinct-select",
-      "id": "unsupported-distinct",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
+      "id": "distinct-select",
       "operations": [
+        {"op": "step"},
+        {"op": "step"},
         {"op": "finalize"}
       ],
-      "sql_hex": "53454c4543542044495354494e4354206e616d652046524f4d206974656d73"
+      "sql_hex": "53454c4543542044495354494e435420312046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "distinct-select",
+      "id": "distinct-order-limit",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e43542073636f7265204953204e554c4c2046524f4d206974656d73204f5244455220425920312044455343204c494d49542031"
     },
     {
       "database": "core",
@@ -933,6 +946,7 @@
     "alter-defaults",
     "constant-select",
     "core-functions",
+    "distinct-select",
     "empty-input",
     "execution-errors",
     "expressions",

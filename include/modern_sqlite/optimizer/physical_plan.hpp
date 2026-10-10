@@ -129,6 +129,7 @@ struct PhysicalGuardNode {
 struct PhysicalFilterNode {
   PhysicalNodeId input;
   std::vector<BoundExpressionId> predicates{};
+  std::vector<BoundExpressionId> guards{};
 };
 
 struct PhysicalLimitNode {

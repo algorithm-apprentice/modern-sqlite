@@ -644,6 +644,24 @@ std::size_t callback_count = 0;
   return SqlValue::Integer(static_cast<std::int64_t>(callback_count));
 }
 
+[[nodiscard]] Result<SqlValue> NumericRepresentative(const ScalarFunctionContext&,
+                                                     std::span<const SqlValue>) {
+  ++callback_count;
+  return callback_count == 1U ? SqlValue::Integer(1) : SqlValue::Real(1.0);
+}
+
+[[nodiscard]] Result<SqlValue> TextRepresentative(const ScalarFunctionContext&,
+                                                  std::span<const SqlValue>) {
+  ++callback_count;
+  if (callback_count == 1U) {
+    return SqlValue::Text("A");
+  }
+  if (callback_count == 2U) {
+    return SqlValue::Text("a");
+  }
+  return SqlValue::Text("B");
+}
+
 [[nodiscard]] Result<SqlValue> FailCall(const ScalarFunctionContext&, std::span<const SqlValue>) {
   ++callback_count;
   return std::unexpected(Error::Create(ErrorCode::kGeneric, "failing function executed"));
@@ -659,7 +677,7 @@ std::size_t callback_count = 0;
 }
 
 struct CustomEnvironment {
-  std::array<ScalarFunction, 5> functions{{
+  std::array<ScalarFunction, 7> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -668,6 +686,12 @@ struct CustomEnvironment {
       ScalarFunction{"volatile_counter", FunctionArity::Exact(0),
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      CountCall},
+      ScalarFunction{"numeric_representative", FunctionArity::Exact(0),
+                     FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                     NumericRepresentative},
+      ScalarFunction{"text_representative", FunctionArity::Exact(0),
+                     FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                     TextRepresentative},
       ScalarFunction{"failing", FunctionArity::Exact(0), FunctionDeterminism::kNonDeterministic,
                      FunctionCollationUse::kNone, FailCall},
       ScalarFunction{"fail_after_one", FunctionArity::Exact(1),
@@ -708,8 +732,7 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
 
 TEST(ReadLowering, DefersDistinctValuesAndCompoundPlans) {
   const CatalogSnapshotPtr catalog = TestCatalog();
-  constexpr std::array<std::string_view, 3> cases{
-      "SELECT DISTINCT id FROM items",
+  constexpr std::array<std::string_view, 2> cases{
       "VALUES(1),(2)",
       "SELECT 1 UNION SELECT 2",
   };
@@ -719,9 +742,216 @@ TEST(ReadLowering, DefersDistinctValuesAndCompoundPlans) {
     LowerPlanResult lowered = LowerPlan(plan);
     ASSERT_FALSE(lowered.has_value());
     EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
-    EXPECT_EQ("DISTINCT, VALUES, and compound SELECT lowering is not supported",
-              lowered.error().detail);
+    EXPECT_EQ("VALUES and compound SELECT lowering is not supported", lowered.error().detail);
   }
+}
+
+TEST(ReadLowering, LowersSimpleDistinctIntoMembershipAndOptionalOrderingBytecode) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BytecodeProgram simple = LowerOrThrow("SELECT DISTINCT name FROM items", catalog);
+  ASSERT_EQ(1U, simple.relations().size());
+  EXPECT_TRUE(simple.sorters().empty());
+  const OrderingRecordDescriptor& membership = simple.relations().front();
+  EXPECT_EQ(1U, membership.field_count);
+  EXPECT_EQ(1U, membership.key_field_count);
+  ASSERT_EQ(1U, membership.key_columns.size());
+  EXPECT_EQ("BINARY", simple.symbol(membership.key_columns[0].collation));
+  const std::vector<InstructionKind> simple_kinds = InstructionKinds(simple);
+  EXPECT_EQ(1U, static_cast<std::size_t>(
+                    std::ranges::count(simple_kinds, InstructionKind::kOpenRelation)));
+  EXPECT_EQ(1U, static_cast<std::size_t>(
+                    std::ranges::count(simple_kinds, InstructionKind::kInsertRelation)));
+  EXPECT_EQ(1U, static_cast<std::size_t>(
+                    std::ranges::count(simple_kinds, InstructionKind::kCloseRelation)));
+
+  const CustomEnvironment custom;
+  const BytecodeProgram ordered = LowerOrThrow(
+      "SELECT DISTINCT 1 FROM items ORDER BY volatile_counter()", catalog, custom.Binder());
+  ASSERT_EQ(1U, ordered.relations().size());
+  ASSERT_EQ(1U, ordered.sorters().size());
+  EXPECT_TRUE(ordered.top_ns().empty());
+  const auto relation_insert =
+      std::ranges::find_if(ordered.instructions(), [](const Instruction& instruction) {
+        return std::holds_alternative<InsertRelationInstruction>(instruction);
+      });
+  const auto hidden_call =
+      std::ranges::find_if(ordered.instructions(), [](const Instruction& instruction) {
+        return std::holds_alternative<CallScalarInstruction>(instruction);
+      });
+  const auto sorter_insert =
+      std::ranges::find_if(ordered.instructions(), [](const Instruction& instruction) {
+        return std::holds_alternative<InsertSorterInstruction>(instruction);
+      });
+  ASSERT_NE(ordered.instructions().end(), relation_insert);
+  ASSERT_NE(ordered.instructions().end(), hidden_call);
+  ASSERT_NE(ordered.instructions().end(), sorter_insert);
+  EXPECT_LT(relation_insert, hidden_call);
+  EXPECT_LT(hidden_call, sorter_insert);
+}
+
+TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 97}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const CustomEnvironment custom;
+
+  callback_count = 0;
+  const BytecodeProgram representative =
+      LowerOrThrow("SELECT DISTINCT numeric_representative() FROM items", catalog, custom.Binder());
+  const auto representative_rows =
+      ExecuteRows(representative, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, representative_rows.size());
+  EXPECT_EQ(SqlValueType::kInteger, representative_rows[0][0].type());
+  EXPECT_EQ(1, representative_rows[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  const BytecodeProgram nulls = LowerOrThrow("SELECT DISTINCT NULL FROM items", catalog);
+  const auto null_rows =
+      ExecuteRows(nulls, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, null_rows.size());
+  EXPECT_EQ(SqlValueType::kNull, null_rows[0][0].type());
+
+  const BytecodeProgram offset_after_membership =
+      LowerOrThrow("SELECT DISTINCT 1 FROM items LIMIT 1 OFFSET 1", catalog);
+  EXPECT_TRUE(ExecuteRows(offset_after_membership, *pager, catalog->version().generation,
+                          VmEnvironment::Core(), &memory)
+                  .empty());
+
+  const BytecodeProgram source_free = LowerOrThrow("SELECT DISTINCT 7", catalog);
+  const auto source_free_rows = ExecuteRows(source_free, *pager, catalog->version().generation,
+                                            VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, source_free_rows.size());
+  EXPECT_EQ(7, source_free_rows[0][0].integer_value());
+
+  callback_count = 0;
+  const BytecodeProgram collated =
+      LowerOrThrow("SELECT DISTINCT text_representative() COLLATE NOCASE FROM items ORDER BY 1",
+                   catalog, custom.Binder());
+  const auto collated_rows =
+      ExecuteRows(collated, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(2U, collated_rows.size());
+  EXPECT_EQ("A", TextBytes(collated_rows[0][0]));
+  EXPECT_EQ("B", TextBytes(collated_rows[1][0]));
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram zero = LowerOrThrow(
+      "SELECT DISTINCT failing() FROM items LIMIT 0 OFFSET failing()", catalog, custom.Binder());
+  Vm zero_without_storage = TakeValue(Vm::Create(zero, custom.Vm()));
+  RequireStatus(zero_without_storage.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation}));
+  EXPECT_EQ(VmStep::kDone, TakeValue(zero_without_storage.Step()));
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram limited = LowerOrThrow(
+      "SELECT DISTINCT volatile_counter() FROM items LIMIT 1", catalog, custom.Binder());
+  const auto limited_rows =
+      ExecuteRows(limited, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, limited_rows.size());
+  EXPECT_EQ(1, limited_rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram hidden = LowerOrThrow(
+      "SELECT DISTINCT 1 FROM items ORDER BY volatile_counter()", catalog, custom.Binder());
+  const auto hidden_rows =
+      ExecuteRows(hidden, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, hidden_rows.size());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram ordered_limit =
+      LowerOrThrow("SELECT DISTINCT volatile_counter()%2 FROM items ORDER BY 1 LIMIT 1", catalog,
+                   custom.Binder());
+  const auto ordered_limit_rows =
+      ExecuteRows(ordered_limit, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, ordered_limit_rows.size());
+  EXPECT_EQ(0, ordered_limit_rows[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram later_error =
+      LowerOrThrow("SELECT DISTINCT fail_after_one(name) FROM items", catalog, custom.Binder());
+  Vm later_error_vm = TakeValue(Vm::Create(later_error, custom.Vm()));
+  RequireStatus(later_error_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, memory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(later_error_vm.Step()));
+  EXPECT_EQ(1, later_error_vm.row()[0].integer_value());
+  const auto failed_after_row = later_error_vm.Step();
+  ASSERT_FALSE(failed_after_row.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed_after_row.error().code());
+  EXPECT_EQ(2U, callback_count);
+
+  const TemporaryStorageFactory file =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  const BytecodeProgram file_program =
+      LowerOrThrow("SELECT DISTINCT name FROM items ORDER BY name", catalog);
+  EXPECT_EQ(3U, ExecuteRows(file_program, *pager, catalog->version().generation,
+                            VmEnvironment::Core(), &file)
+                    .size());
+
+  Vm missing = TakeValue(Vm::Create(representative, custom.Vm()));
+  RequireStatus(
+      missing.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  const auto missing_storage = missing.Step();
+  ASSERT_FALSE(missing_storage.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_storage.error().code());
+
+  const BytecodeProgram empty_guard = LowerOrThrow(
+      "SELECT DISTINCT 1 FROM items WHERE id<0 AND abs(-9223372036854775808)", catalog);
+  Vm empty_guard_vm = TakeValue(Vm::Create(empty_guard, VmEnvironment::Core()));
+  RequireStatus(empty_guard_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, memory}));
+  const auto guard_failure = empty_guard_vm.Step();
+  ASSERT_FALSE(guard_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, guard_failure.error().code());
+  EXPECT_EQ("integer overflow", guard_failure.error().message());
+  RequireStatus(pager->EndRead());
+}
+
+TEST(ReadLowering, ResetsAndRebindsSimpleDistinctParameters) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const BytecodeProgram program = LowerOrThrow("SELECT DISTINCT ?1 FROM items LIMIT ?2", catalog);
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+
+  RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(5)));
+  RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation, memory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(5, vm.row()[0].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(7)));
+  RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation, memory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(7, vm.row()[0].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager->EndRead());
 }
 
 TEST(ReadLowering, LowersRuntimeLimitOrderByIntoTopNAndExternalFallbackBytecode) {
@@ -2627,6 +2857,11 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
   top_n_limit.maximum_top_ns = 0;
   expect_limit("SELECT name FROM items ORDER BY name LIMIT 1", top_n_limit,
                ProgramErrorCode::kTopNLimitExceeded);
+
+  ProgramLimits relation_limit;
+  relation_limit.maximum_relations = 0;
+  expect_limit("SELECT DISTINCT name FROM items", relation_limit,
+               ProgramErrorCode::kRelationLimitExceeded);
 
   ProgramLimits result_limit;
   result_limit.maximum_result_columns = 0;

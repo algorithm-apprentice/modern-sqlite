@@ -356,6 +356,24 @@ template <typename Bound>
          ExpressionIsDeterministic(bound_select, id);
 }
 
+struct AdvancedPredicateParts {
+  std::vector<BoundExpressionId> predicates{};
+  std::vector<BoundExpressionId> guards{};
+};
+
+[[nodiscard]] AdvancedPredicateParts SplitAdvancedPredicate(const BoundSelect& bound_select,
+                                                            BoundExpressionId predicate) {
+  AdvancedPredicateParts parts;
+  const auto visit = [&](BoundExpressionId conjunct) {
+    (IsStatementGuard(bound_select, conjunct) ? parts.guards : parts.predicates)
+        .push_back(conjunct);
+    return true;
+  };
+  auto visitor = visit;
+  static_cast<void>(VisitConjuncts(bound_select, predicate, &visitor));
+  return parts;
+}
+
 template <typename Bound>
 [[nodiscard]] bool IsRowIdReference(const Bound& bound_select, const SourceInfo& source,
                                     BoundExpressionId id) noexcept {
@@ -1541,8 +1559,12 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
             return value->root_page == expected_root;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
-            return value != nullptr && value->input.value() == node.input.value() &&
-                   value->predicates.size() == 1U && value->predicates.front() == node.predicate;
+            if (value == nullptr || value->input.value() != node.input.value()) {
+              return false;
+            }
+            const AdvancedPredicateParts expected =
+                SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
+            return value->predicates == expected.predicates && value->guards == expected.guards;
           } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
             const auto* value = std::get_if<PhysicalLimitNode>(&physical);
             return value != nullptr && value->input.value() == node.input.value() &&
@@ -1763,7 +1785,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   }
   if (index < nodes.size() && std::holds_alternative<PhysicalFilterNode>(nodes[index].payload)) {
     const auto& filter = std::get<PhysicalFilterNode>(nodes[index].payload);
-    if (filter.input != input || filter.predicates.empty()) {
+    if (filter.input != input || filter.predicates.empty() || !filter.guards.empty()) {
       return std::unexpected{InvariantFailure("physical filter shape is invalid")};
     }
     for (const BoundExpressionId predicate : filter.predicates) {
@@ -2066,6 +2088,7 @@ class PhysicalPlanBuilder final {
               PhysicalFilterNode{
                   .input = input,
                   .predicates = std::move(residuals),
+                  .guards = {},
               },
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
@@ -2174,9 +2197,12 @@ class PhysicalPlanBuilder final {
                   .root_page = root_page,
               };
             } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
+              AdvancedPredicateParts predicates =
+                  SplitAdvancedPredicate(impl->logical_plan.bound_select(), node.predicate);
               return PhysicalFilterNode{
                   .input = mapped[node.input.value()],
-                  .predicates = {node.predicate},
+                  .predicates = std::move(predicates.predicates),
+                  .guards = std::move(predicates.guards),
               };
             } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
               return PhysicalLimitNode{
