@@ -188,6 +188,7 @@ enum class PhysicalNodeKind : std::uint8_t {
 
 enum class OptimizerErrorCode : std::uint8_t {
   kInvalidInput,
+  kUnsupportedFeature,
   kInternalInvariant,
 };
 

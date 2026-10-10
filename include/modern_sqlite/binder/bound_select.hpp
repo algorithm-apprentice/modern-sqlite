@@ -271,6 +271,7 @@ struct BoundOrderingTerm {
   SortOrder order = SortOrder::kAscending;
   BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
   std::optional<std::size_t> result_column{};
+  bool explicit_collation = false;
 };
 
 enum class BindErrorCode : std::uint8_t {

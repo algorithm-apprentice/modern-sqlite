@@ -2062,6 +2062,7 @@ class StatementBinder final {
           .order = order,
           .null_placement = null_placement,
           .result_column = *result_column,
+          .explicit_collation = OrderByHasExplicitCollation(term.expression),
       });
     }
     return {};
@@ -2886,6 +2887,7 @@ class StatementBinder final {
           .order = order,
           .null_placement = null_placement,
           .result_column = result_column,
+          .explicit_collation = OrderByHasExplicitCollation(term.expression),
       });
     }
     return {};
