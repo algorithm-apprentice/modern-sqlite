@@ -1,0 +1,4559 @@
+{
+  "binaries": {
+    "diagnostic": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": true,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "443df74f982ca2dcaf86ad2ef9e4c0b7488f2e7b",
+          "tree": "56c8749e717addf74e18dfd5072095173e90bc29"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "logical_name": "modern_sqlite_distinct_compound_diagnostics",
+      "sha256": "4dc726553fe3380b01862a0040dd58defa9750d1c6c4eed3be636bad41b426d4",
+      "size_bytes": 4402824
+    },
+    "timing": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": false,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "443df74f982ca2dcaf86ad2ef9e4c0b7488f2e7b",
+          "tree": "56c8749e717addf74e18dfd5072095173e90bc29"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "logical_name": "modern_sqlite_distinct_compound_benchmark",
+      "sha256": "e3390247e5c11bed225eebfd3e515359e57896a7161a85bc6662e459bf2769d7",
+      "size_bytes": 4398536
+    }
+  },
+  "build": {
+    "actual_harness_cxx_compile_flags": "'-I<BUILD_DIRECTORY>/generated' '-I<REPOSITORY_ROOT>/include' '-I<SQLITE_SOURCE_DIRECTORY>' -O3 -DNDEBUG -std=c++23 -arch arm64 -Wall -Wextra -Wpedantic -Wcast-align -Wconversion -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -Wnon-virtual-dtor -Wnull-dereference -Wold-style-cast -Woverloaded-virtual -Wshadow -Wsign-conversion -Werror",
+    "actual_modern_cxx_compile_flags": "'-I<REPOSITORY_ROOT>/include' -O3 -DNDEBUG -std=c++23 -arch arm64 -Wall -Wextra -Wpedantic -Wcast-align -Wconversion -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -Wnon-virtual-dtor -Wnull-dereference -Wold-style-cast -Woverloaded-virtual -Wshadow -Wsign-conversion -Werror",
+    "actual_sqlite_c_compile_flags": "-DNDEBUG -DSQLITE_DQS=3 -DSQLITE_THREADSAFE=0 '-I<SQLITE_SOURCE_DIRECTORY>' -O3 -DNDEBUG -std=gnu99 -arch arm64",
+    "actual_timing_link_flags": "-O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names",
+    "build_type": "Release",
+    "c_base_flags": "",
+    "c_compiler": "/usr/bin/cc",
+    "c_compiler_version": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "c_effective_flags": "-O3 -DNDEBUG",
+    "c_release_flags": "-O3 -DNDEBUG",
+    "cmake_version": "cmake version 4.4.3",
+    "cxx_base_flags": "",
+    "cxx_compiler": "/usr/bin/c++",
+    "cxx_compiler_version": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "cxx_effective_flags": "-O3 -DNDEBUG",
+    "cxx_release_flags": "-O3 -DNDEBUG",
+    "generator": "Ninja",
+    "linker_base_flags": "",
+    "linker_effective_flags": "",
+    "linker_release_flags": ""
+  },
+  "completion_schema_version": 1,
+  "diagnostic_runs": [
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/000-distinct-low-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "distinct-low-card-memory",
+        "scratch/000-distinct-low-card-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 0,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 106554875,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/000-distinct-low-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/000-distinct-low-card-memory-modern.json",
+        "sha256": "95c6456dc65381a5bb2e70cb3f411a6c3bd60bcb44493f08f436ce64afbd0c4f",
+        "size_bytes": 2122
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/001-distinct-low-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "distinct-low-card-memory",
+        "scratch/001-distinct-low-card-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 1,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 81831292,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/001-distinct-low-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/001-distinct-low-card-memory-sqlite.json",
+        "sha256": "f305c739ad2ee7fba011589441099b6230386c73a3fcb6c5f4f44968da566937",
+        "size_bytes": 2218
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/002-distinct-high-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "distinct-high-card-memory",
+        "scratch/002-distinct-high-card-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 2,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 1566331708,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/002-distinct-high-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/002-distinct-high-card-memory-modern.json",
+        "sha256": "9fd1c5f0232908181f1bcafb766e191afc07b1304bb135bed139c915a5911401",
+        "size_bytes": 2132
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/003-distinct-high-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "distinct-high-card-memory",
+        "scratch/003-distinct-high-card-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 3,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 128531292,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/003-distinct-high-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/003-distinct-high-card-memory-sqlite.json",
+        "sha256": "8f9970bc194919c8856afaac4be0ceaa02693c119070ea960123953b7569451d",
+        "size_bytes": 2228
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/004-distinct-collated-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "distinct-collated-memory",
+        "scratch/004-distinct-collated-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 4,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 109041875,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/004-distinct-collated-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/004-distinct-collated-memory-modern.json",
+        "sha256": "3f06af259516181687bd591cf0115d392b9a69c557703a065d007852c51dfa82",
+        "size_bytes": 2121
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/005-distinct-collated-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "distinct-collated-memory",
+        "scratch/005-distinct-collated-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 5,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 79806792,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/005-distinct-collated-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/005-distinct-collated-memory-sqlite.json",
+        "sha256": "b6f944191a429d1a7592596de7a5de974126e70026907f47583e007d0a555b57",
+        "size_bytes": 2217
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/006-distinct-order-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "distinct-order-limit-memory",
+        "scratch/006-distinct-order-limit-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 6,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 148997417,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/006-distinct-order-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/006-distinct-order-limit-memory-modern.json",
+        "sha256": "cb99cca247dc9e914b06b6214696922efc0fca18e2b2ba3d81c3f128ddd0791f",
+        "size_bytes": 2127
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/007-distinct-order-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "distinct-order-limit-memory",
+        "scratch/007-distinct-order-limit-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 7,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 79318750,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/007-distinct-order-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/007-distinct-order-limit-memory-sqlite.json",
+        "sha256": "865be21c7f670e8286b0e4d46185760b8f5695dfb1b3e0e19fd5f3ddad3eae0a",
+        "size_bytes": 2224
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/008-values-union-all-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "values-union-all-limit-memory",
+        "scratch/008-values-union-all-limit-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 8,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 106831083,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/008-values-union-all-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/008-values-union-all-limit-memory-modern.json",
+        "sha256": "e126384915b27908f03cda4e48100d093b9963be923a904b5873de5b025ad980",
+        "size_bytes": 2641
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/009-values-union-all-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "values-union-all-limit-memory",
+        "scratch/009-values-union-all-limit-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 9,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 75509667,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/009-values-union-all-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/009-values-union-all-limit-memory-sqlite.json",
+        "sha256": "8c481924a21b3aaceaeb51e2b537e2bbb16005cfe1258adec4f9ce6c04872118",
+        "size_bytes": 2739
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/010-union-replace-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "union-replace-file",
+        "scratch/010-union-replace-file-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 10,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 285620667,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/010-union-replace-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/010-union-replace-file-modern.json",
+        "sha256": "79d62809e4af148903dfe3316f75f7fe0ef6ee09d2c4069fb28173ccf010bab2",
+        "size_bytes": 2135
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/011-union-replace-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "union-replace-file",
+        "scratch/011-union-replace-file-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 11,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 87401500,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/011-union-replace-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/011-union-replace-file-sqlite.json",
+        "sha256": "d7f7e5328ee15cc2bb74ba126c49a29af17faab391daa6e381066f79b95f1719",
+        "size_bytes": 2221
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/012-except-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "except-membership-memory",
+        "scratch/012-except-membership-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 12,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 160256333,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/012-except-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/012-except-membership-memory-modern.json",
+        "sha256": "c44a01ac12b858511dd98a02d894ce12dee411d078e5eb73fd970bfbb272aa16",
+        "size_bytes": 2134
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/013-except-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "except-membership-memory",
+        "scratch/013-except-membership-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 13,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 91564583,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/013-except-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/013-except-membership-memory-sqlite.json",
+        "sha256": "faff266b725d86073a51f66d9233296d3667bff4d5080ce1cd8daec595b2cba5",
+        "size_bytes": 2233
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/014-intersect-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "intersect-membership-memory",
+        "scratch/014-intersect-membership-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 14,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 158306875,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/014-intersect-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/014-intersect-membership-memory-modern.json",
+        "sha256": "a716f9a9c51ba4876338b38e381f25a1b81af0a3f9a6710baf255333cdd6e13e",
+        "size_bytes": 2137
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/015-intersect-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "intersect-membership-memory",
+        "scratch/015-intersect-membership-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 15,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 89171541,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/015-intersect-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/015-intersect-membership-memory-sqlite.json",
+        "sha256": "4e796847998ea58522ae879a47d2353044ad15168293dadab13b8115a16f2c8e",
+        "size_bytes": 2236
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/016-ordered-union-all-topn-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "ordered-union-all-topn-memory",
+        "scratch/016-ordered-union-all-topn-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 16,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 207850625,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/016-ordered-union-all-topn-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/016-ordered-union-all-topn-memory-modern.json",
+        "sha256": "ff8831cdf329d17a59ba7bdf371ec0a8c84c68d7ca81b7335927f346d1d79ec5",
+        "size_bytes": 2149
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/017-ordered-union-all-topn-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "ordered-union-all-topn-memory",
+        "scratch/017-ordered-union-all-topn-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 17,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 94209083,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/017-ordered-union-all-topn-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/017-ordered-union-all-topn-memory-sqlite.json",
+        "sha256": "07573ea66058bb2f45c2379f4c01c43d2812775f5af97f33abaf0fd131e9060e",
+        "size_bytes": 2242
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/018-ordered-union-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "ordered-union-merge-memory",
+        "scratch/018-ordered-union-merge-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 18,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 180189542,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/018-ordered-union-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/018-ordered-union-merge-memory-modern.json",
+        "sha256": "e19debe0bb2bbf6fa31b329412ac1f9c939dd08c6faec0413e97d661f32b9d10",
+        "size_bytes": 2138
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/019-ordered-union-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "ordered-union-merge-memory",
+        "scratch/019-ordered-union-merge-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 19,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 90226458,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/019-ordered-union-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/019-ordered-union-merge-memory-sqlite.json",
+        "sha256": "efae9e53c5581130eadcd66e7aa6da1fe81dda6d761dede4f5d77c89aaa8d92f",
+        "size_bytes": 2231
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/020-ordered-except-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "ordered-except-merge-memory",
+        "scratch/020-ordered-except-merge-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 20,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 165854333,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/020-ordered-except-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/020-ordered-except-merge-memory-modern.json",
+        "sha256": "90e82bb28c0df1d4ab5453ab450d813efb8cd9c06eb3e292321a0f6a7f8afdbf",
+        "size_bytes": 2138
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/021-ordered-except-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "ordered-except-merge-memory",
+        "scratch/021-ordered-except-merge-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 21,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 90712458,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/021-ordered-except-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/021-ordered-except-merge-memory-sqlite.json",
+        "sha256": "0b25ba5f34aed7f1e59ad90af4c8b71a2d811a1aad1754bd2e200d0e11be7bde",
+        "size_bytes": 2236
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/022-ordered-intersect-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "ordered-intersect-merge-memory",
+        "scratch/022-ordered-intersect-merge-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 22,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 167293542,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/022-ordered-intersect-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/022-ordered-intersect-merge-memory-modern.json",
+        "sha256": "97fce8d5af999f11a7e38a159e678705f5148fa6dd0a236758bce046327cfba9",
+        "size_bytes": 2141
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/023-ordered-intersect-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "ordered-intersect-merge-memory",
+        "scratch/023-ordered-intersect-merge-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 23,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 89440042,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/023-ordered-intersect-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/023-ordered-intersect-merge-memory-sqlite.json",
+        "sha256": "a0a7b6ccd7df948616d2527add317b905a0ae5306ed338206185a6c18c09cb2f",
+        "size_bytes": 2239
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/024-long-mixed-compound-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "long-mixed-compound-memory",
+        "scratch/024-long-mixed-compound-memory-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 24,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 301683500,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/024-long-mixed-compound-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/024-long-mixed-compound-memory-modern.json",
+        "sha256": "48c8d5ff4f78d1862cfe1d52c134dedf1a1bd20e23cd1ea86fbdfcceea8f1747",
+        "size_bytes": 2159
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/025-long-mixed-compound-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "long-mixed-compound-memory",
+        "scratch/025-long-mixed-compound-memory-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 25,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 110056042,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/025-long-mixed-compound-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/025-long-mixed-compound-memory-sqlite.json",
+        "sha256": "4cf09ade7fe6a1d5cb9d544edba0af5650ffb3cc9a9bc597be7d9f83516313b1",
+        "size_bytes": 2254
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/026-union-keyed-relation-before-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "modern",
+        "union-keyed-relation-before-file",
+        "scratch/026-union-keyed-relation-before-file-modern.db",
+        "diagnostic"
+      ],
+      "ordinal": 26,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 1565924875,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/026-union-keyed-relation-before-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/026-union-keyed-relation-before-file-modern.json",
+        "sha256": "401d0923981ce3a206c3d2e0b3e72c85b7e9cf0568635165a37af01eb875342b",
+        "size_bytes": 2167
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/027-union-keyed-relation-before-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_diagnostics",
+        "run",
+        "sqlite",
+        "union-keyed-relation-before-file",
+        "scratch/027-union-keyed-relation-before-file-sqlite.db",
+        "diagnostic"
+      ],
+      "ordinal": 27,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 181393000,
+        "timed_out": false
+      },
+      "stderr": {
+        "path": "raw/diagnostic/027-union-keyed-relation-before-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/027-union-keyed-relation-before-file-sqlite.json",
+        "sha256": "f6550a5bc0695378d9962296afc6c6cab25debcffacb7272e533445c5e4ea885",
+        "size_bytes": 2246
+      }
+    }
+  ],
+  "diagnostic_schema_version": 1,
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cpu_timer": "CLOCK_PROCESS_CPUTIME_ID",
+    "kernel": "27.0.0",
+    "logical_cpu_count": 14,
+    "os": "Darwin",
+    "wall_timer": "steady_clock"
+  },
+  "inputs": [
+    {
+      "path": "tests/performance/distinct-compound-workloads-v1.json",
+      "role": "workload-manifest",
+      "sha256": "2df5b91853e60417ad5dfd3aca66d9d2915af5d483655dd404ef16d52b4741de",
+      "size_bytes": 24092
+    },
+    {
+      "path": "tests/compatibility/sqlite-oracle-profile-v1.json",
+      "role": "sqlite-profile",
+      "sha256": "cf0982cb2f38c893359188a6ed11bd05ff541d5975a57d482f7fd367a4d02981",
+      "size_bytes": 3072
+    },
+    {
+      "path": "benchmarks/distinct_compound_performance.cpp",
+      "role": "benchmark-source",
+      "sha256": "9b49202b8730e7cf0db29323b0babaa40e55156298ed21d197f6965d74a1681b",
+      "size_bytes": 25537
+    },
+    {
+      "path": "benchmarks/order_by_performance.cpp",
+      "role": "shared-benchmark-source",
+      "sha256": "89163bcc56844bb0820cc5ba48dcd34578194d515862a8d800dab481b2d5bee3",
+      "size_bytes": 162456
+    },
+    {
+      "path": "tools/read_performance.py",
+      "role": "shared-runner-source",
+      "sha256": "d80818e178db25f8454861bd48f9aec9fb2a5447bb455d4651e6a11052d26ba4",
+      "size_bytes": 139308
+    },
+    {
+      "path": "tools/order_by_performance.py",
+      "role": "shared-order-by-runner-source",
+      "sha256": "8828ebf83a2fedced64d54bf10712848e6f59e7c1d1e736644eba50c127c6edd",
+      "size_bytes": 31858
+    },
+    {
+      "path": "tools/distinct_compound_performance.py",
+      "role": "distinct-compound-runner-source",
+      "sha256": "b64da9e4d7dcb3e066a70fbaf70ae8f388a9011557083a4a6fcc420a2ad04b2f",
+      "size_bytes": 38626
+    },
+    {
+      "path": "tests/fixtures/order_by_performance/ordered.db",
+      "role": "fixture-ordered",
+      "sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+      "size_bytes": 19931136
+    },
+    {
+      "path": "tests/fixtures/order_by_performance/ordered.sql",
+      "role": "fixture-sql-ordered",
+      "sha256": "9c127a78e025de7a50132e9e37017eb2e5be588ebff3e4d95fd9465da0a70649",
+      "size_bytes": 739
+    }
+  ],
+  "schedule": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "clean": true,
+    "revision": "443df74f982ca2dcaf86ad2ef9e4c0b7488f2e7b",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "56c8749e717addf74e18dfd5072095173e90bc29",
+    "worktree_content_sha256": "f218bd1554063e1a8af262a2de8368750d6dca92df6f9da49f1caf534e45625c"
+  },
+  "sqlite": {
+    "compile_options": [
+      "ATOMIC_INTRINSICS=1",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "DQS=3",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=0",
+      "MUTEX_OMIT",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=0"
+    ],
+    "library_role": "statically-linked-benchmark-oracle",
+    "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+    "sqlite3_c_sha256": "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
+    "sqlite3_h_sha256": "ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5",
+    "version": "3.54.0"
+  },
+  "status": "complete",
+  "timing_runs": [
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/000-round-0-distinct-low-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-low-card-memory",
+        "scratch/000-round-0-distinct-low-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 0,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 177562875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/000-round-0-distinct-low-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/000-round-0-distinct-low-card-memory-modern.json",
+        "sha256": "d62591e7835cbcea64395a94bd7c7d08a79d90b241a6dae6df039b2b80fb7c96",
+        "size_bytes": 2409
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/001-round-0-distinct-low-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-low-card-memory",
+        "scratch/001-round-0-distinct-low-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 1,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 100465917,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/001-round-0-distinct-low-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/001-round-0-distinct-low-card-memory-sqlite.json",
+        "sha256": "ae1b30c0f0edc65d26b765d611372d7dd8a991703b227919eb1039a2dc2a8b2f",
+        "size_bytes": 2403
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/002-round-0-distinct-high-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-high-card-memory",
+        "scratch/002-round-0-distinct-high-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 2,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3062069667,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/002-round-0-distinct-high-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/002-round-0-distinct-high-card-memory-modern.json",
+        "sha256": "562c974dc9f2bc53ea20d66981d72e8b64e3b84b6c2c82e8906fe6c7e7a3db78",
+        "size_bytes": 2449
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/003-round-0-distinct-high-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-high-card-memory",
+        "scratch/003-round-0-distinct-high-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 3,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 187609917,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/003-round-0-distinct-high-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/003-round-0-distinct-high-card-memory-sqlite.json",
+        "sha256": "1885b781eed52c09dc1d84e3b4002c8808c0170332c6a966b18ee330ea703d79",
+        "size_bytes": 2443
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/004-round-0-distinct-collated-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-collated-memory",
+        "scratch/004-round-0-distinct-collated-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 4,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 191499375,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/004-round-0-distinct-collated-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/004-round-0-distinct-collated-memory-modern.json",
+        "sha256": "54993bb8e407da3adac197fe900cfab021a4db161c0acb49cade84518c38b678",
+        "size_bytes": 2405
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/005-round-0-distinct-collated-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-collated-memory",
+        "scratch/005-round-0-distinct-collated-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 5,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 95338917,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/005-round-0-distinct-collated-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/005-round-0-distinct-collated-memory-sqlite.json",
+        "sha256": "5e35df5df9dc9db2e92669a935366f4ccba88c679be7cd391b5394db8b984cb8",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/006-round-0-distinct-order-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-order-limit-memory",
+        "scratch/006-round-0-distinct-order-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 6,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 325679500,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/006-round-0-distinct-order-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/006-round-0-distinct-order-limit-memory-modern.json",
+        "sha256": "340127178c5510ac25ef9b221b14e2e4b942380313ae4cad0f0982ecb655b5d9",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/007-round-0-distinct-order-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-order-limit-memory",
+        "scratch/007-round-0-distinct-order-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 7,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 95356542,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/007-round-0-distinct-order-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/007-round-0-distinct-order-limit-memory-sqlite.json",
+        "sha256": "14c571bd31cc651ef7e5335f7f7c45da222e8ae441e0f57e84485cd86fa66c85",
+        "size_bytes": 2420
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/008-round-0-values-union-all-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "values-union-all-limit-memory",
+        "scratch/008-round-0-values-union-all-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 8,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 261498667,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/008-round-0-values-union-all-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/008-round-0-values-union-all-limit-memory-modern.json",
+        "sha256": "3974d71343d2b98f43964cef78b9df22b4bfcaafd4e52c7143eac6a5765412b5",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/009-round-0-values-union-all-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "values-union-all-limit-memory",
+        "scratch/009-round-0-values-union-all-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 9,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 84976875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/009-round-0-values-union-all-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/009-round-0-values-union-all-limit-memory-sqlite.json",
+        "sha256": "82d853953943f2c8771afbd3520ffd3b0b25e93e64c96acca9af2bee8ee59f0c",
+        "size_bytes": 2423
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/010-round-0-union-replace-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-replace-file",
+        "scratch/010-round-0-union-replace-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 10,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 480361583,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/010-round-0-union-replace-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/010-round-0-union-replace-file-modern.json",
+        "sha256": "694217e3127da2eafa8594ef87670065c16e1573ac78dcb5aeed409b06f7c07f",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/011-round-0-union-replace-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-replace-file",
+        "scratch/011-round-0-union-replace-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 11,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 92188875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/011-round-0-union-replace-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/011-round-0-union-replace-file-sqlite.json",
+        "sha256": "d578dc3271aefcf5862bb42448c8fdbaac648b1a891bcd964b1fc85a7e8209f6",
+        "size_bytes": 2415
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/012-round-0-except-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "except-membership-memory",
+        "scratch/012-round-0-except-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 12,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 232498834,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/012-round-0-except-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/012-round-0-except-membership-memory-modern.json",
+        "sha256": "7dfd3100216591b186004dca63b56d8fb85710d75d060b065d20a9d6a63d4c30",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/013-round-0-except-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "except-membership-memory",
+        "scratch/013-round-0-except-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 13,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 229860208,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/013-round-0-except-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/013-round-0-except-membership-memory-sqlite.json",
+        "sha256": "b8409b1d7ef6d25ca89ffd724a5a9087fa41b24ccbad87f2d74ad3b0c7b1498e",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/014-round-0-intersect-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "intersect-membership-memory",
+        "scratch/014-round-0-intersect-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 14,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 237769042,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/014-round-0-intersect-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/014-round-0-intersect-membership-memory-modern.json",
+        "sha256": "c9537d758dba5adc328c66046bcb58282b724279b6a7b658f376d0ce12c0af1b",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/015-round-0-intersect-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "intersect-membership-memory",
+        "scratch/015-round-0-intersect-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 15,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 233097667,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/015-round-0-intersect-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/015-round-0-intersect-membership-memory-sqlite.json",
+        "sha256": "8e3bdcd33510e51e57b046d019d6f6398d3d4a87a2753a3cd7211e7f56f31a2f",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/016-round-0-ordered-union-all-topn-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-all-topn-memory",
+        "scratch/016-round-0-ordered-union-all-topn-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 16,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 316706708,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/016-round-0-ordered-union-all-topn-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/016-round-0-ordered-union-all-topn-memory-modern.json",
+        "sha256": "8a57cccda78252e1658150a77187be732310d564411c4228ada39910a6547af7",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/017-round-0-ordered-union-all-topn-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-all-topn-memory",
+        "scratch/017-round-0-ordered-union-all-topn-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 17,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 113058708,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/017-round-0-ordered-union-all-topn-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/017-round-0-ordered-union-all-topn-memory-sqlite.json",
+        "sha256": "9cbc1346bac7cbf402740a2580032b4755d31ad0fe4ef0fee6735a8bcf1a099f",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/018-round-0-ordered-union-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-merge-memory",
+        "scratch/018-round-0-ordered-union-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 18,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 274812041,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/018-round-0-ordered-union-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/018-round-0-ordered-union-merge-memory-modern.json",
+        "sha256": "74c7502dea844e0c251d089e70ecc3dde19c319ddb5d655042b26b3e34828e84",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/019-round-0-ordered-union-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-merge-memory",
+        "scratch/019-round-0-ordered-union-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 19,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 92218792,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/019-round-0-ordered-union-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/019-round-0-ordered-union-merge-memory-sqlite.json",
+        "sha256": "259854cc990f31097c4f22eb201549fb1c1fb9b7836205d37106165e94bad959",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/020-round-0-ordered-except-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-except-merge-memory",
+        "scratch/020-round-0-ordered-except-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 20,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 248222833,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/020-round-0-ordered-except-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/020-round-0-ordered-except-merge-memory-modern.json",
+        "sha256": "9a42ff4906649f2401035f8f5a835cac4ad000781c93884c39369d034f327e05",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/021-round-0-ordered-except-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-except-merge-memory",
+        "scratch/021-round-0-ordered-except-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 21,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 229727166,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/021-round-0-ordered-except-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/021-round-0-ordered-except-merge-memory-sqlite.json",
+        "sha256": "a7abf897c5ffea9cbb11b4b1e603197a4b3b7f22e05649abab4e1e5a4b03e3a7",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/022-round-0-ordered-intersect-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-intersect-merge-memory",
+        "scratch/022-round-0-ordered-intersect-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 22,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 246616708,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/022-round-0-ordered-intersect-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/022-round-0-ordered-intersect-merge-memory-modern.json",
+        "sha256": "3c340c31be3ef56d5fc1c3d4ba7afd413e4ba9d128e4bfaf54a7dd20d14117b6",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/023-round-0-ordered-intersect-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-intersect-merge-memory",
+        "scratch/023-round-0-ordered-intersect-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 23,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 232786125,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/023-round-0-ordered-intersect-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/023-round-0-ordered-intersect-merge-memory-sqlite.json",
+        "sha256": "050b67e3fc75de7553fddf68bea15f441d6bbb5447541b73f26676738bbdd692",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/024-round-0-long-mixed-compound-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "long-mixed-compound-memory",
+        "scratch/024-round-0-long-mixed-compound-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 24,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 514213875,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/024-round-0-long-mixed-compound-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/024-round-0-long-mixed-compound-memory-modern.json",
+        "sha256": "4bdfaa894012f22e2172dcf716b18613ff6d881c08185eaae5f183db5644ef20",
+        "size_bytes": 2438
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/025-round-0-long-mixed-compound-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "long-mixed-compound-memory",
+        "scratch/025-round-0-long-mixed-compound-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 25,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 283415209,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/025-round-0-long-mixed-compound-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/025-round-0-long-mixed-compound-memory-sqlite.json",
+        "sha256": "7110f88b41984f6c6ba8fc6c19a44852157fd126505c75ba93dba9827376a743",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/026-round-0-union-keyed-relation-before-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-keyed-relation-before-file",
+        "scratch/026-round-0-union-keyed-relation-before-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 26,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 2838099791,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/026-round-0-union-keyed-relation-before-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/026-round-0-union-keyed-relation-before-file-modern.json",
+        "sha256": "b840b3ca28fc39a658d1433be39fbe38e8e2f422140ca951c6022ff72a2ecb37",
+        "size_bytes": 2457
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/027-round-0-union-keyed-relation-before-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-keyed-relation-before-file",
+        "scratch/027-round-0-union-keyed-relation-before-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 27,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 282902500,
+        "timed_out": false
+      },
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/027-round-0-union-keyed-relation-before-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/027-round-0-union-keyed-relation-before-file-sqlite.json",
+        "sha256": "cc24dc1b0b722058cf99bed72af1e8719e3dfb1144441d515741cb12dd642f7f",
+        "size_bytes": 2451
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/028-round-1-union-keyed-relation-before-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-keyed-relation-before-file",
+        "scratch/028-round-1-union-keyed-relation-before-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 28,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 278206958,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/028-round-1-union-keyed-relation-before-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/028-round-1-union-keyed-relation-before-file-sqlite.json",
+        "sha256": "4629421468d277da6330d28deb5ea073a1286782e02086e41ae51fdbe733fe96",
+        "size_bytes": 2451
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/029-round-1-union-keyed-relation-before-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-keyed-relation-before-file",
+        "scratch/029-round-1-union-keyed-relation-before-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 29,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 2841658584,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/029-round-1-union-keyed-relation-before-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/029-round-1-union-keyed-relation-before-file-modern.json",
+        "sha256": "8fe4c9dd7f5a54651b0837fb3242ed603ca87b7bcb1f71bdf16977cbe30c41d7",
+        "size_bytes": 2457
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/030-round-1-long-mixed-compound-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "long-mixed-compound-memory",
+        "scratch/030-round-1-long-mixed-compound-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 30,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 270630917,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/030-round-1-long-mixed-compound-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/030-round-1-long-mixed-compound-memory-sqlite.json",
+        "sha256": "9550cae10ec2f1db78e767d9093d58c759197cb6d5b5af762c0da7e162694de4",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/031-round-1-long-mixed-compound-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "long-mixed-compound-memory",
+        "scratch/031-round-1-long-mixed-compound-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 31,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 518617208,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/031-round-1-long-mixed-compound-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/031-round-1-long-mixed-compound-memory-modern.json",
+        "sha256": "4b9c9b21ee356a63b8ed98f6dd933cc55787824e017643d7cc71389f11ff3723",
+        "size_bytes": 2438
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/032-round-1-ordered-intersect-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-intersect-merge-memory",
+        "scratch/032-round-1-ordered-intersect-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 32,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 238872041,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/032-round-1-ordered-intersect-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/032-round-1-ordered-intersect-merge-memory-sqlite.json",
+        "sha256": "1e254813b584cd4bbfc2d50cd8cd0bd591a4cde91ef609f7a3a43069cede7a99",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/033-round-1-ordered-intersect-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-intersect-merge-memory",
+        "scratch/033-round-1-ordered-intersect-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 33,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 255828583,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/033-round-1-ordered-intersect-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/033-round-1-ordered-intersect-merge-memory-modern.json",
+        "sha256": "5ebaaae0c68e9b2d9c13c224847aec626daba966491a6d4e6c485537bb7bb073",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/034-round-1-ordered-except-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-except-merge-memory",
+        "scratch/034-round-1-ordered-except-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 34,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 232702541,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/034-round-1-ordered-except-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/034-round-1-ordered-except-merge-memory-sqlite.json",
+        "sha256": "45b0429bde4e157a4c493815b008a5d5a024c3c077905d85fb9e005514ba3a09",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/035-round-1-ordered-except-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-except-merge-memory",
+        "scratch/035-round-1-ordered-except-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 35,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 249340750,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/035-round-1-ordered-except-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/035-round-1-ordered-except-merge-memory-modern.json",
+        "sha256": "b8f6b247ed1e0842036c0ac7a36b297ecb61e637bbb662af4e6a22979e038c54",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/036-round-1-ordered-union-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-merge-memory",
+        "scratch/036-round-1-ordered-union-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 36,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 93218084,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/036-round-1-ordered-union-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/036-round-1-ordered-union-merge-memory-sqlite.json",
+        "sha256": "ef4051ebe8a97e4a0c549753a5e27104147e230df29f6ab9056483ce26eb785c",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/037-round-1-ordered-union-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-merge-memory",
+        "scratch/037-round-1-ordered-union-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 37,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 273011000,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/037-round-1-ordered-union-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/037-round-1-ordered-union-merge-memory-modern.json",
+        "sha256": "fcaaf03cda9161d3f253d8c43a7783b1d4b99e655126f6b4246e4b631e7f3ffd",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/038-round-1-ordered-union-all-topn-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-all-topn-memory",
+        "scratch/038-round-1-ordered-union-all-topn-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 38,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 115398333,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/038-round-1-ordered-union-all-topn-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/038-round-1-ordered-union-all-topn-memory-sqlite.json",
+        "sha256": "ef51b2b5877964e05c107ec0d6de77d03e682b9509f6b1578906d6d7640a0168",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/039-round-1-ordered-union-all-topn-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-all-topn-memory",
+        "scratch/039-round-1-ordered-union-all-topn-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 39,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 321827333,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/039-round-1-ordered-union-all-topn-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/039-round-1-ordered-union-all-topn-memory-modern.json",
+        "sha256": "c8bb821d73dd5ea5e9eed531eee3b212d6f0bb4bead8bb2342b5cae75396837e",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/040-round-1-intersect-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "intersect-membership-memory",
+        "scratch/040-round-1-intersect-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 40,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 245212875,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/040-round-1-intersect-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/040-round-1-intersect-membership-memory-sqlite.json",
+        "sha256": "420b017089540c53c40ef759116e31a7b0a0c7ebddd3efe4b38ac9e91fbce3e0",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/041-round-1-intersect-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "intersect-membership-memory",
+        "scratch/041-round-1-intersect-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 41,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 245573166,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/041-round-1-intersect-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/041-round-1-intersect-membership-memory-modern.json",
+        "sha256": "ae6b92711bf3f0c17d48ac4ab059977e4f13440b82073b827e9275fad5d317c4",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/042-round-1-except-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "except-membership-memory",
+        "scratch/042-round-1-except-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 42,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 253428833,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/042-round-1-except-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/042-round-1-except-membership-memory-sqlite.json",
+        "sha256": "baff963ac128f549a9fe4dd3526b387932ea2c561b95f295976df4ee3c6a593e",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/043-round-1-except-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "except-membership-memory",
+        "scratch/043-round-1-except-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 43,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 238261375,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/043-round-1-except-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/043-round-1-except-membership-memory-modern.json",
+        "sha256": "9435f7d10e3867ae9ad0760552990b39f2c162b514d77438897afe9ccdef5487",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/044-round-1-union-replace-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-replace-file",
+        "scratch/044-round-1-union-replace-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 44,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 96481625,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/044-round-1-union-replace-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/044-round-1-union-replace-file-sqlite.json",
+        "sha256": "5f4d23706497d98062af5d51193b44272e4f0533de98235767a5776abe70abf3",
+        "size_bytes": 2415
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/045-round-1-union-replace-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-replace-file",
+        "scratch/045-round-1-union-replace-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 45,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 495495250,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/045-round-1-union-replace-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/045-round-1-union-replace-file-modern.json",
+        "sha256": "9aca5e262c0624ef1104c6dc9601f3ec15e400c055fa4e0fb06331667289fc24",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/046-round-1-values-union-all-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "values-union-all-limit-memory",
+        "scratch/046-round-1-values-union-all-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 46,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 88267250,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/046-round-1-values-union-all-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/046-round-1-values-union-all-limit-memory-sqlite.json",
+        "sha256": "92d5ce8db8a29ccd6933b574628db1472661ec1b4ff7e64c3d1232d1940b11bb",
+        "size_bytes": 2423
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/047-round-1-values-union-all-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "values-union-all-limit-memory",
+        "scratch/047-round-1-values-union-all-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 47,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 263620500,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/047-round-1-values-union-all-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/047-round-1-values-union-all-limit-memory-modern.json",
+        "sha256": "d5501559293dc5d26227a137cba61efb282b15e2b7d553c3392d127c177e27c2",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/048-round-1-distinct-order-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-order-limit-memory",
+        "scratch/048-round-1-distinct-order-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 48,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 96138541,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/048-round-1-distinct-order-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/048-round-1-distinct-order-limit-memory-sqlite.json",
+        "sha256": "740147b62b229c8318386511db12fa6103602ad08336070675e7da9c97831129",
+        "size_bytes": 2420
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/049-round-1-distinct-order-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-order-limit-memory",
+        "scratch/049-round-1-distinct-order-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 49,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 325053708,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/049-round-1-distinct-order-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/049-round-1-distinct-order-limit-memory-modern.json",
+        "sha256": "6d1b77e026ed5175ea322f4d235593f0dd256d7742c3f3f45b549059d7af6320",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/050-round-1-distinct-collated-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-collated-memory",
+        "scratch/050-round-1-distinct-collated-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 50,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 103316333,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/050-round-1-distinct-collated-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/050-round-1-distinct-collated-memory-sqlite.json",
+        "sha256": "02418afb277b0e275b0c2cb56ff77c2bbaa14202f7374db2eb611d44437207ac",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/051-round-1-distinct-collated-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-collated-memory",
+        "scratch/051-round-1-distinct-collated-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 51,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 189913500,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/051-round-1-distinct-collated-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/051-round-1-distinct-collated-memory-modern.json",
+        "sha256": "5992dddaf0129f1d8975b1d77ae5e1dfe3e3053e81a3277340ca4d169fb809f6",
+        "size_bytes": 2405
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/052-round-1-distinct-high-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-high-card-memory",
+        "scratch/052-round-1-distinct-high-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 52,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 179141209,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/052-round-1-distinct-high-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/052-round-1-distinct-high-card-memory-sqlite.json",
+        "sha256": "ba76ac98a2320465f331a582b5b88b826337bdfe431c74196131b30fe5198d01",
+        "size_bytes": 2443
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/053-round-1-distinct-high-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-high-card-memory",
+        "scratch/053-round-1-distinct-high-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 53,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3081611750,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/053-round-1-distinct-high-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/053-round-1-distinct-high-card-memory-modern.json",
+        "sha256": "c6c78f6c2d718e96f5b51798079c700f5e1c8387d239f7188f47456e5ffb793f",
+        "size_bytes": 2449
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/054-round-1-distinct-low-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-low-card-memory",
+        "scratch/054-round-1-distinct-low-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 54,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 94677000,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/054-round-1-distinct-low-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/054-round-1-distinct-low-card-memory-sqlite.json",
+        "sha256": "cdc177c03458b9967ac7f03288adbd6e002454b500df6075ee7d63af1baa0f96",
+        "size_bytes": 2403
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/055-round-1-distinct-low-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-low-card-memory",
+        "scratch/055-round-1-distinct-low-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 55,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 171439792,
+        "timed_out": false
+      },
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/055-round-1-distinct-low-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/055-round-1-distinct-low-card-memory-modern.json",
+        "sha256": "0ab4d0886b02bedc4853a034406f73726f105017e728935d517e8864941b55fb",
+        "size_bytes": 2409
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/056-round-2-distinct-low-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-low-card-memory",
+        "scratch/056-round-2-distinct-low-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 56,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 169770958,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/056-round-2-distinct-low-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/056-round-2-distinct-low-card-memory-modern.json",
+        "sha256": "ff1af366f9f7c30eccc1c1db7545566c5032e221838c1210c54c80460bb38002",
+        "size_bytes": 2409
+      }
+    },
+    {
+      "case": "distinct-low-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/057-round-2-distinct-low-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-low-card-memory",
+        "scratch/057-round-2-distinct-low-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 57,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 93940584,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/057-round-2-distinct-low-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/057-round-2-distinct-low-card-memory-sqlite.json",
+        "sha256": "7e9579e4953f6543aa707a853067900116d57846545560bf395f5d98183d4768",
+        "size_bytes": 2403
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/058-round-2-distinct-high-card-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-high-card-memory",
+        "scratch/058-round-2-distinct-high-card-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 58,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 3021398250,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/058-round-2-distinct-high-card-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/058-round-2-distinct-high-card-memory-modern.json",
+        "sha256": "be8a71144ff1729e3db50f37b8247c9bd5c9597c1dde196362e187aa1f41a4d0",
+        "size_bytes": 2449
+      }
+    },
+    {
+      "case": "distinct-high-card-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/059-round-2-distinct-high-card-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-high-card-memory",
+        "scratch/059-round-2-distinct-high-card-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 59,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 182940750,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/059-round-2-distinct-high-card-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/059-round-2-distinct-high-card-memory-sqlite.json",
+        "sha256": "cfb5815a51f2316a1f8e1e980b774a821a83ae0817ccafbf7bdcd51ca8752a7b",
+        "size_bytes": 2443
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/060-round-2-distinct-collated-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-collated-memory",
+        "scratch/060-round-2-distinct-collated-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 60,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 196300291,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/060-round-2-distinct-collated-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/060-round-2-distinct-collated-memory-modern.json",
+        "sha256": "ad13a81ec352b6ac5d9f3aa849bdcf86865b13860250236f098d6c86c23d146b",
+        "size_bytes": 2405
+      }
+    },
+    {
+      "case": "distinct-collated-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/061-round-2-distinct-collated-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-collated-memory",
+        "scratch/061-round-2-distinct-collated-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 61,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 103344500,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/061-round-2-distinct-collated-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/061-round-2-distinct-collated-memory-sqlite.json",
+        "sha256": "913c7da436682114bf8bb004d441927618e71fd0d707f87dfd92e246f7416598",
+        "size_bytes": 2399
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/062-round-2-distinct-order-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "distinct-order-limit-memory",
+        "scratch/062-round-2-distinct-order-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 62,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 328840375,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/062-round-2-distinct-order-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/062-round-2-distinct-order-limit-memory-modern.json",
+        "sha256": "ede9981a7a09f75989a906b8e921f868d4e6e7d7a5b6bae807790581cec4ef8f",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "distinct-order-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/063-round-2-distinct-order-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "distinct-order-limit-memory",
+        "scratch/063-round-2-distinct-order-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 63,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 96996958,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/063-round-2-distinct-order-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/063-round-2-distinct-order-limit-memory-sqlite.json",
+        "sha256": "e70c870a5e09f5ab18227906456af96fd3c439d23932f9c7a83bf232acae3b87",
+        "size_bytes": 2420
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/064-round-2-values-union-all-limit-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "values-union-all-limit-memory",
+        "scratch/064-round-2-values-union-all-limit-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 64,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 272713667,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/064-round-2-values-union-all-limit-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/064-round-2-values-union-all-limit-memory-modern.json",
+        "sha256": "aa2dabbea8551c3a984037d908a0aad3dd15ccf34227fe6444d0c969bc0cceff",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "values-union-all-limit-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/065-round-2-values-union-all-limit-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "values-union-all-limit-memory",
+        "scratch/065-round-2-values-union-all-limit-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 65,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 89912458,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/065-round-2-values-union-all-limit-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/065-round-2-values-union-all-limit-memory-sqlite.json",
+        "sha256": "7cb62ce49e40319ba82b755bd3b5e8857e774228d86c072f748f2e0751d1865d",
+        "size_bytes": 2423
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/066-round-2-union-replace-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-replace-file",
+        "scratch/066-round-2-union-replace-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 66,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 499322708,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/066-round-2-union-replace-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/066-round-2-union-replace-file-modern.json",
+        "sha256": "6ac7e5229a86247d3b0ec7dfc0bddd5e0b57624bb94e2b18cbbcf4adca9e71be",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "union-replace-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/067-round-2-union-replace-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-replace-file",
+        "scratch/067-round-2-union-replace-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 67,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 94862291,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/067-round-2-union-replace-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/067-round-2-union-replace-file-sqlite.json",
+        "sha256": "ac32b3acc4cd02204779423396b9ee0b3c9d3f15ed11ea49a9cba77e79e4a031",
+        "size_bytes": 2415
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/068-round-2-except-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "except-membership-memory",
+        "scratch/068-round-2-except-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 68,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 236344750,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/068-round-2-except-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/068-round-2-except-membership-memory-modern.json",
+        "sha256": "bd0a728c144922d3d6ef0b2106ac397c090a78e0d145803fe08686e78f4f59be",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "except-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/069-round-2-except-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "except-membership-memory",
+        "scratch/069-round-2-except-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 69,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 239773000,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/069-round-2-except-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/069-round-2-except-membership-memory-sqlite.json",
+        "sha256": "bb8b5ebabb262fb776b6f424647e435ba9798884389cb16993f9c50ed7225219",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/070-round-2-intersect-membership-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "intersect-membership-memory",
+        "scratch/070-round-2-intersect-membership-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 70,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 237700083,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/070-round-2-intersect-membership-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/070-round-2-intersect-membership-memory-modern.json",
+        "sha256": "1225bb48a3e4e3b98f5ed49962f63545e800cbf39e731f814a7ceca74fe671ee",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "intersect-membership-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/071-round-2-intersect-membership-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "intersect-membership-memory",
+        "scratch/071-round-2-intersect-membership-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 71,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 236173417,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/071-round-2-intersect-membership-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/071-round-2-intersect-membership-memory-sqlite.json",
+        "sha256": "32af1f2805c58c4aab02130888199a9da721ce93bdb0dbd59c8d7693a618d9fa",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/072-round-2-ordered-union-all-topn-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-all-topn-memory",
+        "scratch/072-round-2-ordered-union-all-topn-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 72,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 320103209,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/072-round-2-ordered-union-all-topn-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/072-round-2-ordered-union-all-topn-memory-modern.json",
+        "sha256": "c2002f7fd1c10e3be7789fc587d3b0da7ee84c33cf2469aa52c46729955c4065",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "ordered-union-all-topn-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/073-round-2-ordered-union-all-topn-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-all-topn-memory",
+        "scratch/073-round-2-ordered-union-all-topn-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 73,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 115978292,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/073-round-2-ordered-union-all-topn-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/073-round-2-ordered-union-all-topn-memory-sqlite.json",
+        "sha256": "998684db6fb20f37ff67ddd7c8d56f893ae733fba7fb8e3df4a4051b2b3a9170",
+        "size_bytes": 2427
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/074-round-2-ordered-union-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-union-merge-memory",
+        "scratch/074-round-2-ordered-union-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 74,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 274223917,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/074-round-2-ordered-union-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/074-round-2-ordered-union-merge-memory-modern.json",
+        "sha256": "72b3a0ac262c0bddee82fb8b4afc40ebe9b53273e8715e21391f0150589a92b8",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-union-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/075-round-2-ordered-union-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-union-merge-memory",
+        "scratch/075-round-2-ordered-union-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 75,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 93254500,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/075-round-2-ordered-union-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/075-round-2-ordered-union-merge-memory-sqlite.json",
+        "sha256": "7c2642615f3f4a1d45ab2da2360cad3072757a4734dd3ce94a1466f9228b3582",
+        "size_bytes": 2426
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/076-round-2-ordered-except-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-except-merge-memory",
+        "scratch/076-round-2-ordered-except-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 76,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 246349334,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/076-round-2-ordered-except-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/076-round-2-ordered-except-merge-memory-modern.json",
+        "sha256": "86105fef926b7e8449cb6f7009aac8a49b5e9de6e4971772f9cfbc7ff8236822",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-except-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/077-round-2-ordered-except-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-except-merge-memory",
+        "scratch/077-round-2-ordered-except-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 77,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 235505833,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/077-round-2-ordered-except-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/077-round-2-ordered-except-merge-memory-sqlite.json",
+        "sha256": "b5236980ac2fda9932022a987b38242af3a6e7b32be175310296598fbc0c802d",
+        "size_bytes": 2429
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/078-round-2-ordered-intersect-merge-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "ordered-intersect-merge-memory",
+        "scratch/078-round-2-ordered-intersect-merge-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 78,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 248433875,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/078-round-2-ordered-intersect-merge-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/078-round-2-ordered-intersect-merge-memory-modern.json",
+        "sha256": "cb19308c708d3f049b9d49cad64e68e206fff702cf187a5f2a5807c17ec0e976",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "ordered-intersect-merge-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/079-round-2-ordered-intersect-merge-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "ordered-intersect-merge-memory",
+        "scratch/079-round-2-ordered-intersect-merge-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 79,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 238892833,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/079-round-2-ordered-intersect-merge-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/079-round-2-ordered-intersect-merge-memory-sqlite.json",
+        "sha256": "61381f57a725f1dcb2cb7517c9d2075af8627ee0e3faf2acd7f4da882eed2170",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/080-round-2-long-mixed-compound-memory-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "long-mixed-compound-memory",
+        "scratch/080-round-2-long-mixed-compound-memory-modern.db",
+        "baseline"
+      ],
+      "ordinal": 80,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 508431042,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/080-round-2-long-mixed-compound-memory-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/080-round-2-long-mixed-compound-memory-modern.json",
+        "sha256": "ef69625b896da81b7b5850d7bf148611621f7bb1b9cc52869e588eb17788a696",
+        "size_bytes": 2438
+      }
+    },
+    {
+      "case": "long-mixed-compound-memory",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/081-round-2-long-mixed-compound-memory-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "long-mixed-compound-memory",
+        "scratch/081-round-2-long-mixed-compound-memory-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 81,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 277616250,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/081-round-2-long-mixed-compound-memory-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/081-round-2-long-mixed-compound-memory-sqlite.json",
+        "sha256": "82ec31fcf57329f38fa501f26449bd87c2e49a91b95463dfcf1e61f6be94b681",
+        "size_bytes": 2432
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/082-round-2-union-keyed-relation-before-file-modern.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "modern",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "modern",
+        "union-keyed-relation-before-file",
+        "scratch/082-round-2-union-keyed-relation-before-file-modern.db",
+        "baseline"
+      ],
+      "ordinal": 82,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 2882500625,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/082-round-2-union-keyed-relation-before-file-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/082-round-2-union-keyed-relation-before-file-modern.json",
+        "sha256": "242ef50ef9e66ed729c12c00d771a10a30f890d762590d0616947b17d94c282b",
+        "size_bytes": 2457
+      }
+    },
+    {
+      "case": "union-keyed-relation-before-file",
+      "database": {
+        "after_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "before_sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+        "cleanup": "removed",
+        "copy_path": "scratch/083-round-2-union-keyed-relation-before-file-sqlite.db",
+        "fixture": "ordered",
+        "sidecars_remaining": [],
+        "source_path": "tests/fixtures/order_by_performance/ordered.db"
+      },
+      "engine": "sqlite",
+      "logical_argv": [
+        "modern_sqlite_distinct_compound_benchmark",
+        "run",
+        "sqlite",
+        "union-keyed-relation-before-file",
+        "scratch/083-round-2-union-keyed-relation-before-file-sqlite.db",
+        "baseline"
+      ],
+      "ordinal": 83,
+      "process": {
+        "returncode": 0,
+        "runner_elapsed_ns": 286968459,
+        "timed_out": false
+      },
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/083-round-2-union-keyed-relation-before-file-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/083-round-2-union-keyed-relation-before-file-sqlite.json",
+        "sha256": "b83c8b4201cbd7b9fdbb00fa3b9e38ba8e2e6dc313539e94a7cc3fd5ca31aefa",
+        "size_bytes": 2451
+      }
+    }
+  ],
+  "workload_manifest": {
+    "path": "tests/performance/distinct-compound-workloads-v1.json",
+    "sha256": "2df5b91853e60417ad5dfd3aca66d9d2915af5d483655dd404ef16d52b4741de",
+    "size_bytes": 24092
+  },
+  "workload_semantics_version": 1
+}

@@ -83,6 +83,42 @@ must report positive Modern page writes and positive SQLite temporary-spill
 bytes. The smaller replacement-UNION case must report zero for both and acts
 as the no-spill control.
 
+## Canonical baseline result
+
+The committed `benchmarks/distinct-compound-baseline-v1` run was generated
+from clean source revision `443df74f982ca2dcaf86ad2ef9e4c0b7488f2e7b`
+with tree `56c8749e717addf74e18dfd5072095173e90bc29`.
+
+All fourteen cases pass the matched 40x wall and CPU guards in aggregate and
+in every paired round:
+
+| Case | Wall ratio | CPU ratio | Maximum round wall |
+|---|---:|---:|---:|
+| low-cardinality DISTINCT | 4.05x | 4.04x | 4.07x |
+| high-cardinality DISTINCT | 26.55x | 26.52x | 27.93x |
+| collated DISTINCT | 4.29x | 4.29x | 4.32x |
+| DISTINCT ORDER BY LIMIT | 9.39x | 9.39x | 9.51x |
+| VALUES UNION ALL LIMIT | 11.31x | 11.30x | 11.49x |
+| file-mode replacement UNION | 17.58x | 17.58x | 18.04x |
+| EXCEPT membership | 0.96x | 0.96x | 1.01x |
+| INTERSECT membership | 1.02x | 1.02x | 1.03x |
+| ordered three-arm UNION ALL | 5.43x | 5.43x | 5.57x |
+| ordered UNION merge | 8.29x | 8.30x | 8.42x |
+| ordered EXCEPT merge | 1.10x | 1.10x | 1.12x |
+| ordered INTERSECT merge | 1.09x | 1.09x | 1.09x |
+| five-arm mixed compound | 2.16x | 2.16x | 2.22x |
+| file-mode keyed-relation baseline | 12.90x | 13.00x | 13.04x |
+
+High-cardinality DISTINCT is the largest recorded gap, with maximum
+paired-round ratios of `27.925789x` wall and `27.891464x` CPU. The file-mode
+keyed-relation case records 95,282 Modern temporary page writes and
+`18,284,574` SQLite temporary spill bytes. The replacement-UNION control
+records zero for both.
+
+All 84 timing children and 28 diagnostic children completed with exact
+per-tag input work, 252 accepted timing samples, source/build/host provenance,
+and empty stderr artifacts.
+
 ## Build and smoke validation
 
 Configure the benchmark build with the pinned SQLite amalgamation:
