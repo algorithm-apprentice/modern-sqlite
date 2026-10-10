@@ -7,9 +7,12 @@
 #include <fstream>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "modern_sqlite/session/read_session.hpp"
+#include "modern_sqlite/text/text.hpp"
 #include "read_fuzz.hpp"
 
 namespace {
@@ -78,6 +81,28 @@ namespace {
   return true;
 }
 
+[[nodiscard]] bool ReplayGeneratedSql(std::string_view fixture) {
+  auto session = modern_sqlite::ReadSession::Open(fixture);
+  if (!session.has_value()) {
+    return false;
+  }
+  constexpr std::array<std::array<std::uint8_t, 4>, 4> inputs{{
+      {0x01, 0x03, 0x05, 0x07},
+      {0x02, 0x04, 0x06, 0x08},
+      {0x7f, 0x80, 0xfe, 0xff},
+      {0x11, 0x22, 0x33, 0x44},
+  }};
+  for (const auto& input : inputs) {
+    const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+    auto prepared = session->Prepare(modern_sqlite::Utf8View{sql});
+    if (!prepared.has_value() || !prepared->statement.has_value() ||
+        !prepared->statement->Finalize().has_value()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 struct DatabaseCorpusInputs {
   const std::filesystem::path& directory;
   const std::filesystem::path& valid_fixture;
@@ -110,7 +135,7 @@ struct DatabaseCorpusInputs {
   const std::filesystem::path fixture = arguments[1];
   const std::filesystem::path sql_corpus = arguments[2];
   const std::filesystem::path database_corpus = arguments[3];
-  return ReplaySqlCorpus(sql_corpus, fixture.string()) &&
+  return ReplaySqlCorpus(sql_corpus, fixture.string()) && ReplayGeneratedSql(fixture.string()) &&
                  ReplayDatabaseCorpus({.directory = database_corpus, .valid_fixture = fixture})
              ? 0
              : 1;

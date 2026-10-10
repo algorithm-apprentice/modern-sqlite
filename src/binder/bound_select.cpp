@@ -376,6 +376,7 @@ struct BoundSelect::Impl final : BoundExpressionState {
   std::vector<CompoundOperator> compound_operators;
   std::vector<BoundCollationId> compound_collations;
   std::vector<BoundResultColumn> result_columns;
+  std::vector<BoundResultColumn> output_columns;
   std::vector<std::optional<ExpressionId>> result_syntax;
   std::optional<BoundExpressionId> where;
   std::vector<BoundOrderingTerm> order_by;
@@ -529,6 +530,7 @@ class StatementBinder final {
     if (!limit.has_value()) {
       return std::unexpected(std::move(limit.error()));
     }
+    PublishResultColumns();
     return BoundSelect(std::move(impl_));
   }
 
@@ -1764,6 +1766,32 @@ class StatementBinder final {
           return value.result_columns;
         },
         core);
+  }
+
+  void PublishResultColumns() {
+    if (impl_->query_cores.empty()) {
+      return;
+    }
+    const std::span<const BoundResultColumn> leftmost =
+        CoreResultColumns(impl_->query_cores.front());
+    impl_->output_columns.assign(leftmost.begin(), leftmost.end());
+    const bool has_set_operator = std::ranges::any_of(
+        impl_->compound_operators,
+        [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
+    const bool has_explicit_order_collation = std::ranges::any_of(
+        impl_->order_by, [](const BoundOrderingTerm& term) { return term.explicit_collation; });
+    if (!has_set_operator || !has_explicit_order_collation || impl_->query_cores.size() < 2U) {
+      return;
+    }
+    const std::span<const BoundResultColumn> rightmost =
+        CoreResultColumns(impl_->query_cores.back());
+    if (impl_->output_columns.size() != rightmost.size()) {
+      return;
+    }
+    for (std::size_t index = 0; index < impl_->output_columns.size(); ++index) {
+      impl_->output_columns[index].declared_type = rightmost[index].declared_type;
+      impl_->output_columns[index].affinity = rightmost[index].affinity;
+    }
   }
 
   [[nodiscard]] static std::string_view CompoundName(CompoundOperator operation) noexcept {
@@ -4203,18 +4231,8 @@ std::span<const BoundCollationId> BoundSelect::compound_collations() const noexc
 }
 
 std::span<const BoundResultColumn> BoundSelect::result_columns() const noexcept {
-  if (impl_ == nullptr || impl_->query_cores.empty()) {
-    return {};
-  }
-  if (const auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores.front());
-      select != nullptr) {
-    return select->result_columns;
-  }
-  if (const auto* values = std::get_if<BoundValuesCore>(&impl_->query_cores.front());
-      values != nullptr) {
-    return values->result_columns;
-  }
-  return {};
+  return impl_ != nullptr ? std::span<const BoundResultColumn>{impl_->output_columns}
+                          : std::span<const BoundResultColumn>{};
 }
 
 std::optional<BoundExpressionId> BoundSelect::where_expression() const noexcept {

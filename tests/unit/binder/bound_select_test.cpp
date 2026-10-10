@@ -1440,6 +1440,41 @@ TEST(Binder, BindsValuesAndCompoundQueryCores) {
   EXPECT_EQ(BoundParameterId{7}, offset.parameter);
 }
 
+TEST(Binder, PublishesSetThenOrderMetadataFromTheRightmostCore) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect ordinary = BindOrThrow(
+      "SELECT id,'left' FROM Items "
+      "UNION SELECT Score,Name FROM Items "
+      "ORDER BY 2",
+      catalog);
+  ASSERT_EQ(2U, ordinary.result_columns().size());
+  EXPECT_EQ("id", ordinary.result_columns()[0].name);
+  EXPECT_EQ("'left'", ordinary.result_columns()[1].name);
+  EXPECT_EQ(std::optional<std::string>{"INTEGER"}, ordinary.result_columns()[0].declared_type);
+  EXPECT_EQ(std::nullopt, ordinary.result_columns()[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kInteger, ordinary.result_columns()[0].affinity);
+  EXPECT_EQ(TypeAffinity::kNone, ordinary.result_columns()[1].affinity);
+
+  const BoundSelect set_then_order = BindOrThrow(
+      "SELECT id,'left' FROM Items "
+      "UNION SELECT Score,Name FROM Items "
+      "ORDER BY 2 COLLATE binary",
+      catalog);
+  ASSERT_EQ(2U, set_then_order.result_columns().size());
+  EXPECT_EQ("id", set_then_order.result_columns()[0].name);
+  EXPECT_EQ("'left'", set_then_order.result_columns()[1].name);
+  EXPECT_EQ(std::optional<std::string>{"REAL"}, set_then_order.result_columns()[0].declared_type);
+  EXPECT_EQ(std::optional<std::string>{"TEXT"}, set_then_order.result_columns()[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kReal, set_then_order.result_columns()[0].affinity);
+  EXPECT_EQ(TypeAffinity::kText, set_then_order.result_columns()[1].affinity);
+
+  const auto& left = std::get<BoundSelectCore>(set_then_order.query_cores().front());
+  EXPECT_EQ(std::optional<std::string>{"INTEGER"}, left.result_columns[0].declared_type);
+  EXPECT_EQ(std::nullopt, left.result_columns[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kInteger, left.result_columns[0].affinity);
+  EXPECT_EQ(TypeAffinity::kNone, left.result_columns[1].affinity);
+}
+
 TEST(Binder, ClassifiesValuesSchedulesAndBindsDistinctCores) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect eager = BindOrThrow("VALUES(?1,abs(?2)),(?3,?4)", catalog);

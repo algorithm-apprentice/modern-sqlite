@@ -3,11 +3,13 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace modern_sqlite::fuzz {
 
 void RunReadSqlInput(std::span<const std::uint8_t> input, std::string_view database_path);
+[[nodiscard]] std::string GenerateReadSqlInput(std::span<const std::uint8_t> input);
 void RunDatabaseImageInput(std::span<const std::uint8_t> input);
 
 }  // namespace modern_sqlite::fuzz

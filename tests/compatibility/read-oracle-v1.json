@@ -6365,6 +6365,74 @@
       }
     },
     {
+      "expectation": "compare",
+      "id": "compound-leftmost-metadata",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "finalize",
+            "operation_index": 0,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6964"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "276c65667427"
+            }
+          ],
+          "next_offset": 73,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "set-then-order-rightmost-metadata",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "finalize",
+            "operation_index": 0,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "5245414c",
+              "name_hex": "6964"
+            },
+            {
+              "declared_type_hex": "54455854",
+              "name_hex": "276c65667427"
+            }
+          ],
+          "next_offset": 88,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
       "boundary": {
         "first_step": "row",
         "prepare": "statement"
@@ -7168,7 +7236,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "063abbc099e5ebcee276e184e1ebe989fe6ef40deba8825171461b93527e2cc4",
+  "corpus_sha256": "f0583f0d54bc8c2aa3bb70fa9ea46f87e002d3ca4fcb3be07a52df42503d3f04",
   "databases": [
     {
       "id": "core",

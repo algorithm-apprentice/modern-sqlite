@@ -429,6 +429,57 @@ int main() try {
     }
   }
 
+  std::size_t compound_step_allocations = 0;
+  {
+    auto session = ReadSession::Open(prepare_path, sorter_options);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, "VALUES(1),(2) UNION SELECT 3 ORDER BY 1");
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto stepped = statement.Step();
+    if (!stepped.has_value() || *stepped != ReadStep::kRow ||
+        statement.row()[0].integer_value() != std::optional<std::int64_t>{1}) {
+      return 1;
+    }
+    compound_step_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (compound_step_allocations == 0U || compound_step_allocations > 512U) {
+    return 1;
+  }
+
+  for (std::size_t failure = 0; failure < compound_step_allocations; ++failure) {
+    auto session = ReadSession::Open(prepare_path, sorter_options);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, "VALUES(1),(2) UNION SELECT 3 ORDER BY 1");
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto stepped = statement.Step();
+      returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom) {
+      return 1;
+    }
+    const Status reset = statement.Reset();
+    if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+      return 1;
+    }
+    const auto recovered = statement.Step();
+    if (!recovered.has_value() || *recovered != ReadStep::kRow ||
+        statement.row()[0].integer_value() != std::optional<std::int64_t>{1}) {
+      return 1;
+    }
+  }
+
   {
     auto session = ReadSession::Open(prepare_path);
     if (!session.has_value()) {

@@ -361,6 +361,58 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
 }
 
+TEST(ReadSession, ExecutesDistinctValuesAndCompoundsThroughThePublicApi) {
+  const ReadSessionOptions memory_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+          },
+  };
+  ReadSession memory = TakeValue(ReadSession::Open(FixturePath().string(), memory_options));
+  ReadStatement set = PrepareStatement(
+      memory, "VALUES(3),(1),(2) UNION SELECT DISTINCT id FROM items ORDER BY 1 LIMIT 4");
+  for (std::int64_t expected = 1; expected <= 3; ++expected) {
+    EXPECT_EQ(ReadStep::kRow, TakeValue(set.Step()));
+    EXPECT_EQ(expected, IntegerValue(set.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(set.Step()));
+
+  ReadStatement rebound =
+      PrepareStatement(memory, "VALUES(?1),(?2) UNION ALL SELECT ?3 ORDER BY 1 LIMIT 2 OFFSET 1");
+  const auto run = [&](std::int64_t first, std::int64_t second, std::int64_t third) {
+    RequireStatus(rebound.Bind(1, SqlValue::Integer(first)));
+    RequireStatus(rebound.Bind(2, SqlValue::Integer(second)));
+    RequireStatus(rebound.Bind(3, SqlValue::Integer(third)));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(rebound.Step()));
+    EXPECT_EQ(second, IntegerValue(rebound.row()[0]));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(rebound.Step()));
+    EXPECT_EQ(third, IntegerValue(rebound.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(rebound.Step()));
+  };
+  run(1, 2, 3);
+  RequireStatus(rebound.Reset());
+  run(4, 5, 6);
+
+  const ReadSessionOptions file_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = ByteCount{1},
+          },
+  };
+  ReadSession file = TakeValue(ReadSession::Open(FixturePath().string(), file_options));
+  ReadStatement ordered = PrepareStatement(file,
+                                           "SELECT 'A' COLLATE NOCASE "
+                                           "UNION SELECT 'B' "
+                                           "UNION SELECT 'a' "
+                                           "ORDER BY 1 COLLATE BINARY");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(ordered.Step()));
+  EXPECT_EQ("B", TextValue(ordered.row()[0]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(ordered.Step()));
+  EXPECT_EQ("a", TextValue(ordered.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(ordered.Step()));
+}
+
 TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   constexpr std::string_view sql = " ; /* empty */ ; SELECT 1; SELECT 2";
@@ -463,6 +515,33 @@ TEST(ReadSession, ExecutesConstantsAfterThePublicSessionHandleIsDestroyed) {
   EXPECT_EQ(1, IntegerValue(statement.row()[0]));
   EXPECT_EQ("constant", TextValue(statement.row()[1]));
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, PublishesCompoundMetadataAcrossSetThenOrder) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  const ReadStatement ordinary = PrepareStatement(session,
+                                                  "SELECT id,'left' FROM Items "
+                                                  "UNION SELECT Score,Name FROM Items "
+                                                  "ORDER BY 2");
+  ASSERT_EQ(2U, ordinary.result_columns().size());
+  EXPECT_EQ("id", ordinary.result_columns()[0].name);
+  EXPECT_EQ("'left'", ordinary.result_columns()[1].name);
+  EXPECT_EQ(std::optional<std::string>{"INTEGER"}, ordinary.result_columns()[0].declared_type);
+  EXPECT_EQ(std::nullopt, ordinary.result_columns()[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kInteger, ordinary.result_columns()[0].affinity);
+  EXPECT_EQ(TypeAffinity::kNone, ordinary.result_columns()[1].affinity);
+
+  const ReadStatement set_then_order = PrepareStatement(session,
+                                                        "SELECT id,'left' FROM Items "
+                                                        "UNION SELECT Score,Name FROM Items "
+                                                        "ORDER BY 2 COLLATE binary");
+  ASSERT_EQ(2U, set_then_order.result_columns().size());
+  EXPECT_EQ("id", set_then_order.result_columns()[0].name);
+  EXPECT_EQ("'left'", set_then_order.result_columns()[1].name);
+  EXPECT_EQ(std::optional<std::string>{"REAL"}, set_then_order.result_columns()[0].declared_type);
+  EXPECT_EQ(std::optional<std::string>{"TEXT"}, set_then_order.result_columns()[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kReal, set_then_order.result_columns()[0].affinity);
+  EXPECT_EQ(TypeAffinity::kText, set_then_order.result_columns()[1].affinity);
 }
 
 TEST(ReadSession, UsesOneBasedBindingsAndPreservesThemAcrossResetAndAutomaticReset) {

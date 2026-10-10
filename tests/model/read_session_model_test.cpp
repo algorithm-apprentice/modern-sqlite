@@ -272,6 +272,23 @@ struct GeneratedValueInput {
              << ",direction=" << (words[2] % 2U == 0U ? "ascending" : "descending")
              << ",nulls=" << (words[3] % 2U == 0U ? "first" : "last");
       break;
+    case 7:
+      output << "values=[" << static_cast<std::int64_t>(words[0] % 11U) - 5 << ','
+             << static_cast<std::int64_t>(words[1] % 11U) - 5 << ','
+             << static_cast<std::int64_t>(words[2] % 11U) - 5 << "],operator=" << words[3] % 4U
+             << ",cutoff=" << 1U + words[1] % kRows.size()
+             << ",limit=" << (words[2] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[2] % 9U))
+             << ",offset=" << words[3] % 5U;
+      break;
+    case 8:
+      output << "left_cutoff=" << 1U + words[1] % kRows.size()
+             << ",right_begin=" << 1U + words[2] % kRows.size() << ",operators=[" << words[1] % 4U
+             << ',' << words[3] % 4U << ']';
+      break;
+    case 9:
+      output << "limit=" << (words[1] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[1] % 9U))
+             << ",offset=" << words[2] % 6U;
+      break;
     default:
       output << "unreachable";
       break;
@@ -454,15 +471,235 @@ void RunOrderedLimit(ReadSession& session, const std::array<std::uint64_t, 4>& w
   RequireStatus(statement.Finalize());
 }
 
+enum class ModelCompoundOperator : std::uint8_t {
+  kUnion,
+  kUnionAll,
+  kExcept,
+  kIntersect,
+};
+
+[[nodiscard]] ModelCompoundOperator GeneratedCompoundOperator(std::uint64_t word) noexcept {
+  return static_cast<ModelCompoundOperator>(word % 4U);
+}
+
+[[nodiscard]] std::string_view CompoundOperatorSql(ModelCompoundOperator operation) noexcept {
+  switch (operation) {
+    case ModelCompoundOperator::kUnion:
+      return "UNION";
+    case ModelCompoundOperator::kUnionAll:
+      return "UNION ALL";
+    case ModelCompoundOperator::kExcept:
+      return "EXCEPT";
+    case ModelCompoundOperator::kIntersect:
+      return "INTERSECT";
+  }
+  return "UNION";
+}
+
+using NullableInteger = std::optional<std::int64_t>;
+
+[[nodiscard]] bool ContainsValue(std::span<const NullableInteger> values,
+                                 const NullableInteger& value) {
+  return std::ranges::find(values, value) != values.end();
+}
+
+[[nodiscard]] std::vector<NullableInteger> UniqueValues(std::span<const NullableInteger> values) {
+  std::vector<NullableInteger> unique;
+  unique.reserve(values.size());
+  for (const NullableInteger& value : values) {
+    if (!ContainsValue(unique, value)) {
+      unique.push_back(value);
+    }
+  }
+  return unique;
+}
+
+[[nodiscard]] std::vector<NullableInteger> ApplyCompound(std::span<const NullableInteger> left,
+                                                         std::span<const NullableInteger> right,
+                                                         ModelCompoundOperator operation) {
+  if (operation == ModelCompoundOperator::kUnionAll) {
+    std::vector<NullableInteger> output{left.begin(), left.end()};
+    output.insert(output.end(), right.begin(), right.end());
+    return output;
+  }
+  const std::vector<NullableInteger> unique_left = UniqueValues(left);
+  const std::vector<NullableInteger> unique_right = UniqueValues(right);
+  std::vector<NullableInteger> output;
+  switch (operation) {
+    case ModelCompoundOperator::kUnion:
+      output = unique_left;
+      for (const NullableInteger& value : unique_right) {
+        if (!ContainsValue(output, value)) {
+          output.push_back(value);
+        }
+      }
+      break;
+    case ModelCompoundOperator::kExcept:
+      for (const NullableInteger& value : unique_left) {
+        if (!ContainsValue(unique_right, value)) {
+          output.push_back(value);
+        }
+      }
+      break;
+    case ModelCompoundOperator::kIntersect:
+      for (const NullableInteger& value : unique_left) {
+        if (ContainsValue(unique_right, value)) {
+          output.push_back(value);
+        }
+      }
+      break;
+    case ModelCompoundOperator::kUnionAll:
+      break;
+  }
+  return output;
+}
+
+void SortModelValues(std::vector<NullableInteger>& values) {
+  std::ranges::stable_sort(values, [](const NullableInteger& left, const NullableInteger& right) {
+    if (left.has_value() != right.has_value()) {
+      return !left.has_value();
+    }
+    return left.has_value() && right.has_value() && *left < *right;
+  });
+}
+
+void ExpectNullableValue(const SqlValue& actual, const NullableInteger& expected) {
+  if (!expected.has_value()) {
+    EXPECT_EQ(SqlValueType::kNull, actual.type());
+    return;
+  }
+  ExpectInteger(actual, *expected);
+}
+
+void RunValuesCompound(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const ModelCompoundOperator operation = GeneratedCompoundOperator(words[3]);
+  const std::array values{
+      static_cast<std::int64_t>(words[0] % 11U) - 5,
+      static_cast<std::int64_t>(words[1] % 11U) - 5,
+      static_cast<std::int64_t>(words[2] % 11U) - 5,
+  };
+  const auto cutoff = static_cast<std::int64_t>(1U + words[1] % kRows.size());
+  const std::int64_t limit = words[2] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[2] % 9U);
+  const auto offset = static_cast<std::size_t>(words[3] % 5U);
+  const std::string sql = "VALUES(?1),(?2),(?3) " + std::string{CompoundOperatorSql(operation)} +
+                          " SELECT value FROM model_rows WHERE id<=?4 "
+                          "ORDER BY 1 LIMIT ?5 OFFSET ?6";
+  ReadStatement statement = Prepare(session, sql);
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    RequireStatus(statement.Bind(index + 1U, SqlValue::Integer(values[index])));
+  }
+  RequireStatus(statement.Bind(4, SqlValue::Integer(cutoff)));
+  RequireStatus(statement.Bind(5, SqlValue::Integer(limit)));
+  RequireStatus(statement.Bind(6, SqlValue::Integer(static_cast<std::int64_t>(offset))));
+
+  std::vector<NullableInteger> left;
+  left.reserve(values.size());
+  for (const std::int64_t value : values) {
+    left.emplace_back(value);
+  }
+  std::vector<NullableInteger> right;
+  for (const ModelRow& row : kRows) {
+    if (row.id <= cutoff) {
+      right.emplace_back(row.value);
+    }
+  }
+  std::vector<NullableInteger> expected = ApplyCompound(left, right, operation);
+  SortModelValues(expected);
+  const std::size_t begin = std::min(offset, expected.size());
+  const std::size_t available = expected.size() - begin;
+  const std::size_t count =
+      limit < 0 ? available : std::min(available, static_cast<std::size_t>(limit));
+  for (std::size_t index = begin; index < begin + count; ++index) {
+    ExpectRowStep(statement);
+    ASSERT_EQ(1U, statement.row().size());
+    ExpectNullableValue(statement.row()[0], expected[index]);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
+void RunMixedTableCompoundCase(ReadSession& session, const std::array<std::uint64_t, 4>& words,
+                               ModelCompoundOperator first_operation,
+                               ModelCompoundOperator second_operation) {
+  const auto left_cutoff = static_cast<std::int64_t>(1U + words[1] % kRows.size());
+  const auto right_begin = static_cast<std::int64_t>(1U + words[2] % kRows.size());
+  const std::string sql = "SELECT value FROM model_rows WHERE id<=?1 " +
+                          std::string{CompoundOperatorSql(first_operation)} +
+                          " SELECT value FROM model_rows WHERE id>=?2 " +
+                          std::string{CompoundOperatorSql(second_operation)} +
+                          " SELECT value FROM model_rows WHERE nullable IS NULL ORDER BY 1";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_cutoff)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_begin)));
+
+  std::vector<NullableInteger> left;
+  std::vector<NullableInteger> right;
+  std::vector<NullableInteger> third;
+  for (const ModelRow& row : kRows) {
+    if (row.id <= left_cutoff) {
+      left.emplace_back(row.value);
+    }
+    if (row.id >= right_begin) {
+      right.emplace_back(row.value);
+    }
+    if (!row.nullable.has_value()) {
+      third.emplace_back(row.value);
+    }
+  }
+  std::vector<NullableInteger> expected = ApplyCompound(left, right, first_operation);
+  expected = ApplyCompound(expected, third, second_operation);
+  SortModelValues(expected);
+  for (const NullableInteger& value : expected) {
+    ExpectRowStep(statement);
+    ASSERT_EQ(1U, statement.row().size());
+    ExpectNullableValue(statement.row()[0], value);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
+void RunMixedTableCompound(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  RunMixedTableCompoundCase(session, words, GeneratedCompoundOperator(words[1]),
+                            GeneratedCompoundOperator(words[3]));
+}
+
+void RunDistinctNullable(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const std::int64_t limit = words[1] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[1] % 9U);
+  const auto offset = static_cast<std::size_t>(words[2] % 6U);
+  ReadStatement statement =
+      Prepare(session, "SELECT DISTINCT nullable FROM model_rows ORDER BY 1 LIMIT ?1 OFFSET ?2");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(limit)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(static_cast<std::int64_t>(offset))));
+
+  std::vector<NullableInteger> values;
+  values.reserve(kRows.size());
+  for (const ModelRow& row : kRows) {
+    values.push_back(row.nullable);
+  }
+  std::vector<NullableInteger> expected = UniqueValues(values);
+  SortModelValues(expected);
+  const std::size_t begin = std::min(offset, expected.size());
+  const std::size_t available = expected.size() - begin;
+  const std::size_t count =
+      limit < 0 ? available : std::min(available, static_cast<std::size_t>(limit));
+  for (std::size_t index = begin; index < begin + count; ++index) {
+    ExpectRowStep(statement);
+    ASSERT_EQ(1U, statement.row().size());
+    ExpectNullableValue(statement.row()[0], expected[index]);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 7> templates{
-      "predicate-scan",     "rowid-lookup", "typed-rebinding", "limit-offset",
-      "repeated-execution", "ordered-scan", "ordered-limit",
+  constexpr std::array<std::string_view, 10> templates{
+      "predicate-scan", "rowid-lookup",  "typed-rebinding", "limit-offset",   "repeated-execution",
+      "ordered-scan",   "ordered-limit", "values-compound", "mixed-compound", "distinct-nullable",
   };
 
-  for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
+  for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
     const std::array words{random.Next(), random.Next(), random.Next(), random.Next()};
     const auto selected = static_cast<std::size_t>(words[0] % templates.size());
     SCOPED_TRACE(Trace(case_index, templates[selected], words, DescribeBindings(selected, words)));
@@ -488,8 +725,37 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
       case 6:
         RunOrderedLimit(session, words);
         break;
+      case 7:
+        RunValuesCompound(session, words);
+        break;
+      case 8:
+        RunMixedTableCompound(session, words);
+        break;
+      case 9:
+        RunDistinctNullable(session, words);
+        break;
       default:
         FAIL() << "unreachable model template";
+    }
+  }
+
+  constexpr std::array<ModelCompoundOperator, 4> operations{
+      ModelCompoundOperator::kUnion,
+      ModelCompoundOperator::kUnionAll,
+      ModelCompoundOperator::kExcept,
+      ModelCompoundOperator::kIntersect,
+  };
+  const std::array<std::uint64_t, 4> matrix_words{
+      UINT64_C(0x19),
+      UINT64_C(0x0d),
+      UINT64_C(0x17),
+      UINT64_C(0x23),
+  };
+  for (const ModelCompoundOperator first : operations) {
+    for (const ModelCompoundOperator second : operations) {
+      SCOPED_TRACE("operator-matrix first=" + std::string{CompoundOperatorSql(first)} +
+                   " second=" + std::string{CompoundOperatorSql(second)});
+      RunMixedTableCompoundCase(session, matrix_words, first, second);
     }
   }
 }
