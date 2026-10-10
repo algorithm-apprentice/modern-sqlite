@@ -230,7 +230,7 @@ TEST(StatementTemporaryStorage, TracksIndependentOwnerReservationsAndPeaks) {
                                                     .sorter_memory_threshold = ByteCount{64},
                                                 }));
   StatementTemporaryStorage first = TakeValue(factory.CreateStatementStorage());
-  StatementTemporaryStorage second = TakeValue(factory.CreateStatementStorage());
+  const StatementTemporaryStorage second = TakeValue(factory.CreateStatementStorage());
   EXPECT_TRUE(first.valid());
   EXPECT_FALSE(first.file_spill_enabled());
   EXPECT_EQ(ByteCount{64}, first.memory_budget());
@@ -478,6 +478,7 @@ TEST(StatementTemporaryStorage, PreservesRegistrationsAndLeasesAcrossMoves) {
   EXPECT_GT(original.overhead_bytes(), empty_overhead);
 
   StatementTemporaryStorage moved{std::move(original)};
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   EXPECT_FALSE(original.valid());
   EXPECT_TRUE(moved.valid());
   EXPECT_EQ(ByteCount{3}, moved.retained_bytes());
@@ -486,12 +487,14 @@ TEST(StatementTemporaryStorage, PreservesRegistrationsAndLeasesAcrossMoves) {
   EXPECT_EQ(ErrorCode::kMisuse, moved_from_registration.error().code());
 
   TemporaryMemoryAccount moved_account{std::move(account)};
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   EXPECT_FALSE(account.valid());
   EXPECT_TRUE(moved_account.valid());
   EXPECT_EQ(ByteCount{3}, moved_account.retained_bytes());
   TemporaryMemoryAccount replacement = TakeValue(moved.RegisterMemoryOwner());
   ASSERT_TRUE(replacement.Reserve(ByteCount{2}).has_value());
   replacement = std::move(moved_account);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   EXPECT_FALSE(moved_account.valid());
   EXPECT_EQ(ByteCount{3}, replacement.retained_bytes());
   EXPECT_EQ(ByteCount{3}, moved.retained_bytes());
@@ -499,9 +502,11 @@ TEST(StatementTemporaryStorage, PreservesRegistrationsAndLeasesAcrossMoves) {
   TemporaryFileLease first = TakeValue(moved.AcquireFileLease());
   TemporaryFileLease second = TakeValue(moved.AcquireFileLease());
   TemporaryFileLease moved_lease{std::move(first)};
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   EXPECT_FALSE(first.valid());
   EXPECT_TRUE(moved_lease.valid());
   second = std::move(moved_lease);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   EXPECT_FALSE(moved_lease.valid());
   EXPECT_TRUE(second.valid());
   EXPECT_EQ(1U, moved.live_file_count());
@@ -517,7 +522,7 @@ TEST(StatementTemporaryStorage, BoundsAndReleasesTemporaryFileLeases) {
   EXPECT_EQ(0U, storage.live_file_count());
   EXPECT_EQ(0U, storage.peak_live_file_count());
 
-  TemporaryFileLease first = TakeValue(storage.AcquireFileLease());
+  const TemporaryFileLease first = TakeValue(storage.AcquireFileLease());
   EXPECT_TRUE(first.valid());
   std::optional<TemporaryFileLease> second;
   second.emplace(TakeValue(storage.AcquireFileLease()));
