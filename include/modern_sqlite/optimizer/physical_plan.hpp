@@ -64,11 +64,14 @@ struct AccessPathCandidate {
   constexpr auto operator<=>(const AccessPathCandidate&) const noexcept = default;
 };
 
-struct PhysicalSingleRowNode {};
+struct PhysicalSingleRowNode {
+  std::size_t core_index = 0;
+};
 
 struct PhysicalEmptyNode {};
 
 struct PhysicalTableScanNode {
+  std::size_t core_index = 0;
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   RootPageId root_page{};
@@ -137,6 +140,7 @@ struct PhysicalLimitNode {
 struct PhysicalProjectionNode {
   PhysicalNodeId input;
   LogicalNodeId logical_projection;
+  std::size_t core_index = 0;
 };
 
 enum class PhysicalSortStrategy : std::uint8_t {
@@ -159,11 +163,58 @@ struct PhysicalOutputNode {
   LogicalNodeId logical_output;
 };
 
+struct PhysicalValuesNode {
+  std::size_t core_index = 0;
+};
+
+enum class PhysicalDistinctStrategy : std::uint8_t {
+  kEphemeralMembership,
+};
+
+struct PhysicalDistinctNode {
+  PhysicalNodeId input;
+  std::size_t core_index = 0;
+  std::vector<BoundCollationId> collations{};
+  PhysicalDistinctStrategy strategy = PhysicalDistinctStrategy::kEphemeralMembership;
+};
+
+enum class PhysicalCompoundStrategy : std::uint8_t {
+  kConcatenate,
+  kUnionLimitOne,
+  kEphemeralSet,
+  kOrderedMerge,
+  kSetThenOrder,
+};
+
+struct PhysicalCompoundNode {
+  PhysicalNodeId left;
+  PhysicalNodeId right;
+  CompoundOperator operation = CompoundOperator::kUnion;
+  std::vector<BoundCollationId> collations{};
+  PhysicalCompoundStrategy strategy = PhysicalCompoundStrategy::kConcatenate;
+};
+
+struct PhysicalCoreOrderPlan {
+  LogicalCoreOrderLayout layout{};
+  PhysicalSortStrategy strategy = PhysicalSortStrategy::kExternal;
+
+  constexpr auto operator<=>(const PhysicalCoreOrderPlan&) const noexcept = default;
+};
+
+struct PhysicalAdvancedOrderNode {
+  PhysicalNodeId input;
+  std::vector<BoundOrderingTerm> terms{};
+  std::vector<PhysicalCoreOrderPlan> core_plans{};
+  bool set_then_order = false;
+  PhysicalSortStrategy final_strategy = PhysicalSortStrategy::kExternal;
+};
+
 using PhysicalNodePayload =
     std::variant<PhysicalSingleRowNode, PhysicalEmptyNode, PhysicalTableScanNode,
                  PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
                  PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
-                 PhysicalOutputNode>;
+                 PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode, PhysicalCompoundNode,
+                 PhysicalAdvancedOrderNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -181,6 +232,10 @@ enum class PhysicalNodeKind : std::uint8_t {
   kProjection,
   kSort,
   kOutput,
+  kValues,
+  kDistinct,
+  kCompound,
+  kAdvancedOrder,
 };
 
 [[nodiscard]] PhysicalNodeKind PhysicalNodeKindOf(const PhysicalNode& node) noexcept;
@@ -215,8 +270,8 @@ class PhysicalPlan final {
   [[nodiscard]] const PhysicalNode& node(PhysicalNodeId id) const noexcept;
   [[nodiscard]] PhysicalNodeId root() const noexcept;
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept;
-  [[nodiscard]] std::size_t selected_candidate_index() const noexcept;
-  [[nodiscard]] const AccessPathCandidate& selected_candidate() const noexcept;
+  [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept;
+  [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept;
 
  private:
   friend class optimizer_detail::PhysicalPlanBuilder;

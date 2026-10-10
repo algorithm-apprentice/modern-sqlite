@@ -86,7 +86,8 @@ struct ReadAccessCandidate {
                                       const BoundOrderingTerm& right) noexcept {
   return left.expression == right.expression && left.collation == right.collation &&
          left.order == right.order && left.null_placement == right.null_placement &&
-         left.result_column == right.result_column;
+         left.result_column == right.result_column &&
+         left.explicit_collation == right.explicit_collation;
 }
 
 template <typename Bound>
@@ -449,6 +450,77 @@ template <typename Bound>
       .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
       .rowid_eligible = !table.without_rowid,
   };
+}
+
+[[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalPlan& logical_plan) {
+  return std::ranges::any_of(logical_plan.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalValuesNode>(node.payload) ||
+           std::holds_alternative<LogicalDistinctNode>(node.payload) ||
+           std::holds_alternative<LogicalCompoundNode>(node.payload) ||
+           std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+}
+
+[[nodiscard]] bool IsIntegerOne(const BoundSelect& bound_select, BoundExpressionId id,
+                                std::int64_t sign = 1) {
+  const BoundExpression& expression = bound_select.expression(id);
+  if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
+      literal != nullptr) {
+    if (literal->boolean_keyword) {
+      return false;
+    }
+    const std::optional<std::int64_t> value = literal->value.integer_value();
+    return value.has_value() && (sign == 1 ? *value == 1 : *value == -1);
+  }
+  const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+  if (unary == nullptr || (unary->operation != BoundUnaryOperation::kPositive &&
+                           unary->operation != BoundUnaryOperation::kNegative)) {
+    return false;
+  }
+  return IsIntegerOne(bound_select, unary->operand,
+                      unary->operation == BoundUnaryOperation::kNegative ? -sign : sign);
+}
+
+[[nodiscard]] bool IsUnionLimitOne(const BoundSelect& bound_select) {
+  const BoundLimit* limit = bound_select.limit();
+  return limit != nullptr && !limit->offset.has_value() && IsIntegerOne(bound_select, limit->limit);
+}
+
+[[nodiscard]] bool IsSetBarrier(CompoundOperator operation) noexcept {
+  return operation == CompoundOperator::kExcept || operation == CompoundOperator::kIntersect;
+}
+
+[[nodiscard]] bool UsesUnionLimitOne(const BoundSelect& bound_select, std::size_t compound_index) {
+  const std::span<const CompoundOperator> operations = bound_select.compound_operators();
+  if (!bound_select.order_by().empty() || !IsUnionLimitOne(bound_select) ||
+      compound_index >= operations.size() ||
+      operations[compound_index] != CompoundOperator::kUnion) {
+    return false;
+  }
+  return std::ranges::none_of(operations.subspan(compound_index + 1U), IsSetBarrier);
+}
+
+[[nodiscard]] std::optional<std::size_t> OrderedUnionLimitOneCoreStart(
+    const BoundSelect& bound_select, bool set_then_order) {
+  if (set_then_order || bound_select.order_by().empty() || !IsUnionLimitOne(bound_select)) {
+    return std::nullopt;
+  }
+
+  const std::span<const CompoundOperator> operations = bound_select.compound_operators();
+  std::size_t operation_start = 0;
+  std::size_t core_start = 0;
+  for (std::size_t index = 0; index < operations.size(); ++index) {
+    if (IsSetBarrier(operations[index])) {
+      operation_start = index + 1U;
+      core_start = index + 2U;
+    }
+  }
+  if (std::ranges::none_of(operations.subspan(operation_start), [](CompoundOperator operation) {
+        return operation == CompoundOperator::kUnion;
+      })) {
+    return std::nullopt;
+  }
+  return core_start;
 }
 
 [[nodiscard]] const LogicalOrderNode* LogicalOrderOf(const LogicalPlan& logical_plan) noexcept {
@@ -1219,6 +1291,10 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     case PhysicalNodeKind::kProjection:
     case PhysicalNodeKind::kSort:
     case PhysicalNodeKind::kOutput:
+    case PhysicalNodeKind::kValues:
+    case PhysicalNodeKind::kDistinct:
+    case PhysicalNodeKind::kCompound:
+    case PhysicalNodeKind::kAdvancedOrder:
       break;
   }
   return PhysicalAccessKind::kEmpty;
@@ -1421,11 +1497,142 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   return {};
 }
 
+[[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
+    const LogicalPlan& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
+    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
+  if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value() ||
+      !candidates.empty() || selected_candidate_index != 0U) {
+    return std::unexpected{InvariantFailure("advanced physical plan arena is invalid")};
+  }
+
+  const LogicalAdvancedOrderNode* advanced_order = nullptr;
+  for (const LogicalNode& node : logical_plan.nodes()) {
+    if (const auto* order = std::get_if<LogicalAdvancedOrderNode>(&node.payload);
+        order != nullptr) {
+      advanced_order = order;
+      break;
+    }
+  }
+  const std::optional<std::size_t> ordered_union_limit_one_core =
+      advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(logical_plan.bound_select(),
+                                                                advanced_order->set_then_order)
+                                : std::nullopt;
+
+  std::size_t compound_index = 0;
+  for (std::size_t index = 0; index < nodes.size(); ++index) {
+    const LogicalNodePayload& logical = logical_plan.nodes()[index].payload;
+    const PhysicalNodePayload& physical = nodes[index].payload;
+    const bool valid = std::visit(
+        [&](const auto& node) {
+          using Node = std::decay_t<decltype(node)>;
+          if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
+            const auto* value = std::get_if<PhysicalSingleRowNode>(&physical);
+            return value != nullptr && value->core_index == node.core_index;
+          } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
+            const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
+            if (value == nullptr || value->core_index != node.core_index ||
+                value->source_kind != node.source_kind || value->table != node.table) {
+              return false;
+            }
+            const RootPageId expected_root =
+                node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()
+                    ? logical_plan.bound_select().catalog()->table(*node.table).root_page
+                    : RootPageId{1};
+            return value->root_page == expected_root;
+          } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
+            const auto* value = std::get_if<PhysicalFilterNode>(&physical);
+            return value != nullptr && value->input.value() == node.input.value() &&
+                   value->predicates.size() == 1U && value->predicates.front() == node.predicate;
+          } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
+            const auto* value = std::get_if<PhysicalLimitNode>(&physical);
+            return value != nullptr && value->input.value() == node.input.value() &&
+                   value->limit == node.limit && value->offset == node.offset;
+          } else if constexpr (std::is_same_v<Node, LogicalProjectionNode>) {
+            const auto* value = std::get_if<PhysicalProjectionNode>(&physical);
+            return value != nullptr && value->input.value() == node.input.value() &&
+                   value->logical_projection.value() == index &&
+                   value->core_index == node.core_index;
+          } else if constexpr (std::is_same_v<Node, LogicalOutputNode>) {
+            const auto* value = std::get_if<PhysicalOutputNode>(&physical);
+            return value != nullptr && value->input.value() == node.input.value() &&
+                   value->logical_output.value() == index;
+          } else if constexpr (std::is_same_v<Node, LogicalValuesNode>) {
+            const auto* value = std::get_if<PhysicalValuesNode>(&physical);
+            return value != nullptr && value->core_index == node.core_index;
+          } else if constexpr (std::is_same_v<Node, LogicalDistinctNode>) {
+            const auto* value = std::get_if<PhysicalDistinctNode>(&physical);
+            return value != nullptr && value->input.value() == node.input.value() &&
+                   value->core_index == node.core_index && value->collations == node.collations &&
+                   value->strategy == PhysicalDistinctStrategy::kEphemeralMembership;
+          } else if constexpr (std::is_same_v<Node, LogicalCompoundNode>) {
+            const auto* value = std::get_if<PhysicalCompoundNode>(&physical);
+            const std::size_t current_compound = compound_index++;
+            if (value == nullptr || value->left.value() != node.left.value() ||
+                value->right.value() != node.right.value() || value->operation != node.operation ||
+                value->collations != node.collations) {
+              return false;
+            }
+            PhysicalCompoundStrategy expected = PhysicalCompoundStrategy::kEphemeralSet;
+            if (advanced_order != nullptr && !advanced_order->set_then_order) {
+              expected = PhysicalCompoundStrategy::kOrderedMerge;
+            } else if (node.operation == CompoundOperator::kUnionAll) {
+              expected = PhysicalCompoundStrategy::kConcatenate;
+            } else if (advanced_order != nullptr && advanced_order->set_then_order) {
+              expected = PhysicalCompoundStrategy::kSetThenOrder;
+            } else if (UsesUnionLimitOne(logical_plan.bound_select(), current_compound)) {
+              expected = PhysicalCompoundStrategy::kUnionLimitOne;
+            }
+            return value->strategy == expected;
+          } else if constexpr (std::is_same_v<Node, LogicalAdvancedOrderNode>) {
+            const auto* value = std::get_if<PhysicalAdvancedOrderNode>(&physical);
+            if (value == nullptr || value->input.value() != node.input.value() ||
+                value->terms.size() != node.terms.size() ||
+                value->core_plans.size() != node.core_layouts.size() ||
+                value->set_then_order != node.set_then_order) {
+              return false;
+            }
+            for (std::size_t term = 0; term < node.terms.size(); ++term) {
+              if (!OrderingTermsEqual(value->terms[term], node.terms[term])) {
+                return false;
+              }
+            }
+            for (std::size_t core = 0; core < node.core_layouts.size(); ++core) {
+              const bool bounded = node.core_layouts[core].schedule ==
+                                       OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
+                                   (ordered_union_limit_one_core.has_value() &&
+                                    core >= *ordered_union_limit_one_core);
+              if (value->core_plans[core].layout != node.core_layouts[core] ||
+                  value->core_plans[core].strategy != (bounded ? PhysicalSortStrategy::kRuntimeLimit
+                                                               : PhysicalSortStrategy::kExternal)) {
+                return false;
+              }
+            }
+            const PhysicalSortStrategy final_strategy =
+                node.set_then_order && logical_plan.bound_select().limit() != nullptr
+                    ? PhysicalSortStrategy::kRuntimeLimit
+                    : PhysicalSortStrategy::kExternal;
+            return value->final_strategy == final_strategy;
+          } else {
+            return false;
+          }
+        },
+        logical);
+    if (!valid) {
+      return std::unexpected{InvariantFailure("advanced physical node is invalid")};
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] std::expected<void, OptimizerError> ValidatePhysicalPlan(
     const LogicalPlan& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
   if (!logical_plan.valid()) {
     return std::unexpected{InvariantFailure("physical plan retained an invalid logical plan")};
+  }
+  if (IsAdvancedLogicalPlan(logical_plan)) {
+    return ValidateAdvancedPhysicalPlan(logical_plan, nodes, root, candidates,
+                                        selected_candidate_index);
   }
   if (nodes.size() < 2U || nodes.size() > 6U || root.value() != nodes.size() - 1U) {
     return std::unexpected{InvariantFailure("physical plan node arena is invalid")};
@@ -1690,14 +1897,8 @@ class PhysicalPlanBuilder final {
       return std::unexpected{
           OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical plan is invalid")};
     }
-    if (std::ranges::any_of(logical_plan.nodes(), [](const LogicalNode& node) {
-          return std::holds_alternative<LogicalValuesNode>(node.payload) ||
-                 std::holds_alternative<LogicalDistinctNode>(node.payload) ||
-                 std::holds_alternative<LogicalCompoundNode>(node.payload);
-        })) {
-      return std::unexpected{
-          OptimizerFailure(OptimizerErrorCode::kUnsupportedFeature,
-                           "DISTINCT, VALUES, and compound SELECT optimization is not supported")};
+    if (IsAdvancedLogicalPlan(logical_plan)) {
+      return BuildAdvanced(std::move(logical_plan));
     }
 
     const SourceInfo source = ResolveSource(logical_plan);
@@ -1930,6 +2131,141 @@ class PhysicalPlanBuilder final {
                                  1U + impl->candidates.size());
     return PhysicalPlan{std::move(impl)};
   }
+
+ private:
+  [[nodiscard]] static OptimizeLogicalPlanResult BuildAdvanced(LogicalPlan logical_plan) {
+    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
+    impl->nodes.reserve(impl->logical_plan.nodes().size());
+    std::vector<PhysicalNodeId> mapped;
+    mapped.reserve(impl->logical_plan.nodes().size());
+
+    const LogicalAdvancedOrderNode* advanced_order = nullptr;
+    for (const LogicalNode& node : impl->logical_plan.nodes()) {
+      if (const auto* order = std::get_if<LogicalAdvancedOrderNode>(&node.payload);
+          order != nullptr) {
+        advanced_order = order;
+        break;
+      }
+    }
+    const std::optional<std::size_t> ordered_union_limit_one_core =
+        advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(impl->logical_plan.bound_select(),
+                                                                  advanced_order->set_then_order)
+                                  : std::nullopt;
+
+    std::size_t compound_index = 0;
+    for (std::size_t logical_index = 0; logical_index < impl->logical_plan.nodes().size();
+         ++logical_index) {
+      const LogicalNode& logical = impl->logical_plan.nodes()[logical_index];
+      PhysicalNodePayload payload = std::visit(
+          [&](const auto& node) -> PhysicalNodePayload {
+            using Node = std::decay_t<decltype(node)>;
+            if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
+              return PhysicalSingleRowNode{.core_index = node.core_index};
+            } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
+              RootPageId root_page{1};
+              if (node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()) {
+                root_page =
+                    impl->logical_plan.bound_select().catalog()->table(*node.table).root_page;
+              }
+              return PhysicalTableScanNode{
+                  .core_index = node.core_index,
+                  .source_kind = node.source_kind,
+                  .table = node.table,
+                  .root_page = root_page,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
+              return PhysicalFilterNode{
+                  .input = mapped[node.input.value()],
+                  .predicates = {node.predicate},
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
+              return PhysicalLimitNode{
+                  .input = mapped[node.input.value()],
+                  .limit = node.limit,
+                  .offset = node.offset,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalProjectionNode>) {
+              return PhysicalProjectionNode{
+                  .input = mapped[node.input.value()],
+                  .logical_projection = LogicalNodeId{static_cast<std::uint32_t>(logical_index)},
+                  .core_index = node.core_index,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalOutputNode>) {
+              return PhysicalOutputNode{
+                  .input = mapped[node.input.value()],
+                  .logical_output = LogicalNodeId{static_cast<std::uint32_t>(logical_index)},
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalValuesNode>) {
+              return PhysicalValuesNode{.core_index = node.core_index};
+            } else if constexpr (std::is_same_v<Node, LogicalDistinctNode>) {
+              return PhysicalDistinctNode{
+                  .input = mapped[node.input.value()],
+                  .core_index = node.core_index,
+                  .collations = node.collations,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalCompoundNode>) {
+              const std::size_t current_compound = compound_index++;
+              PhysicalCompoundStrategy strategy = PhysicalCompoundStrategy::kEphemeralSet;
+              if (advanced_order != nullptr && !advanced_order->set_then_order) {
+                strategy = PhysicalCompoundStrategy::kOrderedMerge;
+              } else if (node.operation == CompoundOperator::kUnionAll) {
+                strategy = PhysicalCompoundStrategy::kConcatenate;
+              } else if (advanced_order != nullptr && advanced_order->set_then_order) {
+                strategy = PhysicalCompoundStrategy::kSetThenOrder;
+              } else if (UsesUnionLimitOne(impl->logical_plan.bound_select(), current_compound)) {
+                strategy = PhysicalCompoundStrategy::kUnionLimitOne;
+              }
+              return PhysicalCompoundNode{
+                  .left = mapped[node.left.value()],
+                  .right = mapped[node.right.value()],
+                  .operation = node.operation,
+                  .collations = node.collations,
+                  .strategy = strategy,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalAdvancedOrderNode>) {
+              std::vector<PhysicalCoreOrderPlan> core_plans;
+              core_plans.reserve(node.core_layouts.size());
+              for (std::size_t core = 0; core < node.core_layouts.size(); ++core) {
+                const LogicalCoreOrderLayout& layout = node.core_layouts[core];
+                const bool bounded =
+                    layout.schedule == OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
+                    (ordered_union_limit_one_core.has_value() &&
+                     core >= *ordered_union_limit_one_core);
+                core_plans.push_back(PhysicalCoreOrderPlan{
+                    .layout = layout,
+                    .strategy = bounded ? PhysicalSortStrategy::kRuntimeLimit
+                                        : PhysicalSortStrategy::kExternal,
+                });
+              }
+              return PhysicalAdvancedOrderNode{
+                  .input = mapped[node.input.value()],
+                  .terms = node.terms,
+                  .core_plans = std::move(core_plans),
+                  .set_then_order = node.set_then_order,
+                  .final_strategy =
+                      node.set_then_order && impl->logical_plan.bound_select().limit() != nullptr
+                          ? PhysicalSortStrategy::kRuntimeLimit
+                          : PhysicalSortStrategy::kExternal,
+              };
+            } else {
+              return PhysicalEmptyNode{};
+            }
+          },
+          logical.payload);
+      impl->nodes.push_back(PhysicalNode{.payload = std::move(payload)});
+      mapped.emplace_back(static_cast<std::uint32_t>(impl->nodes.size() - 1U));
+    }
+
+    impl->root = mapped[impl->logical_plan.root().value()];
+    const std::span<const AccessPathCandidate> candidates{impl->candidates};
+    std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
+        impl->logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
+    if (!validated.has_value()) {
+      return std::unexpected{std::move(validated.error())};
+    }
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork, impl->nodes.size());
+    return PhysicalPlan{std::move(impl)};
+  }
 };
 
 class PhysicalStatementPlanBuilder final {
@@ -2158,6 +2494,14 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "sort";
     case PhysicalNodeKind::kOutput:
       return "output";
+    case PhysicalNodeKind::kValues:
+      return "values";
+    case PhysicalNodeKind::kDistinct:
+      return "distinct";
+    case PhysicalNodeKind::kCompound:
+      return "compound";
+    case PhysicalNodeKind::kAdvancedOrder:
+      return "advanced_order";
   }
   return "unknown";
 }
@@ -2214,12 +2558,18 @@ std::span<const AccessPathCandidate> PhysicalPlan::candidates() const noexcept {
                           : std::span<const AccessPathCandidate>{};
 }
 
-std::size_t PhysicalPlan::selected_candidate_index() const noexcept {
+std::optional<std::size_t> PhysicalPlan::selected_candidate_index() const noexcept {
+  if (impl_ == nullptr || impl_->selected_candidate >= impl_->candidates.size()) {
+    return std::nullopt;
+  }
   return impl_->selected_candidate;
 }
 
-const AccessPathCandidate& PhysicalPlan::selected_candidate() const noexcept {
-  return impl_->candidates[impl_->selected_candidate];
+const AccessPathCandidate* PhysicalPlan::selected_candidate() const noexcept {
+  if (impl_ == nullptr || impl_->selected_candidate >= impl_->candidates.size()) {
+    return nullptr;
+  }
+  return &impl_->candidates[impl_->selected_candidate];
 }
 
 OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan) {
@@ -2253,6 +2603,56 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
   const std::span<const PhysicalNode> nodes = plan.nodes();
   if (nodes.empty()) {
     std::terminate();
+  }
+  if (IsAdvancedLogicalPlan(plan.logical_plan())) {
+    std::string explain;
+    const auto append_line = [&explain](std::string_view line) {
+      if (!explain.empty()) {
+        explain.push_back('\n');
+      }
+      explain.append(line);
+    };
+    for (const PhysicalNode& node : nodes) {
+      if (const auto* values = std::get_if<PhysicalValuesNode>(&node.payload); values != nullptr) {
+        append_line("VALUES CORE " + std::to_string(values->core_index));
+      } else if (const auto* single = std::get_if<PhysicalSingleRowNode>(&node.payload);
+                 single != nullptr) {
+        append_line("CORE " + std::to_string(single->core_index) + " SCAN CONSTANT ROW");
+      } else if (const auto* scan = std::get_if<PhysicalTableScanNode>(&node.payload);
+                 scan != nullptr) {
+        std::string line = "CORE " + std::to_string(scan->core_index) + " SCAN ";
+        AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &line);
+        append_line(line);
+      } else if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&node.payload);
+                 distinct != nullptr) {
+        append_line("DISTINCT CORE " + std::to_string(distinct->core_index) +
+                    " USING EPHEMERAL RELATION");
+      } else if (const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload);
+                 compound != nullptr) {
+        std::string strategy = "EPHEMERAL SET";
+        switch (compound->strategy) {
+          case PhysicalCompoundStrategy::kConcatenate:
+            strategy = "CONCATENATE";
+            break;
+          case PhysicalCompoundStrategy::kUnionLimitOne:
+            strategy = "UNION LIMIT ONE";
+            break;
+          case PhysicalCompoundStrategy::kEphemeralSet:
+            break;
+          case PhysicalCompoundStrategy::kOrderedMerge:
+            strategy = "ORDERED MERGE";
+            break;
+          case PhysicalCompoundStrategy::kSetThenOrder:
+            strategy = "SET THEN ORDER";
+            break;
+        }
+        append_line("COMPOUND USING " + strategy);
+      } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&node.payload);
+                 order != nullptr) {
+        append_line(order->set_then_order ? "ORDER SET RESULT" : "ORDER ARM STREAMS");
+      }
+    }
+    return explain;
   }
   const PhysicalNode& access = nodes[0];
   std::string explain;

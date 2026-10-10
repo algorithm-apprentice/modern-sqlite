@@ -5287,6 +5287,17 @@ LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
         .detail = "physical plan is invalid",
     });
   }
+  if (std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+        return std::holds_alternative<PhysicalValuesNode>(node.payload) ||
+               std::holds_alternative<PhysicalDistinctNode>(node.payload) ||
+               std::holds_alternative<PhysicalCompoundNode>(node.payload) ||
+               std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+      })) {
+    return std::unexpected(PlanLoweringError{
+        .code = PlanLoweringErrorCode::kUnsupportedPlan,
+        .detail = "DISTINCT, VALUES, and compound SELECT lowering is not supported",
+    });
+  }
   return PlanLowerer(plan, limits).Run();
 }
 
