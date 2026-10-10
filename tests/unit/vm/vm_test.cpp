@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -59,6 +60,10 @@ constexpr std::uint64_t kCatalogGeneration = 17;
 [[nodiscard]] constexpr ConstantId Constant(std::uint32_t value) { return ConstantId(value); }
 [[nodiscard]] constexpr SymbolId Symbol(std::uint32_t value) { return SymbolId(value); }
 [[nodiscard]] constexpr CursorFieldId Field(std::uint32_t value) { return CursorFieldId(value); }
+[[nodiscard]] constexpr RelationId Relation(std::uint32_t value) { return RelationId(value); }
+[[nodiscard]] constexpr RecordComparisonId RecordComparison(std::uint32_t value) {
+  return RecordComparisonId(value);
+}
 [[nodiscard]] constexpr InstructionAddress Address(std::uint32_t value) {
   return InstructionAddress(value);
 }
@@ -358,6 +363,281 @@ class TemporaryDatabase final {
       NextTopNInstruction{.top_n = TopNId(0), .next_target = Address(19)},
       ResetTopNInstruction{.top_n = TopNId(0)},
       CloseTopNInstruction{.top_n = TopNId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildRelationProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Integer(20));
+  input.constants.push_back(SqlValue::Real(2.0));
+  input.constants.push_back(SqlValue::Integer(21));
+  input.constants.push_back(SqlValue::Integer(22));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(10));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(30));
+  input.constants.push_back(SqlValue::Integer(4));
+  input.relations.push_back(SorterDescriptor());
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "key",
+          .declared_type = "NUMERIC",
+          .affinity = TypeAffinity::kNumeric,
+      },
+      ResultColumnMetadata{
+          .name = "payload",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+  };
+  input.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(4),
+      },
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(8),
+      },
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(4), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kReplaceExisting,
+          .duplicate_target = Address(10),
+      },
+      LoadConstantInstruction{.constant = Constant(5), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(6), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(13),
+      },
+      LoadConstantInstruction{.constant = Constant(7), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(8), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(16),
+      },
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      ContainsRelationInstruction{
+          .relation = Relation(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .found_target = Address(19),
+      },
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(9), .output = Reg(0)},
+      DeleteRelationInstruction{
+          .relation = Relation(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+      },
+      LoadConstantInstruction{.constant = Constant(5), .output = Reg(0)},
+      DeleteRelationInstruction{
+          .relation = Relation(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+      },
+      RewindRelationInstruction{.relation = Relation(0), .empty_target = Address(28)},
+      ReadRelationFieldInstruction{.relation = Relation(0), .field = 0, .output = Reg(0)},
+      ReadRelationFieldInstruction{.relation = Relation(0), .field = 1, .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(0), .count = 2},
+      NextRelationInstruction{.relation = Relation(0), .next_target = Address(24)},
+      ResetRelationInstruction{.relation = Relation(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildRelationDrainProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  ByteBuffer payload{ByteCount{900}};
+  std::ranges::fill(payload.mutable_view(), std::byte{0x5a});
+  input.constants.push_back(SqlValue::Blob(std::move(payload)));
+  constexpr std::uint32_t kRowCount = 24;
+  for (std::uint32_t key = 0; key < kRowCount; ++key) {
+    input.constants.push_back(SqlValue::Integer(key));
+  }
+  input.relations.push_back(SorterDescriptor());
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "key",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+  };
+  input.instructions.emplace_back(OpenRelationInstruction{.relation = Relation(0)});
+  input.instructions.emplace_back(
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)});
+  for (std::uint32_t key = 0; key < kRowCount; ++key) {
+    input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = Constant(key + 1U), .output = Reg(0)});
+    const auto next =
+        InstructionAddress(static_cast<std::uint32_t>(input.instructions.size() + 1U));
+    input.instructions.emplace_back(InsertRelationInstruction{
+        .relation = Relation(0),
+        .first_value = Reg(0),
+        .value_count = 2,
+        .mode = RelationInsertMode::kKeepExisting,
+        .duplicate_target = next,
+    });
+  }
+  const auto rewind_address = static_cast<std::uint32_t>(input.instructions.size());
+  input.instructions.emplace_back(RewindRelationInstruction{
+      .relation = Relation(0),
+      .empty_target = Address(rewind_address + 4U),
+  });
+  input.instructions.emplace_back(
+      ReadRelationFieldInstruction{.relation = Relation(0), .field = 0, .output = Reg(0)});
+  input.instructions.emplace_back(ResultRowInstruction{.first = Reg(0), .count = 1});
+  input.instructions.emplace_back(NextRelationInstruction{
+      .relation = Relation(0), .next_target = Address(rewind_address + 1U)});
+  input.instructions.emplace_back(ResetRelationInstruction{.relation = Relation(0)});
+  input.instructions.emplace_back(CloseRelationInstruction{.relation = Relation(0)});
+  input.instructions.emplace_back(HaltInstruction{});
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildRecordComparisonProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 15;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Real(1.0));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Real(1.0));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.emplace_back();
+  input.constants.push_back(SqlValue::Real(1.0));
+  input.constants.emplace_back();
+  OrderingRecordDescriptor descriptor = SorterDescriptor();
+  descriptor.key_field_count = 2;
+  descriptor.key_columns.push_back(OrderingColumnMetadata{
+      .collation = Symbol(0),
+      .order = BytecodeSortOrder::kDescending,
+      .null_placement = BytecodeNullPlacement::kFirst,
+  });
+  input.record_comparisons.push_back(std::move(descriptor));
+  for (std::uint32_t index = 0; index < 12; ++index) {
+    input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = Constant(index), .output = Reg(index)});
+  }
+  input.instructions.emplace_back(CompareRecordsInstruction{
+      .comparison = RecordComparison(0),
+      .left_first = Reg(0),
+      .right_first = Reg(2),
+      .output = Reg(12),
+  });
+  input.instructions.emplace_back(CompareRecordsInstruction{
+      .comparison = RecordComparison(0),
+      .left_first = Reg(4),
+      .right_first = Reg(6),
+      .output = Reg(13),
+  });
+  input.instructions.emplace_back(CompareRecordsInstruction{
+      .comparison = RecordComparison(0),
+      .left_first = Reg(8),
+      .right_first = Reg(10),
+      .output = Reg(14),
+  });
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "less",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+      ResultColumnMetadata{
+          .name = "greater",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+      ResultColumnMetadata{
+          .name = "equal",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+  };
+  input.instructions.emplace_back(ResultRowInstruction{.first = Reg(12), .count = 3});
+  input.instructions.emplace_back(HaltInstruction{});
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildReplaceBranchProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(10));
+  input.constants.push_back(SqlValue::Integer(20));
+  input.constants.push_back(SqlValue::Integer(0));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.relations.push_back(SorterDescriptor());
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "replaced",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+  };
+  input.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(4),
+      },
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(1)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kReplaceExisting,
+          .duplicate_target = Address(8),
+      },
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(2)},
+      JumpInstruction{.target = Address(9)},
+      LoadConstantInstruction{.constant = Constant(4), .output = Reg(2)},
+      CloseRelationInstruction{.relation = Relation(0)},
+      ResultRowInstruction{.first = Reg(2), .count = 1},
       HaltInstruction{},
   };
   return TakeProgramValue(BytecodeProgram::Create(input));
@@ -2785,6 +3065,38 @@ TEST_F(VmTest, ResolvesOrderingCapabilityCollations) {
   const auto unresolved = Vm::Create(missing_program, VmEnvironment::Core());
   ASSERT_FALSE(unresolved.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, unresolved.error().code());
+
+  ProgramInput missing_relation;
+  missing_relation.schema_version = CurrentSchema(*pager_);
+  missing_relation.symbols.emplace_back("missing");
+  missing_relation.relations.push_back(SorterDescriptor());
+  missing_relation.instructions = {
+      OpenRelationInstruction{.relation = Relation(0)},
+      HaltInstruction{},
+  };
+  const BytecodeProgram missing_relation_program =
+      TakeProgramValue(BytecodeProgram::Create(missing_relation));
+  const auto unresolved_relation = Vm::Create(missing_relation_program, VmEnvironment::Core());
+  ASSERT_FALSE(unresolved_relation.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, unresolved_relation.error().code());
+
+  ProgramInput missing_comparison;
+  missing_comparison.schema_version = CurrentSchema(*pager_);
+  missing_comparison.symbols.emplace_back("missing");
+  OrderingRecordDescriptor comparison = SorterDescriptor();
+  comparison.key_field_count = 2;
+  comparison.key_columns.push_back(OrderingColumnMetadata{
+      .collation = Symbol(0),
+      .order = BytecodeSortOrder::kAscending,
+      .null_placement = BytecodeNullPlacement::kFirst,
+  });
+  missing_comparison.record_comparisons.push_back(std::move(comparison));
+  missing_comparison.instructions = {HaltInstruction{}};
+  const BytecodeProgram missing_comparison_program =
+      TakeProgramValue(BytecodeProgram::Create(missing_comparison));
+  const auto unresolved_comparison = Vm::Create(missing_comparison_program, VmEnvironment::Core());
+  ASSERT_FALSE(unresolved_comparison.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, unresolved_comparison.error().code());
 }
 
 TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
@@ -2827,6 +3139,15 @@ TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_TRUE(vfs.pathless_file_present());
   while (TakeValue(vm.Step()) == VmStep::kRow) {
+  }
+  EXPECT_FALSE(vfs.pathless_file_present());
+
+  {
+    Vm abandoned = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        abandoned.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(abandoned.Step()));
+    EXPECT_TRUE(vfs.pathless_file_present());
   }
   EXPECT_FALSE(vfs.pathless_file_present());
 
@@ -2876,6 +3197,147 @@ TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
   const auto rejected_bound = negative.Step();
   ASSERT_FALSE(rejected_bound.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, rejected_bound.error().code());
+}
+
+TEST_F(VmTest, ExecutesRelationBytecodeAndCanResetForAnotherRun) {
+  const BytecodeProgram program = BuildRelationProgram(*pager_);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  EXPECT_EQ(SqlValueType::kReal, vm.row()[0].type());
+  EXPECT_EQ(2.0, vm.row()[0].real_value());
+  EXPECT_EQ(22, vm.row()[1].integer_value());
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(3, vm.row()[0].integer_value());
+  EXPECT_EQ(30, vm.row()[1].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(2.0, vm.row()[0].real_value());
+}
+
+TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 1,
+                            }));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = BuildRelationProgram(*pager);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                }));
+
+  Vm reset = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      reset.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(reset.Step()));
+  EXPECT_TRUE(vfs.pathless_file_present());
+  RequireStatus(reset.Reset());
+  EXPECT_FALSE(vfs.pathless_file_present());
+
+  Vm halted = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      halted.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  while (TakeValue(halted.Step()) == VmStep::kRow) {
+  }
+  EXPECT_FALSE(vfs.pathless_file_present());
+
+  Vm missing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  const auto missing_factory = missing.Step();
+  ASSERT_FALSE(missing_factory.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
+
+  vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
+  Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  const auto failed = failing.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
+TEST(Vm, RelationDrainCanFailAfterRowsAndStillDeletesItsTransientFile) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 1,
+                            }));
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = BuildRelationDrainProgram(*pager);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                }));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(0, vm.row()[0].integer_value());
+  EXPECT_TRUE(vfs.pathless_file_present());
+
+  vfs.FailPathlessReadAfter(0, ErrorCode::kIo);
+  std::size_t rows_seen = 1;
+  Result<VmStep> stepped = VmStep::kRow;
+  while (stepped.has_value() && *stepped == VmStep::kRow) {
+    stepped = vm.Step();
+    if (stepped.has_value() && *stepped == VmStep::kRow) {
+      ++rows_seen;
+    }
+  }
+  ASSERT_FALSE(stepped.has_value());
+  EXPECT_EQ(ErrorCode::kIo, stepped.error().code());
+  EXPECT_GT(rows_seen, 0U);
+  EXPECT_LT(rows_seen, 24U);
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
+TEST_F(VmTest, ComparesConsecutiveRecordRangesWithOrderingMetadata) {
+  const BytecodeProgram program = BuildRecordComparisonProgram(*pager_);
+  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(3U, vm.row().size());
+  EXPECT_EQ(-1, vm.row()[0].integer_value());
+  EXPECT_EQ(1, vm.row()[1].integer_value());
+  EXPECT_EQ(0, vm.row()[2].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, ReplaceRelationBranchesWhenAnEquivalentKeyAlreadyExists) {
+  const BytecodeProgram program = BuildReplaceBranchProgram(*pager_);
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(1U, vm.row().size());
+  EXPECT_EQ(1, vm.row()[0].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION

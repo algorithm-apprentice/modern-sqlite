@@ -212,6 +212,15 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(RelationInsertMode mode) noexcept {
+  switch (mode) {
+    case RelationInsertMode::kKeepExisting:
+    case RelationInsertMode::kReplaceExisting:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(RowIdSeekMode mode) noexcept {
   switch (mode) {
     case RowIdSeekMode::kEqual:
@@ -392,6 +401,31 @@ template <typename T>
     }
   }
 
+  if (!AddArrayBytes<OrderingRecordDescriptor>(ElementCount(input.relations, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  for (const auto& relation : input.relations) {
+    if (!AddArrayBytes<OrderingColumnMetadata>(ElementCount(relation.key_columns, measure),
+                                               &total) ||
+        total > limits.maximum_owned_bytes) {
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+    }
+  }
+
+  if (!AddArrayBytes<OrderingRecordDescriptor>(ElementCount(input.record_comparisons, measure),
+                                               &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  for (const auto& comparison : input.record_comparisons) {
+    if (!AddArrayBytes<OrderingColumnMetadata>(ElementCount(comparison.key_columns, measure),
+                                               &total) ||
+        total > limits.maximum_owned_bytes) {
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+    }
+  }
+
   if (!AddArrayBytes<ResultColumnMetadata>(ElementCount(input.result_columns, measure), &total) ||
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
@@ -484,6 +518,26 @@ template <typename T>
     });
   }
 
+  clone.relations.reserve(input.relations.size());
+  for (const auto& relation : input.relations) {
+    clone.relations.push_back(OrderingRecordDescriptor{
+        .field_count = relation.field_count,
+        .key_field_count = relation.key_field_count,
+        .key_columns = std::vector<OrderingColumnMetadata>(relation.key_columns.begin(),
+                                                           relation.key_columns.end()),
+    });
+  }
+
+  clone.record_comparisons.reserve(input.record_comparisons.size());
+  for (const auto& comparison : input.record_comparisons) {
+    clone.record_comparisons.push_back(OrderingRecordDescriptor{
+        .field_count = comparison.field_count,
+        .key_field_count = comparison.key_field_count,
+        .key_columns = std::vector<OrderingColumnMetadata>(comparison.key_columns.begin(),
+                                                           comparison.key_columns.end()),
+    });
+  }
+
   clone.result_columns.reserve(input.result_columns.size());
   for (const auto& column : input.result_columns) {
     clone.result_columns.push_back(ResultColumnMetadata{
@@ -523,6 +577,14 @@ template <typename T>
   if (input.top_ns.size() > limits.maximum_top_ns ||
       input.top_ns.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kTopNLimitExceeded));
+  }
+  if (input.relations.size() > limits.maximum_relations ||
+      input.relations.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kRelationLimitExceeded));
+  }
+  if (input.record_comparisons.size() > limits.maximum_record_comparisons ||
+      input.record_comparisons.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kRecordComparisonLimitExceeded));
   }
   if (static_cast<std::size_t>(input.parameter_count) > limits.maximum_parameters) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kParameterLimitExceeded));
@@ -720,6 +782,23 @@ template <typename T>
       return checked;
     }
   }
+  for (std::size_t relation_index = 0; relation_index < input.relations.size(); ++relation_index) {
+    if (auto checked = check_ordering_descriptor(input.relations[relation_index], relation_index);
+        !checked) {
+      return checked;
+    }
+  }
+  for (std::size_t comparison_index = 0; comparison_index < input.record_comparisons.size();
+       ++comparison_index) {
+    const OrderingRecordDescriptor& descriptor = input.record_comparisons[comparison_index];
+    if (descriptor.key_field_count != descriptor.field_count) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
+                                     ProgramError::kNoInstruction, comparison_index));
+    }
+    if (auto checked = check_ordering_descriptor(descriptor, comparison_index); !checked) {
+      return checked;
+    }
+  }
   return {};
 }
 
@@ -783,6 +862,20 @@ template <typename T>
   const auto check_top_n = [&](TopNId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.top_ns.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidTopN, instruction, id.value()));
+    }
+    return {};
+  };
+  const auto check_relation = [&](RelationId id, std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.relations.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRelation, instruction, id.value()));
+    }
+    return {};
+  };
+  const auto check_record_comparison = [&](RecordComparisonId id,
+                                           std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.record_comparisons.size()) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidRecordComparison, instruction, id.value()));
     }
     return {};
   };
@@ -1366,6 +1459,93 @@ template <typename T>
           } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction> ||
                                std::is_same_v<Operation, CloseTopNInstruction>) {
             return check_top_n(operation.top_n, index);
+          } else if constexpr (std::is_same_v<Operation, OpenRelationInstruction> ||
+                               std::is_same_v<Operation, ResetRelationInstruction> ||
+                               std::is_same_v<Operation, CloseRelationInstruction>) {
+            return check_relation(operation.relation, index);
+          } else if constexpr (std::is_same_v<Operation, InsertRelationInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            if (!IsValid(operation.mode)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+            }
+            const OrderingRecordDescriptor& descriptor =
+                input.relations[operation.relation.value()];
+            if (operation.value_count != descriptor.field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.value_count));
+            }
+            if (auto result = check_range(operation.first_value, operation.value_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return check_target(operation.duplicate_target, index);
+          } else if constexpr (std::is_same_v<Operation, ContainsRelationInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            const OrderingRecordDescriptor& descriptor =
+                input.relations[operation.relation.value()];
+            if (operation.key_count != descriptor.key_field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.key_count));
+            }
+            if (auto result = check_range(operation.first_key, operation.key_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return check_target(operation.found_target, index);
+          } else if constexpr (std::is_same_v<Operation, DeleteRelationInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            const OrderingRecordDescriptor& descriptor =
+                input.relations[operation.relation.value()];
+            if (operation.key_count != descriptor.key_field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.key_count));
+            }
+            return check_range(operation.first_key, operation.key_count,
+                               InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, RewindRelationInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            return check_target(operation.empty_target, index);
+          } else if constexpr (std::is_same_v<Operation, ReadRelationFieldInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            if (operation.field >= input.relations[operation.relation.value()].field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidField, index, operation.field));
+            }
+            return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, NextRelationInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            return check_target(operation.next_target, index);
+          } else if constexpr (std::is_same_v<Operation, CompareRecordsInstruction>) {
+            if (auto result = check_record_comparison(operation.comparison, index); !result) {
+              return result;
+            }
+            const std::uint32_t field_count =
+                input.record_comparisons[operation.comparison.value()].field_count;
+            if (auto result = check_range(operation.left_first, field_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            if (auto result = check_range(operation.right_first, field_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1479,9 +1659,11 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   const std::size_t state_cursor_count = storage_cursor_count + (has_rowid_list ? 1U : 0U);
   const std::size_t rowid_list_state_index = storage_cursor_count;
   const std::size_t cursor_words = CeilingDivide(state_cursor_count, kCursorsPerWord);
-  const std::size_t capability_count = input.sorters.size() + input.top_ns.size();
+  const std::size_t capability_count =
+      input.sorters.size() + input.top_ns.size() + input.relations.size();
   const std::size_t capability_offset = register_words + cursor_words;
   const std::size_t top_n_offset = capability_offset + input.sorters.size();
+  const std::size_t relation_offset = top_n_offset + input.top_ns.size();
   const std::size_t state_words = capability_offset + capability_count;
 
   std::size_t stored_state_words = 0;
@@ -1634,6 +1816,12 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     const auto set_top_n_state = [&](TopNId top_n, CapabilityState value) noexcept {
       state[top_n_offset + top_n.value()] = static_cast<std::uint64_t>(value);
     };
+    const auto relation_state = [&](RelationId relation) noexcept {
+      return static_cast<CapabilityState>(state[relation_offset + relation.value()]);
+    };
+    const auto set_relation_state = [&](RelationId relation, CapabilityState value) noexcept {
+      state[relation_offset + relation.value()] = static_cast<std::uint64_t>(value);
+    };
     const auto fallthrough = [&]() -> ProgramResult<void> {
       if (instruction_index + 1 >= instruction_count) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kFallthroughPastEnd, instruction_index));
@@ -1714,6 +1902,27 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       if (top_n_state(top_n) != CapabilityState::kPositioned) {
         return std::unexpected(
             ErrorAt(ProgramErrorCode::kCapabilityNotPositioned, instruction_index, top_n.value()));
+      }
+      return {};
+    };
+    const auto require_relation_open = [&](RelationId relation) -> ProgramResult<void> {
+      if (relation_state(relation) == CapabilityState::kClosed) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotOpen, instruction_index, relation.value()));
+      }
+      return {};
+    };
+    const auto require_relation_writing = [&](RelationId relation) -> ProgramResult<void> {
+      if (relation_state(relation) != CapabilityState::kWriting) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotWriting, instruction_index, relation.value()));
+      }
+      return {};
+    };
+    const auto require_relation_positioned = [&](RelationId relation) -> ProgramResult<void> {
+      if (relation_state(relation) != CapabilityState::kPositioned) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityNotPositioned,
+                                       instruction_index, relation.value()));
       }
       return {};
     };
@@ -1859,6 +2068,93 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
                                              instruction_index, operation.top_n.value()));
             }
             set_top_n_state(operation.top_n, CapabilityState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OpenRelationInstruction>) {
+            if (relation_state(operation.relation) != CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyOpen,
+                                             instruction_index, operation.relation.value()));
+            }
+            set_relation_state(operation.relation, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, InsertRelationInstruction>) {
+            if (auto result = require_relation_writing(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_value, operation.value_count);
+                !result) {
+              return result;
+            }
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            return merge_state(operation.duplicate_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, ContainsRelationInstruction>) {
+            if (auto result = require_relation_writing(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            return merge_state(operation.found_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, DeleteRelationInstruction>) {
+            if (auto result = require_relation_writing(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, RewindRelationInstruction>) {
+            if (auto result = require_relation_writing(operation.relation); !result) {
+              return result;
+            }
+            set_relation_state(operation.relation, CapabilityState::kPositioned);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_relation_state(operation.relation, CapabilityState::kExhausted);
+            return merge_state(operation.empty_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, ReadRelationFieldInstruction>) {
+            if (auto result = require_relation_positioned(operation.relation); !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, NextRelationInstruction>) {
+            if (auto result = require_relation_positioned(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = merge_state(operation.next_target.value(), state); !result) {
+              return result;
+            }
+            set_relation_state(operation.relation, CapabilityState::kExhausted);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResetRelationInstruction>) {
+            if (auto result = require_relation_open(operation.relation); !result) {
+              return result;
+            }
+            set_relation_state(operation.relation, CapabilityState::kWriting);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CloseRelationInstruction>) {
+            if (relation_state(operation.relation) == CapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
+                                             instruction_index, operation.relation.value()));
+            }
+            set_relation_state(operation.relation, CapabilityState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CompareRecordsInstruction>) {
+            const std::uint32_t field_count =
+                input.record_comparisons[operation.comparison.value()].field_count;
+            if (auto result = require_range(operation.left_first, field_count); !result) {
+              return result;
+            }
+            if (auto result = require_range(operation.right_first, field_count); !result) {
+              return result;
+            }
+            initialize(operation.output);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CreateTableRootInstruction>) {
             if (operation.cursor.has_value()) {
@@ -2417,6 +2713,26 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "reset_top_n";
     case InstructionKind::kCloseTopN:
       return "close_top_n";
+    case InstructionKind::kOpenRelation:
+      return "open_relation";
+    case InstructionKind::kInsertRelation:
+      return "insert_relation";
+    case InstructionKind::kContainsRelation:
+      return "contains_relation";
+    case InstructionKind::kDeleteRelation:
+      return "delete_relation";
+    case InstructionKind::kRewindRelation:
+      return "rewind_relation";
+    case InstructionKind::kReadRelationField:
+      return "read_relation_field";
+    case InstructionKind::kNextRelation:
+      return "next_relation";
+    case InstructionKind::kResetRelation:
+      return "reset_relation";
+    case InstructionKind::kCloseRelation:
+      return "close_relation";
+    case InstructionKind::kCompareRecords:
+      return "compare_records";
   }
   return "unknown";
 }
@@ -2428,6 +2744,8 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kCursorLimitExceeded:
     case ProgramErrorCode::kSorterLimitExceeded:
     case ProgramErrorCode::kTopNLimitExceeded:
+    case ProgramErrorCode::kRelationLimitExceeded:
+    case ProgramErrorCode::kRecordComparisonLimitExceeded:
     case ProgramErrorCode::kParameterLimitExceeded:
     case ProgramErrorCode::kConstantLimitExceeded:
     case ProgramErrorCode::kSymbolLimitExceeded:
@@ -2449,6 +2767,8 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kInvalidCursor:
     case ProgramErrorCode::kInvalidSorter:
     case ProgramErrorCode::kInvalidTopN:
+    case ProgramErrorCode::kInvalidRelation:
+    case ProgramErrorCode::kInvalidRecordComparison:
     case ProgramErrorCode::kInvalidOrderingDescriptor:
     case ProgramErrorCode::kInvalidField:
     case ProgramErrorCode::kInvalidBranchTarget:
@@ -2561,6 +2881,15 @@ const OrderingRecordDescriptor& BytecodeProgram::sorter(SorterId id) const noexc
 
 const OrderingRecordDescriptor& BytecodeProgram::top_n(TopNId id) const noexcept {
   return input_.top_ns[id.value()];
+}
+
+const OrderingRecordDescriptor& BytecodeProgram::relation(RelationId id) const noexcept {
+  return input_.relations[id.value()];
+}
+
+const OrderingRecordDescriptor& BytecodeProgram::record_comparison(
+    RecordComparisonId id) const noexcept {
+  return input_.record_comparisons[id.value()];
 }
 
 const Instruction& BytecodeProgram::instruction(InstructionAddress address) const noexcept {
@@ -2773,6 +3102,55 @@ ProgramResult<TopNId> ProgramBuilder::AddTopN(OrderingRecordDescriptor top_n) {
   return TopNId(static_cast<std::uint32_t>(input_.top_ns.size() - 1U));
 }
 
+ProgramResult<RelationId> ProgramBuilder::AddRelation(OrderingRecordDescriptor relation) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.relations.size() >= limits_.maximum_relations ||
+      input_.relations.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kRelationLimitExceeded));
+  }
+  const std::size_t bytes = OrderingOwnedBytes(relation);
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(bytes); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.relations.push_back(std::move(relation));
+  } catch (...) {
+    owned_bytes_ -= bytes;
+    throw;
+  }
+  return RelationId(static_cast<std::uint32_t>(input_.relations.size() - 1U));
+}
+
+ProgramResult<RecordComparisonId> ProgramBuilder::AddRecordComparison(
+    OrderingRecordDescriptor comparison) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.record_comparisons.size() >= limits_.maximum_record_comparisons ||
+      input_.record_comparisons.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kRecordComparisonLimitExceeded));
+  }
+  const std::size_t bytes = OrderingOwnedBytes(comparison);
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(bytes); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.record_comparisons.push_back(std::move(comparison));
+  } catch (...) {
+    owned_bytes_ -= bytes;
+    throw;
+  }
+  return RecordComparisonId(static_cast<std::uint32_t>(input_.record_comparisons.size() - 1U));
+}
+
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
     ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
     ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result) {
@@ -2874,6 +3252,10 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<CheckTopNInstruction>(instruction) ||
       std::holds_alternative<RewindTopNInstruction>(instruction) ||
       std::holds_alternative<NextTopNInstruction>(instruction) ||
+      std::holds_alternative<InsertRelationInstruction>(instruction) ||
+      std::holds_alternative<ContainsRelationInstruction>(instruction) ||
+      std::holds_alternative<RewindRelationInstruction>(instruction) ||
+      std::holds_alternative<NextRelationInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
       std::holds_alternative<SeekIndexInstruction>(instruction) ||
       std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
@@ -2957,6 +3339,54 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitNextTopN(TopNId top_n, Lab
     return std::unexpected(checked.error());
   }
   return AppendPending(PendingNextTopN{.top_n = top_n, .target = next_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitInsertRelation(RelationId relation,
+                                                                     RegisterId first_value,
+                                                                     std::uint32_t value_count,
+                                                                     RelationInsertMode mode,
+                                                                     Label duplicate_target) {
+  if (auto checked = CheckLabel(duplicate_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingInsertRelation{
+      .relation = relation,
+      .first_value = first_value,
+      .value_count = value_count,
+      .mode = mode,
+      .target = duplicate_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitContainsRelation(RelationId relation,
+                                                                       RegisterId first_key,
+                                                                       std::uint32_t key_count,
+                                                                       Label found_target) {
+  if (auto checked = CheckLabel(found_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingContainsRelation{
+      .relation = relation,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = found_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitRewindRelation(RelationId relation,
+                                                                     Label empty_target) {
+  if (auto checked = CheckLabel(empty_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingRewindRelation{.relation = relation, .target = empty_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitNextRelation(RelationId relation,
+                                                                   Label next_target) {
+  if (auto checked = CheckLabel(next_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingNextRelation{.relation = relation, .target = next_target});
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor, RegisterId key,
@@ -3112,6 +3542,31 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
           } else if constexpr (std::is_same_v<Operation, PendingNextTopN>) {
             return NextTopNInstruction{
                 .top_n = operation.top_n,
+                .next_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingInsertRelation>) {
+            return InsertRelationInstruction{
+                .relation = operation.relation,
+                .first_value = operation.first_value,
+                .value_count = operation.value_count,
+                .mode = operation.mode,
+                .duplicate_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingContainsRelation>) {
+            return ContainsRelationInstruction{
+                .relation = operation.relation,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
+                .found_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingRewindRelation>) {
+            return RewindRelationInstruction{
+                .relation = operation.relation,
+                .empty_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingNextRelation>) {
+            return NextRelationInstruction{
+                .relation = operation.relation,
                 .next_target = target(operation.target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingSeekRowId>) {

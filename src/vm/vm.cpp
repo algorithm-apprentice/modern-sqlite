@@ -268,6 +268,7 @@ struct Vm::Impl {
         write_cursors_(program.write_cursors().size()),
         sorters_(program.sorters().size()),
         top_ns_(program.top_ns().size()),
+        relations_(program.relations().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
@@ -325,6 +326,13 @@ struct Vm::Impl {
       return resolved;
     }
     if (auto resolved = resolve_ordering_collations(program_->top_ns()); !resolved.has_value()) {
+      return resolved;
+    }
+    if (auto resolved = resolve_ordering_collations(program_->relations()); !resolved.has_value()) {
+      return resolved;
+    }
+    if (auto resolved = resolve_ordering_collations(program_->record_comparisons());
+        !resolved.has_value()) {
       return resolved;
     }
 
@@ -603,6 +611,25 @@ struct Vm::Impl {
   [[nodiscard]] RecordSorterDescriptor RuntimeOrderingDescriptor(
       const OrderingRecordDescriptor& descriptor) const {
     RecordSorterDescriptor runtime{
+        .field_count = descriptor.field_count,
+        .key_field_count = descriptor.key_field_count,
+    };
+    runtime.key_columns.reserve(descriptor.key_columns.size());
+    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
+      runtime.key_columns.emplace_back(
+          CollationFor(column.collation),
+          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
+                                                         : IndexSortDirection::kAscending,
+          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
+                                                                : IndexNullPlacement::kFirst);
+    }
+    runtime.record_options = record_options_;
+    return runtime;
+  }
+
+  [[nodiscard]] EphemeralRelationDescriptor RuntimeRelationDescriptor(
+      const OrderingRecordDescriptor& descriptor) const {
+    EphemeralRelationDescriptor runtime{
         .field_count = descriptor.field_count,
         .key_field_count = descriptor.key_field_count,
     };
@@ -2345,6 +2372,190 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenRelationInstruction& operation) {
+    if (temporary_storage_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "relation bytecode requires temporary storage"));
+    }
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is already open"));
+    }
+    auto created = temporary_storage_->CreateEphemeralRelation(
+        RuntimeRelationDescriptor(program_->relation(operation.relation)));
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    runtime.emplace(std::move(*created));
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InsertRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    const auto values = std::span<const SqlValue>{registers_}.subspan(operation.first_value.value(),
+                                                                      operation.value_count);
+    auto encoded = EncodeRecord(values, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto inserted =
+        runtime->Insert(std::move(*encoded), operation.mode == RelationInsertMode::kReplaceExisting
+                                                 ? EphemeralInsertMode::kReplaceExisting
+                                                 : EphemeralInsertMode::kKeepExisting);
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (*inserted != EphemeralInsertResult::kInserted) {
+      program_counter_ = operation.duplicate_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const ContainsRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    const auto key = std::span<const SqlValue>{registers_}.subspan(operation.first_key.value(),
+                                                                   operation.key_count);
+    auto encoded = EncodeRecord(key, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto contained = runtime->Contains(encoded->view());
+    if (!contained.has_value()) {
+      return std::unexpected(std::move(contained.error()));
+    }
+    if (*contained) {
+      program_counter_ = operation.found_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const DeleteRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    const auto key = std::span<const SqlValue>{registers_}.subspan(operation.first_key.value(),
+                                                                   operation.key_count);
+    auto encoded = EncodeRecord(key, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto erased = runtime->Erase(encoded->view());
+    if (!erased.has_value()) {
+      return std::unexpected(std::move(erased.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    auto rewound = runtime->Rewind();
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (runtime->state() == EphemeralRelationState::kExhausted) {
+      program_counter_ = operation.empty_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const ReadRelationFieldInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    auto record = runtime->current_record();
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    auto field = record->field(operation.field);
+    if (!field.has_value()) {
+      return std::unexpected(std::move(field.error()));
+    }
+    return SetRegister(operation.output, field->ToOwned());
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    auto advanced = runtime->Next();
+    if (!advanced.has_value()) {
+      return std::unexpected(std::move(advanced.error()));
+    }
+    if (*advanced) {
+      program_counter_ = operation.next_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResetRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    auto reset = runtime->Reset();
+    if (!reset.has_value()) {
+      return std::unexpected(std::move(reset.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseRelationInstruction& operation) {
+    std::optional<EphemeralRelation>& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    runtime->Close();
+    runtime.reset();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CompareRecordsInstruction& operation) {
+    const OrderingRecordDescriptor& descriptor = program_->record_comparison(operation.comparison);
+    const auto left = std::span<const SqlValue>{registers_}.subspan(operation.left_first.value(),
+                                                                    descriptor.field_count);
+    const auto right = std::span<const SqlValue>{registers_}.subspan(operation.right_first.value(),
+                                                                     descriptor.field_count);
+    auto left_record = EncodeRecord(left, record_options_);
+    if (!left_record.has_value()) {
+      return std::unexpected(std::move(left_record.error()));
+    }
+    auto right_record = EncodeRecord(right, record_options_);
+    if (!right_record.has_value()) {
+      return std::unexpected(std::move(right_record.error()));
+    }
+    auto left_view = RecordView::Parse(left_record->view(), record_options_);
+    if (!left_view.has_value()) {
+      return std::unexpected(std::move(left_view.error()));
+    }
+    auto right_view = RecordView::Parse(right_record->view(), record_options_);
+    if (!right_view.has_value()) {
+      return std::unexpected(std::move(right_view.error()));
+    }
+    EphemeralRelationDescriptor runtime = RuntimeRelationDescriptor(descriptor);
+    auto comparison = CompareRecordPrefixes(*left_view, *right_view, runtime.key_columns);
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    const std::int64_t result = *comparison == std::weak_ordering::less
+                                    ? -1
+                                    : (*comparison == std::weak_ordering::greater ? 1 : 0);
+    return SetRegister(operation.output, SqlValue::Integer(result));
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
     CloseAllCursors();
     ClearRow();
@@ -2492,6 +2703,9 @@ struct Vm::Impl {
     for (std::optional<BoundedTopN>& top_n : top_ns_) {
       top_n.reset();
     }
+    for (std::optional<EphemeralRelation>& relation : relations_) {
+      relation.reset();
+    }
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -2510,6 +2724,7 @@ struct Vm::Impl {
   std::vector<RuntimeWriteCursor> write_cursors_;
   std::vector<std::optional<RecordSorter>> sorters_;
   std::vector<std::optional<BoundedTopN>> top_ns_;
+  std::vector<std::optional<EphemeralRelation>> relations_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;

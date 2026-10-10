@@ -66,6 +66,30 @@ int main() try {
               },
           },
   });
+  input.relations.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  input.record_comparisons.push_back(OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
   input.write_cursors.push_back(WriteCursorDescriptor{
       .root_page = RootPageNumber(2),
       .columns =
@@ -119,8 +143,20 @@ int main() try {
     checksum += top_n.key_field_count;
     checksum += top_n.key_columns.size();
   }
+  for (const OrderingRecordDescriptor& relation : program.relations()) {
+    checksum += relation.field_count;
+    checksum += relation.key_field_count;
+    checksum += relation.key_columns.size();
+  }
+  for (const OrderingRecordDescriptor& comparison : program.record_comparisons()) {
+    checksum += comparison.field_count;
+    checksum += comparison.key_field_count;
+    checksum += comparison.key_columns.size();
+  }
   checksum += program.sorter(SorterId(0)).field_count;
   checksum += program.top_n(TopNId(0)).field_count;
+  checksum += program.relation(RelationId(0)).field_count;
+  checksum += program.record_comparison(RecordComparisonId(0)).field_count;
   checksum += static_cast<std::size_t>(program.statement_kind());
   checksum += static_cast<std::size_t>(program.transaction_access());
   checksum += static_cast<std::size_t>(program.rollback_mode());

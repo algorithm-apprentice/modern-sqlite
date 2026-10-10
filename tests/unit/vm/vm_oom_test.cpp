@@ -381,6 +381,110 @@ int main() try {
     return 1;
   }
 
+  ProgramInput relation_input;
+  relation_input.schema_version = input.schema_version;
+  relation_input.register_count = 2;
+  relation_input.constants.push_back(SqlValue::Integer(1));
+  relation_input.constants.push_back(SqlValue::Integer(10));
+  relation_input.symbols.emplace_back("BINARY");
+  relation_input.relations.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  relation_input.instructions = {
+      OpenRelationInstruction{.relation = RelationId(0)},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      InsertRelationInstruction{
+          .relation = RelationId(0),
+          .first_value = RegisterId(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = InstructionAddress(4),
+      },
+      HaltInstruction{},
+  };
+  auto relation_program = BytecodeProgram::Create(relation_input);
+  if (!relation_program.has_value()) {
+    return 1;
+  }
+  auto relation_vm = Vm::Create(*relation_program, VmEnvironment::Core());
+  if (!relation_vm.has_value() ||
+      !relation_vm->AttachExecutionContext(VmExecutionContext{**opened, 17, sorter_factory})
+           .has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto relation_failure = relation_vm->Step();
+  fail_allocations = false;
+  if (relation_failure.has_value() || relation_failure.error().code() != ErrorCode::kOutOfMemory ||
+      relation_vm->state() != VmState::kError) {
+    return 1;
+  }
+
+  ProgramInput comparison_input;
+  comparison_input.schema_version = input.schema_version;
+  comparison_input.register_count = 5;
+  for (const std::int64_t value : {1, 2, 1, 3}) {
+    comparison_input.constants.push_back(SqlValue::Integer(value));
+  }
+  comparison_input.symbols.emplace_back("BINARY");
+  comparison_input.record_comparisons.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 2,
+      .key_columns =
+          {
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+              OrderingColumnMetadata{
+                  .collation = SymbolId(0),
+                  .order = BytecodeSortOrder::kAscending,
+                  .null_placement = BytecodeNullPlacement::kFirst,
+              },
+          },
+  });
+  comparison_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      LoadConstantInstruction{.constant = ConstantId(2), .output = RegisterId(2)},
+      LoadConstantInstruction{.constant = ConstantId(3), .output = RegisterId(3)},
+      CompareRecordsInstruction{
+          .comparison = RecordComparisonId(0),
+          .left_first = RegisterId(0),
+          .right_first = RegisterId(2),
+          .output = RegisterId(4),
+      },
+      HaltInstruction{},
+  };
+  auto comparison_program = BytecodeProgram::Create(comparison_input);
+  if (!comparison_program.has_value()) {
+    return 1;
+  }
+  auto comparison_vm = Vm::Create(*comparison_program, VmEnvironment::Core());
+  if (!comparison_vm.has_value() ||
+      !comparison_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto comparison_failure = comparison_vm->Step();
+  fail_allocations = false;
+  if (comparison_failure.has_value() ||
+      comparison_failure.error().code() != ErrorCode::kOutOfMemory ||
+      comparison_vm->state() != VmState::kError) {
+    return 1;
+  }
+
   const auto overflow_index_descriptor = [] {
     return ReadCursorDescriptor{
         .root_page = RootPageNumber(102),
