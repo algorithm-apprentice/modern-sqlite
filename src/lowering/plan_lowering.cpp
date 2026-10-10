@@ -137,7 +137,9 @@ class PlanLowerer final {
       return std::unexpected(std::move(inspected.error()));
     }
     LoweringResult<void> layout =
-        distinct_ != nullptr ? BuildDistinctRegisterLayout() : BuildReadRegisterLayout();
+        streaming_query_
+            ? BuildStreamingRegisterLayout()
+            : (distinct_ != nullptr ? BuildDistinctRegisterLayout() : BuildReadRegisterLayout());
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
@@ -159,7 +161,8 @@ class PlanLowerer final {
     }
     builder_.emplace(std::move(*created));
 
-    if (bound_select_->table_source() != nullptr) {
+    if (streaming_requires_snapshot_ ||
+        (!streaming_query_ && bound_select_->table_source() != nullptr)) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
                                            "unable to require a database snapshot");
       if (!required.has_value()) {
@@ -172,17 +175,25 @@ class PlanLowerer final {
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
-    if (distinct_ != nullptr) {
+    if (streaming_query_) {
+      if (auto descriptors = AddStreamingDescriptors(); !descriptors.has_value()) {
+        return std::unexpected(std::move(descriptors.error()));
+      }
+    } else if (distinct_ != nullptr) {
       if (auto descriptors = AddDistinctDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
       }
     } else if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
       return std::unexpected(std::move(ordering.error()));
     }
-    if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
-      return std::unexpected(std::move(cursor.error()));
+    if (!streaming_query_) {
+      if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
     }
-    LoweringResult<void> emitted = distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan();
+    LoweringResult<void> emitted = streaming_query_
+                                       ? EmitStreamingPlan()
+                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan());
     if (!emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
@@ -647,6 +658,151 @@ class PlanLowerer final {
     return std::move(*built);
   }
 
+  struct StreamingCorePlan {
+    std::size_t core_index = 0;
+    const BoundQueryCore* bound = nullptr;
+    const PhysicalSingleRowNode* single_row = nullptr;
+    const PhysicalTableScanNode* table_scan = nullptr;
+    const PhysicalValuesNode* values = nullptr;
+    const PhysicalFilterNode* filter = nullptr;
+    const PhysicalProjectionNode* projection = nullptr;
+    const PhysicalDistinctNode* distinct = nullptr;
+    std::optional<CursorId> cursor{};
+    std::optional<RelationId> relation{};
+  };
+
+  [[nodiscard]] LoweringResult<void> InspectStreamingPlan() {
+    const std::span<const PhysicalNode> nodes = read_plan_->nodes();
+    const std::span<const BoundQueryCore> cores = bound_select_->query_cores();
+    if (nodes.empty() || cores.empty()) {
+      return std::unexpected(InternalFailure("streaming query plan is empty"));
+    }
+    if (!bound_select_->order_by().empty()) {
+      return std::unexpected(
+          UnsupportedFailure("ordered compound SELECT lowering is not supported"));
+    }
+    if (!std::ranges::all_of(bound_select_->compound_operators(), [](CompoundOperator operation) {
+          return operation == CompoundOperator::kUnionAll;
+        })) {
+      return std::unexpected(UnsupportedFailure("set compound SELECT lowering is not supported"));
+    }
+
+    streaming_query_ = true;
+    streaming_cores_.resize(cores.size());
+    for (std::size_t index = 0; index < cores.size(); ++index) {
+      streaming_cores_[index].core_index = index;
+      streaming_cores_[index].bound = &cores[index];
+    }
+    std::vector<std::optional<std::size_t>> node_cores(nodes.size());
+    std::size_t compound_count = 0;
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+      const PhysicalNode& physical = nodes[index];
+      if (const auto* single = std::get_if<PhysicalSingleRowNode>(&physical.payload);
+          single != nullptr) {
+        if (single->core_index >= streaming_cores_.size() ||
+            streaming_cores_[single->core_index].single_row != nullptr ||
+            streaming_cores_[single->core_index].table_scan != nullptr ||
+            streaming_cores_[single->core_index].values != nullptr) {
+          return std::unexpected(InternalFailure("streaming single-row core is invalid"));
+        }
+        streaming_cores_[single->core_index].single_row = single;
+        node_cores[index] = single->core_index;
+      } else if (const auto* scan = std::get_if<PhysicalTableScanNode>(&physical.payload);
+                 scan != nullptr) {
+        if (scan->core_index >= streaming_cores_.size() ||
+            streaming_cores_[scan->core_index].single_row != nullptr ||
+            streaming_cores_[scan->core_index].table_scan != nullptr ||
+            streaming_cores_[scan->core_index].values != nullptr) {
+          return std::unexpected(InternalFailure("streaming table core is invalid"));
+        }
+        streaming_cores_[scan->core_index].table_scan = scan;
+        node_cores[index] = scan->core_index;
+        streaming_requires_snapshot_ = true;
+      } else if (const auto* values = std::get_if<PhysicalValuesNode>(&physical.payload);
+                 values != nullptr) {
+        if (values->core_index >= streaming_cores_.size() ||
+            streaming_cores_[values->core_index].single_row != nullptr ||
+            streaming_cores_[values->core_index].table_scan != nullptr ||
+            streaming_cores_[values->core_index].values != nullptr) {
+          return std::unexpected(InternalFailure("streaming VALUES core is invalid"));
+        }
+        streaming_cores_[values->core_index].values = values;
+        node_cores[index] = values->core_index;
+      } else if (const auto* filter = std::get_if<PhysicalFilterNode>(&physical.payload);
+                 filter != nullptr) {
+        if (filter->input.value() >= node_cores.size() ||
+            !node_cores[filter->input.value()].has_value()) {
+          return std::unexpected(InternalFailure("streaming filter input is invalid"));
+        }
+        const std::size_t core_index = AssumeValue(node_cores[filter->input.value()]);
+        if (streaming_cores_[core_index].filter != nullptr) {
+          return std::unexpected(InternalFailure("streaming core has duplicate filters"));
+        }
+        streaming_cores_[core_index].filter = filter;
+        node_cores[index] = core_index;
+      } else if (const auto* projection = std::get_if<PhysicalProjectionNode>(&physical.payload);
+                 projection != nullptr) {
+        if (projection->core_index >= streaming_cores_.size() ||
+            streaming_cores_[projection->core_index].projection != nullptr) {
+          return std::unexpected(InternalFailure("streaming projection is invalid"));
+        }
+        streaming_cores_[projection->core_index].projection = projection;
+        node_cores[index] = projection->core_index;
+      } else if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&physical.payload);
+                 distinct != nullptr) {
+        if (distinct->core_index >= streaming_cores_.size() ||
+            streaming_cores_[distinct->core_index].distinct != nullptr) {
+          return std::unexpected(InternalFailure("streaming DISTINCT core is invalid"));
+        }
+        streaming_cores_[distinct->core_index].distinct = distinct;
+        node_cores[index] = distinct->core_index;
+      } else if (const auto* compound = std::get_if<PhysicalCompoundNode>(&physical.payload);
+                 compound != nullptr) {
+        if (compound->operation != CompoundOperator::kUnionAll ||
+            compound->strategy != PhysicalCompoundStrategy::kConcatenate) {
+          return std::unexpected(
+              UnsupportedFailure("set compound SELECT lowering is not supported"));
+        }
+        ++compound_count;
+      } else if (const auto* limit = std::get_if<PhysicalLimitNode>(&physical.payload);
+                 limit != nullptr) {
+        if (limit_ != nullptr) {
+          return std::unexpected(InternalFailure("streaming query has duplicate LIMIT nodes"));
+        }
+        limit_ = limit;
+      } else {
+        return std::unexpected(
+            UnsupportedFailure("streaming query contains an unsupported physical node"));
+      }
+    }
+
+    if (compound_count != bound_select_->compound_operators().size()) {
+      return std::unexpected(InternalFailure("streaming compound count is invalid"));
+    }
+    for (const StreamingCorePlan& core : streaming_cores_) {
+      if (core.bound == nullptr) {
+        return std::unexpected(InternalFailure("streaming core has no bound metadata"));
+      }
+      if (std::holds_alternative<BoundValuesCore>(*core.bound)) {
+        if (core.values == nullptr || core.single_row != nullptr || core.table_scan != nullptr ||
+            core.filter != nullptr || core.projection != nullptr || core.distinct != nullptr) {
+          return std::unexpected(InternalFailure("streaming VALUES core shape is invalid"));
+        }
+        continue;
+      }
+      const auto& select = std::get<BoundSelectCore>(*core.bound);
+      const bool source_matches =
+          select.table_source.has_value() ? core.table_scan != nullptr : core.single_row != nullptr;
+      const bool distinct_matches =
+          (select.quantifier == SelectQuantifier::kDistinct) == (core.distinct != nullptr);
+      if (!source_matches || core.values != nullptr || core.projection == nullptr ||
+          !distinct_matches) {
+        return std::unexpected(InternalFailure("streaming SELECT core shape is invalid"));
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> InspectDistinctPlan() {
     const std::span<const PhysicalNode> nodes = read_plan_->nodes();
     if (nodes.size() < 3U || bound_select_->query_cores().size() != 1U ||
@@ -718,6 +874,12 @@ class PlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> InspectPlan() {
+    if (std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
+          return std::holds_alternative<PhysicalValuesNode>(node.payload) ||
+                 std::holds_alternative<PhysicalCompoundNode>(node.payload);
+        })) {
+      return InspectStreamingPlan();
+    }
     if (std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
           return std::holds_alternative<PhysicalDistinctNode>(node.payload);
         })) {
@@ -1047,6 +1209,56 @@ class PlanLowerer final {
     return FinishRegisterLayout();
   }
 
+  [[nodiscard]] LoweringResult<void> BuildStreamingRegisterLayout() {
+    if (!streaming_query_ || streaming_cores_.empty()) {
+      return std::unexpected(InternalFailure("streaming register layout has no cores"));
+    }
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+    auto result_block = AllocateRegisters(bound_select_->result_columns().size());
+    if (!result_block.has_value()) {
+      return std::unexpected(std::move(result_block.error()));
+    }
+    result_block_first_ = *result_block;
+
+    if (limit_ != nullptr) {
+      auto limit_register = AllocateRegisters(1);
+      auto zero_register = AllocateRegisters(1);
+      auto one_register = AllocateRegisters(1);
+      auto negative_register = AllocateRegisters(1);
+      if (!limit_register.has_value()) {
+        return std::unexpected(std::move(limit_register.error()));
+      }
+      if (!zero_register.has_value()) {
+        return std::unexpected(std::move(zero_register.error()));
+      }
+      if (!one_register.has_value()) {
+        return std::unexpected(std::move(one_register.error()));
+      }
+      if (!negative_register.has_value()) {
+        return std::unexpected(std::move(negative_register.error()));
+      }
+      limit_register_ = *limit_register;
+      zero_register_ = *zero_register;
+      one_register_ = *one_register;
+      negative_limit_register_ = *negative_register;
+      if (limit_->offset.has_value()) {
+        auto offset_register = AllocateRegisters(1);
+        auto comparison_register = AllocateRegisters(1);
+        if (!offset_register.has_value()) {
+          return std::unexpected(std::move(offset_register.error()));
+        }
+        if (!comparison_register.has_value()) {
+          return std::unexpected(std::move(comparison_register.error()));
+        }
+        offset_register_ = *offset_register;
+        comparison_register_ = *comparison_register;
+      }
+    }
+    return FinishRegisterLayout();
+  }
+
   [[nodiscard]] LoweringResult<void> BuildInsertRegisterLayout() {
     if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
       return expressions;
@@ -1341,6 +1553,189 @@ class PlanLowerer final {
       return std::unexpected(std::move(sorter.error()));
     }
     sorter_ = *sorter;
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddStreamingCursorDescriptor(StreamingCorePlan& core,
+                                                                  const BoundSelectCore& select) {
+    if (core.table_scan == nullptr || !select.table_source.has_value() ||
+        select.source_column_begin > bound_select_->source_columns().size() ||
+        select.source_column_count >
+            bound_select_->source_columns().size() - select.source_column_begin) {
+      return std::unexpected(InternalFailure("streaming cursor metadata is invalid"));
+    }
+    const std::span<const BoundSourceColumn> columns = bound_select_->source_columns().subspan(
+        select.source_column_begin, select.source_column_count);
+    ReadCursorDescriptor descriptor{
+        .root_page = RootPageNumber(core.table_scan->root_page.value),
+        .storage = CursorStorageKind::kRowIdTable,
+        .record_field_count = 0,
+        .fields = {},
+        .index_columns = {},
+    };
+    if (core.table_scan->source_kind == BoundSourceKind::kSchemaTable) {
+      constexpr std::uint32_t kSchemaFieldCount = 5;
+      if (columns.size() != kSchemaFieldCount) {
+        return std::unexpected(InternalFailure("streaming schema core shape is invalid"));
+      }
+      descriptor.record_field_count = kSchemaFieldCount;
+      descriptor.fields.reserve(kSchemaFieldCount);
+      for (std::uint32_t index = 0; index < kSchemaFieldCount; ++index) {
+        descriptor.fields.push_back(CursorFieldSource{
+            .kind = CursorFieldSourceKind::kRecordField,
+            .record_field = index,
+        });
+        source_cursor_fields_[select.source_column_begin + index] = CursorFieldId{index};
+      }
+    } else {
+      if (!core.table_scan->table.has_value()) {
+        return std::unexpected(InternalFailure("streaming table core has no table ID"));
+      }
+      const CatalogSnapshot& catalog = *bound_select_->catalog();
+      const TableId table_id = *core.table_scan->table;
+      const CatalogTable& table = catalog.table(table_id);
+      if (!table.without_rowid) {
+        if (table.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(InternalFailure("streaming table field count is too large"));
+        }
+        descriptor.record_field_count = static_cast<std::uint32_t>(table.columns.size());
+        descriptor.fields.reserve(columns.size());
+        for (std::size_t index = 0; index < columns.size(); ++index) {
+          const BoundSourceColumn& source_column = columns[index];
+          if (!source_column.catalog_column.has_value() ||
+              source_column.catalog_column->value >= table.columns.size()) {
+            return std::unexpected(InternalFailure("streaming bound source column is invalid"));
+          }
+          const ColumnId column_id = *source_column.catalog_column;
+          if (table.rowid_alias.has_value() && *table.rowid_alias == column_id) {
+            descriptor.fields.push_back(CursorFieldSource{
+                .kind = CursorFieldSourceKind::kRowId,
+                .record_field = 0,
+            });
+          } else {
+            auto field = CatalogFieldSource(table.columns[column_id.value],
+                                            static_cast<std::uint32_t>(column_id.value));
+            if (!field.has_value()) {
+              return std::unexpected(std::move(field.error()));
+            }
+            descriptor.fields.push_back(*field);
+            source_field_real_affinity_[select.source_column_begin + index] =
+                source_column.affinity == TypeAffinity::kReal;
+          }
+          source_cursor_fields_[select.source_column_begin + index] =
+              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
+        }
+      } else {
+        descriptor.storage = CursorStorageKind::kIndex;
+        const std::optional<IndexId> primary_id = catalog.primary_key_index(table_id);
+        if (!primary_id.has_value()) {
+          return std::unexpected(
+              InternalFailure("streaming WITHOUT ROWID core has no primary index"));
+        }
+        const CatalogIndex& primary = catalog.index(*primary_id);
+        if (primary.terms.empty() ||
+            primary.terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(
+              InternalFailure("streaming WITHOUT ROWID primary shape is invalid"));
+        }
+        descriptor.record_field_count = static_cast<std::uint32_t>(primary.terms.size());
+        descriptor.index_columns.reserve(primary.terms.size());
+        std::vector<std::optional<std::uint32_t>> field_by_column(table.columns.size());
+        for (std::size_t term_index = 0; term_index < primary.terms.size(); ++term_index) {
+          const CatalogIndexTerm& term = primary.terms[term_index];
+          const auto* column = std::get_if<ColumnId>(&term.target);
+          if (column == nullptr || column->value >= table.columns.size() ||
+              field_by_column[column->value].has_value()) {
+            return std::unexpected(InternalFailure("streaming primary index term is invalid"));
+          }
+          field_by_column[column->value] = static_cast<std::uint32_t>(term_index);
+          auto collation = SymbolForName(term.collation_name);
+          if (!collation.has_value()) {
+            return std::unexpected(std::move(collation.error()));
+          }
+          descriptor.index_columns.push_back(IndexColumnMetadata{
+              .collation = *collation,
+              .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                            : BytecodeSortOrder::kAscending,
+          });
+        }
+        descriptor.fields.reserve(columns.size());
+        for (std::size_t index = 0; index < columns.size(); ++index) {
+          const BoundSourceColumn& source_column = columns[index];
+          if (!source_column.catalog_column.has_value() ||
+              source_column.catalog_column->value >= table.columns.size()) {
+            return std::unexpected(
+                InternalFailure("streaming WITHOUT ROWID source column is invalid"));
+          }
+          const ColumnId column_id = *source_column.catalog_column;
+          if (!field_by_column[column_id.value].has_value()) {
+            return std::unexpected(InternalFailure("streaming primary record omits a column"));
+          }
+          auto field = CatalogFieldSource(table.columns[column_id.value],
+                                          AssumeValue(field_by_column[column_id.value]));
+          if (!field.has_value()) {
+            return std::unexpected(std::move(field.error()));
+          }
+          descriptor.fields.push_back(*field);
+          source_cursor_fields_[select.source_column_begin + index] =
+              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
+          source_field_real_affinity_[select.source_column_begin + index] =
+              source_column.affinity == TypeAffinity::kReal;
+        }
+      }
+    }
+    auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
+                                       "unable to add streaming core cursor");
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    core.cursor = *cursor;
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddStreamingDescriptors() {
+    source_cursor_fields_.assign(bound_select_->source_columns().size(), std::nullopt);
+    source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
+    for (StreamingCorePlan& core : streaming_cores_) {
+      if (const auto* select = std::get_if<BoundSelectCore>(core.bound); select != nullptr) {
+        if (core.table_scan != nullptr) {
+          if (auto cursor = AddStreamingCursorDescriptor(core, *select); !cursor.has_value()) {
+            return cursor;
+          }
+        }
+        if (core.distinct != nullptr) {
+          if (core.distinct->collations.size() != select->result_columns.size() ||
+              select->result_columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(
+                InternalFailure("streaming DISTINCT descriptor shape is invalid"));
+          }
+          OrderingRecordDescriptor descriptor{
+              .field_count = static_cast<std::uint32_t>(select->result_columns.size()),
+              .key_field_count = static_cast<std::uint32_t>(select->result_columns.size()),
+              .key_columns = {},
+          };
+          descriptor.key_columns.reserve(core.distinct->collations.size());
+          for (const BoundCollationId collation : core.distinct->collations) {
+            if (collation.value() >= collation_symbols_.size()) {
+              return std::unexpected(
+                  InternalFailure("streaming DISTINCT collation is not published"));
+            }
+            descriptor.key_columns.push_back(OrderingColumnMetadata{
+                .collation = collation_symbols_[collation.value()],
+                .order = BytecodeSortOrder::kAscending,
+                .null_placement = BytecodeNullPlacement::kFirst,
+            });
+          }
+          auto relation =
+              ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(descriptor)),
+                                   "unable to add streaming DISTINCT relation");
+          if (!relation.has_value()) {
+            return std::unexpected(std::move(relation.error()));
+          }
+          core.relation = *relation;
+        }
+      }
+    }
     return {};
   }
 
@@ -5241,6 +5636,388 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
+  void SetStreamingCoreContext(const StreamingCorePlan& core) noexcept {
+    filter_ = core.filter;
+    projection_ = core.projection;
+    cursor_ = core.cursor;
+    table_scan_ = core.table_scan;
+    distinct_ = core.distinct;
+    distinct_relation_ = core.relation;
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingGuards(const StreamingCorePlan& core,
+                                                         Label skipped) {
+    if (core.filter == nullptr) {
+      return {};
+    }
+    for (const BoundExpressionId predicate : core.filter->guards) {
+      if (auto emitted = EmitPredicate(predicate, skipped); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingFilters(const StreamingCorePlan& core,
+                                                          Label rejected) {
+    if (core.filter == nullptr) {
+      return {};
+    }
+    for (const BoundExpressionId predicate : core.filter->predicates) {
+      if (auto emitted = EmitPredicate(predicate, rejected); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingProjection(const BoundSelectCore& select) {
+    if (select.result_columns.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(InternalFailure("streaming projection width is invalid"));
+    }
+    for (std::size_t index = 0; index < select.result_columns.size(); ++index) {
+      if (auto emitted = EmitExpression(
+              select.result_columns[index].expression,
+              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingMembership(const StreamingCorePlan& core,
+                                                             Label duplicate) {
+    if (!core.relation.has_value()) {
+      return {};
+    }
+    auto inserted =
+        ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
+                                 *core.relation, result_block_first_,
+                                 static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+                                 RelationInsertMode::kKeepExisting, duplicate),
+                             "unable to emit streaming DISTINCT membership");
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingClose(const StreamingCorePlan& core,
+                                                        bool close_cursor) {
+    if (close_cursor) {
+      if (!core.cursor.has_value()) {
+        return std::unexpected(InternalFailure("streaming core has no cursor to close"));
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = *core.cursor});
+          !closed.has_value()) {
+        return closed;
+      }
+    }
+    if (core.relation.has_value()) {
+      if (auto closed = Append(CloseRelationInstruction{.relation = *core.relation});
+          !closed.has_value()) {
+        return closed;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingResult(Label skipped, Label limit_completion,
+                                                         bool apply_offset) {
+    if (apply_offset) {
+      if (auto offset = EmitOffset(skipped); !offset.has_value()) {
+        return offset;
+      }
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (limit_ != nullptr) {
+      return EmitDistinctLimitAfterRow(DistinctLimitTargets{
+          .advance = skipped,
+          .completion = limit_completion,
+      });
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingTableCore(const StreamingCorePlan& core,
+                                                            const BoundSelectCore& select,
+                                                            Label final_completion) {
+    if (!core.cursor.has_value()) {
+      return std::unexpected(InternalFailure("streaming table core has no cursor"));
+    }
+    SetStreamingCoreContext(core);
+    const CursorId cursor = *core.cursor;
+    auto after_core = CreateLabel();
+    auto opened_completion = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    std::optional<Label> limit_completion;
+    if (!after_core.has_value()) {
+      return std::unexpected(std::move(after_core.error()));
+    }
+    if (!opened_completion.has_value()) {
+      return std::unexpected(std::move(opened_completion.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      limit_completion = *label;
+    }
+    if (auto guards = EmitStreamingGuards(core, *after_core); !guards.has_value()) {
+      return guards;
+    }
+    if (core.relation.has_value()) {
+      if (auto opened = Append(OpenRelationInstruction{.relation = *core.relation});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+      return opened;
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *opened_completion),
+                             "unable to emit streaming table rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
+      return filters;
+    }
+    if (!core.relation.has_value()) {
+      if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+        return offset;
+      }
+    }
+    if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+      return projected;
+    }
+    if (auto membership = EmitStreamingMembership(core, *advance); !membership.has_value()) {
+      return membership;
+    }
+    const Label row_limit_completion =
+        limit_completion.has_value() ? *limit_completion : final_completion;
+    if (auto result =
+            EmitStreamingResult(*advance, row_limit_completion, core.relation.has_value());
+        !result.has_value()) {
+      return result;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                     "unable to emit streaming table advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*opened_completion); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = EmitStreamingClose(core, true); !closed.has_value()) {
+      return closed;
+    }
+    if (auto jumped = EmitJump(*after_core); !jumped.has_value()) {
+      return jumped;
+    }
+    if (limit_completion.has_value()) {
+      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = EmitStreamingClose(core, true); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return BindLabel(*after_core);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingSingleCore(const StreamingCorePlan& core,
+                                                             const BoundSelectCore& select,
+                                                             Label final_completion) {
+    SetStreamingCoreContext(core);
+    auto after_core = CreateLabel();
+    auto opened_completion = CreateLabel();
+    std::optional<Label> limit_completion;
+    if (!after_core.has_value()) {
+      return std::unexpected(std::move(after_core.error()));
+    }
+    if (!opened_completion.has_value()) {
+      return std::unexpected(std::move(opened_completion.error()));
+    }
+    if (limit_ != nullptr && core.relation.has_value()) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      limit_completion = *label;
+    }
+    if (auto guards = EmitStreamingGuards(core, *after_core); !guards.has_value()) {
+      return guards;
+    }
+    if (core.relation.has_value()) {
+      if (auto opened = Append(OpenRelationInstruction{.relation = *core.relation});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    if (auto filters = EmitStreamingFilters(core, *opened_completion); !filters.has_value()) {
+      return filters;
+    }
+    if (!core.relation.has_value()) {
+      if (auto offset = EmitOffset(*opened_completion); !offset.has_value()) {
+        return offset;
+      }
+    }
+    if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+      return projected;
+    }
+    if (auto membership = EmitStreamingMembership(core, *opened_completion);
+        !membership.has_value()) {
+      return membership;
+    }
+    const Label row_limit_completion =
+        limit_completion.has_value() ? *limit_completion : final_completion;
+    if (auto result = EmitStreamingResult(*opened_completion, row_limit_completion,
+                                          core.relation.has_value());
+        !result.has_value()) {
+      return result;
+    }
+    if (auto bound = BindLabel(*opened_completion); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = EmitStreamingClose(core, false); !closed.has_value()) {
+      return closed;
+    }
+    if (auto jumped = EmitJump(*after_core); !jumped.has_value()) {
+      return jumped;
+    }
+    if (limit_completion.has_value()) {
+      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = EmitStreamingClose(core, false); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return BindLabel(*after_core);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingValuesCore(const BoundValuesCore& values,
+                                                             Label final_completion) {
+    cursor_.reset();
+    filter_ = nullptr;
+    projection_ = nullptr;
+    distinct_ = nullptr;
+    distinct_relation_.reset();
+    for (const std::vector<BoundExpressionId>& row : values.rows) {
+      if (row.size() != bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("VALUES row width is invalid"));
+      }
+      auto next_row = CreateLabel();
+      if (!next_row.has_value()) {
+        return std::unexpected(std::move(next_row.error()));
+      }
+      if (values.schedule == BoundValuesEvaluationSchedule::kConsumerFiltered) {
+        if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
+          return offset;
+        }
+      }
+      for (std::size_t index = 0; index < row.size(); ++index) {
+        if (auto emitted = EmitExpression(
+                row[index],
+                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+      if (values.schedule == BoundValuesEvaluationSchedule::kProducerEager) {
+        if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
+          return offset;
+        }
+      }
+      if (auto result = Append(ResultRowInstruction{
+              .first = result_block_first_,
+              .count = static_cast<std::uint32_t>(row.size()),
+          });
+          !result.has_value()) {
+        return result;
+      }
+      if (limit_ != nullptr) {
+        if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
+                .advance = *next_row,
+                .completion = final_completion,
+            });
+            !limited.has_value()) {
+          return limited;
+        }
+      }
+      if (auto bound = BindLabel(*next_row); !bound.has_value()) {
+        return bound;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingPlan() {
+    if (!streaming_query_ || streaming_cores_.empty()) {
+      return std::unexpected(InternalFailure("streaming query emission has no cores"));
+    }
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
+      return limit;
+    }
+    for (const StreamingCorePlan& core : streaming_cores_) {
+      if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+        if (auto emitted = EmitStreamingValuesCore(*values, *completion); !emitted.has_value()) {
+          return emitted;
+        }
+        continue;
+      }
+      const auto& select = std::get<BoundSelectCore>(*core.bound);
+      if (core.table_scan != nullptr) {
+        if (auto emitted = EmitStreamingTableCore(core, select, *completion);
+            !emitted.has_value()) {
+          return emitted;
+        }
+      } else {
+        if (auto emitted = EmitStreamingSingleCore(core, select, *completion);
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+    }
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitDistinctProjection() {
     if (projection_ == nullptr) {
       return std::unexpected(InternalFailure("DISTINCT projection is unavailable"));
@@ -5933,6 +6710,9 @@ class PlanLowerer final {
   const PhysicalOutputNode* output_ = nullptr;
   const PhysicalDistinctNode* distinct_ = nullptr;
   const PhysicalAdvancedOrderNode* advanced_order_ = nullptr;
+  bool streaming_query_ = false;
+  bool streaming_requires_snapshot_ = false;
+  std::vector<StreamingCorePlan> streaming_cores_;
 
   std::size_t next_register_ = 0;
   std::uint32_t register_count_ = 0;
@@ -6032,12 +6812,12 @@ LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
     });
   }
   if (std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
-        return std::holds_alternative<PhysicalValuesNode>(node.payload) ||
-               std::holds_alternative<PhysicalCompoundNode>(node.payload);
+        const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload);
+        return compound != nullptr && compound->strategy != PhysicalCompoundStrategy::kConcatenate;
       })) {
     return std::unexpected(PlanLoweringError{
         .code = PlanLoweringErrorCode::kUnsupportedPlan,
-        .detail = "VALUES and compound SELECT lowering is not supported",
+        .detail = "set compound SELECT lowering is not supported",
     });
   }
   return PlanLowerer(plan, limits).Run();

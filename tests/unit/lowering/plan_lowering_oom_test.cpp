@@ -375,6 +375,12 @@ int main() try {
       DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");
   const PhysicalPlan ordered_distinct = DistinctFixture(
       catalog, "SELECT DISTINCT Name FROM Items ORDER BY stable_guard(?) LIMIT ? OFFSET ?");
+  const PhysicalPlan values_union =
+      DistinctFixture(catalog, "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 LIMIT ?7 OFFSET ?8");
+  const PhysicalPlan table_union =
+      DistinctFixture(catalog, "SELECT Name FROM Items UNION ALL SELECT 'tail' LIMIT ? OFFSET ?");
+  const PhysicalPlan distinct_union =
+      DistinctFixture(catalog, "SELECT DISTINCT Name FROM Items UNION ALL SELECT 'tail' LIMIT ?");
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
@@ -416,6 +422,16 @@ int main() try {
 
     return LowerPlan(plan).has_value();
   };
+
+  if (!verify_oom(values_union)) {
+    return 1;
+  }
+  if (!verify_oom(table_union)) {
+    return 1;
+  }
+  if (!verify_oom(distinct_union)) {
+    return 1;
+  }
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
                  verify_oom(ordered_index) && verify_oom(ordered_limit_index) &&

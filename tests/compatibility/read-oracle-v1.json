@@ -4925,6 +4925,170 @@
       }
     },
     {
+      "expectation": "compare",
+      "id": "values-row-major",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e32"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "hex": "61",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e32"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "hex": "62",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 2,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 3,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e32"
+            }
+          ],
+          "next_offset": 21,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "union-all-limit-offset",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "6e616d65"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "hex": "44656c7461",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "6e616d65"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "hex": "7461696c",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 2,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 3,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "54455854",
+              "name_hex": "6e616d65"
+            }
+          ],
+          "next_offset": 63,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
       "boundary": {
         "first_step": "row",
         "prepare": "statement"
@@ -5736,7 +5900,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "b1a652541c2f6b0fdf335d2d7c9ae920549e89005dda8ab73f6d74e8177dbd59",
+  "corpus_sha256": "f3404a4bca8b24a67425a2790a61c055a309f69609173e3aef2e7b2216d47edc",
   "databases": [
     {
       "id": "core",
