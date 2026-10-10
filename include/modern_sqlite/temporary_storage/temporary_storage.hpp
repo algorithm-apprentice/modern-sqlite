@@ -19,15 +19,18 @@ namespace modern_sqlite {
 
 class Pager;
 class EphemeralRelation;
+class RecordSorter;
 class TemporaryStorageFactory;
 class TemporaryMemoryAccount;
 class TemporaryFileLease;
 class StatementTemporaryStorage;
+struct RecordSorterDescriptor;
 struct EphemeralRelationDescriptor;
 
 namespace temporary_storage_detail {
 struct MemoryRegistration;
 struct StatementState;
+class StatementStorageAccess;
 class RelationArenaAccess;
 }  // namespace temporary_storage_detail
 
@@ -65,6 +68,8 @@ class TemporaryMemoryAccount final {
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] ByteCount retained_bytes() const noexcept;
   [[nodiscard]] Status Reserve(ByteCount amount);
+  // Tracks a bounded file-mode drain working set that may exceed the spill budget.
+  [[nodiscard]] Status ReserveWorkingSet(ByteCount amount);
   [[nodiscard]] Status Release(ByteCount amount);
 
  private:
@@ -120,13 +125,15 @@ class StatementTemporaryStorage final {
   [[nodiscard]] Result<TemporaryMemoryAccount> RegisterMemoryOwner(
       TemporaryStorageSpillTarget& target);
   [[nodiscard]] Result<TemporaryFileLease> AcquireFileLease();
+  // The returned sorter borrows the underlying state, which must outlive it.
+  [[nodiscard]] Result<RecordSorter> CreateRecordSorter(const RecordSorterDescriptor& descriptor);
   // The returned relation borrows the underlying state, which must outlive it.
   [[nodiscard]] Result<EphemeralRelation> CreateEphemeralRelation(
       const EphemeralRelationDescriptor& descriptor);
 
  private:
   friend class TemporaryStorageFactory;
-  friend class temporary_storage_detail::RelationArenaAccess;
+  friend class temporary_storage_detail::StatementStorageAccess;
 
   explicit StatementTemporaryStorage(
       std::unique_ptr<temporary_storage_detail::StatementState> state) noexcept;
@@ -243,14 +250,13 @@ class RecordSorter final {
   void Close() noexcept;
 
  private:
-  friend class TemporaryStorageFactory;
+  friend class StatementTemporaryStorage;
 
   struct Impl;
 
   explicit RecordSorter(std::unique_ptr<Impl> impl) noexcept;
   [[nodiscard]] static Result<RecordSorter> Create(const RecordSorterDescriptor& descriptor,
-                                                   ByteCount memory_threshold,
-                                                   const TemporaryStorageFactory& factory);
+                                                   StatementTemporaryStorage& storage);
 
   std::unique_ptr<Impl> impl_;
 };
@@ -324,8 +330,6 @@ class TemporaryStorageFactory final {
   [[nodiscard]] bool file_spill_enabled() const noexcept;
   [[nodiscard]] ByteCount sorter_memory_threshold() const noexcept;
   [[nodiscard]] Result<StatementTemporaryStorage> CreateStatementStorage() const;
-  [[nodiscard]] Result<RecordSorter> CreateRecordSorter(
-      const RecordSorterDescriptor& descriptor) const;
   [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
                                                std::size_t bound) const;
   [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;

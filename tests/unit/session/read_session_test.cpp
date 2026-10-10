@@ -334,7 +334,7 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kFile,
-              .sorter_memory_threshold = ByteCount{1},
+              .sorter_memory_threshold = ByteCount{256},
           },
   };
   ReadSession vfs_session = TakeValue(
@@ -397,7 +397,7 @@ TEST(ReadSession, ExecutesDistinctValuesAndCompoundsThroughThePublicApi) {
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kFile,
-              .sorter_memory_threshold = ByteCount{1},
+              .sorter_memory_threshold = ByteCount{256},
           },
   };
   ReadSession file = TakeValue(ReadSession::Open(FixturePath().string(), file_options));

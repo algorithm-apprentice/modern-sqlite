@@ -151,6 +151,12 @@ temporarily hold encoding scratch and allocator metadata outside the account,
 as ADR-0055 already permits for bounded B-tree working sets. If one record is
 larger than the budget in file mode, do not retain it in memory: create the
 required arena and stream/insert it directly. Memory mode returns `kTooLarge`.
+When file-backed data is later positioned, the required drain working set may
+exceed the nominal budget after ordinary pressure spilling has reclaimed
+everything possible. This is one current relation record or at most one
+current sorter record per merge input. These buffers and fixed merge arrays
+remain fully included in retained/peak diagnostics; the bounded working-set
+reservation is not available in memory mode or for ordinary owner growth.
 Drain working sets remain bounded by merge fan-in, `maximum_value_bytes`, and
 the existing lowering limits on simultaneously positioned temporary streams.
 

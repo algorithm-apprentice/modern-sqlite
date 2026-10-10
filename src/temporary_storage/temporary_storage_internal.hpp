@@ -42,10 +42,14 @@ class RelationRootLease final {
 
 class RelationArenaAccess final {
  public:
-  [[nodiscard]] static StatementState& State(StatementTemporaryStorage& storage) noexcept;
-  [[nodiscard]] static bool Failed(const StatementState& state) noexcept;
   [[nodiscard]] static Result<RelationRootLease> Acquire(StatementState& state,
                                                          std::span<const IndexColumnOrder> columns);
+};
+
+class StatementStorageAccess final {
+ public:
+  [[nodiscard]] static StatementState& State(StatementTemporaryStorage& storage) noexcept;
+  [[nodiscard]] static bool Failed(const StatementState& state) noexcept;
 };
 
 }  // namespace temporary_storage_detail

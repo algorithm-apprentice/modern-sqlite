@@ -568,6 +568,21 @@ TEST(EphemeralRelation, AccountsCopiedOverflowRecordsOnlyWhilePositioned) {
   EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 }
 
+TEST(EphemeralRelation, TracksAnOversizedPositionedRecordAsAFileWorkingSet) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{128}};
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(relation.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
+                                      EphemeralInsertMode::kKeepExisting)));
+  RequireStatus(relation.Rewind());
+  EXPECT_GT(relation.memory_usage(), environment.storage().memory_budget());
+  EXPECT_EQ(relation.memory_usage(), environment.storage().retained_bytes());
+  EXPECT_FALSE(TakeValue(relation.Next()));
+  EXPECT_EQ(ByteCount{0}, relation.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
 TEST(EphemeralRelation, MemoryModeRejectsOversizedRecordsWithoutLosingExistingRows) {
   RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{128}};
   EphemeralRelation relation =
