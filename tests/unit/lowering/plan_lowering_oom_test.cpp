@@ -381,6 +381,14 @@ int main() try {
       DistinctFixture(catalog, "SELECT Name FROM Items UNION ALL SELECT 'tail' LIMIT ? OFFSET ?");
   const PhysicalPlan distinct_union =
       DistinctFixture(catalog, "SELECT DISTINCT Name FROM Items UNION ALL SELECT 'tail' LIMIT ?");
+  const std::array<PhysicalPlan, 5> set_plans{
+      DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1"),
+      DistinctFixture(catalog, "SELECT Name FROM Items EXCEPT SELECT ?1"),
+      DistinctFixture(catalog, "SELECT Name FROM Items INTERSECT SELECT ?1"),
+      DistinctFixture(catalog,
+                      "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
+      DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
+  };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
@@ -393,14 +401,14 @@ int main() try {
   const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
   const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
 
-  const auto verify_oom = [](const auto& plan) {
+  const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U) {
     allocation_index.store(0, std::memory_order_relaxed);
     const LowerPlanResult baseline = LowerPlan(plan);
     if (!baseline.has_value()) {
       return false;
     }
     const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
-    if (allocation_count == 0U || allocation_count > 128U) {
+    if (allocation_count == 0U || allocation_count > maximum_allocations) {
       return false;
     }
 
@@ -431,6 +439,11 @@ int main() try {
   }
   if (!verify_oom(distinct_union)) {
     return 1;
+  }
+  for (const PhysicalPlan& set_plan : set_plans) {
+    if (!verify_oom(set_plan, 320U)) {
+      return 1;
+    }
   }
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&

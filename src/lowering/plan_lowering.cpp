@@ -137,9 +137,10 @@ class PlanLowerer final {
       return std::unexpected(std::move(inspected.error()));
     }
     LoweringResult<void> layout =
-        streaming_query_
-            ? BuildStreamingRegisterLayout()
-            : (distinct_ != nullptr ? BuildDistinctRegisterLayout() : BuildReadRegisterLayout());
+        set_query_ ? BuildSetRegisterLayout()
+                   : (streaming_query_ ? BuildStreamingRegisterLayout()
+                                       : (distinct_ != nullptr ? BuildDistinctRegisterLayout()
+                                                               : BuildReadRegisterLayout()));
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
@@ -162,7 +163,7 @@ class PlanLowerer final {
     builder_.emplace(std::move(*created));
 
     if (streaming_requires_snapshot_ ||
-        (!streaming_query_ && bound_select_->table_source() != nullptr)) {
+        (!streaming_query_ && !set_query_ && bound_select_->table_source() != nullptr)) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
                                            "unable to require a database snapshot");
       if (!required.has_value()) {
@@ -175,7 +176,11 @@ class PlanLowerer final {
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
-    if (streaming_query_) {
+    if (set_query_) {
+      if (auto descriptors = AddSetDescriptors(); !descriptors.has_value()) {
+        return std::unexpected(std::move(descriptors.error()));
+      }
+    } else if (streaming_query_) {
       if (auto descriptors = AddStreamingDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
       }
@@ -186,14 +191,15 @@ class PlanLowerer final {
     } else if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
       return std::unexpected(std::move(ordering.error()));
     }
-    if (!streaming_query_) {
+    if (!streaming_query_ && !set_query_) {
       if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
     }
-    LoweringResult<void> emitted = streaming_query_
-                                       ? EmitStreamingPlan()
-                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan());
+    LoweringResult<void> emitted =
+        set_query_ ? EmitSetPlan()
+                   : (streaming_query_ ? EmitStreamingPlan()
+                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan()));
     if (!emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
@@ -681,13 +687,10 @@ class PlanLowerer final {
       return std::unexpected(
           UnsupportedFailure("ordered compound SELECT lowering is not supported"));
     }
-    if (!std::ranges::all_of(bound_select_->compound_operators(), [](CompoundOperator operation) {
-          return operation == CompoundOperator::kUnionAll;
-        })) {
-      return std::unexpected(UnsupportedFailure("set compound SELECT lowering is not supported"));
-    }
-
-    streaming_query_ = true;
+    streaming_query_ = std::ranges::all_of(
+        bound_select_->compound_operators(),
+        [](CompoundOperator operation) { return operation == CompoundOperator::kUnionAll; });
+    set_query_ = !streaming_query_;
     streaming_cores_.resize(cores.size());
     for (std::size_t index = 0; index < cores.size(); ++index) {
       streaming_cores_[index].core_index = index;
@@ -758,11 +761,17 @@ class PlanLowerer final {
         node_cores[index] = distinct->core_index;
       } else if (const auto* compound = std::get_if<PhysicalCompoundNode>(&physical.payload);
                  compound != nullptr) {
-        if (compound->operation != CompoundOperator::kUnionAll ||
-            compound->strategy != PhysicalCompoundStrategy::kConcatenate) {
+        const bool concatenate = compound->operation == CompoundOperator::kUnionAll &&
+                                 compound->strategy == PhysicalCompoundStrategy::kConcatenate;
+        const bool set = compound->operation != CompoundOperator::kUnionAll &&
+                         (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
+                          compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne);
+        if (!concatenate && !set) {
           return std::unexpected(
-              UnsupportedFailure("set compound SELECT lowering is not supported"));
+              UnsupportedFailure("ordered compound SELECT lowering is not supported"));
         }
+        set_limit_one_ =
+            set_limit_one_ || compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne;
         ++compound_count;
       } else if (const auto* limit = std::get_if<PhysicalLimitNode>(&physical.payload);
                  limit != nullptr) {
@@ -1210,7 +1219,7 @@ class PlanLowerer final {
   }
 
   [[nodiscard]] LoweringResult<void> BuildStreamingRegisterLayout() {
-    if (!streaming_query_ || streaming_cores_.empty()) {
+    if ((!streaming_query_ && !set_query_) || streaming_cores_.empty()) {
       return std::unexpected(InternalFailure("streaming register layout has no cores"));
     }
     if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
@@ -1255,6 +1264,37 @@ class PlanLowerer final {
         offset_register_ = *offset_register;
         comparison_register_ = *comparison_register;
       }
+    }
+    return FinishRegisterLayout();
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildSetRegisterLayout() {
+    if (!set_query_) {
+      return std::unexpected(InternalFailure("set register layout has no set query"));
+    }
+    if (auto streaming = BuildStreamingRegisterLayout(); !streaming.has_value()) {
+      return streaming;
+    }
+    if (!zero_register_.has_value()) {
+      auto zero = AllocateRegisters(1);
+      if (!zero.has_value()) {
+        return std::unexpected(std::move(zero.error()));
+      }
+      zero_register_ = *zero;
+    }
+    if (!one_register_.has_value()) {
+      auto one = AllocateRegisters(1);
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      one_register_ = *one;
+    }
+    for (std::optional<RegisterId>& count : set_count_registers_) {
+      auto allocated = AllocateRegisters(1);
+      if (!allocated.has_value()) {
+        return std::unexpected(std::move(allocated.error()));
+      }
+      count = *allocated;
     }
     return FinishRegisterLayout();
   }
@@ -1735,6 +1775,41 @@ class PlanLowerer final {
           core.relation = *relation;
         }
       }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> AddSetDescriptors() {
+    if (auto streaming = AddStreamingDescriptors(); !streaming.has_value()) {
+      return streaming;
+    }
+    if (bound_select_->compound_collations().size() != bound_select_->result_columns().size() ||
+        bound_select_->result_columns().size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(InternalFailure("compound relation descriptor shape is invalid"));
+    }
+    for (std::optional<RelationId>& relation : set_relations_) {
+      OrderingRecordDescriptor descriptor{
+          .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+          .key_field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+          .key_columns = {},
+      };
+      descriptor.key_columns.reserve(bound_select_->compound_collations().size());
+      for (const BoundCollationId collation : bound_select_->compound_collations()) {
+        if (collation.value() >= collation_symbols_.size()) {
+          return std::unexpected(InternalFailure("compound collation is not published"));
+        }
+        descriptor.key_columns.push_back(OrderingColumnMetadata{
+            .collation = collation_symbols_[collation.value()],
+            .order = BytecodeSortOrder::kAscending,
+            .null_placement = BytecodeNullPlacement::kFirst,
+        });
+      }
+      auto added = ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(descriptor)),
+                                        "unable to add compound relation descriptor");
+      if (!added.has_value()) {
+        return std::unexpected(std::move(added.error()));
+      }
+      relation = *added;
     }
     return {};
   }
@@ -6018,6 +6093,926 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
+  [[nodiscard]] RelationId SetRelation(std::size_t index) const noexcept {
+    return AssumeValue(set_relations_[index]);
+  }
+
+  [[nodiscard]] RegisterId SetCount(std::size_t index) const noexcept {
+    return AssumeValue(set_count_registers_[index]);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetCounterInitialization() {
+    if (!zero_register_.has_value() || !one_register_.has_value()) {
+      return std::unexpected(InternalFailure("set counters have no constants"));
+    }
+    auto zero = EnsureZeroConstant();
+    auto one = EnsureOneConstant();
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto loaded = Append(LoadConstantInstruction{
+            .constant = *zero,
+            .output = AssumeValue(zero_register_),
+        });
+        !loaded.has_value()) {
+      return loaded;
+    }
+    return Append(LoadConstantInstruction{
+        .constant = *one,
+        .output = AssumeValue(one_register_),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetIncrement(RegisterId count) {
+    return Append(BinaryInstruction{
+        .operation = BinaryOperation::kAdd,
+        .left = count,
+        .right = AssumeValue(one_register_),
+        .output = count,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetDecrement(RegisterId count) {
+    return Append(BinaryInstruction{
+        .operation = BinaryOperation::kSubtract,
+        .left = count,
+        .right = AssumeValue(one_register_),
+        .output = count,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOpenCountedRelation(RelationId relation,
+                                                             RegisterId count) {
+    if (auto opened = Append(OpenRelationInstruction{.relation = relation}); !opened.has_value()) {
+      return opened;
+    }
+    return Append(CopyInstruction{
+        .input = AssumeValue(zero_register_),
+        .output = count,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetInsert(RelationId relation, RelationInsertMode mode,
+                                                   std::optional<RegisterId> count) {
+    auto existing = CreateLabel();
+    if (!existing.has_value()) {
+      return std::unexpected(std::move(existing.error()));
+    }
+    auto inserted = ConvertProgramResult(
+        AssumeValue(builder_).EmitInsertRelation(
+            relation, result_block_first_,
+            static_cast<std::uint32_t>(bound_select_->result_columns().size()), mode, *existing),
+        "unable to emit set relation insertion");
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (count.has_value()) {
+      if (auto incremented = EmitSetIncrement(*count); !incremented.has_value()) {
+        return incremented;
+      }
+    }
+    return BindLabel(*existing);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitMaterializedSetInsert(
+      RelationId target, std::optional<RegisterId> count,
+      std::optional<RelationId> distinct_membership) {
+    if (!distinct_membership.has_value()) {
+      return EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
+    }
+    auto duplicate = CreateLabel();
+    if (!duplicate.has_value()) {
+      return std::unexpected(std::move(duplicate.error()));
+    }
+    auto inserted =
+        ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
+                                 *distinct_membership, result_block_first_,
+                                 static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+                                 RelationInsertMode::kKeepExisting, *duplicate),
+                             "unable to emit set-arm DISTINCT membership");
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (auto target_inserted = EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
+        !target_inserted.has_value()) {
+      return target_inserted;
+    }
+    return BindLabel(*duplicate);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitMaterializeSelectRows(
+      const StreamingCorePlan& core, const BoundSelectCore& select, RelationId target,
+      std::optional<RegisterId> count, bool emit_guards,
+      std::optional<RelationId> distinct_membership = std::nullopt) {
+    SetStreamingCoreContext(core);
+    auto after = CreateLabel();
+    if (!after.has_value()) {
+      return std::unexpected(std::move(after.error()));
+    }
+    if (emit_guards) {
+      if (auto guards = EmitStreamingGuards(core, *after); !guards.has_value()) {
+        return guards;
+      }
+    }
+    if (core.table_scan != nullptr) {
+      if (!core.cursor.has_value()) {
+        return std::unexpected(InternalFailure("set table core has no cursor"));
+      }
+      const CursorId cursor = *core.cursor;
+      auto done = CreateLabel();
+      auto row = CreateLabel();
+      auto advance = CreateLabel();
+      if (!done.has_value()) {
+        return std::unexpected(std::move(done.error()));
+      }
+      if (!row.has_value()) {
+        return std::unexpected(std::move(row.error()));
+      }
+      if (!advance.has_value()) {
+        return std::unexpected(std::move(advance.error()));
+      }
+      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+        return opened;
+      }
+      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                          "unable to emit set table rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+      if (auto bound = BindLabel(*row); !bound.has_value()) {
+        return bound;
+      }
+      if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
+        return filters;
+      }
+      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        return projected;
+      }
+      if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
+          !inserted.has_value()) {
+        return inserted;
+      }
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                       "unable to emit set table advance");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+      if (auto bound = BindLabel(*done); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+        return closed;
+      }
+    } else {
+      if (auto filters = EmitStreamingFilters(core, *after); !filters.has_value()) {
+        return filters;
+      }
+      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        return projected;
+      }
+      if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
+          !inserted.has_value()) {
+        return inserted;
+      }
+    }
+    return BindLabel(*after);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitMaterializeValuesRows(const BoundValuesCore& values,
+                                                               RelationId target,
+                                                               std::optional<RegisterId> count) {
+    for (const std::vector<BoundExpressionId>& row : values.rows) {
+      if (row.size() != bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("set VALUES row width is invalid"));
+      }
+      for (std::size_t index = 0; index < row.size(); ++index) {
+        if (auto emitted = EmitExpression(
+                row[index],
+                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+      if (auto inserted = EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
+          !inserted.has_value()) {
+        return inserted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitTransferRelation(RelationId source,
+                                                          RelationInsertMode mode,
+                                                          RelationId target,
+                                                          std::optional<RegisterId> target_count) {
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(source, *empty),
+                                        "unable to emit set relation rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    for (std::size_t index = 0; index < bound_select_->result_columns().size(); ++index) {
+      if (auto read = Append(ReadRelationFieldInstruction{
+              .relation = source,
+              .field = static_cast<std::uint32_t>(index),
+              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    if (auto inserted = EmitSetInsert(target, mode, target_count); !inserted.has_value()) {
+      return inserted;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(source, *row),
+                                     "unable to emit set relation advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    return Append(CloseRelationInstruction{.relation = source});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitMaterializeCore(const StreamingCorePlan& core,
+                                                         RelationId target, RegisterId count) {
+    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+      return EmitMaterializeValuesRows(*values, target, count);
+    }
+    const auto& select = std::get<BoundSelectCore>(*core.bound);
+    if (core.relation == std::nullopt) {
+      return EmitMaterializeSelectRows(core, select, target, count, true);
+    }
+
+    SetStreamingCoreContext(core);
+    auto skipped = CreateLabel();
+    if (!skipped.has_value()) {
+      return std::unexpected(std::move(skipped.error()));
+    }
+    if (auto guards = EmitStreamingGuards(core, *skipped); !guards.has_value()) {
+      return guards;
+    }
+    const RelationId local = *core.relation;
+    if (auto opened = Append(OpenRelationInstruction{.relation = local}); !opened.has_value()) {
+      return opened;
+    }
+    if (auto rows = EmitMaterializeSelectRows(core, select, target, count, false, local);
+        !rows.has_value()) {
+      return rows;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = local}); !closed.has_value()) {
+      return closed;
+    }
+    return BindLabel(*skipped);
+  }
+
+  struct SetAccumulator {
+    std::size_t accumulator = 0;
+    std::size_t right = 1;
+    std::size_t output = 2;
+  };
+
+  [[nodiscard]] LoweringResult<void> EmitReadSetRow(RelationId relation) {
+    for (std::size_t index = 0; index < bound_select_->result_columns().size(); ++index) {
+      if (auto read = Append(ReadRelationFieldInstruction{
+              .relation = relation,
+              .field = static_cast<std::uint32_t>(index),
+              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUnionStep(SetAccumulator state,
+                                                   const StreamingCorePlan& right_core) {
+    const RelationId accumulator = SetRelation(state.accumulator);
+    const RelationId right = SetRelation(state.right);
+    const RegisterId accumulator_count = SetCount(state.accumulator);
+    const RegisterId right_count = SetCount(state.right);
+    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
+      return opened;
+    }
+    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
+        !materialized.has_value()) {
+      return materialized;
+    }
+    return EmitTransferRelation(right, RelationInsertMode::kReplaceExisting, accumulator,
+                                accumulator_count);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitExceptStep(SetAccumulator state,
+                                                    const StreamingCorePlan& right_core) {
+    const RelationId accumulator = SetRelation(state.accumulator);
+    const RelationId right = SetRelation(state.right);
+    const RegisterId accumulator_count = SetCount(state.accumulator);
+    const RegisterId right_count = SetCount(state.right);
+    auto after = CreateLabel();
+    auto empty_right = CreateLabel();
+    auto row = CreateLabel();
+    auto found = CreateLabel();
+    auto advance = CreateLabel();
+    if (!after.has_value()) {
+      return std::unexpected(std::move(after.error()));
+    }
+    if (!empty_right.has_value()) {
+      return std::unexpected(std::move(empty_right.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (auto skipped = EmitJumpIf(accumulator_count, JumpCondition::kIfFalse, *after);
+        !skipped.has_value()) {
+      return skipped;
+    }
+    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
+      return opened;
+    }
+    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
+        !materialized.has_value()) {
+      return materialized;
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(right, *empty_right),
+                             "unable to emit EXCEPT right rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto read = EmitReadSetRow(right); !read.has_value()) {
+      return read;
+    }
+    auto contained = ConvertProgramResult(
+        AssumeValue(builder_).EmitContainsRelation(
+            accumulator, result_block_first_,
+            static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
+        "unable to emit EXCEPT membership");
+    if (!contained.has_value()) {
+      return std::unexpected(std::move(contained.error()));
+    }
+    if (auto jumped = EmitJump(*advance); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*found); !bound.has_value()) {
+      return bound;
+    }
+    if (auto erased = Append(DeleteRelationInstruction{
+            .relation = accumulator,
+            .first_key = result_block_first_,
+            .key_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        });
+        !erased.has_value()) {
+      return erased;
+    }
+    if (auto decremented = EmitSetDecrement(accumulator_count); !decremented.has_value()) {
+      return decremented;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(right, *row),
+                                     "unable to emit EXCEPT right advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty_right); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = right}); !closed.has_value()) {
+      return closed;
+    }
+    return BindLabel(*after);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitIntersectStep(SetAccumulator* state,
+                                                       const StreamingCorePlan& right_core) {
+    const RelationId accumulator = SetRelation(state->accumulator);
+    const RelationId right = SetRelation(state->right);
+    const RelationId output = SetRelation(state->output);
+    const RegisterId accumulator_count = SetCount(state->accumulator);
+    const RegisterId right_count = SetCount(state->right);
+    const RegisterId output_count = SetCount(state->output);
+    auto empty_scan = CreateLabel();
+    auto row = CreateLabel();
+    auto found = CreateLabel();
+    auto advance = CreateLabel();
+    auto done = CreateLabel();
+    if (!empty_scan.has_value()) {
+      return std::unexpected(std::move(empty_scan.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!found.has_value()) {
+      return std::unexpected(std::move(found.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    if (auto skipped = EmitJumpIf(accumulator_count, JumpCondition::kIfFalse, *done);
+        !skipped.has_value()) {
+      return skipped;
+    }
+    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
+      return opened;
+    }
+    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
+        !materialized.has_value()) {
+      return materialized;
+    }
+    if (auto opened = EmitOpenCountedRelation(output, output_count); !opened.has_value()) {
+      return opened;
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(accumulator, *empty_scan),
+                             "unable to emit INTERSECT left rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto read = EmitReadSetRow(accumulator); !read.has_value()) {
+      return read;
+    }
+    auto contained = ConvertProgramResult(
+        AssumeValue(builder_).EmitContainsRelation(
+            right, result_block_first_,
+            static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
+        "unable to emit INTERSECT membership");
+    if (!contained.has_value()) {
+      return std::unexpected(std::move(contained.error()));
+    }
+    if (auto jumped = EmitJump(*advance); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*found); !bound.has_value()) {
+      return bound;
+    }
+    if (auto inserted = EmitSetInsert(output, RelationInsertMode::kKeepExisting, output_count);
+        !inserted.has_value()) {
+      return inserted;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(accumulator, *row),
+                                     "unable to emit INTERSECT left advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty_scan); !bound.has_value()) {
+      return bound;
+    }
+    if (auto reset = Append(ResetRelationInstruction{.relation = accumulator});
+        !reset.has_value()) {
+      return reset;
+    }
+    if (auto cleared_count = Append(CopyInstruction{
+            .input = AssumeValue(zero_register_),
+            .output = accumulator_count,
+        });
+        !cleared_count.has_value()) {
+      return cleared_count;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = right}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto transferred = EmitTransferRelation(output, RelationInsertMode::kKeepExisting,
+                                                accumulator, accumulator_count);
+        !transferred.has_value()) {
+      return transferred;
+    }
+    return BindLabel(*done);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetMaterialization(std::size_t end_operation,
+                                                            SetAccumulator* state) {
+    const RelationId accumulator = SetRelation(state->accumulator);
+    const RegisterId accumulator_count = SetCount(state->accumulator);
+    if (auto opened = EmitOpenCountedRelation(accumulator, accumulator_count);
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto first = EmitMaterializeCore(streaming_cores_.front(), accumulator, accumulator_count);
+        !first.has_value()) {
+      return first;
+    }
+    for (std::size_t operation_index = 0; operation_index <= end_operation; ++operation_index) {
+      const CompoundOperator operation = bound_select_->compound_operators()[operation_index];
+      const StreamingCorePlan& right_core = streaming_cores_[operation_index + 1U];
+      switch (operation) {
+        case CompoundOperator::kUnionAll:
+          if (auto materialized = EmitMaterializeCore(right_core, SetRelation(state->accumulator),
+                                                      SetCount(state->accumulator));
+              !materialized.has_value()) {
+            return materialized;
+          }
+          break;
+        case CompoundOperator::kUnion:
+          if (auto united = EmitUnionStep(*state, right_core); !united.has_value()) {
+            return united;
+          }
+          break;
+        case CompoundOperator::kExcept:
+          if (auto excepted = EmitExceptStep(*state, right_core); !excepted.has_value()) {
+            return excepted;
+          }
+          break;
+        case CompoundOperator::kIntersect:
+          if (auto intersected = EmitIntersectStep(state, right_core); !intersected.has_value()) {
+            return intersected;
+          }
+          break;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDrainSetRelation(RelationId relation,
+                                                          Label final_completion) {
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    auto after = CreateLabel();
+    std::optional<Label> limit_completion;
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (!after.has_value()) {
+      return std::unexpected(std::move(after.error()));
+    }
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      limit_completion = *label;
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
+                                        "unable to emit final set rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
+      return read;
+    }
+    if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+      return offset;
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (limit_completion.has_value()) {
+      if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
+              .advance = *advance,
+              .completion = *limit_completion,
+          });
+          !limited.has_value()) {
+        return limited;
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(relation, *row),
+                                     "unable to emit final set advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto jumped = EmitJump(*after); !jumped.has_value()) {
+      return jumped;
+    }
+    if (limit_completion.has_value()) {
+      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseRelationInstruction{.relation = relation});
+          !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return BindLabel(*after);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitDemandOneRelation(RelationId relation,
+                                                           Label final_completion) {
+    auto empty = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
+                                        "unable to emit LIMIT-one set rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
+      return read;
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    return Append(CloseRelationInstruction{.relation = relation});
+  }
+
+  [[nodiscard]] LoweringResult<bool> EmitDemandOneCore(const StreamingCorePlan& core,
+                                                       Label final_completion) {
+    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+      if (values->rows.empty()) {
+        return false;
+      }
+      const std::vector<BoundExpressionId>& row = values->rows.front();
+      for (std::size_t index = 0; index < row.size(); ++index) {
+        if (auto emitted = EmitExpression(
+                row[index],
+                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return std::unexpected(std::move(emitted.error()));
+        }
+      }
+      if (auto result = Append(ResultRowInstruction{
+              .first = result_block_first_,
+              .count = static_cast<std::uint32_t>(row.size()),
+          });
+          !result.has_value()) {
+        return std::unexpected(std::move(result.error()));
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      return true;
+    }
+
+    const auto& select = std::get<BoundSelectCore>(*core.bound);
+    SetStreamingCoreContext(core);
+    auto next_core = CreateLabel();
+    if (!next_core.has_value()) {
+      return std::unexpected(std::move(next_core.error()));
+    }
+    if (auto guards = EmitStreamingGuards(core, *next_core); !guards.has_value()) {
+      return std::unexpected(std::move(guards.error()));
+    }
+    if (core.table_scan != nullptr) {
+      if (!core.cursor.has_value()) {
+        return std::unexpected(InternalFailure("LIMIT-one table core has no cursor"));
+      }
+      const CursorId cursor = *core.cursor;
+      auto done = CreateLabel();
+      auto row = CreateLabel();
+      std::optional<Label> advance;
+      if (core.filter != nullptr && !core.filter->predicates.empty()) {
+        auto created = CreateLabel();
+        if (!created.has_value()) {
+          return std::unexpected(std::move(created.error()));
+        }
+        advance = *created;
+      }
+      if (!done.has_value()) {
+        return std::unexpected(std::move(done.error()));
+      }
+      if (!row.has_value()) {
+        return std::unexpected(std::move(row.error()));
+      }
+      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                          "unable to emit LIMIT-one table rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+      if (auto bound = BindLabel(*row); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto filters = EmitStreamingFilters(core, advance.value_or(*done));
+          !filters.has_value()) {
+        return std::unexpected(std::move(filters.error()));
+      }
+      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        return std::unexpected(std::move(projected.error()));
+      }
+      if (auto result = Append(ResultRowInstruction{
+              .first = result_block_first_,
+              .count = static_cast<std::uint32_t>(select.result_columns.size()),
+          });
+          !result.has_value()) {
+        return std::unexpected(std::move(result.error()));
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (advance.has_value()) {
+        if (auto bound = BindLabel(*advance); !bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                         "unable to emit LIMIT-one table advance");
+        if (!next.has_value()) {
+          return std::unexpected(std::move(next.error()));
+        }
+      }
+      if (auto bound = BindLabel(*done); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto bound = BindLabel(*next_core); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      return false;
+    }
+
+    if (auto filters = EmitStreamingFilters(core, *next_core); !filters.has_value()) {
+      return std::unexpected(std::move(filters.error()));
+    }
+    if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+      return std::unexpected(std::move(projected.error()));
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(select.result_columns.size()),
+        });
+        !result.has_value()) {
+      return std::unexpected(std::move(result.error()));
+    }
+    if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*next_core); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return core.filter == nullptr ||
+           (core.filter->guards.empty() && core.filter->predicates.empty());
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetLimitOnePlan(Label final_completion) {
+    std::optional<std::size_t> last_barrier;
+    for (std::size_t index = 0; index < bound_select_->compound_operators().size(); ++index) {
+      const CompoundOperator operation = bound_select_->compound_operators()[index];
+      if (operation == CompoundOperator::kExcept || operation == CompoundOperator::kIntersect) {
+        last_barrier = index;
+      }
+    }
+    std::size_t first_core = 0;
+    if (last_barrier.has_value()) {
+      SetAccumulator state;
+      if (auto materialized = EmitSetMaterialization(*last_barrier, &state);
+          !materialized.has_value()) {
+        return materialized;
+      }
+      if (auto demanded = EmitDemandOneRelation(SetRelation(state.accumulator), final_completion);
+          !demanded.has_value()) {
+        return demanded;
+      }
+      first_core = *last_barrier + 2U;
+    }
+    for (std::size_t core_index = first_core; core_index < streaming_cores_.size(); ++core_index) {
+      auto demanded = EmitDemandOneCore(streaming_cores_[core_index], final_completion);
+      if (!demanded.has_value()) {
+        return std::unexpected(std::move(demanded.error()));
+      }
+      if (*demanded) {
+        break;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetPlan() {
+    if (!set_query_ || bound_select_->compound_operators().empty()) {
+      return std::unexpected(InternalFailure("set query emission has no operators"));
+    }
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto counters = EmitSetCounterInitialization(); !counters.has_value()) {
+      return counters;
+    }
+    if (set_limit_one_) {
+      if (auto limited = EmitSetLimitOnePlan(*completion); !limited.has_value()) {
+        return limited;
+      }
+    } else {
+      std::optional<std::size_t> last_set;
+      for (std::size_t index = 0; index < bound_select_->compound_operators().size(); ++index) {
+        if (bound_select_->compound_operators()[index] != CompoundOperator::kUnionAll) {
+          last_set = index;
+        }
+      }
+      if (!last_set.has_value()) {
+        return std::unexpected(InternalFailure("set query has no set operator"));
+      }
+      SetAccumulator state;
+      if (auto materialized = EmitSetMaterialization(*last_set, &state);
+          !materialized.has_value()) {
+        return materialized;
+      }
+      if (auto drained = EmitDrainSetRelation(SetRelation(state.accumulator), *completion);
+          !drained.has_value()) {
+        return drained;
+      }
+      for (std::size_t core_index = *last_set + 2U; core_index < streaming_cores_.size();
+           ++core_index) {
+        const StreamingCorePlan& core = streaming_cores_[core_index];
+        if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+          if (auto emitted = EmitStreamingValuesCore(*values, *completion); !emitted.has_value()) {
+            return emitted;
+          }
+        } else {
+          const auto& select = std::get<BoundSelectCore>(*core.bound);
+          if (core.table_scan != nullptr) {
+            if (auto emitted = EmitStreamingTableCore(core, select, *completion);
+                !emitted.has_value()) {
+              return emitted;
+            }
+          } else {
+            if (auto emitted = EmitStreamingSingleCore(core, select, *completion);
+                !emitted.has_value()) {
+              return emitted;
+            }
+          }
+        }
+      }
+    }
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitDistinctProjection() {
     if (projection_ == nullptr) {
       return std::unexpected(InternalFailure("DISTINCT projection is unavailable"));
@@ -6711,8 +7706,12 @@ class PlanLowerer final {
   const PhysicalDistinctNode* distinct_ = nullptr;
   const PhysicalAdvancedOrderNode* advanced_order_ = nullptr;
   bool streaming_query_ = false;
+  bool set_query_ = false;
+  bool set_limit_one_ = false;
   bool streaming_requires_snapshot_ = false;
   std::vector<StreamingCorePlan> streaming_cores_;
+  std::array<std::optional<RelationId>, 3> set_relations_{};
+  std::array<std::optional<RegisterId>, 3> set_count_registers_{};
 
   std::size_t next_register_ = 0;
   std::uint32_t register_count_ = 0;
@@ -6809,15 +7808,6 @@ LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
     return std::unexpected(PlanLoweringError{
         .code = PlanLoweringErrorCode::kInvalidInput,
         .detail = "physical plan is invalid",
-    });
-  }
-  if (std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
-        const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload);
-        return compound != nullptr && compound->strategy != PhysicalCompoundStrategy::kConcatenate;
-      })) {
-    return std::unexpected(PlanLoweringError{
-        .code = PlanLoweringErrorCode::kUnsupportedPlan,
-        .detail = "set compound SELECT lowering is not supported",
     });
   }
   return PlanLowerer(plan, limits).Run();
