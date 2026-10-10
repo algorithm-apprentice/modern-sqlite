@@ -386,6 +386,37 @@ int main() try {
     }
   }
 
+  const std::array<PhysicalPlan, 5> set_plans{
+      PhysicalFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1"),
+      PhysicalFixture(catalog, "SELECT Name FROM Items EXCEPT SELECT ?1"),
+      PhysicalFixture(catalog, "SELECT Name FROM Items INTERSECT SELECT ?1"),
+      PhysicalFixture(catalog,
+                      "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
+      PhysicalFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
+  };
+  std::array<std::size_t, 5> set_allocations{};
+  std::unique_ptr<BytecodeProgram> set_published;
+  for (std::size_t plan_index = 0; plan_index < set_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(set_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations == 0U || allocations > 320U ||
+          (set_allocations[plan_index] != 0U && allocations != set_allocations[plan_index])) {
+        return 1;
+      }
+      set_allocations[plan_index] = allocations;
+      if (plan_index + 1U == set_plans.size() && set_published == nullptr) {
+        set_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   constexpr std::size_t kExpectedMutationAllocations = 21U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
