@@ -245,6 +245,13 @@ int main() try {
   if (ordered_allocations != 7U) {
     return 1;
   }
+  const std::size_t compound_allocations = OptimizeAllocationCount(
+      "SELECT DISTINCT id,Name FROM Items "
+      "UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
+      catalog);
+  if (compound_allocations == 0U || compound_allocations > 128U) {
+    return 1;
+  }
 
   LogicalStatementPlan mutation_logical = LogicalMutationFixture(catalog);
   allocation_count.store(0, std::memory_order_relaxed);
@@ -274,6 +281,16 @@ int main() try {
     return 1;
   }
   std::unique_ptr<PhysicalPlan> ordered = std::make_unique<PhysicalPlan>(std::move(*ordered_built));
+  LogicalPlan compound_logical = LogicalFixture(
+      "SELECT DISTINCT id,Name FROM Items "
+      "UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
+      catalog);
+  OptimizeLogicalPlanResult compound_built = OptimizeLogicalPlan(std::move(compound_logical));
+  if (!compound_built.has_value()) {
+    return 1;
+  }
+  std::unique_ptr<PhysicalPlan> compound =
+      std::make_unique<PhysicalPlan>(std::move(*compound_built));
 
   std::uint64_t checksum = 0;
   fail_allocations = true;
@@ -281,8 +298,12 @@ int main() try {
   checksum += published->nodes().size();
   checksum += published->candidates().size();
   checksum += published->root().value();
-  checksum += published->selected_candidate_index();
-  checksum += published->selected_candidate().cost.work_units;
+  if (!published->selected_candidate_index().has_value() ||
+      published->selected_candidate() == nullptr) {
+    return 1;
+  }
+  checksum += *published->selected_candidate_index();
+  checksum += published->selected_candidate()->cost.work_units;
   for (std::uint32_t index = 0; index < published->nodes().size(); ++index) {
     const PhysicalNode& node = published->node(PhysicalNodeId{index});
     checksum += static_cast<std::uint64_t>(PhysicalNodeKindOf(node));
@@ -293,6 +314,18 @@ int main() try {
   checksum += sort.terms.size();
   checksum += sort.payload_expressions.size();
   checksum += sort.output_fields.size();
+  checksum += compound->nodes().size();
+  checksum += compound->candidates().size();
+  checksum += compound->root().value();
+  if (compound->selected_candidate_index().has_value() ||
+      compound->selected_candidate() != nullptr) {
+    return 1;
+  }
+  for (std::uint32_t index = 0; index < compound->nodes().size(); ++index) {
+    const PhysicalNode& node = compound->node(PhysicalNodeId{index});
+    checksum += static_cast<std::uint64_t>(PhysicalNodeKindOf(node));
+    std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
+  }
   const PhysicalMutationPlan& mutation = std::get<PhysicalMutationPlan>(mutation_plan);
   const auto& update = std::get<PhysicalUpdateMutation>(mutation.payload());
   checksum += static_cast<std::uint64_t>(update.access.kind);

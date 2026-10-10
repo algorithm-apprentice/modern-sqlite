@@ -706,6 +706,24 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(ReadLowering, DefersDistinctValuesAndCompoundPlans) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  constexpr std::array<std::string_view, 3> cases{
+      "SELECT DISTINCT id FROM items",
+      "VALUES(1),(2)",
+      "SELECT 1 UNION SELECT 2",
+  };
+  for (const std::string_view sql : cases) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    LowerPlanResult lowered = LowerPlan(plan);
+    ASSERT_FALSE(lowered.has_value());
+    EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
+    EXPECT_EQ("DISTINCT, VALUES, and compound SELECT lowering is not supported",
+              lowered.error().detail);
+  }
+}
+
 TEST(ReadLowering, LowersRuntimeLimitOrderByIntoTopNAndExternalFallbackBytecode) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BytecodeProgram program =

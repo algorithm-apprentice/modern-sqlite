@@ -174,8 +174,8 @@ bool inject_failure = false;
     throw std::runtime_error{"failed to plan covering index lowering OOM fixture"};
   }
   OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
-  if (!physical.has_value() ||
-      physical->selected_candidate().kind != PhysicalAccessKind::kIndexScan) {
+  if (!physical.has_value() || physical->selected_candidate() == nullptr ||
+      physical->selected_candidate()->kind != PhysicalAccessKind::kIndexScan) {
     throw std::runtime_error{"failed to optimize covering index lowering OOM fixture"};
   }
   return std::move(*physical);
