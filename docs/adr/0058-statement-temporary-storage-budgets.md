@@ -164,10 +164,11 @@ ByteCount overhead_bytes() const noexcept;
 
 Add `EphemeralRelation::memory_usage()`. Capability `memory_usage()` accessors
 report owner-charged retained bytes. Registration tables, free-extent
-metadata, and other shared-arena allocations report as statement overhead:
+metadata, and other shared-arena allocations report separately as statement
+overhead:
 
 ```text
-sum(capability memory_usage) + overhead_bytes = retained_bytes
+sum(capability memory_usage) = retained_bytes
 ```
 
 ### 4. Register spillable owners through scoped borrowing

@@ -100,6 +100,341 @@ constexpr std::size_t kMergeFanIn = 16;
 
 }  // namespace
 
+namespace temporary_storage_detail {
+
+struct StatementState;
+
+struct MemoryRegistration {
+  ~MemoryRegistration();
+
+  // All links are borrowed; the account owns this registration.
+  StatementState* state = nullptr;
+  TemporaryStorageSpillTarget* target = nullptr;
+  MemoryRegistration* previous = nullptr;
+  MemoryRegistration* next = nullptr;
+  std::size_t retained_bytes = 0;
+  std::uint64_t ordinal = 0;
+  bool spilling = false;
+};
+
+struct StatementState {
+  StatementState(const TemporaryStorageFactory& owning_factory, ByteCount memory_limit) noexcept
+      : factory(&owning_factory),
+        budget(memory_limit.value()),
+        file_spill(owning_factory.file_spill_enabled()) {}
+
+  ~StatementState() {
+    if (owners != nullptr || owner_count != 0U || live_files != 0U) {
+      std::terminate();
+    }
+  }
+
+  [[nodiscard]] Result<TemporaryMemoryAccount> Register(TemporaryStorageSpillTarget* target) {
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (next_ordinal == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(TooLarge("temporary memory owner ordinal is exhausted"));
+    }
+    if (owner_count == std::numeric_limits<std::size_t>::max()) {
+      return std::unexpected(TooLarge("temporary memory owner registry is exhausted"));
+    }
+    try {
+      auto registration = std::make_unique<MemoryRegistration>();
+      registration->state = this;
+      registration->target = target;
+      registration->ordinal = next_ordinal++;
+      registration->next = owners;
+      if (owners != nullptr) {
+        owners->previous = registration.get();
+      }
+      owners = registration.get();
+      ++owner_count;
+      return TemporaryMemoryAccount{std::move(registration)};
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+  }
+
+  void Unregister(MemoryRegistration& registration) noexcept {
+    if (registration.state != this || registration.retained_bytes > retained) {
+      std::terminate();
+    }
+    retained -= registration.retained_bytes;
+    registration.retained_bytes = 0;
+    if (registration.previous != nullptr) {
+      registration.previous->next = registration.next;
+    } else {
+      owners = registration.next;
+    }
+    if (registration.next != nullptr) {
+      registration.next->previous = registration.previous;
+    }
+    registration.previous = nullptr;
+    registration.next = nullptr;
+    registration.state = nullptr;
+    if (owner_count == 0U) {
+      std::terminate();
+    }
+    --owner_count;
+  }
+
+  [[nodiscard]] Status Reserve(MemoryRegistration& registration, std::size_t amount) {
+    if (registration.state != this) {
+      return std::unexpected(Misuse("temporary memory account is detached"));
+    }
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (amount == 0U) {
+      return {};
+    }
+    if (amount > std::numeric_limits<std::size_t>::max() - registration.retained_bytes ||
+        amount > std::numeric_limits<std::size_t>::max() - retained) {
+      return std::unexpected(TooLarge("temporary memory accounting overflowed"));
+    }
+
+    while (retained > budget || amount > budget - retained) {
+      if (!file_spill) {
+        return std::unexpected(TooLarge("statement temporary memory budget exceeded"));
+      }
+      MemoryRegistration* selected = nullptr;
+      std::size_t selected_reclaimable = 0;
+      for (MemoryRegistration* candidate = owners; candidate != nullptr;
+           candidate = candidate->next) {
+        if (candidate->target == nullptr || candidate->spilling) {
+          continue;
+        }
+        const std::size_t reclaimable = candidate->target->reclaimable_bytes().value();
+        if (reclaimable > candidate->retained_bytes) {
+          failed = true;
+          return std::unexpected(Internal("temporary spill target exceeds its retained memory"));
+        }
+        if (reclaimable == 0U) {
+          continue;
+        }
+        if (selected == nullptr || reclaimable > selected_reclaimable ||
+            (reclaimable == selected_reclaimable && candidate->ordinal < selected->ordinal)) {
+          selected = candidate;
+          selected_reclaimable = reclaimable;
+        }
+      }
+      if (selected == nullptr) {
+        return std::unexpected(TooLarge("statement temporary memory budget exceeded"));
+      }
+
+      const std::size_t before = retained;
+      selected->spilling = true;
+      Status spilled = selected->target->SpillForPressure();
+      selected->spilling = false;
+      if (!spilled.has_value()) {
+        failed = true;
+        return std::unexpected(std::move(spilled.error()));
+      }
+      if (failed) {
+        return std::unexpected(Internal("statement temporary storage failed during spill"));
+      }
+      if (retained >= before) {
+        failed = true;
+        return std::unexpected(Internal("temporary pressure spill released no memory"));
+      }
+    }
+
+    registration.retained_bytes += amount;
+    retained += amount;
+    peak_retained = std::max(peak_retained, retained);
+    return {};
+  }
+
+  [[nodiscard]] Status Release(MemoryRegistration& registration, std::size_t amount) noexcept {
+    if (registration.state != this) {
+      return std::unexpected(Misuse("temporary memory account is detached"));
+    }
+    if (amount > registration.retained_bytes || amount > retained) {
+      return std::unexpected(Misuse("temporary memory release exceeds retained bytes"));
+    }
+    registration.retained_bytes -= amount;
+    retained -= amount;
+    return {};
+  }
+
+  [[nodiscard]] Result<TemporaryFileLease> AcquireFile() {
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    if (!file_spill) {
+      return std::unexpected(Misuse("temporary files are disabled in memory mode"));
+    }
+    if (live_files >= 2U) {
+      return std::unexpected(TooLarge("statement temporary file limit exceeded"));
+    }
+    ++live_files;
+    peak_live_files = std::max(peak_live_files, live_files);
+    return TemporaryFileLease{*this};
+  }
+
+  void ReleaseFile() noexcept {
+    if (live_files == 0U) {
+      std::terminate();
+    }
+    --live_files;
+  }
+
+  [[nodiscard]] std::size_t OverheadBytes() const noexcept {
+    if (owner_count > (std::numeric_limits<std::size_t>::max() - sizeof(StatementState)) /
+                          sizeof(MemoryRegistration)) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    return sizeof(StatementState) + owner_count * sizeof(MemoryRegistration);
+  }
+
+  // The session-owned factory outlives statement storage.
+  const TemporaryStorageFactory* factory;
+  std::size_t budget;
+  bool file_spill;
+  bool failed = false;
+  std::size_t retained = 0;
+  std::size_t peak_retained = 0;
+  std::size_t live_files = 0;
+  std::size_t peak_live_files = 0;
+  std::size_t owner_count = 0;
+  std::uint64_t next_ordinal = 0;
+  MemoryRegistration* owners = nullptr;
+};
+
+MemoryRegistration::~MemoryRegistration() {
+  if (state != nullptr) {
+    state->Unregister(*this);
+  }
+}
+
+}  // namespace temporary_storage_detail
+
+TemporaryMemoryAccount::TemporaryMemoryAccount(
+    std::unique_ptr<temporary_storage_detail::MemoryRegistration> registration) noexcept
+    : registration_(std::move(registration)) {}
+
+TemporaryMemoryAccount::TemporaryMemoryAccount(TemporaryMemoryAccount&&) noexcept = default;
+
+TemporaryMemoryAccount& TemporaryMemoryAccount::operator=(TemporaryMemoryAccount&&) noexcept =
+    default;
+
+TemporaryMemoryAccount::~TemporaryMemoryAccount() = default;
+
+bool TemporaryMemoryAccount::valid() const noexcept {
+  return registration_ != nullptr && registration_->state != nullptr;
+}
+
+ByteCount TemporaryMemoryAccount::retained_bytes() const noexcept {
+  return ByteCount{valid() ? registration_->retained_bytes : 0U};
+}
+
+Status TemporaryMemoryAccount::Reserve(ByteCount amount) {
+  if (!valid()) {
+    return std::unexpected(Misuse("temporary memory account is invalid"));
+  }
+  return registration_->state->Reserve(*registration_, amount.value());
+}
+
+Status TemporaryMemoryAccount::Release(ByteCount amount) {
+  if (!valid()) {
+    return std::unexpected(Misuse("temporary memory account is invalid"));
+  }
+  return registration_->state->Release(*registration_, amount.value());
+}
+
+TemporaryFileLease::TemporaryFileLease(temporary_storage_detail::StatementState& state) noexcept
+    : state_(&state) {}
+
+TemporaryFileLease::TemporaryFileLease(TemporaryFileLease&& other) noexcept
+    : state_(std::exchange(other.state_, nullptr)) {}
+
+TemporaryFileLease& TemporaryFileLease::operator=(TemporaryFileLease&& other) noexcept {
+  if (this != &other) {
+    Release();
+    state_ = std::exchange(other.state_, nullptr);
+  }
+  return *this;
+}
+
+TemporaryFileLease::~TemporaryFileLease() { Release(); }
+
+bool TemporaryFileLease::valid() const noexcept { return state_ != nullptr; }
+
+void TemporaryFileLease::Release() noexcept {
+  if (state_ != nullptr) {
+    state_->ReleaseFile();
+    state_ = nullptr;
+  }
+}
+
+StatementTemporaryStorage::StatementTemporaryStorage(
+    std::unique_ptr<temporary_storage_detail::StatementState> state) noexcept
+    : state_(std::move(state)) {}
+
+StatementTemporaryStorage::StatementTemporaryStorage(StatementTemporaryStorage&&) noexcept =
+    default;
+
+StatementTemporaryStorage::~StatementTemporaryStorage() = default;
+
+bool StatementTemporaryStorage::valid() const noexcept { return state_ != nullptr; }
+
+bool StatementTemporaryStorage::failed() const noexcept {
+  return state_ != nullptr && state_->failed;
+}
+
+bool StatementTemporaryStorage::file_spill_enabled() const noexcept {
+  return state_ != nullptr && state_->file_spill;
+}
+
+ByteCount StatementTemporaryStorage::memory_budget() const noexcept {
+  return ByteCount{state_ == nullptr ? 0U : state_->budget};
+}
+
+ByteCount StatementTemporaryStorage::retained_bytes() const noexcept {
+  return ByteCount{state_ == nullptr ? 0U : state_->retained};
+}
+
+ByteCount StatementTemporaryStorage::peak_retained_bytes() const noexcept {
+  return ByteCount{state_ == nullptr ? 0U : state_->peak_retained};
+}
+
+ByteCount StatementTemporaryStorage::overhead_bytes() const noexcept {
+  return ByteCount{state_ == nullptr ? 0U : state_->OverheadBytes()};
+}
+
+std::size_t StatementTemporaryStorage::live_file_count() const noexcept {
+  return state_ == nullptr ? 0U : state_->live_files;
+}
+
+std::size_t StatementTemporaryStorage::peak_live_file_count() const noexcept {
+  return state_ == nullptr ? 0U : state_->peak_live_files;
+}
+
+Result<TemporaryMemoryAccount> StatementTemporaryStorage::RegisterMemoryOwner() {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("statement temporary storage is invalid"));
+  }
+  return state_->Register(nullptr);
+}
+
+Result<TemporaryMemoryAccount> StatementTemporaryStorage::RegisterMemoryOwner(
+    TemporaryStorageSpillTarget& target) {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("statement temporary storage is invalid"));
+  }
+  return state_->Register(&target);
+}
+
+Result<TemporaryFileLease> StatementTemporaryStorage::AcquireFileLease() {
+  if (state_ == nullptr) {
+    return std::unexpected(Misuse("statement temporary storage is invalid"));
+  }
+  return state_->AcquireFile();
+}
+
 struct RecordSorter::Impl {
   struct Entry {
     Entry(ByteBuffer owned_record, RecordView record_view) noexcept
@@ -1473,6 +1808,17 @@ ByteCount TemporaryStorageFactory::sorter_memory_threshold() const noexcept {
   const std::size_t cache_size =
       cache_pages > kMaximumPmaSize / page_size ? kMaximumPmaSize : cache_pages * page_size;
   return ByteCount{std::max(minimum, std::min(cache_size, kMaximumPmaSize))};
+}
+
+Result<StatementTemporaryStorage> TemporaryStorageFactory::CreateStatementStorage() const {
+  try {
+    return StatementTemporaryStorage{std::make_unique<temporary_storage_detail::StatementState>(
+        *this, sorter_memory_threshold())};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<RecordSorter> TemporaryStorageFactory::CreateRecordSorter(

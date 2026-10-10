@@ -19,6 +19,14 @@ namespace modern_sqlite {
 class Pager;
 class EphemeralRelation;
 class TemporaryStorageFactory;
+class TemporaryMemoryAccount;
+class TemporaryFileLease;
+class StatementTemporaryStorage;
+
+namespace temporary_storage_detail {
+struct MemoryRegistration;
+struct StatementState;
+}  // namespace temporary_storage_detail
 
 enum class TemporaryStoreMode : std::uint8_t {
   kFile,
@@ -33,6 +41,91 @@ struct TemporaryStorageOptions {
 };
 
 [[nodiscard]] Result<void> ValidateTemporaryStorageOptions(TemporaryStorageOptions options);
+
+class TemporaryStorageSpillTarget {
+ public:
+  virtual ~TemporaryStorageSpillTarget() = default;
+
+  [[nodiscard]] virtual ByteCount reclaimable_bytes() const noexcept = 0;
+  // The registered account and target must remain alive throughout this callback.
+  [[nodiscard]] virtual Status SpillForPressure() = 0;
+};
+
+class TemporaryMemoryAccount final {
+ public:
+  TemporaryMemoryAccount(const TemporaryMemoryAccount&) = delete;
+  TemporaryMemoryAccount& operator=(const TemporaryMemoryAccount&) = delete;
+  TemporaryMemoryAccount(TemporaryMemoryAccount&&) noexcept;
+  TemporaryMemoryAccount& operator=(TemporaryMemoryAccount&&) noexcept;
+  ~TemporaryMemoryAccount();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] ByteCount retained_bytes() const noexcept;
+  [[nodiscard]] Status Reserve(ByteCount amount);
+  [[nodiscard]] Status Release(ByteCount amount);
+
+ private:
+  friend class StatementTemporaryStorage;
+  friend struct temporary_storage_detail::StatementState;
+
+  explicit TemporaryMemoryAccount(
+      std::unique_ptr<temporary_storage_detail::MemoryRegistration> registration) noexcept;
+
+  std::unique_ptr<temporary_storage_detail::MemoryRegistration> registration_;
+};
+
+class TemporaryFileLease final {
+ public:
+  TemporaryFileLease(const TemporaryFileLease&) = delete;
+  TemporaryFileLease& operator=(const TemporaryFileLease&) = delete;
+  TemporaryFileLease(TemporaryFileLease&& other) noexcept;
+  TemporaryFileLease& operator=(TemporaryFileLease&& other) noexcept;
+  ~TemporaryFileLease();
+
+  [[nodiscard]] bool valid() const noexcept;
+
+ private:
+  friend class StatementTemporaryStorage;
+  friend struct temporary_storage_detail::StatementState;
+
+  explicit TemporaryFileLease(temporary_storage_detail::StatementState& state) noexcept;
+  void Release() noexcept;
+
+  temporary_storage_detail::StatementState* state_;
+};
+
+class StatementTemporaryStorage final {
+ public:
+  StatementTemporaryStorage(const StatementTemporaryStorage&) = delete;
+  StatementTemporaryStorage& operator=(const StatementTemporaryStorage&) = delete;
+  StatementTemporaryStorage(StatementTemporaryStorage&&) noexcept;
+  StatementTemporaryStorage& operator=(StatementTemporaryStorage&&) = delete;
+  ~StatementTemporaryStorage();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] bool failed() const noexcept;
+  [[nodiscard]] bool file_spill_enabled() const noexcept;
+  [[nodiscard]] ByteCount memory_budget() const noexcept;
+  [[nodiscard]] ByteCount retained_bytes() const noexcept;
+  [[nodiscard]] ByteCount peak_retained_bytes() const noexcept;
+  [[nodiscard]] ByteCount overhead_bytes() const noexcept;
+  [[nodiscard]] std::size_t live_file_count() const noexcept;
+  [[nodiscard]] std::size_t peak_live_file_count() const noexcept;
+
+  [[nodiscard]] Result<TemporaryMemoryAccount> RegisterMemoryOwner();
+  // The target is borrowed and must outlive the returned account.
+  [[nodiscard]] Result<TemporaryMemoryAccount> RegisterMemoryOwner(
+      TemporaryStorageSpillTarget& target);
+  [[nodiscard]] Result<TemporaryFileLease> AcquireFileLease();
+
+ private:
+  friend class TemporaryStorageFactory;
+
+  explicit StatementTemporaryStorage(
+      std::unique_ptr<temporary_storage_detail::StatementState> state) noexcept;
+
+  std::unique_ptr<temporary_storage_detail::StatementState> state_;
+};
 
 struct RecordSorterDescriptor {
   std::size_t field_count = 0;
@@ -222,6 +315,7 @@ class TemporaryStorageFactory final {
   [[nodiscard]] bool attached_to(const Pager& pager) const noexcept { return pager_ == &pager; }
   [[nodiscard]] bool file_spill_enabled() const noexcept;
   [[nodiscard]] ByteCount sorter_memory_threshold() const noexcept;
+  [[nodiscard]] Result<StatementTemporaryStorage> CreateStatementStorage() const;
   [[nodiscard]] Result<RecordSorter> CreateRecordSorter(
       const RecordSorterDescriptor& descriptor) const;
   [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
