@@ -2,6 +2,7 @@
 #define MODERN_SQLITE_TEMPORARY_STORAGE_TEMPORARY_STORAGE_HPP_
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -16,6 +17,7 @@
 namespace modern_sqlite {
 
 class Pager;
+class EphemeralRelation;
 class TemporaryStorageFactory;
 
 enum class TemporaryStoreMode : std::uint8_t {
@@ -38,6 +40,70 @@ struct RecordSorterDescriptor {
   // Referenced collations must outlive every sorter created from the descriptor.
   std::vector<IndexColumnOrder> key_columns{};
   RecordCodecOptions record_options{};
+};
+
+struct EphemeralRelationDescriptor {
+  std::size_t field_count = 0;
+  std::size_t key_field_count = 0;
+  // Referenced collations must outlive every relation created from the descriptor.
+  std::vector<IndexColumnOrder> key_columns{};
+  RecordCodecOptions record_options{};
+};
+
+enum class EphemeralInsertMode : std::uint8_t {
+  kKeepExisting,
+  kReplaceExisting,
+};
+
+enum class EphemeralInsertResult : std::uint8_t {
+  kInserted,
+  kDuplicate,
+  kReplaced,
+};
+
+enum class EphemeralRelationState : std::uint8_t {
+  kWriting,
+  kPositioned,
+  kExhausted,
+  kClosed,
+};
+
+[[nodiscard]] std::string_view EphemeralRelationStateName(EphemeralRelationState state) noexcept;
+
+class EphemeralRelation final {
+ public:
+  EphemeralRelation(const EphemeralRelation&) = delete;
+  EphemeralRelation& operator=(const EphemeralRelation&) = delete;
+  EphemeralRelation(EphemeralRelation&&) noexcept;
+  EphemeralRelation& operator=(EphemeralRelation&&) noexcept;
+  ~EphemeralRelation();
+
+  [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] EphemeralRelationState state() const noexcept;
+  [[nodiscard]] std::size_t record_count() const noexcept;
+  [[nodiscard]] bool file_backed() const noexcept;
+
+  [[nodiscard]] Result<EphemeralInsertResult> Insert(ByteBuffer record, EphemeralInsertMode mode);
+  [[nodiscard]] Result<bool> Contains(ByteView key);
+  [[nodiscard]] Result<bool> Erase(ByteView key);
+  [[nodiscard]] Status Rewind();
+  // The returned view remains valid until Next(), Reset(), Close(), move
+  // assignment, or destruction.
+  [[nodiscard]] Result<RecordView> current_record() const;
+  [[nodiscard]] Result<bool> Next();
+  [[nodiscard]] Status Reset();
+  void Close() noexcept;
+
+ private:
+  friend class TemporaryStorageFactory;
+
+  struct Impl;
+
+  explicit EphemeralRelation(std::unique_ptr<Impl> impl) noexcept;
+  [[nodiscard]] static Result<EphemeralRelation> Create(
+      const EphemeralRelationDescriptor& descriptor, const TemporaryStorageFactory& factory);
+
+  std::unique_ptr<Impl> impl_;
 };
 
 enum class RecordSorterState : std::uint8_t {
@@ -160,10 +226,13 @@ class TemporaryStorageFactory final {
       const RecordSorterDescriptor& descriptor) const;
   [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
                                                std::size_t bound) const;
+  [[nodiscard]] Result<EphemeralRelation> CreateEphemeralRelation(
+      const EphemeralRelationDescriptor& descriptor) const;
   [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;
 
  private:
   friend class BoundedTopN;
+  friend class EphemeralRelation;
 
   TemporaryStorageFactory(Vfs& vfs, const Pager& pager, TemporaryStorageOptions options) noexcept
       : vfs_(&vfs), pager_(&pager), options_(options) {}

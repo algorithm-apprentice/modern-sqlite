@@ -155,6 +155,8 @@ class IndexBtreeWriter final {
   // Encoded operations use the writer's columns as a unique comparison prefix
   // and may store additional payload fields. Do not mix them with SqlValue mutations.
   [[nodiscard]] Status InsertEncoded(ByteView record);
+  [[nodiscard]] Result<bool> ContainsEncoded(ByteView key);
+  [[nodiscard]] Status ReplaceEncoded(ByteView record);
   [[nodiscard]] Result<bool> Delete(std::span<const SqlValue> values);
   [[nodiscard]] Result<bool> DeleteEncoded(ByteView record);
   [[nodiscard]] Result<std::uint64_t> Clear();

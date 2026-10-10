@@ -54,6 +54,7 @@ add_executable(
   unit/syntax/lexer_test.cpp
   unit/syntax/parser_test.cpp
   unit/temporary_storage/bounded_top_n_test.cpp
+  unit/temporary_storage/ephemeral_relation_test.cpp
   unit/temporary_storage/record_sorter_test.cpp
   unit/temporary_storage/temporary_storage_test.cpp
   unit/text/text_test.cpp
@@ -155,6 +156,33 @@ set_tests_properties(
     LABELS unit
     TIMEOUT 10
 )
+
+foreach(kind allocation oom)
+  add_executable(
+    modern_sqlite_ephemeral_relation_${kind}_test
+    unit/temporary_storage/ephemeral_relation_${kind}_test.cpp
+  )
+  target_include_directories(
+    modern_sqlite_ephemeral_relation_${kind}_test
+    PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src"
+  )
+  target_link_libraries(
+    modern_sqlite_ephemeral_relation_${kind}_test
+    PRIVATE modern_sqlite::modern_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_ephemeral_relation_${kind}_test PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_ephemeral_relation_${kind}_test)
+  add_test(
+    NAME temporary_storage.ephemeral_relation_${kind}
+    COMMAND modern_sqlite_ephemeral_relation_${kind}_test
+  )
+  set_tests_properties(
+    temporary_storage.ephemeral_relation_${kind}
+    PROPERTIES
+      LABELS unit
+      TIMEOUT 20
+  )
+endforeach()
 
 foreach(kind allocation oom)
   add_executable(
