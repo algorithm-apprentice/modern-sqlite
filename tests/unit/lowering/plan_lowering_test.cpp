@@ -667,6 +667,13 @@ std::size_t callback_count = 0;
   return std::unexpected(Error::Create(ErrorCode::kGeneric, "failing function executed"));
 }
 
+[[nodiscard]] Result<SqlValue> DeterministicFailCall(const ScalarFunctionContext&,
+                                                     std::span<const SqlValue>) {
+  ++callback_count;
+  return std::unexpected(
+      Error::Create(ErrorCode::kGeneric, "deterministic failing function executed"));
+}
+
 [[nodiscard]] Result<SqlValue> FailAfterOne(const ScalarFunctionContext&,
                                             std::span<const SqlValue>) {
   ++callback_count;
@@ -677,7 +684,7 @@ std::size_t callback_count = 0;
 }
 
 struct CustomEnvironment {
-  std::array<ScalarFunction, 7> functions{{
+  std::array<ScalarFunction, 8> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -694,6 +701,9 @@ struct CustomEnvironment {
                      TextRepresentative},
       ScalarFunction{"failing", FunctionArity::Exact(0), FunctionDeterminism::kNonDeterministic,
                      FunctionCollationUse::kNone, FailCall},
+      ScalarFunction{"deterministic_failing", FunctionArity::Exact(0),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     DeterministicFailCall},
       ScalarFunction{"fail_after_one", FunctionArity::Exact(1),
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      FailAfterOne},
@@ -733,8 +743,8 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
 TEST(ReadLowering, DefersDistinctValuesAndCompoundPlans) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   constexpr std::array<std::string_view, 2> cases{
-      "VALUES(1),(2)",
       "SELECT 1 UNION SELECT 2",
+      "SELECT 1 EXCEPT SELECT 2",
   };
   for (const std::string_view sql : cases) {
     SCOPED_TRACE(sql);
@@ -742,8 +752,214 @@ TEST(ReadLowering, DefersDistinctValuesAndCompoundPlans) {
     LowerPlanResult lowered = LowerPlan(plan);
     ASSERT_FALSE(lowered.has_value());
     EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
-    EXPECT_EQ("VALUES and compound SELECT lowering is not supported", lowered.error().detail);
+    EXPECT_EQ("set compound SELECT lowering is not supported", lowered.error().detail);
   }
+}
+
+TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+  const CustomEnvironment custom;
+
+  const BytecodeProgram values = LowerOrThrow("VALUES(1,'a'),(2,'b')", catalog);
+  EXPECT_TRUE(values.cursors().empty());
+  const auto value_rows = ExecuteRows(values, *pager, catalog->version().generation);
+  ASSERT_EQ(2U, value_rows.size());
+  EXPECT_EQ(1, value_rows[0][0].integer_value());
+  EXPECT_EQ("a", TextBytes(value_rows[0][1]));
+  EXPECT_EQ(2, value_rows[1][0].integer_value());
+  EXPECT_EQ("b", TextBytes(value_rows[1][1]));
+
+  const BytecodeProgram table_values =
+      LowerOrThrow("SELECT name FROM items UNION ALL VALUES('tail')", catalog);
+  const auto table_value_rows = ExecuteRows(table_values, *pager, catalog->version().generation);
+  ASSERT_EQ(4U, table_value_rows.size());
+  EXPECT_EQ("alpha", TextBytes(table_value_rows[0][0]));
+  EXPECT_EQ("beta", TextBytes(table_value_rows[1][0]));
+  EXPECT_EQ("gamma", TextBytes(table_value_rows[2][0]));
+  EXPECT_EQ("tail", TextBytes(table_value_rows[3][0]));
+
+  const BytecodeProgram two_tables =
+      LowerOrThrow("SELECT name FROM items UNION ALL SELECT name FROM items WHERE id=2", catalog);
+  ASSERT_EQ(2U, two_tables.cursors().size());
+  const auto two_table_rows = ExecuteRows(two_tables, *pager, catalog->version().generation);
+  ASSERT_EQ(4U, two_table_rows.size());
+  EXPECT_EQ("alpha", TextBytes(two_table_rows[0][0]));
+  EXPECT_EQ("beta", TextBytes(two_table_rows[1][0]));
+  EXPECT_EQ("gamma", TextBytes(two_table_rows[2][0]));
+  EXPECT_EQ("beta", TextBytes(two_table_rows[3][0]));
+
+  const BytecodeProgram without_rowid =
+      LowerOrThrow("SELECT a FROM wr UNION ALL SELECT a FROM wr", catalog);
+  const auto without_rowid_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
+  ASSERT_EQ(4U, without_rowid_rows.size());
+  EXPECT_EQ("right", TextBytes(without_rowid_rows[0][0]));
+  EXPECT_EQ("left", TextBytes(without_rowid_rows[1][0]));
+  EXPECT_EQ("right", TextBytes(without_rowid_rows[2][0]));
+  EXPECT_EQ("left", TextBytes(without_rowid_rows[3][0]));
+
+  callback_count = 0;
+  const BytecodeProgram row_major = LowerOrThrow(
+      "VALUES(volatile_counter(),volatile_counter()),"
+      "(volatile_counter(),volatile_counter())",
+      catalog, custom.Binder());
+  const auto row_major_rows =
+      ExecuteRows(row_major, *pager, catalog->version().generation, custom.Vm());
+  ASSERT_EQ(2U, row_major_rows.size());
+  EXPECT_EQ(1, row_major_rows[0][0].integer_value());
+  EXPECT_EQ(2, row_major_rows[0][1].integer_value());
+  EXPECT_EQ(3, row_major_rows[1][0].integer_value());
+  EXPECT_EQ(4, row_major_rows[1][1].integer_value());
+  EXPECT_EQ(4U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram limited = LowerOrThrow(
+      "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT failing() LIMIT 1", catalog, custom.Binder());
+  const auto limited_rows =
+      ExecuteRows(limited, *pager, catalog->version().generation, custom.Vm());
+  ASSERT_EQ(1U, limited_rows.size());
+  EXPECT_EQ(1, limited_rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+
+  const BytecodeProgram table_limited =
+      LowerOrThrow("SELECT name FROM items UNION ALL SELECT 'tail' LIMIT 2", catalog);
+  const auto table_limited_rows = ExecuteRows(table_limited, *pager, catalog->version().generation);
+  ASSERT_EQ(2U, table_limited_rows.size());
+  EXPECT_EQ("alpha", TextBytes(table_limited_rows[0][0]));
+  EXPECT_EQ("beta", TextBytes(table_limited_rows[1][0]));
+
+  const BytecodeProgram source_free_offset = LowerOrThrow(
+      "SELECT abs(-9223372036854775808) "
+      "UNION ALL SELECT 2 LIMIT 1 OFFSET 1",
+      catalog);
+  const auto source_free_offset_rows =
+      ExecuteRows(source_free_offset, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, source_free_offset_rows.size());
+  EXPECT_EQ(2, source_free_offset_rows[0][0].integer_value());
+
+  const BytecodeProgram table_offset = LowerOrThrow(
+      "SELECT abs(-9223372036854775808) FROM items WHERE id=1 "
+      "UNION ALL SELECT 2 LIMIT 1 OFFSET 1",
+      catalog);
+  const auto table_offset_rows = ExecuteRows(table_offset, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, table_offset_rows.size());
+  EXPECT_EQ(2, table_offset_rows[0][0].integer_value());
+
+  callback_count = 0;
+  const BytecodeProgram eager = LowerOrThrow(
+      "VALUES(deterministic_failing()),(2) "
+      "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
+      catalog, custom.Binder());
+  Vm eager_vm = TakeValue(Vm::Create(eager, custom.Vm()));
+  RequireStatus(
+      eager_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  const auto eager_failure = eager_vm.Step();
+  ASSERT_FALSE(eager_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, eager_failure.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram filtered = LowerOrThrow(
+      "VALUES(deterministic_failing() IS NULL),(2) "
+      "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
+      catalog, custom.Binder());
+  const auto filtered_rows =
+      ExecuteRows(filtered, *pager, catalog->version().generation, custom.Vm());
+  ASSERT_EQ(1U, filtered_rows.size());
+  EXPECT_EQ(2, filtered_rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram zero =
+      LowerOrThrow("VALUES(failing()),(2) UNION ALL SELECT 3 LIMIT 0 OFFSET failing()", catalog,
+                   custom.Binder());
+  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram later =
+      LowerOrThrow("SELECT 1 UNION ALL SELECT failing()", catalog, custom.Binder());
+  Vm later_vm = TakeValue(Vm::Create(later, custom.Vm()));
+  RequireStatus(
+      later_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(later_vm.Step()));
+  EXPECT_EQ(1, later_vm.row()[0].integer_value());
+  const auto later_failure = later_vm.Step();
+  ASSERT_FALSE(later_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, later_failure.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  const TemporaryStorageFactory temporary_storage =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const BytecodeProgram distinct_arm =
+      LowerOrThrow("SELECT DISTINCT 1 FROM items UNION ALL SELECT 2", catalog);
+  const auto distinct_arm_rows = ExecuteRows(distinct_arm, *pager, catalog->version().generation,
+                                             VmEnvironment::Core(), &temporary_storage);
+  ASSERT_EQ(2U, distinct_arm_rows.size());
+  EXPECT_EQ(1, distinct_arm_rows[0][0].integer_value());
+  EXPECT_EQ(2, distinct_arm_rows[1][0].integer_value());
+
+  const BytecodeProgram distinct_limited =
+      LowerOrThrow("SELECT DISTINCT 1 FROM items UNION ALL SELECT 2 LIMIT 1", catalog);
+  const auto distinct_limited_rows =
+      ExecuteRows(distinct_limited, *pager, catalog->version().generation, VmEnvironment::Core(),
+                  &temporary_storage);
+  ASSERT_EQ(1U, distinct_limited_rows.size());
+  EXPECT_EQ(1, distinct_limited_rows[0][0].integer_value());
+
+  const BytecodeProgram distinct_zero = LowerOrThrow(
+      "SELECT DISTINCT failing() FROM items UNION ALL SELECT 2 LIMIT 0", catalog, custom.Binder());
+  callback_count = 0;
+  EXPECT_TRUE(
+      ExecuteRows(distinct_zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  const BytecodeProgram guarded = LowerOrThrow(
+      "SELECT 1 FROM items WHERE id<0 AND abs(-9223372036854775808) "
+      "UNION ALL SELECT 2",
+      catalog);
+  Vm guarded_vm = TakeValue(Vm::Create(guarded, VmEnvironment::Core()));
+  RequireStatus(
+      guarded_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  const auto guard_failure = guarded_vm.Step();
+  ASSERT_FALSE(guard_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, guard_failure.error().code());
+  RequireStatus(pager->EndRead());
+}
+
+TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+  const BytecodeProgram program =
+      LowerOrThrow("VALUES(?1),(?2) UNION ALL SELECT ?3 LIMIT ?4 OFFSET ?5", catalog);
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  const auto run = [&](std::int64_t first, std::int64_t second, std::int64_t third) {
+    RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(first)));
+    RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(second)));
+    RequireStatus(vm.Bind(ParameterId{2}, SqlValue::Integer(third)));
+    RequireStatus(vm.Bind(ParameterId{3}, SqlValue::Integer(2)));
+    RequireStatus(vm.Bind(ParameterId{4}, SqlValue::Integer(1)));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(second, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(third, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  };
+  run(1, 2, 3);
+  RequireStatus(vm.Reset());
+  run(4, 5, 6);
+  RequireStatus(pager->EndRead());
 }
 
 TEST(ReadLowering, LowersSimpleDistinctIntoMembershipAndOptionalOrderingBytecode) {

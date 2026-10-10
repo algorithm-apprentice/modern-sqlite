@@ -731,6 +731,32 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "values",
+      "id": "values-row-major",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "56414c55455328312c276127292c28322c27622729"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "union-all",
+      "id": "union-all-limit-offset",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206e616d652046524f4d206974656d7320554e494f4e20414c4c2053454c45435420277461696c27204c494d49542032204f46465345542033"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "aggregate-function",
       "id": "unsupported-aggregate",
@@ -963,6 +989,8 @@
     "storage-classes",
     "table-scan",
     "typed-bindings",
+    "union-all",
+    "values",
     "without-rowid"
   ]
 }

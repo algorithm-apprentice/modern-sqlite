@@ -357,6 +357,35 @@ int main() try {
     }
   }
 
+  const std::array<PhysicalPlan, 3> streaming_plans{
+      PhysicalFixture(catalog, "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 LIMIT ?7 OFFSET ?8"),
+      PhysicalFixture(catalog, "SELECT Name FROM Items UNION ALL SELECT 'tail' LIMIT ?1 OFFSET ?2"),
+      PhysicalFixture(catalog, "SELECT DISTINCT Name FROM Items UNION ALL SELECT 'tail' LIMIT ?1"),
+  };
+  std::array<std::size_t, 3> streaming_allocations{};
+  std::unique_ptr<BytecodeProgram> streaming_published;
+  for (std::size_t plan_index = 0; plan_index < streaming_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(streaming_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations == 0U || allocations > 192U ||
+          (streaming_allocations[plan_index] != 0U &&
+           allocations != streaming_allocations[plan_index])) {
+        return 1;
+      }
+      streaming_allocations[plan_index] = allocations;
+      if (plan_index == 2U && streaming_published == nullptr) {
+        streaming_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   constexpr std::size_t kExpectedMutationAllocations = 21U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -507,7 +536,7 @@ int main() try {
       return 1;
     }
   }
-  if (published == nullptr || distinct_published == nullptr) {
+  if (published == nullptr || distinct_published == nullptr || streaming_published == nullptr) {
     return 1;
   }
 
@@ -532,6 +561,9 @@ int main() try {
   checksum += distinct_published->instructions().size();
   checksum += distinct_published->relation(RelationId{0}).field_count;
   checksum += distinct_published->sorter(SorterId{0}).field_count;
+  checksum += streaming_published->cursors().size();
+  checksum += streaming_published->relations().size();
+  checksum += streaming_published->instructions().size();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;
