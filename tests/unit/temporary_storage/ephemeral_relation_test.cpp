@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -44,27 +45,38 @@ void RequireStatus(Status status) {
 
 class RelationEnvironment final {
  public:
-  explicit RelationEnvironment(TemporaryStoreMode mode)
+  explicit RelationEnvironment(TemporaryStoreMode mode,
+                               std::optional<ByteCount> memory_threshold = std::nullopt)
       : pager_(TakeValue(
             Pager::Open(vfs_, test::kWritePagerInputPath,
                         PagerOptions{
                             .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                             .cache_capacity_pages = 1,
                         }))),
-        factory_(TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_,
-                                                           TemporaryStorageOptions{
-                                                               .mode = mode,
-                                                           }))) {
+        factory_(TakeValue(
+            TemporaryStorageFactory::Create(vfs_, *pager_,
+                                            TemporaryStorageOptions{
+                                                .mode = mode,
+                                                .sorter_memory_threshold = memory_threshold,
+                                            }))),
+        storage_(std::in_place, TakeValue(factory_.CreateStatementStorage())) {
     RequireStatus(pager_->BeginRead());
   }
 
-  [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+  [[nodiscard]] StatementTemporaryStorage& storage() noexcept {
+    if (!storage_.has_value()) {
+      std::terminate();
+    }
+    return *storage_;
+  }
   [[nodiscard]] test::WritePagerFixedVfs& vfs() noexcept { return vfs_; }
+  void ResetStorage() noexcept { storage_.reset(); }
 
  private:
   test::WritePagerFixedVfs vfs_;
   std::unique_ptr<Pager> pager_;
   TemporaryStorageFactory factory_;
+  std::optional<StatementTemporaryStorage> storage_;
 };
 
 [[nodiscard]] EphemeralRelationDescriptor Descriptor() {
@@ -137,6 +149,16 @@ struct BlobRowSpec {
   return Encode(values);
 }
 
+[[nodiscard]] ByteBuffer TextBlobRow(std::string key, std::size_t payload_size) {
+  ByteBuffer payload{ByteCount{payload_size}};
+  std::ranges::fill(payload.mutable_view(), std::byte{0x5a});
+  std::array<SqlValue, 2> values{
+      SqlValue::Text(std::move(key)),
+      SqlValue::Blob(std::move(payload)),
+  };
+  return Encode(values);
+}
+
 [[nodiscard]] ByteBuffer MultiKey(std::optional<std::string_view> text, std::int64_t number) {
   const std::array<SqlValue, 2> values{
       text.has_value() ? SqlValue::Text(std::string{*text}) : SqlValue{},
@@ -167,9 +189,9 @@ TEST(EphemeralRelationApi, PublishesMoveOnlyLifecycleAndInsertResults) {
   EXPECT_EQ("unknown",
             EphemeralRelationStateName(static_cast<EphemeralRelationState>(255)));  // NOLINT
 
-  const RelationEnvironment environment{TemporaryStoreMode::kMemory};
+  RelationEnvironment environment{TemporaryStoreMode::kMemory};
   EphemeralRelation relation =
-      TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   EXPECT_TRUE(relation.valid());
   EXPECT_EQ(EphemeralRelationState::kWriting, relation.state());
   EXPECT_EQ(0U, relation.record_count());
@@ -184,14 +206,44 @@ TEST(EphemeralRelationApi, PublishesMoveOnlyLifecycleAndInsertResults) {
   EXPECT_FALSE(moved.valid());
 }
 
+TEST(EphemeralRelationApi, KeepsBorrowedStatementStateStableAcrossStorageMove) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 1,
+                            }));
+  RequireStatus(pager->BeginRead());
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{128},
+                                                }));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+  EphemeralRelation relation = TakeValue(storage.CreateEphemeralRelation(Descriptor()));
+  const StatementTemporaryStorage moved{std::move(storage)};
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_FALSE(storage.valid());
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(relation.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
+                                      EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(relation.file_backed());
+  EXPECT_EQ(1U, moved.live_file_count());
+  relation.Close();
+}
+
 TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
-    RelationEnvironment environment{mode};
+    RelationEnvironment environment{
+        mode, mode == TemporaryStoreMode::kFile ? std::optional{ByteCount{64}} : std::nullopt};
     EphemeralRelation relation =
-        TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
-    EXPECT_EQ(mode == TemporaryStoreMode::kFile, relation.file_backed());
-    EXPECT_EQ(mode == TemporaryStoreMode::kFile, environment.vfs().pathless_file_present());
+        TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+    EXPECT_FALSE(relation.file_backed());
+    EXPECT_FALSE(environment.vfs().pathless_file_present());
 
     EXPECT_EQ(EphemeralInsertResult::kInserted,
               TakeValue(relation.Insert(IntegerRow(2, 20), EphemeralInsertMode::kKeepExisting)));
@@ -203,6 +255,8 @@ TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {
               TakeValue(relation.Insert(IntegerRow(1, 10), EphemeralInsertMode::kKeepExisting)));
     EXPECT_EQ(EphemeralInsertResult::kInserted,
               TakeValue(relation.Insert(IntegerRow(3, 30), EphemeralInsertMode::kKeepExisting)));
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, relation.file_backed());
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, environment.vfs().pathless_file_present());
     EXPECT_EQ(3U, relation.record_count());
 
     EXPECT_TRUE(TakeValue(relation.Contains(IntegerKey(1).view())));
@@ -238,6 +292,8 @@ TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {
     EXPECT_EQ(EphemeralRelationState::kExhausted, relation.state());
 
     relation.Close();
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, environment.vfs().pathless_file_present());
+    environment.ResetStorage();
     EXPECT_FALSE(environment.vfs().pathless_file_present());
   }
 }
@@ -256,9 +312,9 @@ TEST(EphemeralRelation, HonorsMultiColumnDirectionNullAndRtrimMetadata) {
   };
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
-    const RelationEnvironment environment{mode};
+    RelationEnvironment environment{mode};
     EphemeralRelation relation =
-        TakeValue(environment.factory().CreateEphemeralRelation(descriptor));
+        TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
     EXPECT_EQ(
         EphemeralInsertResult::kInserted,
         TakeValue(relation.Insert(MultiRow("x ", 1, 10), EphemeralInsertMode::kKeepExisting)));
@@ -290,9 +346,9 @@ TEST(EphemeralRelation, MatchesSqliteKeyEqualityAndRepresentativeRules) {
 
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
-    const RelationEnvironment environment{mode};
+    RelationEnvironment environment{mode};
     EphemeralRelation relation =
-        TakeValue(environment.factory().CreateEphemeralRelation(descriptor));
+        TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
 
     EXPECT_EQ(
         EphemeralInsertResult::kInserted,
@@ -354,9 +410,9 @@ TEST(EphemeralRelation, MatchesSqliteKeyEqualityAndRepresentativeRules) {
 }
 
 TEST(EphemeralRelation, FileBackendSplitsRebalancesClearsAndRemovesItsFile) {
-  RelationEnvironment environment{TemporaryStoreMode::kFile};
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{1024}};
   EphemeralRelation relation =
-      TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   for (std::int64_t key = 127; key >= 0; --key) {
     EXPECT_EQ(EphemeralInsertResult::kInserted,
               TakeValue(relation.Insert(BlobRow(BlobRowSpec{
@@ -390,19 +446,191 @@ TEST(EphemeralRelation, FileBackendSplitsRebalancesClearsAndRemovesItsFile) {
   RequireStatus(relation.Rewind());
   EXPECT_EQ(9, Field(TakeValue(relation.current_record()), 0).integer_value());
   relation.Close();
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  environment.ResetStorage();
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(EphemeralRelation, SharesOneLazyStatementArenaAcrossFileModeRelations) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{1024}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EphemeralRelation second = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+
+  EXPECT_FALSE(first.file_backed());
+  EXPECT_FALSE(second.file_backed());
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(0U, environment.storage().live_file_count());
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
+                                   EphemeralInsertMode::kKeepExisting)));
+  EXPECT_FALSE(first.file_backed());
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 3, .payload_size = 900U}),
+                                   EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(first.file_backed());
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U}),
+                                    EphemeralInsertMode::kKeepExisting)));
+  EXPECT_FALSE(second.file_backed());
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 4, .payload_size = 900U}),
+                                    EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(second.file_backed());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+  EXPECT_TRUE(TakeValue(first.Contains(IntegerKey(1).view())));
+  EXPECT_TRUE(TakeValue(second.Contains(IntegerKey(2).view())));
+
+  RequireStatus(first.Rewind());
+  const RecordView borrowed = TakeValue(first.current_record());
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 6, .payload_size = 900U}),
+                                    EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(1, Field(borrowed, 0).integer_value());
+
+  first.Close();
+  second.Close();
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+
+  const ByteCount peak_overhead = environment.storage().overhead_bytes();
+  EphemeralRelationDescriptor reused_descriptor = Descriptor();
+  reused_descriptor.key_columns[0] = IndexColumnOrder{NoCaseCollation()};
+  EphemeralRelation reused =
+      TakeValue(environment.storage().CreateEphemeralRelation(reused_descriptor));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(reused.Insert(TextBlobRow("A", 900U), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(reused.Insert(TextBlobRow("B", 900U), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kDuplicate,
+            TakeValue(reused.Insert(TextBlobRow("a", 900U), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(reused.file_backed());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  reused.Close();
+  EXPECT_EQ(peak_overhead, environment.storage().overhead_bytes());
+  environment.ResetStorage();
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(EphemeralRelation, AccountsMemoryAndSpillsLargestOwnerUnderStatementPressure) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{512}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EphemeralRelation second = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 200U}),
+                                   EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 16U}),
+                                    EphemeralInsertMode::kKeepExisting)));
+  EXPECT_GT(first.memory_usage(), second.memory_usage());
+  EXPECT_EQ(first.memory_usage().value() + second.memory_usage().value(),
+            environment.storage().retained_bytes().value());
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 3, .payload_size = 250U}),
+                                    EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(first.file_backed());
+  EXPECT_FALSE(second.file_backed());
+  EXPECT_EQ(ByteCount{0}, first.memory_usage());
+  EXPECT_EQ(second.memory_usage(), environment.storage().retained_bytes());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+
+  first.Close();
+  second.Close();
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
+TEST(EphemeralRelation, AccountsCopiedOverflowRecordsOnlyWhilePositioned) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{8192}};
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  for (std::int64_t key = 1; key <= 2; ++key) {
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(relation.Insert(BlobRow(BlobRowSpec{.key = key, .payload_size = 5000U}),
+                                        EphemeralInsertMode::kKeepExisting)));
+  }
+  EXPECT_TRUE(relation.file_backed());
+  EXPECT_EQ(ByteCount{0}, relation.memory_usage());
+
+  RequireStatus(relation.Rewind());
+  EXPECT_GT(relation.memory_usage(), ByteCount{0});
+  EXPECT_EQ(relation.memory_usage(), environment.storage().retained_bytes());
+  EXPECT_TRUE(TakeValue(relation.Next()));
+  EXPECT_GT(relation.memory_usage(), ByteCount{0});
+  EXPECT_FALSE(TakeValue(relation.Next()));
+  EXPECT_EQ(ByteCount{0}, relation.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
+TEST(EphemeralRelation, MemoryModeRejectsOversizedRecordsWithoutLosingExistingRows) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{128}};
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(relation.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 16U}),
+                                      EphemeralInsertMode::kKeepExisting)));
+  const ByteCount retained = relation.memory_usage();
+
+  const auto too_large = relation.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U}),
+                                         EphemeralInsertMode::kKeepExisting);
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, too_large.error().code());
+  EXPECT_TRUE(relation.valid());
+  EXPECT_EQ(1U, relation.record_count());
+  EXPECT_EQ(retained, relation.memory_usage());
+  EXPECT_EQ(retained, environment.storage().retained_bytes());
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(EphemeralRelation, DefersRetiredRootClearingAndPoisonsSharedArenaOnFailure) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{128}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
+                                   EphemeralInsertMode::kKeepExisting)));
+  first.Close();
+  EXPECT_FALSE(environment.storage().failed());
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EphemeralRelation sibling =
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+
+  environment.vfs().FailPathlessWriteAfter(0, ErrorCode::kIo);
+  EphemeralRelation reused = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  const auto failed = reused.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U}),
+                                    EphemeralInsertMode::kKeepExisting);
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(reused.valid());
+  EXPECT_TRUE(environment.storage().failed());
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  const auto sibling_after_failure = sibling.Contains(IntegerKey(1).view());
+  ASSERT_FALSE(sibling_after_failure.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, sibling_after_failure.error().code());
+  EXPECT_FALSE(sibling.valid());
+
+  const auto after_failure = environment.storage().CreateEphemeralRelation(Descriptor());
+  ASSERT_FALSE(after_failure.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, after_failure.error().code());
+  environment.ResetStorage();
   EXPECT_FALSE(environment.vfs().pathless_file_present());
 }
 
 TEST(EphemeralRelation, RejectsInvalidShapesAndClosesOnMalformedRecords) {
-  const RelationEnvironment environment{TemporaryStoreMode::kMemory};
+  RelationEnvironment environment{TemporaryStoreMode::kMemory};
   const auto zero_fields =
-      environment.factory().CreateEphemeralRelation(EphemeralRelationDescriptor{
+      environment.storage().CreateEphemeralRelation(EphemeralRelationDescriptor{
           .field_count = 0,
           .key_field_count = 1,
           .key_columns = {IndexColumnOrder{BinaryCollation()}},
       });
   const auto mismatched_key =
-      environment.factory().CreateEphemeralRelation(EphemeralRelationDescriptor{
+      environment.storage().CreateEphemeralRelation(EphemeralRelationDescriptor{
           .field_count = 2,
           .key_field_count = 1,
       });
@@ -412,7 +640,7 @@ TEST(EphemeralRelation, RejectsInvalidShapesAndClosesOnMalformedRecords) {
   EXPECT_EQ(ErrorCode::kMisuse, mismatched_key.error().code());
 
   EphemeralRelation malformed =
-      TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   ByteBuffer invalid_record{ByteCount{1}};
   invalid_record.mutable_view()[0] = std::byte{0xff};
   const auto inserted =
@@ -421,14 +649,14 @@ TEST(EphemeralRelation, RejectsInvalidShapesAndClosesOnMalformedRecords) {
   EXPECT_FALSE(malformed.valid());
 
   EphemeralRelation wrong_key =
-      TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   const auto contained = wrong_key.Contains(IntegerRow(1, 10).view());
   ASSERT_FALSE(contained.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, contained.error().code());
   EXPECT_FALSE(wrong_key.valid());
 
   EphemeralRelation lifecycle =
-      TakeValue(environment.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   EXPECT_FALSE(lifecycle.current_record().has_value());
   EXPECT_FALSE(lifecycle.Next().has_value());
   const auto invalid_mode =
@@ -441,27 +669,33 @@ TEST(EphemeralRelation, RejectsInvalidShapesAndClosesOnMalformedRecords) {
 }
 
 TEST(EphemeralRelation, FileBackendPropagatesIoFailuresAndCleansUp) {
-  RelationEnvironment open_failure{TemporaryStoreMode::kFile};
+  RelationEnvironment open_failure{TemporaryStoreMode::kFile, ByteCount{128}};
   open_failure.vfs().FailNextPathlessOpen(ErrorCode::kIo);
-  const auto failed_open = open_failure.factory().CreateEphemeralRelation(Descriptor());
-  ASSERT_FALSE(failed_open.has_value());
-  EXPECT_EQ(ErrorCode::kIo, failed_open.error().code());
+  EphemeralRelation failed_open =
+      TakeValue(open_failure.storage().CreateEphemeralRelation(Descriptor()));
+  const auto failed_open_insert = failed_open.Insert(
+      BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}), EphemeralInsertMode::kKeepExisting);
+  ASSERT_FALSE(failed_open_insert.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_open_insert.error().code());
   EXPECT_FALSE(open_failure.vfs().pathless_file_present());
 
-  RelationEnvironment write_failure{TemporaryStoreMode::kFile};
+  RelationEnvironment write_failure{TemporaryStoreMode::kFile, ByteCount{128}};
   EphemeralRelation writing =
-      TakeValue(write_failure.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(write_failure.storage().CreateEphemeralRelation(Descriptor()));
   write_failure.vfs().FailPathlessWriteAfter(0, ErrorCode::kIo);
   const auto failed_insert = writing.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
                                             EphemeralInsertMode::kKeepExisting);
   ASSERT_FALSE(failed_insert.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_insert.error().code());
   EXPECT_FALSE(writing.valid());
+  EXPECT_TRUE(write_failure.storage().failed());
+  EXPECT_TRUE(write_failure.vfs().pathless_file_present());
+  write_failure.ResetStorage();
   EXPECT_FALSE(write_failure.vfs().pathless_file_present());
 
-  RelationEnvironment read_failure{TemporaryStoreMode::kFile};
+  RelationEnvironment read_failure{TemporaryStoreMode::kFile, ByteCount{1024}};
   EphemeralRelation reading =
-      TakeValue(read_failure.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(read_failure.storage().CreateEphemeralRelation(Descriptor()));
   for (std::int64_t key = 1; key <= 4; ++key) {
     EXPECT_EQ(EphemeralInsertResult::kInserted,
               TakeValue(reading.Insert(BlobRow(BlobRowSpec{.key = key, .payload_size = 900U}),
@@ -472,11 +706,14 @@ TEST(EphemeralRelation, FileBackendPropagatesIoFailuresAndCleansUp) {
   ASSERT_FALSE(failed_rewind.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_rewind.error().code());
   EXPECT_FALSE(reading.valid());
+  EXPECT_TRUE(read_failure.storage().failed());
+  EXPECT_TRUE(read_failure.vfs().pathless_file_present());
+  read_failure.ResetStorage();
   EXPECT_FALSE(read_failure.vfs().pathless_file_present());
 
-  RelationEnvironment late_read_failure{TemporaryStoreMode::kFile};
+  RelationEnvironment late_read_failure{TemporaryStoreMode::kFile, ByteCount{1024}};
   EphemeralRelation draining =
-      TakeValue(late_read_failure.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(late_read_failure.storage().CreateEphemeralRelation(Descriptor()));
   constexpr std::int64_t kDrainRows = 24;
   for (std::int64_t key = 0; key < kDrainRows; ++key) {
     EXPECT_EQ(EphemeralInsertResult::kInserted,
@@ -498,11 +735,14 @@ TEST(EphemeralRelation, FileBackendPropagatesIoFailuresAndCleansUp) {
   EXPECT_GT(rows_seen, 0U);
   EXPECT_LT(rows_seen, static_cast<std::size_t>(kDrainRows));
   EXPECT_FALSE(draining.valid());
+  EXPECT_TRUE(late_read_failure.storage().failed());
+  EXPECT_TRUE(late_read_failure.vfs().pathless_file_present());
+  late_read_failure.ResetStorage();
   EXPECT_FALSE(late_read_failure.vfs().pathless_file_present());
 
-  RelationEnvironment reset_failure{TemporaryStoreMode::kFile};
+  RelationEnvironment reset_failure{TemporaryStoreMode::kFile, ByteCount{1024}};
   EphemeralRelation resetting =
-      TakeValue(reset_failure.factory().CreateEphemeralRelation(Descriptor()));
+      TakeValue(reset_failure.storage().CreateEphemeralRelation(Descriptor()));
   for (std::int64_t key = 0; key < 8; ++key) {
     EXPECT_EQ(EphemeralInsertResult::kInserted,
               TakeValue(resetting.Insert(BlobRow(BlobRowSpec{.key = key, .payload_size = 900U}),
@@ -513,6 +753,9 @@ TEST(EphemeralRelation, FileBackendPropagatesIoFailuresAndCleansUp) {
   ASSERT_FALSE(failed_reset.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_reset.error().code());
   EXPECT_FALSE(resetting.valid());
+  EXPECT_TRUE(reset_failure.storage().failed());
+  EXPECT_TRUE(reset_failure.vfs().pathless_file_present());
+  reset_failure.ResetStorage();
   EXPECT_FALSE(reset_failure.vfs().pathless_file_present());
 }
 

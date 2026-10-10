@@ -16,6 +16,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
+#include "temporary_storage_internal.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -104,6 +105,35 @@ namespace temporary_storage_detail {
 
 struct StatementState;
 
+struct RelationRoot {
+  // A retired writer's comparison references may have expired. Reuse only
+  // calls root_page() and Clear(), which do not inspect comparison metadata,
+  // before replacing the writer with freshly borrowed columns.
+  std::optional<IndexBtreeWriter> writer;
+  std::unique_ptr<RelationRoot> next;
+};
+
+struct RelationArena {
+  RelationArena(TemporaryFileLease owned_file_lease, std::unique_ptr<Pager> owned_pager,
+                BtreeWriteSession owned_session) noexcept
+      : file_lease(std::move(owned_file_lease)),
+        pager(std::move(owned_pager)),
+        session(std::move(owned_session)) {}
+
+  ~RelationArena() {
+    while (retired_roots != nullptr) {
+      std::unique_ptr<RelationRoot> next = std::move(retired_roots->next);
+      retired_roots = std::move(next);
+    }
+  }
+
+  TemporaryFileLease file_lease;
+  std::unique_ptr<Pager> pager;
+  BtreeWriteSession session;
+  std::unique_ptr<RelationRoot> retired_roots;
+  std::size_t root_count = 0;
+};
+
 struct MemoryRegistration {
   ~MemoryRegistration();
 
@@ -124,7 +154,11 @@ struct StatementState {
         file_spill(owning_factory.file_spill_enabled()) {}
 
   ~StatementState() {
-    if (owners != nullptr || owner_count != 0U || live_files != 0U) {
+    if (owners != nullptr || owner_count != 0U || live_relation_roots != 0U) {
+      std::terminate();
+    }
+    relation_arena.reset();
+    if (live_files != 0U) {
       std::terminate();
     }
   }
@@ -282,12 +316,149 @@ struct StatementState {
     --live_files;
   }
 
-  [[nodiscard]] std::size_t OverheadBytes() const noexcept {
-    if (owner_count > (std::numeric_limits<std::size_t>::max() - sizeof(StatementState)) /
-                          sizeof(MemoryRegistration)) {
-      return std::numeric_limits<std::size_t>::max();
+  [[nodiscard]] Result<RelationArena*> EnsureRelationArena() {
+    if (failed) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
     }
-    return sizeof(StatementState) + owner_count * sizeof(MemoryRegistration);
+    if (relation_arena != nullptr) {
+      return relation_arena.get();
+    }
+
+    auto file_lease = AcquireFile();
+    if (!file_lease.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(file_lease.error()));
+    }
+    const std::size_t page_size = factory->pager_->page_size().value();
+    const std::size_t threshold_pages = 1U + (budget - 1U) / page_size;
+    const std::size_t main_cache_pages =
+        std::max<std::size_t>(1U, factory->pager_->cache_capacity_pages());
+    const std::size_t cache_pages =
+        std::max<std::size_t>(1U, std::min(main_cache_pages, threshold_pages));
+    auto pager =
+        Pager::OpenEphemeral(*factory->vfs_, PagerOptions{
+                                                 .empty_database_page_size = ByteCount{page_size},
+                                                 .cache_capacity_pages = cache_pages,
+                                             });
+    if (!pager.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(pager.error()));
+    }
+    auto begun_read = (*pager)->BeginRead();
+    if (!begun_read.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(begun_read.error()));
+    }
+    auto begun_write = (*pager)->BeginWrite();
+    if (!begun_write.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(begun_write.error()));
+    }
+    auto session = BtreeWriteSession::Open(**pager);
+    if (!session.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(session.error()));
+    }
+    auto initialized = session->InitializeDatabase();
+    if (!initialized.has_value()) {
+      failed = true;
+      return std::unexpected(std::move(initialized.error()));
+    }
+    try {
+      relation_arena = std::make_unique<RelationArena>(std::move(*file_lease), std::move(*pager),
+                                                       std::move(*session));
+      return relation_arena.get();
+    } catch (const std::bad_alloc&) {
+      failed = true;
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      failed = true;
+      return std::unexpected(Error::OutOfMemory());
+    }
+  }
+
+  [[nodiscard]] Result<std::unique_ptr<RelationRoot>> AcquireRelationRoot(
+      std::span<const IndexColumnOrder> columns) {
+    auto arena = EnsureRelationArena();
+    if (!arena.has_value()) {
+      return std::unexpected(std::move(arena.error()));
+    }
+    if (live_relation_roots == std::numeric_limits<std::size_t>::max()) {
+      return std::unexpected(TooLarge("live temporary relation root count is exhausted"));
+    }
+
+    std::unique_ptr<RelationRoot> root;
+    if ((*arena)->retired_roots != nullptr) {
+      root = std::move((*arena)->retired_roots);
+      (*arena)->retired_roots = std::move(root->next);
+      if (!root->writer.has_value()) {
+        std::terminate();
+      }
+      auto cleared = root->writer->Clear();
+      if (!cleared.has_value()) {
+        failed = true;
+        root->next = std::move((*arena)->retired_roots);
+        (*arena)->retired_roots = std::move(root);
+        return std::unexpected(std::move(cleared.error()));
+      }
+      const PageNumber root_page = root->writer->root_page();
+      auto reopened = (*arena)->session.OpenIndexBtree(root_page, columns);
+      if (!reopened.has_value()) {
+        failed = true;
+        root->next = std::move((*arena)->retired_roots);
+        (*arena)->retired_roots = std::move(root);
+        return std::unexpected(std::move(reopened.error()));
+      }
+      root->writer.emplace(std::move(*reopened));
+    } else {
+      if ((*arena)->root_count == std::numeric_limits<std::size_t>::max()) {
+        return std::unexpected(TooLarge("temporary relation root count is exhausted"));
+      }
+      try {
+        root = std::make_unique<RelationRoot>();
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      auto created = (*arena)->session.CreateIndexBtree(columns);
+      if (!created.has_value()) {
+        failed = true;
+        return std::unexpected(std::move(created.error()));
+      }
+      if ((*arena)->root_count == 0U && created->root_page() != PageNumber{2}) {
+        failed = true;
+        return std::unexpected(Internal("first temporary relation root is not page two"));
+      }
+      root->writer.emplace(std::move(*created));
+      ++(*arena)->root_count;
+    }
+    ++live_relation_roots;
+    return root;
+  }
+
+  void RetireRelationRoot(std::unique_ptr<RelationRoot> root) noexcept {
+    if (root == nullptr || relation_arena == nullptr || live_relation_roots == 0U) {
+      std::terminate();
+    }
+    root->next = std::move(relation_arena->retired_roots);
+    relation_arena->retired_roots = std::move(root);
+    --live_relation_roots;
+  }
+
+  [[nodiscard]] std::size_t OverheadBytes() const noexcept {
+    std::size_t overhead = sizeof(StatementState);
+    const auto add = [&overhead](std::size_t count, std::size_t size) {
+      if (count > (std::numeric_limits<std::size_t>::max() - overhead) / size) {
+        overhead = std::numeric_limits<std::size_t>::max();
+        return;
+      }
+      overhead += count * size;
+    };
+    add(owner_count, sizeof(MemoryRegistration));
+    if (relation_arena != nullptr) {
+      add(1U, sizeof(RelationArena));
+      add(relation_arena->root_count, sizeof(RelationRoot));
+    }
+    return overhead;
   }
 
   // The session-owned factory outlives statement storage.
@@ -300,8 +471,10 @@ struct StatementState {
   std::size_t live_files = 0;
   std::size_t peak_live_files = 0;
   std::size_t owner_count = 0;
+  std::size_t live_relation_roots = 0;
   std::uint64_t next_ordinal = 0;
   MemoryRegistration* owners = nullptr;
+  std::unique_ptr<RelationArena> relation_arena;
 };
 
 MemoryRegistration::~MemoryRegistration() {
@@ -309,6 +482,18 @@ MemoryRegistration::~MemoryRegistration() {
     state->Unregister(*this);
   }
 }
+
+struct RelationRootLease::Impl {
+  ~Impl() {
+    if (root != nullptr) {
+      state->RetireRelationRoot(std::move(root));
+    }
+  }
+
+  // The statement state owns the arena and outlives every root lease.
+  StatementState* state = nullptr;
+  std::unique_ptr<RelationRoot> root;
+};
 
 }  // namespace temporary_storage_detail
 
@@ -368,6 +553,80 @@ void TemporaryFileLease::Release() noexcept {
     state_->ReleaseFile();
     state_ = nullptr;
   }
+}
+
+temporary_storage_detail::RelationRootLease::RelationRootLease(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+temporary_storage_detail::RelationRootLease::RelationRootLease(RelationRootLease&&) noexcept =
+    default;
+
+temporary_storage_detail::RelationRootLease& temporary_storage_detail::RelationRootLease::operator=(
+    RelationRootLease&&) noexcept = default;
+
+temporary_storage_detail::RelationRootLease::~RelationRootLease() = default;
+
+bool temporary_storage_detail::RelationRootLease::valid() const noexcept {
+  return impl_ != nullptr && impl_->root != nullptr;
+}
+
+Pager& temporary_storage_detail::RelationRootLease::pager() const noexcept {
+  if (!valid() || impl_->state->relation_arena == nullptr) {
+    std::terminate();
+  }
+  return *impl_->state->relation_arena->pager;
+}
+
+IndexBtreeWriter& temporary_storage_detail::RelationRootLease::writer() noexcept {
+  if (!valid() || !impl_->root->writer.has_value()) {
+    std::terminate();
+  }
+  return *impl_->root->writer;
+}
+
+PageNumber temporary_storage_detail::RelationRootLease::root_page() const noexcept {
+  if (!valid() || !impl_->root->writer.has_value()) {
+    std::terminate();
+  }
+  return impl_->root->writer->root_page();
+}
+
+void temporary_storage_detail::RelationRootLease::MarkStatementFailed() noexcept {
+  if (!valid()) {
+    std::terminate();
+  }
+  impl_->state->failed = true;
+}
+
+Result<temporary_storage_detail::RelationRootLease>
+temporary_storage_detail::RelationArenaAccess::Acquire(StatementState& state,
+                                                       std::span<const IndexColumnOrder> columns) {
+  try {
+    auto impl = std::make_unique<RelationRootLease::Impl>();
+    impl->state = &state;
+    auto root = state.AcquireRelationRoot(columns);
+    if (!root.has_value()) {
+      return std::unexpected(std::move(root.error()));
+    }
+    impl->root = std::move(*root);
+    return RelationRootLease{std::move(impl)};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+temporary_storage_detail::StatementState& temporary_storage_detail::RelationArenaAccess::State(
+    StatementTemporaryStorage& storage) noexcept {
+  if (storage.state_ == nullptr) {
+    std::terminate();
+  }
+  return *storage.state_;
+}
+
+bool temporary_storage_detail::RelationArenaAccess::Failed(const StatementState& state) noexcept {
+  return state.failed;
 }
 
 StatementTemporaryStorage::StatementTemporaryStorage(
