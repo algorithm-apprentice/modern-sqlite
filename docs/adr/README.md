@@ -61,3 +61,4 @@ their corresponding implementation begins.
 55. [ADR-0055: SQLite-Aligned Ephemeral Pager and Spillable Top-N](0055-sqlite-aligned-ephemeral-pager-and-spillable-top-n.md)
 56. [ADR-0056: SQLite-Aligned DISTINCT, VALUES, and Compound SELECT](0056-sqlite-aligned-distinct-values-and-compound-select.md)
 57. [ADR-0057: SQLite-Aligned Aggregate Roadmap](0057-sqlite-aligned-aggregates-and-grouping.md)
+58. [ADR-0058: Statement-Owned Temporary Storage Budgets](0058-statement-temporary-storage-budgets.md)

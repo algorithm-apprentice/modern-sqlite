@@ -3,6 +3,23 @@
 - Status: Accepted
 - Date: 2026-10-09
 
+## Amendment: statement-owned shared storage
+
+ADR-0058 supersedes the ownership portions of this ADR for future production
+changes:
+
+- file-mode top-N roots move from one Pager/file/cache per capability into one
+  statement-owned shared relation arena;
+- page two is required only for the first root in a fresh arena;
+- top-N candidate and retained allocations participate in statement-wide
+  accounting; and
+- sorter temporary files move into the shared extent-managed PMA arena.
+
+The admission rule, stable sequence, packed queue-record format,
+candidate-pending lifecycle, ephemeral Pager policy, encoded key-prefix
+mutation, runtime LIMIT lowering, and all SQL-visible behavior below remain
+authoritative.
+
 ## Context
 
 ADR-0054 requires ORDER BY with a syntactic LIMIT or OFFSET to use a
