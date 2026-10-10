@@ -1268,7 +1268,12 @@ class ReadPerformanceValidationTest(unittest.TestCase):
                 [
                     sys.executable,
                     "-c",
-                    "import sys; sys.stdout.write('x' * 1024)",
+                    (
+                        "import sys,time;"
+                        "sys.stdout.write('x' * 1024);"
+                        "sys.stdout.flush();"
+                        "time.sleep(5)"
+                    ),
                 ],
                 cwd=self.root,
                 timeout_seconds=2.0,
