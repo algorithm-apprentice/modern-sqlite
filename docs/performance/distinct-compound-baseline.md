@@ -30,10 +30,12 @@ The contract pins fourteen cases:
 14. a file-mode keyed-relation baseline retained for later optimization
     comparisons.
 
-Every case fixes the SQL text, source-row work, result rows and digest,
-temporary-store mode, sorter threshold, and warmup/measured/diagnostic
-iterations. The logical work and digest must match between Modern SQLite and
-the pinned SQLite 3.54.0 build before timing is accepted.
+Every case fixes the SQL text, compound-input-row work, result rows and
+digest, temporary-store mode, sorter threshold, and
+warmup/measured/diagnostic iterations. Every work object, including smoke and
+fixture verification, is compared with an independent immutable constant.
+The logical work and digest must match between Modern SQLite and the pinned
+SQLite 3.54.0 build before timing is accepted.
 
 ## Matched configuration
 
@@ -63,6 +65,23 @@ pre-optimization keyed-relation and high-cardinality DISTINCT gaps named by
 ADR-0056 rather than disguising them with easier inputs. Later optimization
 work must preserve the immutable workload and fixture identities and may
 tighten the guard only through a new reviewed contract version.
+
+## Diagnostic evidence
+
+Diagnostic builds add a non-deterministic identity function named
+`modern_sqlite_probe`. The dedicated diagnostic SQL wraps one projected
+expression for every input row of every compound arm. Every arm has a distinct
+tag, every VALUES row has its own tag, and collection starts after warmup.
+Modern and SQLite must report the exact pinned `probe_counts` vector and its
+`source_rows` sum, so compensating skipped and repeated arms cannot pass. The
+probe is absent from timing SQL, the timing binary, and ordinary production
+builds.
+
+Because every Modern workload is query-only, a diagnostic database-page
+write can only belong to temporary storage. The file-mode keyed-relation case
+must report positive Modern page writes and positive SQLite temporary-spill
+bytes. The smaller replacement-UNION case must report zero for both and acts
+as the no-spill control.
 
 ## Build and smoke validation
 
@@ -117,3 +136,5 @@ python3 tools/distinct_compound_performance.py validate-baseline \
 The output directory is immutable evidence: aggregate, run manifest, raw
 timing reports, raw diagnostic reports, and bounded stderr logs. Regeneration
 uses a new directory rather than modifying an existing baseline in place.
+CI and CTest validate this directory unconditionally, so missing evidence is
+a failure rather than a skipped check.

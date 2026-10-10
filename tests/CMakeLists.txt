@@ -1130,27 +1130,25 @@ set_tests_properties(
     TIMEOUT 30
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
-if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/distinct-compound-baseline-v1/aggregate.json")
-  add_test(
-    NAME performance.distinct_compound_baseline_validation
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tools/distinct_compound_performance.py"
-      validate-baseline
-      --repository-root "${PROJECT_SOURCE_DIR}"
-      --workloads
-        "${PROJECT_SOURCE_DIR}/tests/performance/distinct-compound-workloads-v1.json"
-      --baseline
-        "${PROJECT_SOURCE_DIR}/benchmarks/distinct-compound-baseline-v1"
-  )
-  set_tests_properties(
-    performance.distinct_compound_baseline_validation
-    PROPERTIES
-      LABELS performance
-      TIMEOUT 30
-      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-  )
-endif()
+add_test(
+  NAME performance.distinct_compound_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/distinct_compound_performance.py"
+    validate-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads
+      "${PROJECT_SOURCE_DIR}/tests/performance/distinct-compound-workloads-v1.json"
+    --baseline
+      "${PROJECT_SOURCE_DIR}/benchmarks/distinct-compound-baseline-v1"
+)
+set_tests_properties(
+  performance.distinct_compound_baseline_validation
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 if(TARGET modern_sqlite_benchmark_sqlite)
   add_executable(
     modern_sqlite_write_pager_sqlite_compatibility

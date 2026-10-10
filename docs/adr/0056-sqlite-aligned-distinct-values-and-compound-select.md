@@ -840,8 +840,34 @@ Record at least:
 
 Pin fixture, SQL, page/cache/temp-store settings, relation backend, sorter
 threshold, result digest, source-row work, spill evidence, and call counts.
-Every repetition must reach the timing floor, and aggregate plus every paired
-round must remain within the accepted 10x wall and CPU guard.
+Every warmup, measured, diagnostic, smoke, and verification work object is an
+independent immutable constant; no expected bytes, digest, or work count is
+derived from another manifest field.
+
+Diagnostic executions use a non-deterministic identity function named
+`modern_sqlite_probe`, compiled only into instrumentation builds and registered
+with the pinned SQLite diagnostic connection. The diagnostic SQL wraps one
+projected expression for every input row of every compound arm. Each arm has a
+distinct immutable tag, and every VALUES row has its own tag. Probe collection
+is reset after warmup and scoped only to the diagnostic execution. Both
+engines must therefore report every exact per-tag count independently of the
+synthesized timing work object. This probe is not part of timing SQL, the
+timing binary, or the ordinary production library.
+
+In file mode, Modern's read-only diagnostic process treats database-page
+writes as temporary-storage spill evidence: the keyed-relation pressure case
+must write at least one page, while the smaller replacement-UNION control must
+write none. SQLite must analogously report positive `TEMPBUF_SPILL` bytes only
+for the keyed-relation pressure case.
+
+Every repetition must reach the five-millisecond timing floor. This
+pre-optimization version-1 contract admits aggregate and paired-round wall and
+CPU ratios up to 40x SQLite so it can record the known high-cardinality
+DISTINCT and file-backed keyed-relation gaps without weakening the workload.
+The guard may be tightened only in a new reviewed contract version after
+optimization evidence. The committed baseline is mandatory: CI and CTest must
+fail when its evidence directory is absent rather than silently skipping
+validation.
 
 ## Explicit deferrals
 

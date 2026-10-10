@@ -15,9 +15,18 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/text/text.hpp"
+
+#ifndef MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE
+#define MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE 0
+#endif
+
+#if MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE != 0 && MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE != 1
+#error "MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE must be 0 or 1"
+#endif
 
 namespace modern_sqlite {
 namespace {
@@ -270,6 +279,19 @@ namespace {
   return MinMaxFunction(context, arguments, false);
 }
 
+#if MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE
+[[nodiscard]] Result<SqlValue> InstrumentationProbe(const ScalarFunctionContext&,
+                                                    std::span<const SqlValue> arguments) {
+  const std::optional<std::int64_t> tag = arguments[0].integer_value();
+  if (!tag.has_value() || *tag <= 0 ||
+      static_cast<std::uint64_t>(*tag) >= instrumentation::kProbeTagCount) {
+    return std::unexpected(Error::Create(ErrorCode::kMisuse, "modern_sqlite_probe tag is invalid"));
+  }
+  MODERN_SQLITE_RECORD_PROBE_CALL(static_cast<std::size_t>(*tag));
+  return arguments[1].Clone();
+}
+#endif
+
 constexpr std::array kCoreFunctions{
     ScalarFunction{"typeof", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                    FunctionCollationUse::kNone, TypeofFunction},
@@ -289,6 +311,11 @@ constexpr std::array kCoreFunctions{
                    FunctionCollationUse::kRequired, MinFunction},
     ScalarFunction{"max", FunctionArity::AtLeast(2), FunctionDeterminism::kDeterministic,
                    FunctionCollationUse::kRequired, MaxFunction},
+#if MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE
+    ScalarFunction{"modern_sqlite_probe", FunctionArity::Exact(2),
+                   FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                   InstrumentationProbe},
+#endif
 };
 
 constexpr FunctionRegistry kCoreRegistry{

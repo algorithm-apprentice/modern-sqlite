@@ -229,13 +229,11 @@ jobs:
           --workloads tests/performance/distinct-compound-workloads-v1.json
       - name: Validate committed DISTINCT and compound baseline
         if: github.event_name == 'push' || matrix.run_on_pr
-        run: |
-          if test -d benchmarks/distinct-compound-baseline-v1; then
-            python3 tools/distinct_compound_performance.py validate-baseline \
-              --repository-root . \
-              --workloads tests/performance/distinct-compound-workloads-v1.json \
-              --baseline benchmarks/distinct-compound-baseline-v1
-          fi
+        run: >
+          python3 tools/distinct_compound_performance.py validate-baseline
+          --repository-root .
+          --workloads tests/performance/distinct-compound-workloads-v1.json
+          --baseline benchmarks/distinct-compound-baseline-v1
       - name: Validate committed write workloads
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >

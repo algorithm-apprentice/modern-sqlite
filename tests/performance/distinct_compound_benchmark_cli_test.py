@@ -82,6 +82,27 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
                         expected_case=case_id,
                         expected_run_kind="smoke",
                     )
+                    if (
+                        engine == "modern"
+                        and case_id == distinct_compound_performance.CASE_IDS[0]
+                    ):
+                        for field, replacement in (
+                            ("schema_version", 1.0),
+                            ("page_size", 4096.0),
+                        ):
+                            malformed = json.loads(json.dumps(report))
+                            if field == "page_size":
+                                malformed["effective_configuration"][field] = replacement
+                            else:
+                                malformed[field] = replacement
+                            with self.assertRaises(read_performance.HarnessError):
+                                read_performance.validate_raw_timing_report(
+                                    malformed,
+                                    workload_manifest=self.workloads,
+                                    expected_engine=engine,
+                                    expected_case=case_id,
+                                    expected_run_kind="smoke",
+                                )
                     reports[engine] = report
             self.assertEqual(
                 reports["modern"]["warmup"],
@@ -94,6 +115,7 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
 
     def test_diagnostics_match_logical_work(self) -> None:
         sqlite_spill_bytes: dict[str, int] = {}
+        modern_pages_written: dict[str, int] = {}
         for case_id in distinct_compound_performance.CASE_IDS:
             work: dict[str, object] | None = None
             for engine in ("modern", "sqlite"):
@@ -119,12 +141,68 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
                         sqlite_spill_bytes[case_id] = report["counters"]["sqlite"][
                             "temp_bytes_spilled"
                         ]
-                    if (
-                        engine == "modern"
-                        and case_id == distinct_compound_performance.CASE_IDS[0]
-                    ):
+                    else:
+                        modern_pages_written[case_id] = report["counters"]["modern"][
+                            "pages_written"
+                        ]
+                    expected_probe_counts = (
+                        distinct_compound_performance.expected_probe_counts(case_id)
+                    )
+                    self.assertEqual(
+                        expected_probe_counts,
+                        report["probe_counts"],
+                    )
+                    self.assertEqual(
+                        sum(expected_probe_counts),
+                        report["source_rows"],
+                    )
+                    if engine == "modern" and case_id == distinct_compound_performance.CASE_IDS[0]:
                         malformed = json.loads(json.dumps(report))
-                        del malformed["counters"]["modern"]["pages_read"]
+                        del malformed["source_rows"]
+                        with self.assertRaises(read_performance.HarnessError):
+                            read_performance.validate_raw_diagnostic_report(
+                                malformed,
+                                workload_manifest=self.workloads,
+                                expected_engine=engine,
+                                expected_case=case_id,
+                            )
+                        malformed = json.loads(json.dumps(report))
+                        malformed["counters"] = []
+                        with self.assertRaises(read_performance.HarnessError):
+                            read_performance.validate_raw_diagnostic_report(
+                                malformed,
+                                workload_manifest=self.workloads,
+                                expected_engine=engine,
+                                expected_case=case_id,
+                            )
+                        for replacement in (True, 1.0):
+                            malformed = json.loads(json.dumps(report))
+                            malformed["probe_counts"][0] = replacement
+                            with self.assertRaises(read_performance.HarnessError):
+                                read_performance.validate_raw_diagnostic_report(
+                                    malformed,
+                                    workload_manifest=self.workloads,
+                                    expected_engine=engine,
+                                    expected_case=case_id,
+                                )
+                        for field, replacement in (
+                            ("schema_version", 1.0),
+                            ("page_size", 4096.0),
+                        ):
+                            malformed = json.loads(json.dumps(report))
+                            if field == "page_size":
+                                malformed["effective_configuration"][field] = replacement
+                            else:
+                                malformed[field] = replacement
+                            with self.assertRaises(read_performance.HarnessError):
+                                read_performance.validate_raw_diagnostic_report(
+                                    malformed,
+                                    workload_manifest=self.workloads,
+                                    expected_engine=engine,
+                                    expected_case=case_id,
+                                )
+                        malformed = json.loads(json.dumps(report))
+                        malformed["probe_counts"][0] -= 1
                         with self.assertRaises(read_performance.HarnessError):
                             read_performance.validate_raw_diagnostic_report(
                                 malformed,
@@ -141,6 +219,34 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
             0,
         )
         self.assertEqual(0, sqlite_spill_bytes["union-replace-file"])
+        self.assertGreater(
+            modern_pages_written["union-keyed-relation-before-file"],
+            0,
+        )
+        self.assertEqual(0, modern_pages_written["union-replace-file"])
+
+        for case_id, replacement in (
+            ("union-keyed-relation-before-file", 0),
+            ("union-replace-file", 1),
+        ):
+            completed = self.run_binary(
+                self.arguments.diagnostic_binary,
+                "run",
+                "modern",
+                case_id,
+                str(self.fixture),
+                "diagnostic",
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            malformed = json.loads(completed.stdout)
+            malformed["counters"]["modern"]["pages_written"] = replacement
+            with self.assertRaises(read_performance.HarnessError):
+                read_performance.validate_raw_diagnostic_report(
+                    malformed,
+                    workload_manifest=self.workloads,
+                    expected_engine="modern",
+                    expected_case=case_id,
+                )
 
     def test_malformed_reports_are_harness_errors(self) -> None:
         with self.assertRaises(read_performance.HarnessError):

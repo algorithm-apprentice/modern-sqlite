@@ -250,6 +250,14 @@ TEST(FunctionRegistryTest, KeepsLazySpecialFormsOutOfEagerScalarDispatch) {
   }
 }
 
+TEST(FunctionRegistryTest, KeepsInstrumentationProbeOutOfOrdinaryRegistry) {
+  const auto function = CoreFunctionRegistry().Resolve("modern_sqlite_probe", 2);
+
+  ASSERT_FALSE(function.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, function.error().code());
+  EXPECT_EQ("no such function: modern_sqlite_probe", function.error().message());
+}
+
 TEST(CoreFunctionTest, TypeofReturnsSQLiteStorageClassNames) {
   const std::array null_argument{SqlValue{}};
   const std::array integer_argument{SqlValue::Integer(7)};

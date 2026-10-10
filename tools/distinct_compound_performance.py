@@ -165,16 +165,46 @@ CASE_ITEM_COUNTS = {
     "distinct-collated-memory": 65_536,
     "distinct-order-limit-memory": 65_536,
     "values-union-all-limit-memory": 65_792,
-    "union-replace-file": 131_072,
-    "except-membership-memory": 131_072,
-    "intersect-membership-memory": 131_072,
-    "ordered-union-all-topn-memory": 196_608,
-    "ordered-union-merge-memory": 131_072,
-    "ordered-except-merge-memory": 131_072,
-    "ordered-intersect-merge-memory": 131_072,
-    "long-mixed-compound-memory": 327_680,
-    "union-keyed-relation-before-file": 131_072,
+    "union-replace-file": 65_536,
+    "except-membership-memory": 49_152,
+    "intersect-membership-memory": 49_152,
+    "ordered-union-all-topn-memory": 81_920,
+    "ordered-union-merge-memory": 65_536,
+    "ordered-except-merge-memory": 49_152,
+    "ordered-intersect-merge-memory": 49_152,
+    "long-mixed-compound-memory": 90_112,
+    "union-keyed-relation-before-file": 65_536,
 }
+
+CASE_PROBE_GROUPS = {
+    "distinct-low-card-memory": ((1, 65_536),),
+    "distinct-high-card-memory": ((1, 65_536),),
+    "distinct-collated-memory": ((1, 65_536),),
+    "distinct-order-limit-memory": ((1, 65_536),),
+    "values-union-all-limit-memory": ((256, 1), (1, 65_536)),
+    "union-replace-file": ((2, 32_768),),
+    "except-membership-memory": ((1, 32_768), (1, 16_384)),
+    "intersect-membership-memory": ((1, 32_768), (1, 16_384)),
+    "ordered-union-all-topn-memory": ((2, 32_768), (1, 16_384)),
+    "ordered-union-merge-memory": ((2, 32_768),),
+    "ordered-except-merge-memory": ((1, 32_768), (1, 16_384)),
+    "ordered-intersect-merge-memory": ((1, 32_768), (1, 16_384)),
+    "long-mixed-compound-memory": (
+        (3, 16_384),
+        (1, 8_192),
+        (1, 32_768),
+    ),
+    "union-keyed-relation-before-file": ((2, 32_768),),
+}
+
+
+def expected_probe_counts(case_id: str) -> list[int]:
+    return [
+        calls
+        for tag_count, calls in CASE_PROBE_GROUPS[case_id]
+        for _ in range(tag_count)
+    ]
+
 
 CASE_MEASURED_ITERATIONS = {
     case_id: (
@@ -199,41 +229,39 @@ CASE_MEASURED_DIGESTS = {
     "values-union-all-limit-memory": "e9f68d7c90b0b405",
 }
 
-SQLITE_FULLSCAN_STEPS = {
-    "distinct-low-card-memory": 65_535,
-    "distinct-high-card-memory": 65_535,
-    "distinct-collated-memory": 65_535,
-    "distinct-order-limit-memory": 65_535,
-    "values-union-all-limit-memory": 65_535,
-    "union-replace-file": 65_535,
-    "except-membership-memory": 131_070,
-    "intersect-membership-memory": 131_039,
-    "ordered-union-all-topn-memory": 196_605,
-    "ordered-union-merge-memory": 65_535,
-    "ordered-except-merge-memory": 131_070,
-    "ordered-intersect-merge-memory": 131_039,
-    "long-mixed-compound-memory": 196_590,
-    "union-keyed-relation-before-file": 0,
+CASE_SINGLE_RESULTS = {
+    "distinct-low-card-memory": (2, 16, "e1e57e17779545b9"),
+    "distinct-high-card-memory": (65_536, 1_114_112, "1115d744f5a9f725"),
+    "distinct-collated-memory": (1, 1, "200b1b815c9ea247"),
+    "distinct-order-limit-memory": (64, 512, "b23d465428610b6e"),
+    "values-union-all-limit-memory": (64, 512, "ebfb42850728072e"),
+    "union-replace-file": (4_096, 32_768, "f2f777673354d459"),
+    "except-membership-memory": (1_024, 8_192, "7b9f56fa8bda78ee"),
+    "intersect-membership-memory": (1_024, 8_192, "83509a56b1476dee"),
+    "ordered-union-all-topn-memory": (64, 16_896, "9a886719eea2be2f"),
+    "ordered-union-merge-memory": (4_096, 32_768, "f2f777673354d459"),
+    "ordered-except-merge-memory": (1_024, 8_192, "7b9f56fa8bda78ee"),
+    "ordered-intersect-merge-memory": (1_024, 8_192, "83509a56b1476dee"),
+    "long-mixed-compound-memory": (2_048, 16_384, "aa64fc0c7c66e5ee"),
+    "union-keyed-relation-before-file": (
+        65_536,
+        17_891_328,
+        "ce76fdee5eb31ac8",
+    ),
 }
 
-SQLITE_SORT_OPERATIONS = {
-    "distinct-low-card-memory": 0,
-    "distinct-high-card-memory": 0,
-    "distinct-collated-memory": 0,
-    "distinct-order-limit-memory": 1,
-    "values-union-all-limit-memory": 2,
-    "union-replace-file": 1,
-    "except-membership-memory": 0,
-    "intersect-membership-memory": 0,
-    "ordered-union-all-topn-memory": 3,
-    "ordered-union-merge-memory": 1,
-    "ordered-except-merge-memory": 0,
-    "ordered-intersect-merge-memory": 0,
-    "long-mixed-compound-memory": 2,
-    "union-keyed-relation-before-file": 2,
+VERIFICATION_WORK = {
+    "operations": 1,
+    "items": 65_536,
+    "rows": 65_536,
+    "bytes": 17_301_504,
+    "result_hits": 1,
+    "result_misses": 0,
+    "digest": "b760b119722fedf5",
 }
 
 SQLITE_SPILL_CASES = {"union-keyed-relation-before-file"}
+MODERN_SPILL_CASES = {"union-keyed-relation-before-file"}
 
 
 _BASE_CASE_IDS = base.CASE_IDS
@@ -254,46 +282,148 @@ def _configured_base() -> Any:
         base.MINIMUM_WALL_NS = _BASE_MINIMUM_WALL_NS
 
 
+def _require_exact_typed(value: Any, expected: Any, label: str) -> None:
+    if type(value) is not type(expected):
+        raise HarnessError(
+            f"{label} must be {type(expected).__name__}, got {type(value).__name__}"
+        )
+    if isinstance(expected, dict):
+        common._require_exact_keys(value, set(expected), label)
+        for key, expected_item in expected.items():
+            _require_exact_typed(value[key], expected_item, f"{label}.{key}")
+        return
+    if isinstance(expected, list):
+        if len(value) != len(expected):
+            raise HarnessError(f"{label} length is not pinned")
+        for index, expected_item in enumerate(expected):
+            _require_exact_typed(value[index], expected_item, f"{label}[{index}]")
+        return
+    if value != expected:
+        raise HarnessError(f"{label} does not match the pinned value")
+
+
+def _validate_original_manifest_types(value: Any) -> None:
+    base._require_keys(value, base._TOP_KEYS, "DISTINCT/compound workload manifest")
+    common._require_integer(
+        value["schema_version"],
+        "DISTINCT/compound workload schema_version",
+        minimum=1,
+    )
+    common._require_integer(
+        value["workload_semantics_version"],
+        "DISTINCT/compound workload workload_semantics_version",
+        minimum=1,
+    )
+    common._require_string(
+        value["sqlite_profile"],
+        "DISTINCT/compound workload sqlite_profile",
+    )
+    compile_options = value["sqlite_semantic_compile_options"]
+    common._require_type(
+        compile_options,
+        list,
+        "DISTINCT/compound workload sqlite_semantic_compile_options",
+    )
+    for index, option in enumerate(compile_options):
+        common._require_string(
+            option,
+            f"DISTINCT/compound workload sqlite_semantic_compile_options[{index}]",
+        )
+    _require_exact_typed(
+        value["configuration"],
+        {
+            "page_size": 4096,
+            "cache_pages": 512,
+            "mmap_bytes": 0,
+            "temp_store": "case",
+            "sorter_memory_threshold": "case",
+            "merge_fan_in": 16,
+            "synchronous": "full",
+            "journal_mode": "delete",
+            "query_only": True,
+            "thread_mode": "single",
+        },
+        "DISTINCT/compound workload configuration",
+    )
+    common._require_integer(
+        value["minimum_wall_ns"],
+        "DISTINCT/compound workload minimum_wall_ns",
+        minimum=1,
+    )
+    _require_exact_typed(
+        value["permutation"],
+        {
+            "algorithm": "splitmix64-rejection-fisher-yates-v1",
+            "fingerprint": "fnv1a64-v1",
+            "fit_seed": "9e3779b97f4a7c15",
+            "pressure_seed": "d1b54a32d192ed03",
+        },
+        "DISTINCT/compound workload permutation",
+    )
+    _require_exact_typed(
+        value["rounds"],
+        [
+            {
+                "index": 0,
+                "case_order": "canonical",
+                "engine_order": ["modern", "sqlite"],
+            },
+            {
+                "index": 1,
+                "case_order": "reverse",
+                "engine_order": ["sqlite", "modern"],
+            },
+            {
+                "index": 2,
+                "case_order": "canonical",
+                "engine_order": ["modern", "sqlite"],
+            },
+        ],
+        "DISTINCT/compound workload rounds",
+    )
+    fixtures = value["fixtures"]
+    common._require_type(fixtures, list, "DISTINCT/compound workload fixtures")
+    for index, fixture in enumerate(fixtures):
+        label = f"DISTINCT/compound workload fixtures[{index}]"
+        base._require_keys(fixture, base._FIXTURE_KEYS, label)
+        for key in ("id", "path", "sql_path", "sha256", "sql_sha256"):
+            common._require_string(fixture[key], f"{label}.{key}")
+        for key in (
+            "size_bytes",
+            "page_size",
+            "page_count",
+            "row_count",
+            "payload_size",
+        ):
+            common._require_integer(fixture[key], f"{label}.{key}", minimum=1)
+    _require_exact_typed(
+        value["guard"],
+        {
+            "maximum_cpu_ratio": {
+                "numerator": GUARD_RATIO,
+                "denominator": 1,
+            },
+            "maximum_wall_ratio": {
+                "numerator": GUARD_RATIO,
+                "denominator": 1,
+            },
+        },
+        "DISTINCT/compound workload guard",
+    )
+
+
 def validate_workload_manifest(
     value: Any,
     *,
     repository_root: pathlib.Path,
     manifest_path: pathlib.Path,
 ) -> dict[str, Any]:
-    normalized = copy.deepcopy(value)
-    if isinstance(normalized, dict):
-        normalized["guard"] = {
-            "maximum_cpu_ratio": {"numerator": 10, "denominator": 1},
-            "maximum_wall_ratio": {"numerator": 10, "denominator": 1},
-        }
-    if isinstance(normalized, dict) and isinstance(normalized.get("cases"), list):
-        for case in normalized["cases"]:
-            if not isinstance(case, dict) or case.get("id") not in CASE_ITEM_COUNTS:
-                continue
-            case["items_per_iteration"] = base.ROW_COUNT
-            case["measured_iterations"] = 1
-            expected = case.get("expected")
-            if not isinstance(expected, dict):
-                continue
-            for group, iterations in (
-                ("warmup", case.get("warmup_iterations")),
-                ("measured", case.get("measured_iterations")),
-                ("diagnostic", case.get("diagnostic_iterations")),
-                ("smoke", 1),
-            ):
-                work = expected.get(group)
-                if isinstance(work, dict) and isinstance(iterations, int):
-                    work["items"] = iterations * base.ROW_COUNT
-            if isinstance(expected, dict) and isinstance(expected.get("smoke"), dict):
-                expected["measured"] = copy.deepcopy(expected["smoke"])
-    with _configured_base():
-        base.validate_workload_manifest(
-            normalized,
-            repository_root=repository_root,
-            manifest_path=manifest_path,
-        )
-    if not isinstance(value, dict) or not isinstance(value.get("cases"), list):
-        raise HarnessError("DISTINCT/compound workload cases must be a list")
+    _validate_original_manifest_types(value)
+    common._require_type(
+        value["cases"],
+        list,
+        "DISTINCT/compound workload cases",
+    )
     expected_guard = {
         "maximum_cpu_ratio": {"numerator": GUARD_RATIO, "denominator": 1},
         "maximum_wall_ratio": {"numerator": GUARD_RATIO, "denominator": 1},
@@ -303,54 +433,151 @@ def validate_workload_manifest(
             f"DISTINCT/compound workload guard must be exactly {GUARD_RATIO}/1"
         )
     for index, case in enumerate(value["cases"]):
-        if not isinstance(case, dict):
-            raise HarnessError(
-                f"DISTINCT/compound workload cases[{index}] must be an object"
-            )
-        case_id = case.get("id")
+        label = f"DISTINCT/compound workload cases[{index}]"
+        common._require_type(case, dict, label)
+        common._require_exact_keys(
+            case,
+            base._CASE_KEYS | {"diagnostic_probe_groups"},
+            label,
+        )
+        case_id = common._require_identifier(
+            case.get("id"),
+            f"{label}.id",
+        )
         if case_id not in CASE_ITEM_COUNTS:
             raise HarnessError("DISTINCT/compound workload contains an unknown case")
         expected_items = CASE_ITEM_COUNTS[case_id]
         expected_measured_iterations = CASE_MEASURED_ITERATIONS[case_id]
-        if case.get("items_per_iteration") != expected_items:
-            raise HarnessError(
-                f"DISTINCT/compound workload cases[{index}].items_per_iteration "
-                f"must be {expected_items}"
+        sql, result_rows, temporary_store, threshold = CASE_CONTRACTS[case_id]
+        _require_exact_typed(
+            {
+                key: case.get(key)
+                for key in (
+                    "fixture",
+                    "kind",
+                    "sql",
+                    "primary_unit",
+                    "warmup_iterations",
+                    "measured_iterations",
+                    "diagnostic_iterations",
+                    "items_per_iteration",
+                    "result_rows_per_iteration",
+                    "query_only",
+                    "temporary_store",
+                    "sorter_memory_threshold",
+                )
+            },
+            {
+                "fixture": base.FIXTURE_ID,
+                "kind": "order-by",
+                "sql": sql,
+                "primary_unit": "source-row",
+                "warmup_iterations": 1,
+                "measured_iterations": expected_measured_iterations,
+                "diagnostic_iterations": 1,
+                "items_per_iteration": expected_items,
+                "result_rows_per_iteration": result_rows,
+                "query_only": True,
+                "temporary_store": temporary_store,
+                "sorter_memory_threshold": threshold,
+            },
+            f"DISTINCT/compound workload cases[{index}] contract",
+        )
+        expected_probe_groups = [
+            {"tag_count": tag_count, "calls_per_tag": calls}
+            for tag_count, calls in CASE_PROBE_GROUPS[case_id]
+        ]
+        probe_groups = case.get("diagnostic_probe_groups")
+        common._require_type(
+            probe_groups,
+            list,
+            f"DISTINCT/compound workload cases[{index}].diagnostic_probe_groups",
+        )
+        for group_index, group in enumerate(probe_groups):
+            label = (
+                f"DISTINCT/compound workload cases[{index}]"
+                f".diagnostic_probe_groups[{group_index}]"
             )
-        if case.get("measured_iterations") != expected_measured_iterations:
+            common._require_type(group, dict, label)
+            common._require_exact_keys(
+                group,
+                {"tag_count", "calls_per_tag"},
+                label,
+            )
+            common._require_integer(
+                group["tag_count"],
+                f"{label}.tag_count",
+                minimum=1,
+            )
+            common._require_integer(
+                group["calls_per_tag"],
+                f"{label}.calls_per_tag",
+                minimum=1,
+            )
+        if probe_groups != expected_probe_groups:
             raise HarnessError(
-                f"DISTINCT/compound workload cases[{index}].measured_iterations "
-                f"must be {expected_measured_iterations}"
+                f"DISTINCT/compound workload cases[{index}].diagnostic_probe_groups "
+                "do not match the pinned per-tag calls"
             )
         expected = case.get("expected")
         if not isinstance(expected, dict):
             raise HarnessError(
                 f"DISTINCT/compound workload cases[{index}].expected must be an object"
             )
-        measured = expected.get("measured")
-        common._validate_work(
-            measured,
-            f"DISTINCT/compound workload cases[{index}].expected.measured",
+        common._require_exact_keys(
+            expected,
+            base._EXPECTED_KEYS,
+            f"DISTINCT/compound workload cases[{index}].expected",
         )
-        smoke = expected.get("smoke")
-        common._validate_work(
-            smoke,
-            f"DISTINCT/compound workload cases[{index}].expected.smoke",
-        )
-        _, result_rows, _, _ = CASE_CONTRACTS[case_id]
-        measured_digest = CASE_MEASURED_DIGESTS.get(case_id, smoke["digest"])
-        expected_measured = {
-            "operations": expected_measured_iterations,
-            "items": expected_measured_iterations * expected_items,
-            "rows": expected_measured_iterations * result_rows,
-            "bytes": expected_measured_iterations * smoke["bytes"],
-            "result_hits": expected_measured_iterations,
-            "result_misses": 0,
-            "digest": measured_digest,
+        for group in sorted(base._EXPECTED_KEYS):
+            common._validate_work(
+                expected[group],
+                f"DISTINCT/compound workload cases[{index}].expected.{group}",
+            )
+        result_rows, result_bytes, single_digest = CASE_SINGLE_RESULTS[case_id]
+        measured_digest = CASE_MEASURED_DIGESTS.get(case_id, single_digest)
+        expected_groups = {
+            "warmup": {
+                "operations": 1,
+                "items": expected_items,
+                "rows": result_rows,
+                "bytes": result_bytes,
+                "result_hits": 1,
+                "result_misses": 0,
+                "digest": single_digest,
+            },
+            "measured": {
+                "operations": expected_measured_iterations,
+                "items": expected_measured_iterations * expected_items,
+                "rows": expected_measured_iterations * result_rows,
+                "bytes": expected_measured_iterations * result_bytes,
+                "result_hits": expected_measured_iterations,
+                "result_misses": 0,
+                "digest": measured_digest,
+            },
+            "diagnostic": {
+                "operations": 1,
+                "items": expected_items,
+                "rows": result_rows,
+                "bytes": result_bytes,
+                "result_hits": 1,
+                "result_misses": 0,
+                "digest": single_digest,
+            },
+            "smoke": {
+                "operations": 1,
+                "items": expected_items,
+                "rows": result_rows,
+                "bytes": result_bytes,
+                "result_hits": 1,
+                "result_misses": 0,
+                "digest": single_digest,
+            },
+            "verification": VERIFICATION_WORK,
         }
-        if measured != expected_measured:
+        if expected != expected_groups:
             raise HarnessError(
-                f"DISTINCT/compound workload cases[{index}].expected.measured "
+                f"DISTINCT/compound workload cases[{index}].expected "
                 "does not match its pinned work"
             )
         for group, iterations in (
@@ -369,7 +596,88 @@ def validate_workload_manifest(
                     f"DISTINCT/compound workload cases[{index}].expected.{group} "
                     "does not match its source-row scale"
                 )
+
+    normalized = copy.deepcopy(value)
+    normalized["guard"] = {
+        "maximum_cpu_ratio": {"numerator": 10, "denominator": 1},
+        "maximum_wall_ratio": {"numerator": 10, "denominator": 1},
+    }
+    for case in normalized["cases"]:
+        if not isinstance(case, dict) or case.get("id") not in CASE_ITEM_COUNTS:
+            continue
+        case.pop("diagnostic_probe_groups", None)
+        case["items_per_iteration"] = base.ROW_COUNT
+        case["measured_iterations"] = 1
+        expected = case.get("expected")
+        if not isinstance(expected, dict):
+            continue
+        for group, iterations in (
+            ("warmup", case.get("warmup_iterations")),
+            ("measured", case.get("measured_iterations")),
+            ("diagnostic", case.get("diagnostic_iterations")),
+            ("smoke", 1),
+        ):
+            work = expected.get(group)
+            if isinstance(work, dict) and isinstance(iterations, int):
+                work["items"] = iterations * base.ROW_COUNT
+        if isinstance(expected.get("smoke"), dict):
+            expected["measured"] = copy.deepcopy(expected["smoke"])
+    with _configured_base():
+        base.validate_workload_manifest(
+            normalized,
+            repository_root=repository_root,
+            manifest_path=manifest_path,
+        )
     return value
+
+
+def _validate_report_versions(
+    value: dict[str, Any],
+    fields: tuple[str, ...],
+    label: str,
+) -> None:
+    for field in fields:
+        version = common._require_integer(value.get(field), f"{label}.{field}")
+        if version != 1:
+            raise HarnessError(f"{label}.{field} must be 1")
+
+
+def validate_raw_timing_report(
+    value: Any,
+    *,
+    workload_manifest: dict[str, Any],
+    expected_engine: str,
+    expected_case: str,
+    expected_run_kind: str = "baseline",
+) -> dict[str, Any]:
+    common._require_type(value, dict, "DISTINCT/compound timing report")
+    common._require_exact_keys(
+        value,
+        common._RAW_TIMING_KEYS,
+        "DISTINCT/compound timing report",
+    )
+    _validate_report_versions(
+        value,
+        (
+            "schema_version",
+            "completion_schema_version",
+            "workload_semantics_version",
+        ),
+        "DISTINCT/compound timing report",
+    )
+    case = common._case_by_id(workload_manifest, expected_case)
+    _require_exact_typed(
+        value["effective_configuration"],
+        base._expected_case_configuration(workload_manifest, case),
+        "DISTINCT/compound timing report.effective_configuration",
+    )
+    return base.validate_raw_timing_report(
+        value,
+        workload_manifest=workload_manifest,
+        expected_engine=expected_engine,
+        expected_case=expected_case,
+        expected_run_kind=expected_run_kind,
+    )
 
 
 def validate_raw_diagnostic_report(
@@ -379,14 +687,65 @@ def validate_raw_diagnostic_report(
     expected_engine: str,
     expected_case: str,
 ) -> dict[str, Any]:
-    if not isinstance(value, dict) or not isinstance(value.get("counters"), dict):
-        return base._COMMON_VALIDATE_RAW_DIAGNOSTIC_REPORT(
-            value,
-            workload_manifest=workload_manifest,
-            expected_engine=expected_engine,
-            expected_case=expected_case,
+    common._require_type(value, dict, "DISTINCT/compound diagnostic report")
+    expected_keys = set(common._RAW_DIAGNOSTIC_KEYS) | {
+        "probe_counts",
+        "source_rows",
+    }
+    if set(value) != expected_keys:
+        raise HarnessError("DISTINCT/compound diagnostic report keys are invalid")
+    _validate_report_versions(
+        value,
+        (
+            "schema_version",
+            "completion_schema_version",
+            "diagnostic_schema_version",
+            "workload_semantics_version",
+        ),
+        "DISTINCT/compound diagnostic report",
+    )
+    common._require_type(
+        value["counters"],
+        dict,
+        "DISTINCT/compound diagnostic report.counters",
+    )
+    common._require_exact_keys(
+        value["counters"],
+        common._COUNTER_GROUP_KEYS,
+        "DISTINCT/compound diagnostic report.counters",
+    )
+    case = common._case_by_id(workload_manifest, expected_case)
+    _require_exact_typed(
+        value["effective_configuration"],
+        base._expected_case_configuration(workload_manifest, case),
+        "DISTINCT/compound diagnostic report.effective_configuration",
+    )
+    probe_counts = value.get("probe_counts")
+    common._require_type(
+        probe_counts,
+        list,
+        "DISTINCT/compound diagnostic probe_counts",
+    )
+    for index, count in enumerate(probe_counts):
+        common._require_integer(
+            count,
+            f"DISTINCT/compound diagnostic probe_counts[{index}]",
+        )
+    if probe_counts != expected_probe_counts(expected_case):
+        raise HarnessError(
+            "DISTINCT/compound diagnostic probe_counts do not match the pinned tags"
+        )
+    source_rows = common._require_integer(
+        value.get("source_rows"),
+        "DISTINCT/compound diagnostic source_rows",
+    )
+    if source_rows != sum(expected_probe_counts(expected_case)):
+        raise HarnessError(
+            "DISTINCT/compound diagnostic source_rows do not match the pinned probe count"
         )
     normalized = copy.deepcopy(value)
+    normalized.pop("probe_counts")
+    normalized.pop("source_rows")
     actual_configuration = normalized.get("effective_configuration")
     normalized["effective_configuration"] = dict(workload_manifest["configuration"])
     selected = normalized["counters"].get(expected_engine)
@@ -418,7 +777,6 @@ def validate_raw_diagnostic_report(
         expected_engine=expected_engine,
         expected_case=expected_case,
     )
-    case = common._case_by_id(workload_manifest, expected_case)
     expected_configuration = base._expected_case_configuration(workload_manifest, case)
     if actual_configuration != expected_configuration:
         raise HarnessError(
@@ -432,15 +790,12 @@ def validate_raw_diagnostic_report(
                 "Modern DISTINCT/compound diagnostic page reads and cache misses "
                 "must match"
             )
+        spilled = counters["pages_written"] > 0
+        if spilled != (expected_case in MODERN_SPILL_CASES):
+            raise HarnessError(
+                "Modern DISTINCT/compound spill classification does not match the case"
+            )
     else:
-        if counters["fullscan_steps"] != SQLITE_FULLSCAN_STEPS[expected_case]:
-            raise HarnessError(
-                "SQLite DISTINCT/compound full-scan count does not match the case"
-            )
-        if counters["sort_operations"] != SQLITE_SORT_OPERATIONS[expected_case]:
-            raise HarnessError(
-                "SQLite DISTINCT/compound sort count does not match the case"
-            )
         spilled = counters["temp_bytes_spilled"] > 0
         if spilled != (expected_case in SQLITE_SPILL_CASES):
             raise HarnessError(
@@ -612,7 +967,7 @@ def _configure_common() -> None:
     common.validate_workload_manifest = validate_workload_manifest
     common._smoke_work = base._smoke_work
     common._collect_input_references = _collect_input_references
-    common.validate_raw_timing_report = base.validate_raw_timing_report
+    common.validate_raw_timing_report = validate_raw_timing_report
     common.validate_raw_diagnostic_report = validate_raw_diagnostic_report
     common._capture_actual_build_flags = _capture_actual_build_flags
 

@@ -16,6 +16,8 @@
 
 namespace modern_sqlite::instrumentation {
 
+inline constexpr std::size_t kProbeTagCount = 512;
+
 enum class Counter : std::uint8_t {
   kAllocations,
   kBytesCopied,
@@ -62,6 +64,7 @@ class CounterCollection;
 namespace detail {
 
 void RecordCounter(Counter counter, std::uint64_t amount) noexcept;
+void RecordProbeCall(std::size_t tag) noexcept;
 
 }  // namespace detail
 
@@ -92,6 +95,39 @@ class ScopedCounterCollection final {
   CounterCollection* previous_;
 };
 
+class ProbeCounterCollection final {
+ public:
+  [[nodiscard]] std::uint64_t Value(std::size_t tag) const noexcept {
+    return tag < values_.size() ? values_[tag] : 0;
+  }
+  void Reset() noexcept { values_.fill(0); }
+
+ private:
+  friend void detail::RecordProbeCall(std::size_t tag) noexcept;
+
+  void Add(std::size_t tag) noexcept {
+    if (tag < values_.size()) {
+      ++values_[tag];
+    }
+  }
+
+  std::array<std::uint64_t, kProbeTagCount> values_{};
+};
+
+class ScopedProbeCounterCollection final {
+ public:
+  explicit ScopedProbeCounterCollection(ProbeCounterCollection& collection) noexcept;
+  ~ScopedProbeCounterCollection() noexcept;
+
+  ScopedProbeCounterCollection(const ScopedProbeCounterCollection&) = delete;
+  ScopedProbeCounterCollection& operator=(const ScopedProbeCounterCollection&) = delete;
+  ScopedProbeCounterCollection(ScopedProbeCounterCollection&&) = delete;
+  ScopedProbeCounterCollection& operator=(ScopedProbeCounterCollection&&) = delete;
+
+ private:
+  ProbeCounterCollection* previous_;
+};
+
 }  // namespace modern_sqlite::instrumentation
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
@@ -100,6 +136,10 @@ class ScopedCounterCollection final {
     ::modern_sqlite::instrumentation::detail::RecordCounter((counter),                           \
                                                             static_cast<std::uint64_t>(amount)); \
   } while (false)
+#define MODERN_SQLITE_RECORD_PROBE_CALL(tag)                                                  \
+  do {                                                                                        \
+    ::modern_sqlite::instrumentation::detail::RecordProbeCall(static_cast<std::size_t>(tag)); \
+  } while (false)
 #else
 #define MODERN_SQLITE_RECORD_COUNTER(counter, amount)                                              \
   do {                                                                                             \
@@ -107,6 +147,12 @@ class ScopedCounterCollection final {
       ::modern_sqlite::instrumentation::detail::RecordCounter((counter),                           \
                                                               static_cast<std::uint64_t>(amount)); \
     }                                                                                              \
+  } while (false)
+#define MODERN_SQLITE_RECORD_PROBE_CALL(tag)                                                    \
+  do {                                                                                          \
+    if constexpr (false) {                                                                      \
+      ::modern_sqlite::instrumentation::detail::RecordProbeCall(static_cast<std::size_t>(tag)); \
+    }                                                                                           \
   } while (false)
 #endif
 

@@ -502,6 +502,8 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     modern_sqlite_diagnostic_engine
     PUBLIC
       MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+    PRIVATE
+      MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE=1
   )
   target_link_libraries(
     modern_sqlite_diagnostic_engine
@@ -803,6 +805,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/vm/vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/index_performance.cpp"
+  "${PROJECT_SOURCE_DIR}/benchmarks/distinct_compound_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/write_performance.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
