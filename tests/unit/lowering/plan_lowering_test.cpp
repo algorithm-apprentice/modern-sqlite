@@ -1130,8 +1130,7 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
       "ORDER BY 1",
       catalog, custom.Binder());
   const auto grouped_union_arm_rows =
-      ExecuteRows(grouped_union_arm, *pager, catalog->version().generation,
-                  custom.Vm(), &memory);
+      ExecuteRows(grouped_union_arm, *pager, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(4U, grouped_union_arm_rows.size());
   EXPECT_EQ("a", TextBytes(grouped_union_arm_rows[0][0]));
   EXPECT_EQ("B", TextBytes(grouped_union_arm_rows[1][0]));
