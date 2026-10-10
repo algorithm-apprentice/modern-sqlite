@@ -232,6 +232,23 @@ TEST(LogicalPlan, BuildsSingleRowProjectionAndRetainsBoundState) {
   EXPECT_EQ(LogicalNodeId{1}, moved.root());
 }
 
+TEST(LogicalPlan, DefersDistinctValuesAndCompoundExecution) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  constexpr std::array<std::string_view, 3> cases{
+      "SELECT DISTINCT Name FROM Items",
+      "VALUES(1),(2)",
+      "SELECT 1 UNION SELECT 2",
+  };
+  for (const std::string_view sql : cases) {
+    SCOPED_TRACE(sql);
+    BuildLogicalPlanResult plan = BuildLogicalPlan(BindOrThrow(sql, catalog));
+    ASSERT_FALSE(plan.has_value());
+    EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, plan.error().code);
+    EXPECT_EQ("DISTINCT, VALUES, and compound SELECT planning is not supported",
+              plan.error().detail);
+  }
+}
+
 TEST(LogicalPlan, BuildsExactScanFilterLimitProjectionChain) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const LogicalPlan plan =

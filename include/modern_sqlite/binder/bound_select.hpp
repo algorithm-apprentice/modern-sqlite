@@ -233,6 +233,28 @@ struct BoundResultColumn {
   TypeAffinity affinity = TypeAffinity::kNone;
 };
 
+enum class BoundValuesEvaluationSchedule : std::uint8_t {
+  kProducerEager,
+  kConsumerFiltered,
+};
+
+struct BoundSelectCore {
+  SelectQuantifier quantifier = SelectQuantifier::kDefault;
+  std::optional<BoundTableSource> table_source{};
+  std::size_t source_column_begin = 0;
+  std::size_t source_column_count = 0;
+  std::vector<BoundResultColumn> result_columns{};
+  std::optional<BoundExpressionId> where{};
+};
+
+struct BoundValuesCore {
+  std::vector<std::vector<BoundExpressionId>> rows{};
+  std::vector<BoundResultColumn> result_columns{};
+  BoundValuesEvaluationSchedule schedule = BoundValuesEvaluationSchedule::kProducerEager;
+};
+
+using BoundQueryCore = std::variant<BoundSelectCore, BoundValuesCore>;
+
 struct BoundLimit {
   BoundExpressionId limit;
   std::optional<BoundExpressionId> offset{};
@@ -262,6 +284,9 @@ enum class BindErrorCode : std::uint8_t {
   kWrongFunctionArity,
   kNoSuchCollation,
   kOrderByTermOutOfRange,
+  kCompoundOrderByTerm,
+  kCompoundColumnCount,
+  kValuesColumnCount,
   kInvalidLiteral,
   kInvalidVariableNumber,
   kParameterLimitExceeded,
@@ -336,6 +361,9 @@ class BoundSelect final {
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] std::span<const BoundQueryCore> query_cores() const noexcept;
+  [[nodiscard]] std::span<const CompoundOperator> compound_operators() const noexcept;
+  [[nodiscard]] std::span<const BoundCollationId> compound_collations() const noexcept;
   [[nodiscard]] std::span<const BoundResultColumn> result_columns() const noexcept;
   [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept;
   [[nodiscard]] std::span<const BoundOrderingTerm> order_by() const noexcept;

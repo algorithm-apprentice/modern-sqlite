@@ -411,6 +411,9 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("indexed_table_unsupported",
             BindErrorCodeName(BindErrorCode::kIndexedTableUnsupported));
   EXPECT_EQ("order_by_term_out_of_range", BindErrorCodeName(BindErrorCode::kOrderByTermOutOfRange));
+  EXPECT_EQ("compound_order_by_term", BindErrorCodeName(BindErrorCode::kCompoundOrderByTerm));
+  EXPECT_EQ("compound_column_count", BindErrorCodeName(BindErrorCode::kCompoundColumnCount));
+  EXPECT_EQ("values_column_count", BindErrorCodeName(BindErrorCode::kValuesColumnCount));
   EXPECT_EQ("index_already_exists", BindErrorCodeName(BindErrorCode::kIndexAlreadyExists));
   EXPECT_EQ("unknown", BindErrorCodeName(static_cast<BindErrorCode>(255)));  // NOLINT
 
@@ -1392,6 +1395,176 @@ TEST(Binder, ResolvesOrderByAliasesOrdinalsExpressionsAndMetadata) {
                   BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
 }
 
+TEST(Binder, BindsValuesAndCompoundQueryCores) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect bound = BindOrThrow(
+      "VALUES(?1,?2 IS NULL),(?3,?4) "
+      "UNION SELECT ?5 AS right_name,?6 COLLATE nocase "
+      "ORDER BY right_name COLLATE binary DESC NULLS FIRST LIMIT ?7 OFFSET ?8",
+      catalog);
+
+  EXPECT_EQ(8U, bound.parameters().size());
+  ASSERT_EQ(2U, bound.query_cores().size());
+  ASSERT_EQ(1U, bound.compound_operators().size());
+  EXPECT_EQ(CompoundOperator::kUnion, bound.compound_operators()[0]);
+
+  const auto& values = std::get<BoundValuesCore>(bound.query_cores()[0]);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, values.schedule);
+  ASSERT_EQ(2U, values.rows.size());
+  ASSERT_EQ(2U, values.result_columns.size());
+  EXPECT_EQ("column1", values.result_columns[0].name);
+  EXPECT_EQ("column2", values.result_columns[1].name);
+
+  const auto& right = std::get<BoundSelectCore>(bound.query_cores()[1]);
+  EXPECT_EQ(SelectQuantifier::kDefault, right.quantifier);
+  EXPECT_EQ(0U, right.source_column_count);
+  ASSERT_EQ(2U, right.result_columns.size());
+  EXPECT_EQ("right_name", right.result_columns[0].name);
+
+  ASSERT_EQ(2U, bound.compound_collations().size());
+  EXPECT_EQ("BINARY", bound.collations()[bound.compound_collations()[0].value()].name);
+  EXPECT_EQ("nocase", bound.collations()[bound.compound_collations()[1].value()].name);
+
+  ASSERT_EQ(1U, bound.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, bound.order_by()[0].result_column);
+  EXPECT_EQ(SortOrder::kDescending, bound.order_by()[0].order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, bound.order_by()[0].null_placement);
+  EXPECT_EQ("BINARY", bound.collations()[bound.order_by()[0].collation.value()].name);
+
+  ASSERT_NE(nullptr, bound.limit());
+  const auto& limit =
+      std::get<BoundParameterExpression>(bound.expression(bound.limit()->limit).payload);
+  const auto& offset = std::get<BoundParameterExpression>(
+      bound.expression(RequiredOptional(bound.limit()->offset)).payload);
+  EXPECT_EQ(BoundParameterId{6}, limit.parameter);
+  EXPECT_EQ(BoundParameterId{7}, offset.parameter);
+}
+
+TEST(Binder, ClassifiesValuesSchedulesAndBindsDistinctCores) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect eager = BindOrThrow("VALUES(?1,abs(?2)),(?3,?4)", catalog);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager,
+            std::get<BoundValuesCore>(eager.query_cores()[0]).schedule);
+
+  const BoundSelect truth = BindOrThrow("VALUES(?1 IS NULL),(2)", catalog);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered,
+            std::get<BoundValuesCore>(truth.query_cores()[0]).schedule);
+
+  constexpr std::array<ScalarFunction, 1> kFunctions{
+      ScalarFunction{"volatile_value", FunctionArity::Exact(0),
+                     FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                     StubScalar},
+  };
+  const FunctionRegistry registry{kFunctions};
+  const std::array<const Collation*, 3> collations{
+      &BinaryCollation(),
+      &NoCaseCollation(),
+      &RTrimCollation(),
+  };
+  const BoundSelect nondeterministic = BindOrThrow("VALUES(volatile_value()),(2)", catalog,
+                                                   BindEnvironment{registry, collations, 17});
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered,
+            std::get<BoundValuesCore>(nondeterministic.query_cores()[0]).schedule);
+
+  const BoundSelect distinct = BindOrThrow("SELECT DISTINCT Name FROM Items", catalog);
+  ASSERT_EQ(1U, distinct.query_cores().size());
+  EXPECT_EQ(SelectQuantifier::kDistinct,
+            std::get<BoundSelectCore>(distinct.query_cores()[0]).quantifier);
+}
+
+TEST(Binder, IsolatesCompoundSourceScopesAndPublishesGlobalCollations) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect sources =
+      BindOrThrow("SELECT Name FROM Items UNION SELECT Score FROM Items", catalog);
+  ASSERT_EQ(2U, sources.query_cores().size());
+  const auto& left = std::get<BoundSelectCore>(sources.query_cores()[0]);
+  const auto& right = std::get<BoundSelectCore>(sources.query_cores()[1]);
+  EXPECT_EQ(0U, left.source_column_begin);
+  EXPECT_EQ(5U, left.source_column_count);
+  EXPECT_EQ(5U, right.source_column_begin);
+  EXPECT_EQ(5U, right.source_column_count);
+  const auto& left_column = std::get<BoundColumnExpression>(
+      sources.expression(left.result_columns[0].expression).payload);
+  const auto& right_column = std::get<BoundColumnExpression>(
+      sources.expression(right.result_columns[0].expression).payload);
+  EXPECT_EQ(BoundSourceColumnId{1}, left_column.column);
+  EXPECT_EQ(BoundSourceColumnId{7}, right_column.column);
+
+  ExpectBindError("SELECT Name FROM Items UNION SELECT missing FROM Items", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing");
+
+  const BoundSelect late = BindOrThrow("SELECT 'a' UNION SELECT 'A' COLLATE nocase", catalog);
+  ASSERT_EQ(1U, late.compound_collations().size());
+  EXPECT_EQ("nocase", late.collations()[late.compound_collations()[0].value()].name);
+
+  const BoundSelect explicit_binary =
+      BindOrThrow("SELECT 'a' COLLATE binary UNION SELECT 'A' COLLATE nocase", catalog);
+  ASSERT_EQ(1U, explicit_binary.compound_collations().size());
+  EXPECT_EQ("binary",
+            explicit_binary.collations()[explicit_binary.compound_collations()[0].value()].name);
+
+  const BoundSelect unused =
+      BindOrThrow("SELECT 'a' COLLATE missing UNION ALL SELECT 'b'", catalog);
+  EXPECT_EQ("missing", unused.collations()[unused.compound_collations()[0].value()].name);
+  static_cast<void>(
+      BindOrThrow("SELECT 1,'a' COLLATE missing UNION ALL SELECT 2,'b' ORDER BY 1", catalog));
+  ExpectBindError("SELECT DISTINCT 'a' COLLATE missing", catalog, BindErrorCode::kNoSuchCollation,
+                  "no such collation sequence: missing");
+  ExpectBindError("SELECT DISTINCT 'a' COLLATE missing ORDER BY no_match", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: no_match");
+  ExpectBindError("SELECT 'a' COLLATE missing UNION SELECT 'b'", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  ExpectBindError("SELECT 'a' COLLATE missing UNION SELECT 'b' ORDER BY no_match", catalog,
+                  BindErrorCode::kCompoundOrderByTerm,
+                  "1 ORDER BY term does not match any column in the result set");
+}
+
+TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,
+                  "all VALUES must have the same number of terms");
+  ExpectBindError("SELECT 1 UNION ALL SELECT 2,3", catalog, BindErrorCode::kCompoundColumnCount,
+                  "SELECTs to the left and right of UNION ALL "
+                  "do not have the same number of result columns");
+
+  const BoundSelect right_alias =
+      BindOrThrow("SELECT 1 UNION SELECT 2 AS right_name ORDER BY right_name", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{0}, right_alias.order_by()[0].result_column);
+
+  const BoundSelect right_expression =
+      BindOrThrow("SELECT 1 UNION SELECT abs(2) ORDER BY abs(2)", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{0}, right_expression.order_by()[0].result_column);
+
+  ExpectBindError("SELECT 1 UNION SELECT abs(2) ORDER BY abs(3)", catalog,
+                  BindErrorCode::kCompoundOrderByTerm,
+                  "1 ORDER BY term does not match any column in the result set");
+  ExpectBindError("SELECT 'a' UNION SELECT 1 ORDER BY 'z'", catalog,
+                  BindErrorCode::kCompoundOrderByTerm,
+                  "1 ORDER BY term does not match any column in the result set");
+
+  const BoundSelect arm_precedence =
+      BindOrThrow(R"(SELECT "x",10 UNION SELECT 20 AS y,30 AS x ORDER BY "x")", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{0}, arm_precedence.order_by()[0].result_column);
+
+  const BoundSelect wildcard =
+      BindOrThrow("SELECT * FROM Items UNION SELECT * FROM Items ORDER BY Items.Name", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{1}, wildcard.order_by()[0].result_column);
+
+  const BoundSelect output_collation = BindOrThrow(
+      "SELECT 'a' COLLATE binary AS l "
+      "UNION ALL SELECT 'B' COLLATE nocase AS r ORDER BY r",
+      catalog);
+  EXPECT_EQ("binary",
+            output_collation.collations()[output_collation.order_by()[0].collation.value()].name);
+
+  ExpectBindError("VALUES(no_such_function()),(1,2)", catalog, BindErrorCode::kNoSuchFunction,
+                  "no such function: no_such_function");
+  ExpectBindError("SELECT no_such_function() UNION SELECT 2,3 UNION SELECT 4", catalog,
+                  BindErrorCode::kCompoundColumnCount,
+                  "SELECTs to the left and right of UNION "
+                  "do not have the same number of result columns");
+}
+
 TEST(Binder, PreservesConditionalParityAndScalarOverrideRules) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect conditionals = BindOrThrow(
@@ -1611,12 +1784,6 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   ExpectBindError("SELECT *", catalog, BindErrorCode::kNoTablesSpecified, "no tables specified");
-  ExpectBindError("SELECT DISTINCT Name FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
-                  "SELECT DISTINCT is not supported");
-  ExpectBindError("VALUES(1),(2)", catalog, BindErrorCode::kUnsupportedFeature,
-                  "VALUES is not supported");
-  ExpectBindError("SELECT 1 UNION SELECT 2", catalog, BindErrorCode::kUnsupportedFeature,
-                  "compound SELECT is not supported");
   ExpectBindError("SELECT Name LIKE 'a%' FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "pattern operators are not supported");
   ExpectBindError("SELECT Name FROM Items LIMIT Name", catalog, BindErrorCode::kNoSuchColumn,
@@ -1627,6 +1794,9 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   ExpectBindError("SELECT * FROM Items", catalog, BindErrorCode::kResultColumnLimitExceeded,
                   "too many columns in result set", BindEnvironment::Core(),
                   BindOptions{.maximum_result_columns = 4});
+  ExpectBindError("VALUES(1,2)", catalog, BindErrorCode::kResultColumnLimitExceeded,
+                  "too many columns in result set", BindEnvironment::Core(),
+                  BindOptions{.maximum_result_columns = 1});
   ExpectBindError("SELECT coalesce(1,2,3)", catalog, BindErrorCode::kFunctionArgumentLimitExceeded,
                   "too many arguments on function coalesce", BindEnvironment::Core(),
                   BindOptions{.maximum_function_arguments = 2});
