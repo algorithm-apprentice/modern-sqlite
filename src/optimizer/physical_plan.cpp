@@ -1690,6 +1690,15 @@ class PhysicalPlanBuilder final {
       return std::unexpected{
           OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical plan is invalid")};
     }
+    if (std::ranges::any_of(logical_plan.nodes(), [](const LogicalNode& node) {
+          return std::holds_alternative<LogicalValuesNode>(node.payload) ||
+                 std::holds_alternative<LogicalDistinctNode>(node.payload) ||
+                 std::holds_alternative<LogicalCompoundNode>(node.payload);
+        })) {
+      return std::unexpected{
+          OptimizerFailure(OptimizerErrorCode::kUnsupportedFeature,
+                           "DISTINCT, VALUES, and compound SELECT optimization is not supported")};
+    }
 
     const SourceInfo source = ResolveSource(logical_plan);
     ReadPredicateAnalysis predicates = AnalyzeReadPredicate(
@@ -2157,6 +2166,8 @@ std::string_view OptimizerErrorCodeName(OptimizerErrorCode code) noexcept {
   switch (code) {
     case OptimizerErrorCode::kInvalidInput:
       return "invalid_input";
+    case OptimizerErrorCode::kUnsupportedFeature:
+      return "unsupported_feature";
     case OptimizerErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
@@ -2167,6 +2178,8 @@ ErrorCode OptimizerError::base_error_code() const noexcept {
   switch (code) {
     case OptimizerErrorCode::kInvalidInput:
       return ErrorCode::kMisuse;
+    case OptimizerErrorCode::kUnsupportedFeature:
+      return ErrorCode::kGeneric;
     case OptimizerErrorCode::kInternalInvariant:
       return ErrorCode::kInternal;
   }

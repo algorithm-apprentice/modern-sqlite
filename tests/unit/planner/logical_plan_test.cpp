@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -109,6 +110,10 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("projection", LogicalNodeKindName(LogicalNodeKind::kProjection));
   EXPECT_EQ("order", LogicalNodeKindName(LogicalNodeKind::kOrder));
   EXPECT_EQ("output", LogicalNodeKindName(LogicalNodeKind::kOutput));
+  EXPECT_EQ("values", LogicalNodeKindName(LogicalNodeKind::kValues));
+  EXPECT_EQ("distinct", LogicalNodeKindName(LogicalNodeKind::kDistinct));
+  EXPECT_EQ("compound", LogicalNodeKindName(LogicalNodeKind::kCompound));
+  EXPECT_EQ("advanced_order", LogicalNodeKindName(LogicalNodeKind::kAdvancedOrder));
   EXPECT_EQ("unknown",
             LogicalNodeKindName(static_cast<LogicalNodeKind>(255)));  // NOLINT
   EXPECT_EQ("insert", LogicalMutationKindName(LogicalMutationKind::kInsert));
@@ -232,7 +237,7 @@ TEST(LogicalPlan, BuildsSingleRowProjectionAndRetainsBoundState) {
   EXPECT_EQ(LogicalNodeId{1}, moved.root());
 }
 
-TEST(LogicalPlan, DefersDistinctValuesAndCompoundExecution) {
+TEST(LogicalPlan, BuildsDistinctValuesAndCompoundQueries) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   constexpr std::array<std::string_view, 3> cases{
       "SELECT DISTINCT Name FROM Items",
@@ -242,10 +247,147 @@ TEST(LogicalPlan, DefersDistinctValuesAndCompoundExecution) {
   for (const std::string_view sql : cases) {
     SCOPED_TRACE(sql);
     BuildLogicalPlanResult plan = BuildLogicalPlan(BindOrThrow(sql, catalog));
-    ASSERT_FALSE(plan.has_value());
-    EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, plan.error().code);
-    EXPECT_EQ("DISTINCT, VALUES, and compound SELECT planning is not supported",
-              plan.error().detail);
+    ASSERT_TRUE(plan.has_value()) << plan.error().detail;
+  }
+}
+
+TEST(LogicalPlan, BuildsValuesAndDistinctCoreSubgraphs) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const LogicalPlan values = PlanOrThrow("VALUES(1),(2)", catalog);
+  ASSERT_EQ(1U, values.nodes().size());
+  EXPECT_EQ(LogicalNodeId{0}, values.root());
+  EXPECT_EQ(LogicalNodeKind::kValues, LogicalNodeKindOf(values.nodes()[0]));
+  EXPECT_EQ(0U, std::get<LogicalValuesNode>(values.nodes()[0].payload).core_index);
+
+  const LogicalPlan distinct = PlanOrThrow("SELECT DISTINCT Name FROM Items WHERE id>0", catalog);
+  ASSERT_EQ(4U, distinct.nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kScan, LogicalNodeKindOf(distinct.nodes()[0]));
+  EXPECT_EQ(0U, std::get<LogicalScanNode>(distinct.nodes()[0].payload).core_index);
+  EXPECT_EQ(LogicalNodeKind::kFilter, LogicalNodeKindOf(distinct.nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(distinct.nodes()[2]));
+  const auto& projection = std::get<LogicalProjectionNode>(distinct.nodes()[2].payload);
+  EXPECT_EQ(0U, projection.core_index);
+  EXPECT_EQ(LogicalNodeId{1}, projection.input);
+  const auto& node = std::get<LogicalDistinctNode>(distinct.nodes()[3].payload);
+  EXPECT_EQ(LogicalNodeId{2}, node.input);
+  EXPECT_EQ(0U, node.core_index);
+  ASSERT_EQ(1U, node.collations.size());
+  EXPECT_EQ("NOCASE", distinct.bound_select().collations()[node.collations[0].value()].name);
+  EXPECT_EQ(LogicalNodeId{3}, distinct.root());
+}
+
+TEST(LogicalPlan, PreservesLeftAssociatedCompoundsAndOuterClauses) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan plan = PlanOrThrow(
+      "VALUES(1) UNION ALL SELECT DISTINCT id FROM Items "
+      "EXCEPT SELECT 3 ORDER BY 1 LIMIT 2 OFFSET 1",
+      catalog);
+
+  ASSERT_EQ(11U, plan.nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kValues, LogicalNodeKindOf(plan.nodes()[0]));
+  EXPECT_EQ(LogicalNodeKind::kScan, LogicalNodeKindOf(plan.nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(plan.nodes()[2]));
+  EXPECT_EQ(LogicalNodeKind::kDistinct, LogicalNodeKindOf(plan.nodes()[3]));
+  EXPECT_EQ(LogicalNodeKind::kSingleRow, LogicalNodeKindOf(plan.nodes()[4]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(plan.nodes()[5]));
+
+  const auto& union_all = std::get<LogicalCompoundNode>(plan.nodes()[6].payload);
+  EXPECT_EQ(LogicalNodeId{0}, union_all.left);
+  EXPECT_EQ(LogicalNodeId{3}, union_all.right);
+  EXPECT_EQ(CompoundOperator::kUnionAll, union_all.operation);
+
+  const auto& except = std::get<LogicalCompoundNode>(plan.nodes()[7].payload);
+  EXPECT_EQ(LogicalNodeId{6}, except.left);
+  EXPECT_EQ(LogicalNodeId{5}, except.right);
+  EXPECT_EQ(CompoundOperator::kExcept, except.operation);
+  ASSERT_EQ(1U, except.collations.size());
+
+  const auto& order = std::get<LogicalAdvancedOrderNode>(plan.nodes()[8].payload);
+  EXPECT_EQ(LogicalNodeId{7}, order.input);
+  ASSERT_EQ(3U, order.core_layouts.size());
+  for (const LogicalCoreOrderLayout& layout : order.core_layouts) {
+    EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, layout.schedule);
+    ASSERT_EQ(1U, layout.key_values.size());
+    EXPECT_EQ(LogicalOrderValueKind::kInputField, layout.key_values[0].kind);
+  }
+  EXPECT_FALSE(order.set_then_order);
+  EXPECT_EQ(LogicalNodeKind::kLimit, LogicalNodeKindOf(plan.nodes()[9]));
+  EXPECT_EQ(LogicalNodeKind::kOutput, LogicalNodeKindOf(plan.nodes()[10]));
+  EXPECT_EQ(LogicalNodeId{10}, plan.root());
+}
+
+TEST(LogicalPlan, UsesKeyFirstOrderOnlyForPureUnionAll) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan union_all = PlanOrThrow(
+      "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY 1 LIMIT 1", catalog);
+  const auto order_iterator = std::ranges::find_if(union_all.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(union_all.nodes().end(), order_iterator);
+  const auto& union_order = std::get<LogicalAdvancedOrderNode>(order_iterator->payload);
+  ASSERT_EQ(2U, union_order.core_layouts.size());
+  for (const LogicalCoreOrderLayout& layout : union_order.core_layouts) {
+    EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, layout.schedule);
+    EXPECT_EQ(LogicalOrderValueKind::kExpression, layout.key_values[0].kind);
+  }
+
+  const LogicalPlan distinct =
+      PlanOrThrow("SELECT DISTINCT id FROM Items ORDER BY 1 LIMIT 1", catalog);
+  const auto distinct_order = std::ranges::find_if(distinct.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(distinct.nodes().end(), distinct_order);
+  const auto& distinct_layout =
+      std::get<LogicalAdvancedOrderNode>(distinct_order->payload).core_layouts[0];
+  EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, distinct_layout.schedule);
+  EXPECT_EQ(LogicalOrderValueKind::kInputField, distinct_layout.key_values[0].kind);
+
+  const LogicalPlan hidden =
+      PlanOrThrow("SELECT DISTINCT Name FROM Items ORDER BY id LIMIT 1", catalog);
+  const auto hidden_order = std::ranges::find_if(hidden.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(hidden.nodes().end(), hidden_order);
+  const auto& hidden_layout =
+      std::get<LogicalAdvancedOrderNode>(hidden_order->payload).core_layouts[0];
+  EXPECT_EQ(LogicalOrderValueKind::kExpression, hidden_layout.key_values[0].kind);
+  EXPECT_EQ(LogicalOrderValueKind::kInputField, hidden_layout.payload_values[0].kind);
+}
+
+TEST(LogicalPlan, PublishesArmLocalOrderSchedulesAndSetThenOrder) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan mixed = PlanOrThrow(
+      "SELECT DISTINCT id,abs(id) FROM Items "
+      "UNION ALL SELECT id,abs(id+1) FROM Items ORDER BY 1 LIMIT 1",
+      catalog);
+  const auto mixed_order = std::ranges::find_if(mixed.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(mixed.nodes().end(), mixed_order);
+  const auto& layouts = std::get<LogicalAdvancedOrderNode>(mixed_order->payload).core_layouts;
+  ASSERT_EQ(2U, layouts.size());
+  EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, layouts[0].schedule);
+  EXPECT_EQ(LogicalOrderValueKind::kInputField, layouts[0].key_values[0].kind);
+  EXPECT_EQ(LogicalOrderValueKind::kInputField, layouts[0].payload_values[0].kind);
+  EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, layouts[1].schedule);
+  EXPECT_EQ(LogicalOrderValueKind::kExpression, layouts[1].key_values[0].kind);
+  EXPECT_EQ(LogicalOrderValueKind::kExpression, layouts[1].payload_values[0].kind);
+
+  const LogicalPlan collated = PlanOrThrow(
+      "SELECT Name FROM Items UNION SELECT Name FROM Items "
+      "ORDER BY 1 COLLATE binary LIMIT 1",
+      catalog);
+  const auto collated_order = std::ranges::find_if(collated.nodes(), [](const LogicalNode& node) {
+    return std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(collated.nodes().end(), collated_order);
+  const auto& order = std::get<LogicalAdvancedOrderNode>(collated_order->payload);
+  EXPECT_TRUE(order.set_then_order);
+  EXPECT_TRUE(order.terms[0].explicit_collation);
+  for (const LogicalCoreOrderLayout& layout : order.core_layouts) {
+    EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, layout.schedule);
+    EXPECT_EQ(LogicalOrderValueKind::kInputField, layout.key_values[0].kind);
   }
 }
 

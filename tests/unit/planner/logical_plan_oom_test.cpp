@@ -105,6 +105,18 @@ bool inject_failure = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundSelect BindCompoundFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
+      ParseTree("VALUES(1) UNION ALL SELECT DISTINCT id FROM Items "
+                "EXCEPT SELECT 3 ORDER BY 1 LIMIT 2"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind compound logical-plan OOM fixture"};
+  }
+  return std::move(*bound);
+}
+
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   modern_sqlite::BindStatementResult bound = modern_sqlite::BindStatement(
@@ -200,6 +212,37 @@ int main() try {
     }
   }
   if (!BuildLogicalPlan(BindOrderedFixture(catalog)).has_value()) {
+    return 1;
+  }
+
+  BoundSelect compound_baseline_bound = BindCompoundFixture(catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const BuildLogicalPlanResult compound_baseline =
+      BuildLogicalPlan(std::move(compound_baseline_bound));
+  if (!compound_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t compound_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (compound_allocation_count == 0U || compound_allocation_count > 64U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
+    BoundSelect bound = BindCompoundFixture(catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const BuildLogicalPlanResult unexpected = BuildLogicalPlan(std::move(bound));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  if (!BuildLogicalPlan(BindCompoundFixture(catalog)).has_value()) {
     return 1;
   }
 

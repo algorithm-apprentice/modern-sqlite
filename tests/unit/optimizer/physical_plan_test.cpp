@@ -602,13 +602,37 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             PhysicalNodeKindName(static_cast<PhysicalNodeKind>(255)));  // NOLINT
 
   EXPECT_EQ("invalid_input", OptimizerErrorCodeName(OptimizerErrorCode::kInvalidInput));
+  EXPECT_EQ("unsupported_feature", OptimizerErrorCodeName(OptimizerErrorCode::kUnsupportedFeature));
   EXPECT_EQ("internal_invariant", OptimizerErrorCodeName(OptimizerErrorCode::kInternalInvariant));
   EXPECT_EQ("unknown",
             OptimizerErrorCodeName(static_cast<OptimizerErrorCode>(255)));  // NOLINT
   EXPECT_EQ(ErrorCode::kMisuse,
             OptimizerError{.code = OptimizerErrorCode::kInvalidInput}.base_error_code());
+  EXPECT_EQ(ErrorCode::kGeneric,
+            OptimizerError{.code = OptimizerErrorCode::kUnsupportedFeature}.base_error_code());
   EXPECT_EQ(ErrorCode::kInternal,
             OptimizerError{.code = OptimizerErrorCode::kInternalInvariant}.base_error_code());
+}
+
+TEST(PhysicalPlan, DefersDistinctValuesAndCompoundOptimization) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  constexpr std::array<std::string_view, 3> cases{
+      "SELECT DISTINCT Name FROM Items",
+      "VALUES(1),(2)",
+      "SELECT 1 UNION SELECT 2",
+  };
+  for (const std::string_view sql : cases) {
+    SCOPED_TRACE(sql);
+    BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+    BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+    ASSERT_TRUE(logical.has_value()) << logical.error().detail;
+    OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+    ASSERT_FALSE(physical.has_value());
+    EXPECT_EQ(OptimizerErrorCode::kUnsupportedFeature, physical.error().code);
+    EXPECT_EQ("DISTINCT, VALUES, and compound SELECT optimization is not supported",
+              physical.error().detail);
+  }
 }
 
 TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {

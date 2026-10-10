@@ -2,6 +2,7 @@
 #define MODERN_SQLITE_PLANNER_LOGICAL_PLAN_HPP_
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -34,9 +35,12 @@ class LogicalNodeId final {
   std::uint32_t value_;
 };
 
-struct LogicalSingleRowNode {};
+struct LogicalSingleRowNode {
+  std::size_t core_index = 0;
+};
 
 struct LogicalScanNode {
+  std::size_t core_index = 0;
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
 };
@@ -54,6 +58,7 @@ struct LogicalLimitNode {
 
 struct LogicalProjectionNode {
   LogicalNodeId input;
+  std::size_t core_index = 0;
   std::vector<BoundExpressionId> expressions{};
 };
 
@@ -86,9 +91,57 @@ struct LogicalOutputNode {
   LogicalNodeId input;
 };
 
+enum class LogicalOrderValueKind : std::uint8_t {
+  kExpression,
+  kInputField,
+};
+
+struct LogicalOrderValue {
+  LogicalOrderValueKind kind = LogicalOrderValueKind::kExpression;
+  std::optional<BoundExpressionId> expression{};
+  std::uint32_t field_index = 0;
+
+  constexpr auto operator<=>(const LogicalOrderValue&) const noexcept = default;
+};
+
+struct LogicalCoreOrderLayout {
+  std::size_t core_index = 0;
+  std::vector<LogicalOrderValue> key_values{};
+  std::vector<LogicalOrderValue> payload_values{};
+  std::vector<SortOutputField> output_fields{};
+  OrderEvaluationSchedule schedule = OrderEvaluationSchedule::kPayloadThenKeys;
+
+  constexpr auto operator<=>(const LogicalCoreOrderLayout&) const noexcept = default;
+};
+
+struct LogicalAdvancedOrderNode {
+  LogicalNodeId input;
+  std::vector<BoundOrderingTerm> terms{};
+  std::vector<LogicalCoreOrderLayout> core_layouts{};
+  bool set_then_order = false;
+};
+
+struct LogicalValuesNode {
+  std::size_t core_index = 0;
+};
+
+struct LogicalDistinctNode {
+  LogicalNodeId input;
+  std::size_t core_index = 0;
+  std::vector<BoundCollationId> collations{};
+};
+
+struct LogicalCompoundNode {
+  LogicalNodeId left;
+  LogicalNodeId right;
+  CompoundOperator operation = CompoundOperator::kUnion;
+  std::vector<BoundCollationId> collations{};
+};
+
 using LogicalNodePayload =
     std::variant<LogicalSingleRowNode, LogicalScanNode, LogicalFilterNode, LogicalLimitNode,
-                 LogicalProjectionNode, LogicalOrderNode, LogicalOutputNode>;
+                 LogicalProjectionNode, LogicalOrderNode, LogicalOutputNode, LogicalValuesNode,
+                 LogicalDistinctNode, LogicalCompoundNode, LogicalAdvancedOrderNode>;
 
 struct LogicalNode {
   LogicalNodePayload payload;
@@ -102,6 +155,10 @@ enum class LogicalNodeKind : std::uint8_t {
   kProjection,
   kOrder,
   kOutput,
+  kValues,
+  kDistinct,
+  kCompound,
+  kAdvancedOrder,
 };
 
 [[nodiscard]] LogicalNodeKind LogicalNodeKindOf(const LogicalNode& node) noexcept;
