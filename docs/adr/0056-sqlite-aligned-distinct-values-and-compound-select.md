@@ -628,13 +628,26 @@ first collapses `'A'`/`'a'` under NOCASE, retaining the right representative
 `'a'`, then orders `'B'`, `'a'` under BINARY.
 
 Arm evaluation remains left to right. The implementation must not keep one
-live sorter per possible compound term. Merge a bounded group, materialize its
-ordered output, close the inputs, and continue as a balanced tree for runs of
-associative UNION or UNION ALL operators. At most three ordering capabilities
-and their transient files are live for one merge step. Source-order tie
-behavior and right-representative UNION semantics must survive grouping.
-EXCEPT, INTERSECT, and mixed operators retain left association and the same
-bounded live-capability rule.
+live sorter per possible compound term.
+
+For a maximal associative run of three or more arms, equivalently two or more
+consecutive UNION ALL or UNION operators:
+
+1. keep one external group sorter open;
+2. materialize each arm through its required local sorter or top-N in source
+   order;
+3. for UNION, deduplicate adjacent complete keys within each arm first,
+   retaining that arm's first representative;
+4. drain and close that arm before opening the next arm;
+5. rely on stable group-sorter insertion order for equal UNION ALL keys; and
+6. for UNION, deduplicate adjacent complete keys once after the group sort,
+   retaining the representative from the last contributing arm.
+
+This grouped materialization avoids both one live sorter per arm and the
+quadratic rewriting of an ever-growing left accumulator. Exactly two arms and
+every EXCEPT, INTERSECT, or mixed barrier use the direct two-stream merge. At
+most three ordering or membership capabilities and their transient files are
+live at once. EXCEPT, INTERSECT, and mixed operators retain left association.
 
 No general coroutine bytecode is introduced in this slice. Ordered arm
 materialization provides the required observable behavior without adding the
@@ -907,6 +920,17 @@ features.
 Rejected because pinned SQLite applies bounded ordering per UNION ALL arm.
 The difference is observable through non-key scalar function calls and
 failures.
+
+### Retain a balanced binary tree of materialized arm runs
+
+Rejected for the initial bytecode contract because building a sibling subtree
+while retaining the first subtree requires four live capabilities: the
+retained run, two sibling inputs, and their output. Avoiding the fourth
+capability would require detachable sorter runs, resumable merge coroutines,
+or a new temporary-file ownership contract. Maximal associative runs instead
+use the stable external group sorter defined above, which preserves left-to-
+right evaluation, keeps the three-capability bound, and avoids quadratic
+left-deep rewriting without introducing those deferred mechanisms.
 
 ### Add general coroutines before subqueries and CTEs
 

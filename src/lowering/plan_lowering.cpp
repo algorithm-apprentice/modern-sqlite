@@ -137,10 +137,13 @@ class PlanLowerer final {
       return std::unexpected(std::move(inspected.error()));
     }
     LoweringResult<void> layout =
-        set_query_ ? BuildSetRegisterLayout()
+        ordered_compound_
+            ? BuildOrderedCompoundRegisterLayout()
+            : (set_query_
+                   ? BuildSetRegisterLayout()
                    : (streaming_query_ ? BuildStreamingRegisterLayout()
                                        : (distinct_ != nullptr ? BuildDistinctRegisterLayout()
-                                                               : BuildReadRegisterLayout()));
+                                                               : BuildReadRegisterLayout())));
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
@@ -176,7 +179,11 @@ class PlanLowerer final {
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
-    if (set_query_) {
+    if (ordered_compound_) {
+      if (auto descriptors = AddOrderedCompoundDescriptors(); !descriptors.has_value()) {
+        return std::unexpected(std::move(descriptors.error()));
+      }
+    } else if (set_query_) {
       if (auto descriptors = AddSetDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
       }
@@ -191,15 +198,18 @@ class PlanLowerer final {
     } else if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
       return std::unexpected(std::move(ordering.error()));
     }
-    if (!streaming_query_ && !set_query_) {
+    if (!streaming_query_ && !set_query_ && !ordered_compound_) {
       if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
     }
     LoweringResult<void> emitted =
-        set_query_ ? EmitSetPlan()
+        ordered_compound_
+            ? EmitOrderedCompoundPlan()
+            : (set_query_
+                   ? EmitSetPlan()
                    : (streaming_query_ ? EmitStreamingPlan()
-                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan()));
+                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan())));
     if (!emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
@@ -677,16 +687,30 @@ class PlanLowerer final {
     std::optional<RelationId> relation{};
   };
 
+  struct OrderedRun {
+    SorterId sorter;
+    bool full_key = false;
+    bool unique = false;
+  };
+
+  struct OrderedCoreRange {
+    std::size_t first = 0;
+    std::size_t last = 0;
+  };
+
+  struct SetAccumulator {
+    std::size_t accumulator = 0;
+    std::size_t right = 1;
+    std::size_t output = 2;
+  };
+
   [[nodiscard]] LoweringResult<void> InspectStreamingPlan() {
     const std::span<const PhysicalNode> nodes = read_plan_->nodes();
     const std::span<const BoundQueryCore> cores = bound_select_->query_cores();
     if (nodes.empty() || cores.empty()) {
       return std::unexpected(InternalFailure("streaming query plan is empty"));
     }
-    if (!bound_select_->order_by().empty()) {
-      return std::unexpected(
-          UnsupportedFailure("ordered compound SELECT lowering is not supported"));
-    }
+    ordered_compound_ = !bound_select_->order_by().empty();
     streaming_query_ = std::ranges::all_of(
         bound_select_->compound_operators(),
         [](CompoundOperator operation) { return operation == CompoundOperator::kUnionAll; });
@@ -697,6 +721,8 @@ class PlanLowerer final {
       streaming_cores_[index].bound = &cores[index];
     }
     std::vector<std::optional<std::size_t>> node_cores(nodes.size());
+    std::vector<PhysicalCompoundStrategy> compound_strategies;
+    compound_strategies.reserve(bound_select_->compound_operators().size());
     std::size_t compound_count = 0;
     for (std::size_t index = 0; index < nodes.size(); ++index) {
       const PhysicalNode& physical = nodes[index];
@@ -761,24 +787,39 @@ class PlanLowerer final {
         node_cores[index] = distinct->core_index;
       } else if (const auto* compound = std::get_if<PhysicalCompoundNode>(&physical.payload);
                  compound != nullptr) {
-        const bool concatenate = compound->operation == CompoundOperator::kUnionAll &&
-                                 compound->strategy == PhysicalCompoundStrategy::kConcatenate;
-        const bool set = compound->operation != CompoundOperator::kUnionAll &&
-                         (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
-                          compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne);
-        if (!concatenate && !set) {
-          return std::unexpected(
-              UnsupportedFailure("ordered compound SELECT lowering is not supported"));
+        if (!ordered_compound_) {
+          const bool concatenate = compound->operation == CompoundOperator::kUnionAll &&
+                                   compound->strategy == PhysicalCompoundStrategy::kConcatenate;
+          const bool set = compound->operation != CompoundOperator::kUnionAll &&
+                           (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
+                            compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne);
+          if (!concatenate && !set) {
+            return std::unexpected(
+                UnsupportedFailure("ordered compound SELECT lowering is not supported"));
+          }
         }
         set_limit_one_ =
             set_limit_one_ || compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne;
+        compound_strategies.push_back(compound->strategy);
         ++compound_count;
+      } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&physical.payload);
+                 order != nullptr) {
+        if (!ordered_compound_ || advanced_order_ != nullptr) {
+          return std::unexpected(InternalFailure("streaming advanced order is invalid"));
+        }
+        advanced_order_ = order;
       } else if (const auto* limit = std::get_if<PhysicalLimitNode>(&physical.payload);
                  limit != nullptr) {
         if (limit_ != nullptr) {
           return std::unexpected(InternalFailure("streaming query has duplicate LIMIT nodes"));
         }
         limit_ = limit;
+      } else if (const auto* output = std::get_if<PhysicalOutputNode>(&physical.payload);
+                 output != nullptr) {
+        if (!ordered_compound_ || output_ != nullptr || index + 1U != nodes.size()) {
+          return std::unexpected(InternalFailure("streaming output metadata is invalid"));
+        }
+        output_ = output;
       } else {
         return std::unexpected(
             UnsupportedFailure("streaming query contains an unsupported physical node"));
@@ -787,6 +828,26 @@ class PlanLowerer final {
 
     if (compound_count != bound_select_->compound_operators().size()) {
       return std::unexpected(InternalFailure("streaming compound count is invalid"));
+    }
+    if (ordered_compound_) {
+      if (advanced_order_ == nullptr || output_ == nullptr ||
+          advanced_order_->core_plans.size() != cores.size() ||
+          advanced_order_->terms.size() != bound_select_->order_by().size()) {
+        return std::unexpected(InternalFailure("ordered compound metadata is incomplete"));
+      }
+      for (std::size_t index = 0; index < compound_strategies.size(); ++index) {
+        const CompoundOperator operation = bound_select_->compound_operators()[index];
+        const PhysicalCompoundStrategy expected =
+            !advanced_order_->set_then_order ? PhysicalCompoundStrategy::kOrderedMerge
+                                             : (operation == CompoundOperator::kUnionAll
+                                                    ? PhysicalCompoundStrategy::kConcatenate
+                                                    : PhysicalCompoundStrategy::kSetThenOrder);
+        if (compound_strategies[index] != expected) {
+          return std::unexpected(InternalFailure("ordered compound strategy is invalid"));
+        }
+      }
+    } else if (advanced_order_ != nullptr || output_ != nullptr) {
+      return std::unexpected(InternalFailure("unordered compound has ordering metadata"));
     }
     for (const StreamingCorePlan& core : streaming_cores_) {
       if (core.bound == nullptr) {
@@ -1295,6 +1356,121 @@ class PlanLowerer final {
         return std::unexpected(std::move(allocated.error()));
       }
       count = *allocated;
+    }
+    return FinishRegisterLayout();
+  }
+
+  [[nodiscard]] std::size_t OrderedRecordFieldCount() const noexcept {
+    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty()) {
+      return 0;
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
+    return layout.key_values.size() + layout.payload_values.size();
+  }
+
+  [[nodiscard]] bool OrderedCoreNeedsFullKey(std::size_t core_index) const noexcept {
+    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
+         ++operation) {
+      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll &&
+          core_index <= operation + 1U) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool OrderedUsesRuntimeLimit() const noexcept {
+    if (advanced_order_ == nullptr) {
+      return false;
+    }
+    return advanced_order_->final_strategy == PhysicalSortStrategy::kRuntimeLimit ||
+           std::ranges::any_of(advanced_order_->core_plans, [](const PhysicalCoreOrderPlan& core) {
+             return core.strategy == PhysicalSortStrategy::kRuntimeLimit;
+           });
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildOrderedCompoundRegisterLayout() {
+    if (!ordered_compound_ || advanced_order_ == nullptr) {
+      return std::unexpected(
+          InternalFailure("ordered compound register layout has no ordering metadata"));
+    }
+    LoweringResult<void> base =
+        advanced_order_->set_then_order ? BuildSetRegisterLayout() : BuildStreamingRegisterLayout();
+    if (!base.has_value()) {
+      return base;
+    }
+    const std::size_t field_count = OrderedRecordFieldCount();
+    if (field_count == 0U) {
+      return std::unexpected(InternalFailure("ordered compound record layout is empty"));
+    }
+    auto left = AllocateRegisters(field_count);
+    auto right = AllocateRegisters(field_count);
+    auto comparison = AllocateRegisters(1);
+    auto predicate = AllocateRegisters(1);
+    if (!left.has_value()) {
+      return std::unexpected(std::move(left.error()));
+    }
+    if (!right.has_value()) {
+      return std::unexpected(std::move(right.error()));
+    }
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    if (!predicate.has_value()) {
+      return std::unexpected(std::move(predicate.error()));
+    }
+    ordered_left_first_ = *left;
+    ordered_right_first_ = *right;
+    ordered_comparison_register_ = *comparison;
+    ordered_predicate_register_ = *predicate;
+
+    if (!zero_register_.has_value()) {
+      auto zero = AllocateRegisters(1);
+      if (!zero.has_value()) {
+        return std::unexpected(std::move(zero.error()));
+      }
+      zero_register_ = *zero;
+    }
+    if (!one_register_.has_value()) {
+      auto one = AllocateRegisters(1);
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      one_register_ = *one;
+    }
+
+    if (OrderedUsesRuntimeLimit()) {
+      if (limit_ == nullptr) {
+        return std::unexpected(InternalFailure("ordered runtime limit has no LIMIT node"));
+      }
+      if (!top_n_bound_register_.has_value()) {
+        auto bound = AllocateRegisters(1);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        top_n_bound_register_ = *bound;
+      }
+      if (limit_->offset.has_value()) {
+        if (!maximum_integer_register_.has_value()) {
+          auto maximum = AllocateRegisters(1);
+          if (!maximum.has_value()) {
+            return std::unexpected(std::move(maximum.error()));
+          }
+          maximum_integer_register_ = *maximum;
+        }
+        if (!bound_room_register_.has_value()) {
+          auto room = AllocateRegisters(1);
+          if (!room.has_value()) {
+            return std::unexpected(std::move(room.error()));
+          }
+          bound_room_register_ = *room;
+        }
+        auto overflow = AllocateRegisters(1);
+        if (!overflow.has_value()) {
+          return std::unexpected(std::move(overflow.error()));
+        }
+        ordered_overflow_register_ = *overflow;
+      }
     }
     return FinishRegisterLayout();
   }
@@ -1810,6 +1986,159 @@ class PlanLowerer final {
         return std::unexpected(std::move(added.error()));
       }
       relation = *added;
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderedCompoundDescriptor(
+      bool full_key) {
+    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty() ||
+        advanced_order_->terms.empty()) {
+      return std::unexpected(InternalFailure("ordered compound descriptor has no layout"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
+    const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
+    const std::size_t key_count = full_key ? field_count : layout.key_values.size();
+    if (field_count > std::numeric_limits<std::uint32_t>::max() ||
+        key_count > std::numeric_limits<std::uint32_t>::max() ||
+        layout.output_fields.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "ordered compound descriptor exceeds bytecode field identities"));
+    }
+    OrderingRecordDescriptor descriptor{
+        .field_count = static_cast<std::uint32_t>(field_count),
+        .key_field_count = static_cast<std::uint32_t>(key_count),
+        .key_columns = {},
+    };
+    descriptor.key_columns.reserve(key_count);
+    for (const BoundOrderingTerm& term : advanced_order_->terms) {
+      if (term.collation.value() >= collation_symbols_.size()) {
+        return std::unexpected(InternalFailure("ordered compound collation is not published"));
+      }
+      descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = collation_symbols_[term.collation.value()],
+          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                        : BytecodeSortOrder::kAscending,
+          .null_placement = term.null_placement == BoundNullPlacement::kLast
+                                ? BytecodeNullPlacement::kLast
+                                : BytecodeNullPlacement::kFirst,
+      });
+    }
+    if (!full_key) {
+      return descriptor;
+    }
+    for (std::size_t payload = 0; payload < layout.payload_values.size(); ++payload) {
+      const auto output =
+          std::ranges::find_if(layout.output_fields, [&](const SortOutputField& field) {
+            return field.kind == SortOutputFieldKind::kPayload && field.field_index == payload;
+          });
+      if (output == layout.output_fields.end()) {
+        return std::unexpected(InternalFailure("ordered compound payload mapping is invalid"));
+      }
+      const auto column =
+          static_cast<std::size_t>(std::distance(layout.output_fields.begin(), output));
+      const BoundCollationId collation = bound_select_->compound_collations()[column];
+      if (collation.value() >= collation_symbols_.size()) {
+        return std::unexpected(InternalFailure("compound comparison collation is not published"));
+      }
+      descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = collation_symbols_[collation.value()],
+          .order = BytecodeSortOrder::kAscending,
+          .null_placement = BytecodeNullPlacement::kFirst,
+      });
+    }
+    return descriptor;
+  }
+
+  [[nodiscard]] LoweringResult<void> AddOrderedCompoundDescriptors() {
+    if (!ordered_compound_ || advanced_order_ == nullptr) {
+      return std::unexpected(
+          InternalFailure("ordered compound descriptors have no ordering metadata"));
+    }
+    if (advanced_order_->set_then_order) {
+      if (auto set = AddSetDescriptors(); !set.has_value()) {
+        return set;
+      }
+    } else if (auto streaming = AddStreamingDescriptors(); !streaming.has_value()) {
+      return streaming;
+    }
+
+    for (std::size_t slot = 0; slot < ordered_sorters_.size(); ++slot) {
+      auto order_descriptor = BuildOrderedCompoundDescriptor(false);
+      if (!order_descriptor.has_value()) {
+        return std::unexpected(std::move(order_descriptor.error()));
+      }
+      auto order_sorter =
+          ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*order_descriptor)),
+                               "unable to add ordered compound sorter");
+      if (!order_sorter.has_value()) {
+        return std::unexpected(std::move(order_sorter.error()));
+      }
+      ordered_sorters_[slot] = *order_sorter;
+
+      auto full_descriptor = BuildOrderedCompoundDescriptor(true);
+      if (!full_descriptor.has_value()) {
+        return std::unexpected(std::move(full_descriptor.error()));
+      }
+      auto full_sorter =
+          ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*full_descriptor)),
+                               "unable to add full-key compound sorter");
+      if (!full_sorter.has_value()) {
+        return std::unexpected(std::move(full_sorter.error()));
+      }
+      ordered_full_sorters_[slot] = *full_sorter;
+    }
+
+    auto order_comparison = BuildOrderedCompoundDescriptor(false);
+    if (!order_comparison.has_value()) {
+      return std::unexpected(std::move(order_comparison.error()));
+    }
+    order_comparison->field_count = order_comparison->key_field_count;
+    auto added_order_comparison = ConvertProgramResult(
+        AssumeValue(builder_).AddRecordComparison(std::move(*order_comparison)),
+        "unable to add ordered compound comparison");
+    if (!added_order_comparison.has_value()) {
+      return std::unexpected(std::move(added_order_comparison.error()));
+    }
+    ordered_comparison_ = *added_order_comparison;
+
+    auto full_comparison = BuildOrderedCompoundDescriptor(true);
+    if (!full_comparison.has_value()) {
+      return std::unexpected(std::move(full_comparison.error()));
+    }
+    auto added_full_comparison =
+        ConvertProgramResult(AssumeValue(builder_).AddRecordComparison(std::move(*full_comparison)),
+                             "unable to add full-key compound comparison");
+    if (!added_full_comparison.has_value()) {
+      return std::unexpected(std::move(added_full_comparison.error()));
+    }
+    ordered_full_comparison_ = *added_full_comparison;
+
+    if (OrderedUsesRuntimeLimit()) {
+      auto order_top_n_descriptor = BuildOrderedCompoundDescriptor(false);
+      if (!order_top_n_descriptor.has_value()) {
+        return std::unexpected(std::move(order_top_n_descriptor.error()));
+      }
+      auto order_top_n =
+          ConvertProgramResult(AssumeValue(builder_).AddTopN(std::move(*order_top_n_descriptor)),
+                               "unable to add ordered compound top-N");
+      if (!order_top_n.has_value()) {
+        return std::unexpected(std::move(order_top_n.error()));
+      }
+      ordered_top_n_ = *order_top_n;
+
+      auto full_top_n_descriptor = BuildOrderedCompoundDescriptor(true);
+      if (!full_top_n_descriptor.has_value()) {
+        return std::unexpected(std::move(full_top_n_descriptor.error()));
+      }
+      auto full_top_n =
+          ConvertProgramResult(AssumeValue(builder_).AddTopN(std::move(*full_top_n_descriptor)),
+                               "unable to add full-key compound top-N");
+      if (!full_top_n.has_value()) {
+        return std::unexpected(std::move(full_top_n.error()));
+      }
+      ordered_full_top_n_ = *full_top_n;
     }
     return {};
   }
@@ -6093,6 +6422,2239 @@ class PlanLowerer final {
     return Append(HaltInstruction{});
   }
 
+  [[nodiscard]] SorterId OrderedSorter(bool full_key, std::size_t slot) const noexcept {
+    return AssumeValue(full_key ? ordered_full_sorters_[slot] : ordered_sorters_[slot]);
+  }
+
+  [[nodiscard]] LoweringResult<SorterId> ChooseOrderedSorter(
+      bool full_key, std::span<const SorterId> excluded) const {
+    const auto& sorters = full_key ? ordered_full_sorters_ : ordered_sorters_;
+    for (const std::optional<SorterId>& sorter : sorters) {
+      if (!sorter.has_value() || std::ranges::find(excluded, *sorter) != excluded.end()) {
+        continue;
+      }
+      return *sorter;
+    }
+    return std::unexpected(InternalFailure("ordered compound has no free sorter"));
+  }
+
+  [[nodiscard]] bool OrderedLayoutUsesInputFields(
+      const LogicalCoreOrderLayout& layout) const noexcept {
+    const auto uses_input = [](const LogicalOrderValue& value) {
+      return value.kind == LogicalOrderValueKind::kInputField;
+    };
+    return std::ranges::any_of(layout.key_values, uses_input) ||
+           std::ranges::any_of(layout.payload_values, uses_input);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedLayoutValue(const LogicalOrderValue& value,
+                                                            RegisterId destination) {
+    if (value.kind == LogicalOrderValueKind::kInputField) {
+      if (value.expression.has_value() ||
+          value.field_index >= bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("ordered compound input field is invalid"));
+      }
+      return Append(CopyInstruction{
+          .input = RegisterId{result_block_first_.value() + value.field_index},
+          .output = destination,
+      });
+    }
+    if (!value.expression.has_value() || value.field_index != 0U) {
+      return std::unexpected(InternalFailure("ordered compound expression value is invalid"));
+    }
+    const BoundExpressionId expression = *value.expression;
+    if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
+      return emitted;
+    }
+    return Append(CopyInstruction{
+        .input = Home(expression),
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedCandidate(const LogicalCoreOrderLayout& layout,
+                                                          std::optional<SorterId> sorter,
+                                                          std::optional<TopNId> top_n,
+                                                          bool full_key, RegisterId record_first,
+                                                          Label rejected) {
+    if (sorter.has_value() == top_n.has_value()) {
+      return std::unexpected(InternalFailure("ordered compound candidate capability is invalid"));
+    }
+    const auto key_count = static_cast<std::uint32_t>(layout.key_values.size());
+    const auto admission_key_count =
+        full_key
+            ? static_cast<std::uint32_t>(layout.key_values.size() + layout.payload_values.size())
+            : key_count;
+    const auto emit_payload = [&]() -> LoweringResult<void> {
+      for (std::size_t index = 0; index < layout.payload_values.size(); ++index) {
+        if (auto emitted = EmitOrderedLayoutValue(
+                layout.payload_values[index],
+                RegisterId{record_first.value() + key_count + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+      return {};
+    };
+    const auto emit_keys = [&]() -> LoweringResult<void> {
+      for (std::size_t index = 0; index < layout.key_values.size(); ++index) {
+        if (auto emitted = EmitOrderedLayoutValue(
+                layout.key_values[index],
+                RegisterId{record_first.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+      return {};
+    };
+    if (layout.schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
+      if (auto payload = emit_payload(); !payload.has_value()) {
+        return payload;
+      }
+      if (auto keys = emit_keys(); !keys.has_value()) {
+        return keys;
+      }
+      if (top_n.has_value()) {
+        auto checked =
+            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(*top_n, record_first,
+                                                                     admission_key_count, rejected),
+                                 "unable to emit ordered compound top-N admission");
+        if (!checked.has_value()) {
+          return std::unexpected(std::move(checked.error()));
+        }
+      }
+    } else {
+      if (auto keys = emit_keys(); !keys.has_value()) {
+        return keys;
+      }
+      if (top_n.has_value()) {
+        auto checked =
+            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(*top_n, record_first,
+                                                                     admission_key_count, rejected),
+                                 "unable to emit ordered compound top-N admission");
+        if (!checked.has_value()) {
+          return std::unexpected(std::move(checked.error()));
+        }
+      }
+      if (auto payload = emit_payload(); !payload.has_value()) {
+        return payload;
+      }
+    }
+    const auto value_count =
+        static_cast<std::uint32_t>(layout.key_values.size() + layout.payload_values.size());
+    if (sorter.has_value()) {
+      return Append(InsertSorterInstruction{
+          .sorter = *sorter,
+          .first_value = record_first,
+          .value_count = value_count,
+      });
+    }
+    return Append(InsertTopNInstruction{
+        .top_n = *top_n,
+        .first_value = record_first,
+        .value_count = value_count,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedSelectCore(const StreamingCorePlan& core,
+                                                           const BoundSelectCore& select,
+                                                           const LogicalCoreOrderLayout& layout,
+                                                           std::optional<SorterId> sorter,
+                                                           std::optional<TopNId> top_n,
+                                                           bool full_key, RegisterId record_first) {
+    SetStreamingCoreContext(core);
+    auto skipped = CreateLabel();
+    if (!skipped.has_value()) {
+      return std::unexpected(std::move(skipped.error()));
+    }
+    if (auto guards = EmitStreamingGuards(core, *skipped); !guards.has_value()) {
+      return guards;
+    }
+    if (core.relation.has_value()) {
+      if (auto opened = Append(OpenRelationInstruction{.relation = *core.relation});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    const bool complete_row = OrderedLayoutUsesInputFields(layout);
+    if (core.table_scan != nullptr) {
+      if (!core.cursor.has_value()) {
+        return std::unexpected(InternalFailure("ordered compound table core has no cursor"));
+      }
+      const CursorId cursor = *core.cursor;
+      auto done = CreateLabel();
+      auto row = CreateLabel();
+      auto advance = CreateLabel();
+      if (!done.has_value()) {
+        return std::unexpected(std::move(done.error()));
+      }
+      if (!row.has_value()) {
+        return std::unexpected(std::move(row.error()));
+      }
+      if (!advance.has_value()) {
+        return std::unexpected(std::move(advance.error()));
+      }
+      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+        return opened;
+      }
+      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                          "unable to emit ordered compound table rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+      if (auto bound = BindLabel(*row); !bound.has_value()) {
+        return bound;
+      }
+      if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
+        return filters;
+      }
+      if (complete_row) {
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        if (auto membership = EmitStreamingMembership(core, *advance); !membership.has_value()) {
+          return membership;
+        }
+      }
+      if (auto candidate =
+              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *advance);
+          !candidate.has_value()) {
+        return candidate;
+      }
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                       "unable to emit ordered compound table advance");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+      if (auto bound = BindLabel(*done); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+        return closed;
+      }
+    } else {
+      if (auto filters = EmitStreamingFilters(core, *skipped); !filters.has_value()) {
+        return filters;
+      }
+      if (complete_row) {
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        if (auto membership = EmitStreamingMembership(core, *skipped); !membership.has_value()) {
+          return membership;
+        }
+      }
+      if (auto candidate =
+              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *skipped);
+          !candidate.has_value()) {
+        return candidate;
+      }
+    }
+    if (core.relation.has_value()) {
+      if (auto closed = Append(CloseRelationInstruction{.relation = *core.relation});
+          !closed.has_value()) {
+        return closed;
+      }
+    }
+    return BindLabel(*skipped);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedValuesCore(const BoundValuesCore& values,
+                                                           const LogicalCoreOrderLayout& layout,
+                                                           std::optional<SorterId> sorter,
+                                                           std::optional<TopNId> top_n,
+                                                           bool full_key, RegisterId record_first) {
+    for (const std::vector<BoundExpressionId>& row : values.rows) {
+      auto rejected = CreateLabel();
+      if (!rejected.has_value()) {
+        return std::unexpected(std::move(rejected.error()));
+      }
+      if (row.size() != bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("ordered compound VALUES width is invalid"));
+      }
+      for (std::size_t index = 0; index < row.size(); ++index) {
+        if (auto emitted = EmitExpression(
+                row[index],
+                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
+      }
+      if (auto candidate =
+              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *rejected);
+          !candidate.has_value()) {
+        return candidate;
+      }
+      if (auto bound = BindLabel(*rejected); !bound.has_value()) {
+        return bound;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedCoreRows(const StreamingCorePlan& core,
+                                                         bool full_key,
+                                                         std::optional<SorterId> sorter,
+                                                         std::optional<TopNId> top_n) {
+    if (advanced_order_ == nullptr || !ordered_right_first_.has_value() ||
+        core.core_index >= advanced_order_->core_plans.size()) {
+      return std::unexpected(InternalFailure("ordered compound core resources are incomplete"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[core.core_index].layout;
+    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+      if (auto emitted = EmitOrderedValuesCore(*values, layout, sorter, top_n, full_key,
+                                               *ordered_right_first_);
+          !emitted.has_value()) {
+        return emitted;
+      }
+    } else {
+      const auto& select = std::get<BoundSelectCore>(*core.bound);
+      if (auto emitted = EmitOrderedSelectCore(core, select, layout, sorter, top_n, full_key,
+                                               *ordered_right_first_);
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitTransferOrderedTopN(TopNId source, SorterId target,
+                                                             RegisterId record_first) {
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindTopN(source, *empty),
+                                        "unable to emit ordered compound top-N rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
+      if (auto read = Append(ReadTopNFieldInstruction{
+              .top_n = source,
+              .field = static_cast<std::uint32_t>(field),
+              .output = RegisterId{record_first.value() + static_cast<std::uint32_t>(field)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = target,
+            .first_value = record_first,
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextTopN(source, *row),
+                                     "unable to emit ordered compound top-N advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    return Append(CloseTopNInstruction{.top_n = source});
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedCoreRun(const StreamingCorePlan& core,
+                                                              bool full_key,
+                                                              std::span<const SorterId> excluded) {
+    if (advanced_order_ == nullptr || core.core_index >= advanced_order_->core_plans.size()) {
+      return std::unexpected(InternalFailure("ordered compound core plan is incomplete"));
+    }
+    auto selected = ChooseOrderedSorter(full_key, excluded);
+    if (!selected.has_value()) {
+      return std::unexpected(std::move(selected.error()));
+    }
+    const SorterId sorter = *selected;
+    const PhysicalCoreOrderPlan& plan = advanced_order_->core_plans[core.core_index];
+    if (plan.strategy == PhysicalSortStrategy::kExternal) {
+      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      if (auto emitted = EmitOrderedCoreRows(core, full_key, sorter, std::nullopt);
+          !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+    } else {
+      if (!top_n_bound_register_.has_value() || !negative_limit_register_.has_value()) {
+        return std::unexpected(InternalFailure("ordered compound top-N registers are incomplete"));
+      }
+      const std::optional<TopNId> top_n = full_key ? ordered_full_top_n_ : ordered_top_n_;
+      if (!top_n.has_value()) {
+        return std::unexpected(InternalFailure("ordered compound top-N descriptor is unavailable"));
+      }
+      auto external = CreateLabel();
+      auto joined = CreateLabel();
+      if (!external.has_value()) {
+        return std::unexpected(std::move(external.error()));
+      }
+      if (!joined.has_value()) {
+        return std::unexpected(std::move(joined.error()));
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+          !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (ordered_overflow_register_.has_value()) {
+        if (auto jumped = EmitJumpIf(AssumeValue(ordered_overflow_register_),
+                                     JumpCondition::kIfTrue, *external);
+            !jumped.has_value()) {
+          return std::unexpected(std::move(jumped.error()));
+        }
+      }
+      if (auto opened = Append(OpenTopNInstruction{
+              .top_n = *top_n,
+              .bound = AssumeValue(top_n_bound_register_),
+          });
+          !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      if (auto emitted = EmitOrderedCoreRows(core, full_key, std::nullopt, *top_n);
+          !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      if (auto transferred =
+              EmitTransferOrderedTopN(*top_n, sorter, AssumeValue(ordered_right_first_));
+          !transferred.has_value()) {
+        return std::unexpected(std::move(transferred.error()));
+      }
+      if (auto jumped = EmitJump(*joined); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (auto bound = BindLabel(*external); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      if (auto emitted = EmitOrderedCoreRows(core, full_key, sorter, std::nullopt);
+          !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+      if (auto bound = BindLabel(*joined); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+    }
+    return OrderedRun{
+        .sorter = sorter,
+        .full_key = full_key,
+        .unique = false,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitReadOrderedSorterRow(SorterId sorter, RegisterId first) {
+    const std::size_t field_count = OrderedRecordFieldCount();
+    for (std::size_t field = 0; field < field_count; ++field) {
+      if (auto read = Append(ReadSorterFieldInstruction{
+              .sorter = sorter,
+              .field = static_cast<std::uint32_t>(field),
+              .output = RegisterId{first.value() + static_cast<std::uint32_t>(field)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitTransferOrderedSorter(SorterId source,
+                                                               RegisterId record_first,
+                                                               SorterId target) {
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(source, *empty),
+                                        "unable to emit ordered compound rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto read = EmitReadOrderedSorterRow(source, record_first); !read.has_value()) {
+      return read;
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = target,
+            .first_value = record_first,
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return inserted;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source, *row),
+                                     "unable to emit ordered compound advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    return Append(CloseSorterInstruction{.sorter = source});
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUniqueFullRun(
+      OrderedRun source, std::span<const SorterId> retained, bool already_positioned = false) {
+    if (!ordered_full_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
+        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+      return std::unexpected(
+          InternalFailure("ordered compound deduplication resources are incomplete"));
+    }
+    std::array<SorterId, 2> excluded{source.sorter, source.sorter};
+    std::size_t excluded_count = 1U;
+    if (!retained.empty()) {
+      excluded[excluded_count++] = retained.front();
+    }
+    auto destination =
+        ChooseOrderedSorter(true, std::span<const SorterId>{excluded}.first(excluded_count));
+    if (!destination.has_value()) {
+      return std::unexpected(std::move(destination.error()));
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = *destination}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+
+    std::optional<Label> empty;
+    if (!already_positioned) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      empty = *label;
+    }
+    auto read_next = CreateLabel();
+    auto duplicate = CreateLabel();
+    auto done = CreateLabel();
+    if (!read_next.has_value()) {
+      return std::unexpected(std::move(read_next.error()));
+    }
+    if (!duplicate.has_value()) {
+      return std::unexpected(std::move(duplicate.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    if (!already_positioned) {
+      auto rewound = ConvertProgramResult(
+          AssumeValue(builder_).EmitRewindSorter(source.sorter, AssumeValue(empty)),
+          "unable to emit ordered compound deduplication rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = *destination,
+            .first_value = AssumeValue(ordered_left_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    auto next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
+                             "unable to emit ordered compound deduplication advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
+        !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*read_next); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = AssumeValue(ordered_full_comparison_),
+            .left_first = AssumeValue(ordered_left_first_),
+            .right_first = AssumeValue(ordered_right_first_),
+            .output = AssumeValue(ordered_comparison_register_),
+        });
+        !compared.has_value()) {
+      return std::unexpected(std::move(compared.error()));
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto equal = Append(CompareInstruction{
+            .comparison = SqlComparison::kEqual,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = AssumeValue(ordered_comparison_register_),
+            .right = AssumeValue(zero_register_),
+            .output = AssumeValue(ordered_predicate_register_),
+        });
+        !equal.has_value()) {
+      return std::unexpected(std::move(equal.error()));
+    }
+    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
+                                 *duplicate);
+        !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = *destination,
+            .first_value = AssumeValue(ordered_right_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
+      if (auto copied = Append(CopyInstruction{
+              .input = RegisterId{AssumeValue(ordered_right_first_).value() +
+                                  static_cast<std::uint32_t>(field)},
+              .output = RegisterId{AssumeValue(ordered_left_first_).value() +
+                                   static_cast<std::uint32_t>(field)},
+          });
+          !copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+    }
+    if (auto bound = BindLabel(*duplicate); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    auto duplicate_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
+                             "unable to emit ordered compound duplicate advance");
+    if (!duplicate_next.has_value()) {
+      return std::unexpected(std::move(duplicate_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
+        !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (empty.has_value()) {
+      if (auto bound = BindLabel(*empty); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+    }
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return OrderedRun{
+        .sorter = *destination,
+        .full_key = true,
+        .unique = true,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedLastUniqueFullRun(
+      OrderedRun source, std::span<const SorterId> retained) {
+    if (!ordered_full_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
+        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+      return std::unexpected(
+          InternalFailure("ordered UNION deduplication resources are incomplete"));
+    }
+    std::array<SorterId, 2> excluded{source.sorter, source.sorter};
+    std::size_t excluded_count = 1U;
+    if (!retained.empty()) {
+      excluded[excluded_count++] = retained.front();
+    }
+    auto destination =
+        ChooseOrderedSorter(true, std::span<const SorterId>{excluded}.first(excluded_count));
+    if (!destination.has_value()) {
+      return std::unexpected(std::move(destination.error()));
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = *destination}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+
+    auto empty = CreateLabel();
+    auto read_next = CreateLabel();
+    auto replace_pending = CreateLabel();
+    auto emit_pending = CreateLabel();
+    auto done = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!read_next.has_value()) {
+      return std::unexpected(std::move(read_next.error()));
+    }
+    if (!replace_pending.has_value()) {
+      return std::unexpected(std::move(replace_pending.error()));
+    }
+    if (!emit_pending.has_value()) {
+      return std::unexpected(std::move(emit_pending.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(source.sorter, *empty),
+                             "unable to emit ordered UNION deduplication rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    auto next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
+                             "unable to emit ordered UNION deduplication advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto jumped = EmitJump(*emit_pending); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*read_next); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = AssumeValue(ordered_full_comparison_),
+            .left_first = AssumeValue(ordered_left_first_),
+            .right_first = AssumeValue(ordered_right_first_),
+            .output = AssumeValue(ordered_comparison_register_),
+        });
+        !compared.has_value()) {
+      return std::unexpected(std::move(compared.error()));
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto equal = Append(CompareInstruction{
+            .comparison = SqlComparison::kEqual,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = AssumeValue(ordered_comparison_register_),
+            .right = AssumeValue(zero_register_),
+            .output = AssumeValue(ordered_predicate_register_),
+        });
+        !equal.has_value()) {
+      return std::unexpected(std::move(equal.error()));
+    }
+    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
+                                 *replace_pending);
+        !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto inserted = EmitInsertOrderedRecord(*destination, AssumeValue(ordered_left_first_));
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (auto bound = BindLabel(*replace_pending); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
+      if (auto copied = Append(CopyInstruction{
+              .input = RegisterId{AssumeValue(ordered_right_first_).value() +
+                                  static_cast<std::uint32_t>(field)},
+              .output = RegisterId{AssumeValue(ordered_left_first_).value() +
+                                   static_cast<std::uint32_t>(field)},
+          });
+          !copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+    }
+    auto continued =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
+                             "unable to emit ordered UNION duplicate advance");
+    if (!continued.has_value()) {
+      return std::unexpected(std::move(continued.error()));
+    }
+    if (auto jumped = EmitJump(*emit_pending); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*emit_pending); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto inserted = EmitInsertOrderedRecord(*destination, AssumeValue(ordered_left_first_));
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
+        !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
+        !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return OrderedRun{
+        .sorter = *destination,
+        .full_key = true,
+        .unique = true,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitInsertOrderedRecord(SorterId sorter, RegisterId first) {
+    return Append(InsertSorterInstruction{
+        .sorter = sorter,
+        .first_value = first,
+        .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedSetMerge(
+      OrderedRun left, OrderedRun right, CompoundOperator operation,
+      bool left_already_positioned = false) {
+    if (operation == CompoundOperator::kUnionAll || !ordered_full_comparison_.has_value() ||
+        !ordered_comparison_register_.has_value() || !ordered_predicate_register_.has_value() ||
+        !zero_register_.has_value()) {
+      return std::unexpected(InternalFailure("ordered set merge resources are incomplete"));
+    }
+    const std::array excluded{left.sorter, right.sorter};
+    auto selected = ChooseOrderedSorter(true, excluded);
+    if (!selected.has_value()) {
+      return std::unexpected(std::move(selected.error()));
+    }
+    const SorterId output = *selected;
+    if (auto opened = Append(OpenSorterInstruction{.sorter = output}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+
+    std::optional<Label> left_empty;
+    std::optional<Label> right_empty_after_left;
+    if (!left_already_positioned) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      left_empty = *label;
+      if (operation == CompoundOperator::kUnion) {
+        label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        right_empty_after_left = *label;
+      }
+    }
+    auto right_empty = CreateLabel();
+    auto compare = CreateLabel();
+    auto take_left = CreateLabel();
+    auto take_right = CreateLabel();
+    auto equal_left_read = CreateLabel();
+    auto equal_right_read = CreateLabel();
+    std::optional<Label> equal_right_drain_read;
+    if (operation == CompoundOperator::kUnion) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      equal_right_drain_read = *label;
+    }
+    auto left_read = CreateLabel();
+    auto right_read = CreateLabel();
+    std::optional<Label> drain_left;
+    std::optional<Label> drain_left_read;
+    if (operation != CompoundOperator::kIntersect) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_left = *label;
+      label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_left_read = *label;
+    }
+    std::optional<Label> drain_right;
+    std::optional<Label> drain_right_read;
+    if (operation == CompoundOperator::kUnion) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_right = *label;
+      label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_right_read = *label;
+    }
+    auto done = CreateLabel();
+    if (!right_empty.has_value()) {
+      return std::unexpected(std::move(right_empty.error()));
+    }
+    if (!compare.has_value()) {
+      return std::unexpected(std::move(compare.error()));
+    }
+    if (!take_left.has_value()) {
+      return std::unexpected(std::move(take_left.error()));
+    }
+    if (!take_right.has_value()) {
+      return std::unexpected(std::move(take_right.error()));
+    }
+    if (!equal_left_read.has_value()) {
+      return std::unexpected(std::move(equal_left_read.error()));
+    }
+    if (!equal_right_read.has_value()) {
+      return std::unexpected(std::move(equal_right_read.error()));
+    }
+    if (!left_read.has_value()) {
+      return std::unexpected(std::move(left_read.error()));
+    }
+    if (!right_read.has_value()) {
+      return std::unexpected(std::move(right_read.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+
+    if (!left_already_positioned) {
+      auto rewound =
+          ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *left_empty),
+                               "unable to emit ordered set left rewind");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    auto right_rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty),
+                             "unable to emit ordered set right rewind");
+    if (!right_rewound.has_value()) {
+      return std::unexpected(std::move(right_rewound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+
+    if (auto bound = BindLabel(*compare); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = AssumeValue(ordered_full_comparison_),
+            .left_first = AssumeValue(ordered_left_first_),
+            .right_first = AssumeValue(ordered_right_first_),
+            .output = AssumeValue(ordered_comparison_register_),
+        });
+        !compared.has_value()) {
+      return std::unexpected(std::move(compared.error()));
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto less = Append(CompareInstruction{
+            .comparison = SqlComparison::kLess,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = AssumeValue(ordered_comparison_register_),
+            .right = AssumeValue(zero_register_),
+            .output = AssumeValue(ordered_predicate_register_),
+        });
+        !less.has_value()) {
+      return std::unexpected(std::move(less.error()));
+    }
+    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
+                                 *take_left);
+        !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto greater = Append(CompareInstruction{
+            .comparison = SqlComparison::kGreater,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = AssumeValue(ordered_comparison_register_),
+            .right = AssumeValue(zero_register_),
+            .output = AssumeValue(ordered_predicate_register_),
+        });
+        !greater.has_value()) {
+      return std::unexpected(std::move(greater.error()));
+    }
+    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
+                                 *take_right);
+        !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (operation == CompoundOperator::kUnion) {
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    } else if (operation == CompoundOperator::kIntersect) {
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    }
+    auto equal_left_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *equal_left_read),
+                             "unable to emit ordered set equal-left advance");
+    if (!equal_left_next.has_value()) {
+      return std::unexpected(std::move(equal_left_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (operation == CompoundOperator::kUnion) {
+      auto equal_right_next = ConvertProgramResult(
+          AssumeValue(builder_).EmitNextSorter(right.sorter, AssumeValue(equal_right_drain_read)),
+          "unable to emit ordered UNION equal-right advance");
+      if (!equal_right_next.has_value()) {
+        return std::unexpected(std::move(equal_right_next.error()));
+      }
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (operation == CompoundOperator::kUnion) {
+      if (auto bound = BindLabel(AssumeValue(equal_right_drain_read)); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+          !read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+
+    if (auto bound = BindLabel(*equal_left_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    auto equal_right_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *equal_right_read),
+                             "unable to emit ordered set equal-right advance");
+    if (!equal_right_next.has_value()) {
+      return std::unexpected(std::move(equal_right_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
+      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    } else {
+      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+    if (auto bound = BindLabel(*equal_right_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*take_left); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (operation != CompoundOperator::kIntersect) {
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    }
+    auto left_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *left_read),
+                             "unable to emit ordered set left advance");
+    if (!left_next.has_value()) {
+      return std::unexpected(std::move(left_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (operation == CompoundOperator::kUnion) {
+      if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    } else {
+      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+    if (auto bound = BindLabel(*left_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*take_right); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (operation == CompoundOperator::kUnion) {
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    }
+    auto right_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *right_read),
+                             "unable to emit ordered set right advance");
+    if (!right_next.has_value()) {
+      return std::unexpected(std::move(right_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
+      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    } else {
+      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+    if (auto bound = BindLabel(*right_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*right_empty); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
+      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    } else {
+      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+
+    if (!left_already_positioned) {
+      if (auto bound = BindLabel(*left_empty); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (operation == CompoundOperator::kUnion) {
+        auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(
+                                                right.sorter, AssumeValue(right_empty_after_left)),
+                                            "unable to emit ordered UNION remaining-right rewind");
+        if (!rewound.has_value()) {
+          return std::unexpected(std::move(rewound.error()));
+        }
+        if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+            !read.has_value()) {
+          return std::unexpected(std::move(read.error()));
+        }
+        if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
+          return std::unexpected(std::move(jumped.error()));
+        }
+        if (auto bound = BindLabel(AssumeValue(right_empty_after_left)); !bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+
+    if (drain_left.has_value()) {
+      if (auto bound = BindLabel(*drain_left); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+      auto drain_left_next = ConvertProgramResult(
+          AssumeValue(builder_).EmitNextSorter(left.sorter, AssumeValue(drain_left_read)),
+          "unable to emit ordered set left drain");
+      if (!drain_left_next.has_value()) {
+        return std::unexpected(std::move(drain_left_next.error()));
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (auto bound = BindLabel(AssumeValue(drain_left_read)); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+          !read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+
+    if (drain_right.has_value()) {
+      if (auto bound = BindLabel(*drain_right); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+          !inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+      auto drain_right_next = ConvertProgramResult(
+          AssumeValue(builder_).EmitNextSorter(right.sorter, AssumeValue(drain_right_read)),
+          "unable to emit ordered set right drain");
+      if (!drain_right_next.has_value()) {
+        return std::unexpected(std::move(drain_right_next.error()));
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
+          !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (auto bound = BindLabel(AssumeValue(drain_right_read)); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+          !read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+    }
+
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return OrderedRun{
+        .sorter = output,
+        .full_key = true,
+        .unique = true,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedBarrierSet(
+      OrderedRun left, const StreamingCorePlan& right_core, CompoundOperator operation) {
+    if (operation != CompoundOperator::kExcept && operation != CompoundOperator::kIntersect) {
+      return std::unexpected(InternalFailure("ordered barrier merge has an invalid operator"));
+    }
+    const SorterId original = left.sorter;
+    auto empty_left = CreateLabel();
+    auto done = CreateLabel();
+    if (!empty_left.has_value()) {
+      return std::unexpected(std::move(empty_left.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *empty_left),
+                             "unable to emit ordered barrier left rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+
+    OrderedRun merge_left = left;
+    bool left_positioned = true;
+    if (!left.full_key || !left.unique) {
+      auto unique = EmitOrderedUniqueFullRun(left, {}, true);
+      if (!unique.has_value()) {
+        return std::unexpected(std::move(unique.error()));
+      }
+      merge_left = *unique;
+      left_positioned = false;
+    }
+    const std::array retained{merge_left.sorter};
+    auto right = EmitOrderedCoreRun(right_core, true, retained);
+    if (!right.has_value()) {
+      return std::unexpected(std::move(right.error()));
+    }
+    auto unique_right = EmitOrderedUniqueFullRun(*right, retained);
+    if (!unique_right.has_value()) {
+      return std::unexpected(std::move(unique_right.error()));
+    }
+    auto merged = EmitOrderedSetMerge(merge_left, *unique_right, operation, left_positioned);
+    if (!merged.has_value()) {
+      return std::unexpected(std::move(merged.error()));
+    }
+    if (merged->sorter != original) {
+      if (auto opened = Append(OpenSorterInstruction{.sorter = original}); !opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      if (auto transferred =
+              EmitTransferOrderedSorter(merged->sorter, AssumeValue(ordered_left_first_), original);
+          !transferred.has_value()) {
+        return std::unexpected(std::move(transferred.error()));
+      }
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*empty_left); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto reset = Append(ResetSorterInstruction{.sorter = original}); !reset.has_value()) {
+      return std::unexpected(std::move(reset.error()));
+    }
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return OrderedRun{
+        .sorter = original,
+        .full_key = true,
+        .unique = true,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionAllGroup(OrderedRun accumulator,
+                                                                    OrderedCoreRange cores,
+                                                                    bool full_key) {
+    const std::array excluded{accumulator.sorter};
+    auto aggregate = ChooseOrderedSorter(full_key, excluded);
+    if (!aggregate.has_value()) {
+      return std::unexpected(std::move(aggregate.error()));
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    if (auto transferred = EmitTransferOrderedSorter(accumulator.sorter,
+                                                     AssumeValue(ordered_left_first_), *aggregate);
+        !transferred.has_value()) {
+      return std::unexpected(std::move(transferred.error()));
+    }
+    for (std::size_t core = cores.first; core <= cores.last; ++core) {
+      const std::array retained{*aggregate};
+      auto run =
+          EmitOrderedCoreRun(streaming_cores_[core], OrderedCoreNeedsFullKey(core), retained);
+      if (!run.has_value()) {
+        return std::unexpected(std::move(run.error()));
+      }
+      if (auto transferred =
+              EmitTransferOrderedSorter(run->sorter, AssumeValue(ordered_right_first_), *aggregate);
+          !transferred.has_value()) {
+        return std::unexpected(std::move(transferred.error()));
+      }
+    }
+    return OrderedRun{
+        .sorter = *aggregate,
+        .full_key = full_key,
+        .unique = false,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionGroup(OrderedRun accumulator,
+                                                                 OrderedCoreRange cores) {
+    const std::array excluded{accumulator.sorter};
+    auto aggregate = ChooseOrderedSorter(true, excluded);
+    if (!aggregate.has_value()) {
+      return std::unexpected(std::move(aggregate.error()));
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    if (auto transferred = EmitTransferOrderedSorter(accumulator.sorter,
+                                                     AssumeValue(ordered_left_first_), *aggregate);
+        !transferred.has_value()) {
+      return std::unexpected(std::move(transferred.error()));
+    }
+    for (std::size_t core = cores.first; core <= cores.last; ++core) {
+      const std::array retained{*aggregate};
+      auto run = EmitOrderedCoreRun(streaming_cores_[core], true, retained);
+      if (!run.has_value()) {
+        return std::unexpected(std::move(run.error()));
+      }
+      auto unique = EmitOrderedUniqueFullRun(*run, retained);
+      if (!unique.has_value()) {
+        return std::unexpected(std::move(unique.error()));
+      }
+      if (auto transferred = EmitTransferOrderedSorter(
+              unique->sorter, AssumeValue(ordered_right_first_), *aggregate);
+          !transferred.has_value()) {
+        return std::unexpected(std::move(transferred.error()));
+      }
+    }
+    return EmitOrderedLastUniqueFullRun(
+        OrderedRun{
+            .sorter = *aggregate,
+            .full_key = true,
+            .unique = false,
+        },
+        {});
+  }
+
+  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionAll(OrderedRun left, OrderedRun right,
+                                                               bool full_key) {
+    const std::array excluded{left.sorter, right.sorter};
+    auto selected = ChooseOrderedSorter(full_key, excluded);
+    if (!selected.has_value()) {
+      return std::unexpected(std::move(selected.error()));
+    }
+    const SorterId output = *selected;
+    if (auto opened = Append(OpenSorterInstruction{.sorter = output}); !opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+
+    auto left_empty = CreateLabel();
+    auto right_empty = CreateLabel();
+    auto compare = CreateLabel();
+    auto take_right = CreateLabel();
+    auto left_read = CreateLabel();
+    auto right_read = CreateLabel();
+    auto drain_left = CreateLabel();
+    auto drain_right = CreateLabel();
+    auto drain_left_read = CreateLabel();
+    auto drain_right_read = CreateLabel();
+    auto right_empty_after_left = CreateLabel();
+    auto done = CreateLabel();
+    if (!left_empty.has_value()) {
+      return std::unexpected(std::move(left_empty.error()));
+    }
+    if (!right_empty.has_value()) {
+      return std::unexpected(std::move(right_empty.error()));
+    }
+    if (!compare.has_value()) {
+      return std::unexpected(std::move(compare.error()));
+    }
+    if (!take_right.has_value()) {
+      return std::unexpected(std::move(take_right.error()));
+    }
+    if (!left_read.has_value()) {
+      return std::unexpected(std::move(left_read.error()));
+    }
+    if (!right_read.has_value()) {
+      return std::unexpected(std::move(right_read.error()));
+    }
+    if (!drain_left.has_value()) {
+      return std::unexpected(std::move(drain_left.error()));
+    }
+    if (!drain_right.has_value()) {
+      return std::unexpected(std::move(drain_right.error()));
+    }
+    if (!drain_left_read.has_value()) {
+      return std::unexpected(std::move(drain_left_read.error()));
+    }
+    if (!drain_right_read.has_value()) {
+      return std::unexpected(std::move(drain_right_read.error()));
+    }
+    if (!right_empty_after_left.has_value()) {
+      return std::unexpected(std::move(right_empty_after_left.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+
+    auto left_rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *left_empty),
+                             "unable to emit ordered UNION ALL left rewind");
+    if (!left_rewound.has_value()) {
+      return std::unexpected(std::move(left_rewound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    auto right_rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty),
+                             "unable to emit ordered UNION ALL right rewind");
+    if (!right_rewound.has_value()) {
+      return std::unexpected(std::move(right_rewound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+
+    if (auto bound = BindLabel(*compare); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (!ordered_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
+        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+      return std::unexpected(
+          InternalFailure("ordered UNION ALL comparison resources are incomplete"));
+    }
+    const RegisterId comparison_register = AssumeValue(ordered_comparison_register_);
+    const RegisterId predicate_register = AssumeValue(ordered_predicate_register_);
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = AssumeValue(ordered_comparison_),
+            .left_first = AssumeValue(ordered_left_first_),
+            .right_first = AssumeValue(ordered_right_first_),
+            .output = comparison_register,
+        });
+        !compared.has_value()) {
+      return std::unexpected(std::move(compared.error()));
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto greater = Append(CompareInstruction{
+            .comparison = SqlComparison::kGreater,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = comparison_register,
+            .right = AssumeValue(zero_register_),
+            .output = predicate_register,
+        });
+        !greater.has_value()) {
+      return std::unexpected(std::move(greater.error()));
+    }
+    if (auto jumped = EmitJumpIf(predicate_register, JumpCondition::kIfTrue, *take_right);
+        !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = output,
+            .first_value = AssumeValue(ordered_left_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    auto left_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *left_read),
+                             "unable to emit ordered UNION ALL left advance");
+    if (!left_next.has_value()) {
+      return std::unexpected(std::move(left_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*left_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*take_right); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = output,
+            .first_value = AssumeValue(ordered_right_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    auto right_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *right_read),
+                             "unable to emit ordered UNION ALL right advance");
+    if (!right_next.has_value()) {
+      return std::unexpected(std::move(right_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*right_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*right_empty); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*left_empty); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    auto remaining_right = ConvertProgramResult(
+        AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty_after_left),
+        "unable to emit ordered UNION ALL remaining-right rewind");
+    if (!remaining_right.has_value()) {
+      return std::unexpected(std::move(remaining_right.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*right_empty_after_left); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*drain_left); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = output,
+            .first_value = AssumeValue(ordered_left_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    auto drain_left_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *drain_left_read),
+                             "unable to emit ordered UNION ALL left drain");
+    if (!drain_left_next.has_value()) {
+      return std::unexpected(std::move(drain_left_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*drain_left_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*drain_right); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = output,
+            .first_value = AssumeValue(ordered_right_first_),
+            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
+        });
+        !inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    auto drain_right_next =
+        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *drain_right_read),
+                             "unable to emit ordered UNION ALL right drain");
+    if (!drain_right_next.has_value()) {
+      return std::unexpected(std::move(drain_right_next.error()));
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
+      return std::unexpected(std::move(closed.error()));
+    }
+    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*drain_right_read); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        !read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return OrderedRun{
+        .sorter = output,
+        .full_key = full_key,
+        .unique = false,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedFinalDrain(OrderedRun run, Label final_completion) {
+    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty()) {
+      return std::unexpected(InternalFailure("ordered compound drain has no layout"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    auto after = CreateLabel();
+    std::optional<Label> limit_completion;
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (!after.has_value()) {
+      return std::unexpected(std::move(after.error()));
+    }
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      limit_completion = *label;
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(run.sorter, *empty),
+                                        "unable to emit final ordered compound rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
+      return offset;
+    }
+    for (std::size_t index = 0; index < layout.output_fields.size(); ++index) {
+      const SortOutputField& output = layout.output_fields[index];
+      const std::uint32_t field =
+          output.kind == SortOutputFieldKind::kKey
+              ? output.field_index
+              : static_cast<std::uint32_t>(layout.key_values.size()) + output.field_index;
+      if (auto read = Append(ReadSorterFieldInstruction{
+              .sorter = run.sorter,
+              .field = field,
+              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(layout.output_fields.size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (limit_completion.has_value()) {
+      if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
+              .advance = *advance,
+              .completion = *limit_completion,
+          });
+          !limited.has_value()) {
+        return limited;
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(run.sorter, *row),
+                                     "unable to emit final ordered compound advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = run.sorter}); !closed.has_value()) {
+      return closed;
+    }
+    if (auto jumped = EmitJump(*after); !jumped.has_value()) {
+      return jumped;
+    }
+    if (limit_completion.has_value()) {
+      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseSorterInstruction{.sorter = run.sorter}); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return BindLabel(*after);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedRuntimeLimitInitialization() {
+    if (!OrderedUsesRuntimeLimit()) {
+      return {};
+    }
+    if (limit_ == nullptr || !limit_register_.has_value() || !top_n_bound_register_.has_value()) {
+      return std::unexpected(InternalFailure("ordered compound runtime LIMIT is incomplete"));
+    }
+    if (!limit_->offset.has_value()) {
+      return Append(CopyInstruction{
+          .input = AssumeValue(limit_register_),
+          .output = AssumeValue(top_n_bound_register_),
+      });
+    }
+    if (!offset_register_.has_value() || !maximum_integer_register_.has_value() ||
+        !bound_room_register_.has_value() || !ordered_overflow_register_.has_value()) {
+      return std::unexpected(
+          InternalFailure("ordered compound runtime bound registers are incomplete"));
+    }
+    auto maximum = EnsureMaximumIntegerConstant();
+    if (!maximum.has_value()) {
+      return std::unexpected(std::move(maximum.error()));
+    }
+    if (auto loaded = Append(LoadConstantInstruction{
+            .constant = *maximum,
+            .output = AssumeValue(maximum_integer_register_),
+        });
+        !loaded.has_value()) {
+      return loaded;
+    }
+    if (auto room = Append(BinaryInstruction{
+            .operation = BinaryOperation::kSubtract,
+            .left = AssumeValue(maximum_integer_register_),
+            .right = AssumeValue(offset_register_),
+            .output = AssumeValue(bound_room_register_),
+        });
+        !room.has_value()) {
+      return room;
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto overflow = Append(CompareInstruction{
+            .comparison = SqlComparison::kLess,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = AssumeValue(bound_room_register_),
+            .right = AssumeValue(limit_register_),
+            .output = AssumeValue(ordered_overflow_register_),
+        });
+        !overflow.has_value()) {
+      return overflow;
+    }
+    return Append(BinaryInstruction{
+        .operation = BinaryOperation::kAdd,
+        .left = AssumeValue(limit_register_),
+        .right = AssumeValue(offset_register_),
+        .output = AssumeValue(top_n_bound_register_),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedControlInitialization() {
+    if (limit_ != nullptr) {
+      return {};
+    }
+    auto zero = EnsureZeroConstant();
+    auto one = EnsureOneConstant();
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto loaded = Append(LoadConstantInstruction{
+            .constant = *zero,
+            .output = AssumeValue(zero_register_),
+        });
+        !loaded.has_value()) {
+      return loaded;
+    }
+    return Append(LoadConstantInstruction{
+        .constant = *one,
+        .output = AssumeValue(one_register_),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetThenOrderRows(SetAccumulator state,
+                                                          std::optional<SorterId> sorter,
+                                                          std::optional<TopNId> top_n) {
+    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty() ||
+        sorter.has_value() == top_n.has_value()) {
+      return std::unexpected(InternalFailure("set-then-order output capability is invalid"));
+    }
+    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
+    const RelationId relation = SetRelation(state.accumulator);
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
+                                        "unable to emit set-then-order relation rewind");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
+      return read;
+    }
+    if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, false,
+                                              AssumeValue(ordered_right_first_), *advance);
+        !candidate.has_value()) {
+      return candidate;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(relation, *row),
+                                     "unable to emit set-then-order relation advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*empty); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
+      return closed;
+    }
+
+    std::optional<std::size_t> last_set;
+    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
+         ++operation) {
+      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll) {
+        last_set = operation;
+      }
+    }
+    if (!last_set.has_value()) {
+      return std::unexpected(InternalFailure("set-then-order query has no set operator"));
+    }
+    for (std::size_t core = *last_set + 2U; core < streaming_cores_.size(); ++core) {
+      if (auto emitted = EmitOrderedCoreRows(streaming_cores_[core], false, sorter, top_n);
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSetThenOrderPlan(Label completion) {
+    if (advanced_order_ == nullptr || !advanced_order_->set_then_order) {
+      return std::unexpected(InternalFailure("set-then-order emission has no fallback plan"));
+    }
+    if (auto counters = EmitSetCounterInitialization(); !counters.has_value()) {
+      return counters;
+    }
+    std::optional<std::size_t> last_set;
+    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
+         ++operation) {
+      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll) {
+        last_set = operation;
+      }
+    }
+    if (!last_set.has_value()) {
+      return std::unexpected(InternalFailure("set-then-order query has no set operator"));
+    }
+    SetAccumulator state;
+    if (auto materialized = EmitSetMaterialization(*last_set, &state); !materialized.has_value()) {
+      return materialized;
+    }
+
+    const SorterId sorter = OrderedSorter(false, 0U);
+    if (advanced_order_->final_strategy == PhysicalSortStrategy::kExternal) {
+      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+        return opened;
+      }
+      if (auto rows = EmitSetThenOrderRows(state, sorter, std::nullopt); !rows.has_value()) {
+        return rows;
+      }
+      return EmitOrderedFinalDrain(OrderedRun{.sorter = sorter, .full_key = false, .unique = false},
+                                   completion);
+    }
+
+    if (!ordered_top_n_.has_value() || !top_n_bound_register_.has_value() ||
+        !negative_limit_register_.has_value()) {
+      return std::unexpected(InternalFailure("set-then-order top-N resources are incomplete"));
+    }
+    auto external = CreateLabel();
+    if (!external.has_value()) {
+      return std::unexpected(std::move(external.error()));
+    }
+    if (auto jumped =
+            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+        !jumped.has_value()) {
+      return jumped;
+    }
+    if (ordered_overflow_register_.has_value()) {
+      if (auto jumped = EmitJumpIf(AssumeValue(ordered_overflow_register_), JumpCondition::kIfTrue,
+                                   *external);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    const TopNId top_n = AssumeValue(ordered_top_n_);
+    if (auto opened = Append(OpenTopNInstruction{
+            .top_n = top_n,
+            .bound = AssumeValue(top_n_bound_register_),
+        });
+        !opened.has_value()) {
+      return opened;
+    }
+    if (auto rows = EmitSetThenOrderRows(state, std::nullopt, top_n); !rows.has_value()) {
+      return rows;
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+      return opened;
+    }
+    if (auto transferred =
+            EmitTransferOrderedTopN(top_n, sorter, AssumeValue(ordered_right_first_));
+        !transferred.has_value()) {
+      return transferred;
+    }
+    if (auto drained = EmitOrderedFinalDrain(
+            OrderedRun{.sorter = sorter, .full_key = false, .unique = false}, completion);
+        !drained.has_value()) {
+      return drained;
+    }
+    if (auto jumped = EmitJump(completion); !jumped.has_value()) {
+      return jumped;
+    }
+
+    if (auto bound = BindLabel(*external); !bound.has_value()) {
+      return bound;
+    }
+    if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+      return opened;
+    }
+    if (auto rows = EmitSetThenOrderRows(state, sorter, std::nullopt); !rows.has_value()) {
+      return rows;
+    }
+    return EmitOrderedFinalDrain(OrderedRun{.sorter = sorter, .full_key = false, .unique = false},
+                                 completion);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderedCompoundPlan() {
+    if (!ordered_compound_ || advanced_order_ == nullptr || streaming_cores_.empty()) {
+      return std::unexpected(InternalFailure("ordered compound emission has no plan"));
+    }
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto bound = EmitOrderedRuntimeLimitInitialization(); !bound.has_value()) {
+      return bound;
+    }
+    if (auto controls = EmitOrderedControlInitialization(); !controls.has_value()) {
+      return controls;
+    }
+    if (advanced_order_->set_then_order) {
+      if (auto emitted = EmitSetThenOrderPlan(*completion); !emitted.has_value()) {
+        return emitted;
+      }
+      if (auto bound = BindLabel(*completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    auto first = EmitOrderedCoreRun(streaming_cores_.front(), OrderedCoreNeedsFullKey(0U), {});
+    if (!first.has_value()) {
+      return std::unexpected(std::move(first.error()));
+    }
+    OrderedRun accumulator = *first;
+    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
+         ++operation) {
+      const CompoundOperator kind = bound_select_->compound_operators()[operation];
+      if (kind == CompoundOperator::kUnionAll) {
+        std::size_t run_end = operation;
+        while (run_end + 1U < bound_select_->compound_operators().size() &&
+               bound_select_->compound_operators()[run_end + 1U] == CompoundOperator::kUnionAll) {
+          ++run_end;
+        }
+        if (run_end > operation) {
+          auto grouped = EmitOrderedUnionAllGroup(
+              accumulator, OrderedCoreRange{.first = operation + 1U, .last = run_end + 1U},
+              OrderedCoreNeedsFullKey(run_end + 1U));
+          if (!grouped.has_value()) {
+            return std::unexpected(std::move(grouped.error()));
+          }
+          accumulator = *grouped;
+          operation = run_end;
+          continue;
+        }
+        const std::array excluded{accumulator.sorter};
+        auto right = EmitOrderedCoreRun(streaming_cores_[operation + 1U],
+                                        OrderedCoreNeedsFullKey(operation + 1U), excluded);
+        if (!right.has_value()) {
+          return std::unexpected(std::move(right.error()));
+        }
+        const bool full_key = OrderedCoreNeedsFullKey(operation + 1U);
+        auto combined = EmitOrderedUnionAll(accumulator, *right, full_key);
+        if (!combined.has_value()) {
+          return std::unexpected(std::move(combined.error()));
+        }
+        accumulator = *combined;
+        continue;
+      }
+
+      if (kind == CompoundOperator::kExcept || kind == CompoundOperator::kIntersect) {
+        auto barrier = EmitOrderedBarrierSet(accumulator, streaming_cores_[operation + 1U], kind);
+        if (!barrier.has_value()) {
+          return std::unexpected(std::move(barrier.error()));
+        }
+        accumulator = *barrier;
+        continue;
+      }
+
+      if (!accumulator.full_key || !accumulator.unique) {
+        auto unique = EmitOrderedUniqueFullRun(accumulator, {});
+        if (!unique.has_value()) {
+          return std::unexpected(std::move(unique.error()));
+        }
+        accumulator = *unique;
+      }
+      std::size_t run_end = operation;
+      while (run_end + 1U < bound_select_->compound_operators().size() &&
+             bound_select_->compound_operators()[run_end + 1U] == CompoundOperator::kUnion) {
+        ++run_end;
+      }
+      if (run_end > operation) {
+        auto grouped = EmitOrderedUnionGroup(
+            accumulator, OrderedCoreRange{.first = operation + 1U, .last = run_end + 1U});
+        if (!grouped.has_value()) {
+          return std::unexpected(std::move(grouped.error()));
+        }
+        accumulator = *grouped;
+        operation = run_end;
+        continue;
+      }
+      const std::array retained{accumulator.sorter};
+      auto right = EmitOrderedCoreRun(streaming_cores_[operation + 1U], true, retained);
+      if (!right.has_value()) {
+        return std::unexpected(std::move(right.error()));
+      }
+      auto unique_right = EmitOrderedUniqueFullRun(*right, retained);
+      if (!unique_right.has_value()) {
+        return std::unexpected(std::move(unique_right.error()));
+      }
+      auto united = EmitOrderedSetMerge(accumulator, *unique_right, CompoundOperator::kUnion);
+      if (!united.has_value()) {
+        return std::unexpected(std::move(united.error()));
+      }
+      accumulator = *united;
+    }
+    if (auto drained = EmitOrderedFinalDrain(accumulator, *completion); !drained.has_value()) {
+      return drained;
+    }
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] RelationId SetRelation(std::size_t index) const noexcept {
     return AssumeValue(set_relations_[index]);
   }
@@ -6382,12 +8944,6 @@ class PlanLowerer final {
     }
     return BindLabel(*skipped);
   }
-
-  struct SetAccumulator {
-    std::size_t accumulator = 0;
-    std::size_t right = 1;
-    std::size_t output = 2;
-  };
 
   [[nodiscard]] LoweringResult<void> EmitReadSetRow(RelationId relation) {
     for (std::size_t index = 0; index < bound_select_->result_columns().size(); ++index) {
@@ -7708,10 +10264,17 @@ class PlanLowerer final {
   bool streaming_query_ = false;
   bool set_query_ = false;
   bool set_limit_one_ = false;
+  bool ordered_compound_ = false;
   bool streaming_requires_snapshot_ = false;
   std::vector<StreamingCorePlan> streaming_cores_;
   std::array<std::optional<RelationId>, 3> set_relations_{};
   std::array<std::optional<RegisterId>, 3> set_count_registers_{};
+  std::array<std::optional<SorterId>, 3> ordered_sorters_{};
+  std::array<std::optional<SorterId>, 3> ordered_full_sorters_{};
+  std::optional<TopNId> ordered_top_n_;
+  std::optional<TopNId> ordered_full_top_n_;
+  std::optional<RecordComparisonId> ordered_comparison_;
+  std::optional<RecordComparisonId> ordered_full_comparison_;
 
   std::size_t next_register_ = 0;
   std::uint32_t register_count_ = 0;
@@ -7731,6 +10294,11 @@ class PlanLowerer final {
   std::optional<RegisterId> top_n_bound_register_;
   std::optional<RegisterId> maximum_integer_register_;
   std::optional<RegisterId> bound_room_register_;
+  std::optional<RegisterId> ordered_left_first_;
+  std::optional<RegisterId> ordered_right_first_;
+  std::optional<RegisterId> ordered_comparison_register_;
+  std::optional<RegisterId> ordered_predicate_register_;
+  std::optional<RegisterId> ordered_overflow_register_;
 
   std::optional<ProgramBuilder> builder_;
   std::vector<std::optional<ConstantId>> literal_constants_;

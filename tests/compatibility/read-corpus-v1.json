@@ -888,6 +888,123 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-union-all-stable",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420312c276c6566742720554e494f4e20414c4c2053454c45435420312c27726967687427204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-union-representative",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420312e3020554e494f4e2053454c4543542031204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-mixed-left-association",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354203220554e494f4e2053454c4543542031204558434550542053454c4543542032204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-set-then-order",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542027412720434f4c4c415445204e4f4341534520554e494f4e2053454c4543542027422720554e494f4e2053454c45435420276127204f52444552204259203120434f4c4c4154452042494e415259"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-empty-left-intersect",
+      "operations": [
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542031205748455245203020494e544552534543542053454c45435420616273282d3932323333373230333638353437373538303829204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-union-limit-one",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354203320554e494f4e2053454c4543542031204f524445522042592031204c494d4954202b31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-table-union-all",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542069642c6e616d652046524f4d206974656d7320554e494f4e20414c4c2053454c4543542069642c6e616d652046524f4d206974656d732057484552452069643d32204f52444552204259203220444553432c31204c494d49542033"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-null-placement",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542073636f72652046524f4d206974656d7320554e494f4e2053454c454354204e554c4c204f5244455220425920312044455343204e554c4c53204649525354"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "set-operators",
+      "id": "ordered-distinct-arm-representative",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542027782720434f4c4c415445204e4f4341534520554e494f4e2053454c4543542044495354494e4354206d696e286e616d6520434f4c4c4154452042494e4152592c2764656c746127292046524f4d206974656d73204f524445522042592031"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "aggregate-function",
       "id": "unsupported-aggregate",

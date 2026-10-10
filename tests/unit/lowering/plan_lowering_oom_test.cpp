@@ -389,6 +389,18 @@ int main() try {
                       "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
   };
+  const std::array<PhysicalPlan, 5> ordered_compound_plans{
+      DistinctFixture(catalog,
+                      "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3"),
+      DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 ORDER BY 1 LIMIT 1"),
+      DistinctFixture(catalog,
+                      "SELECT Name FROM Items EXCEPT SELECT ?1 INTERSECT SELECT ?2 ORDER BY 1"),
+      DistinctFixture(catalog,
+                      "SELECT Name FROM Items UNION SELECT ?1 "
+                      "ORDER BY 1 COLLATE BINARY LIMIT ?2"),
+      DistinctFixture(catalog,
+                      "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
+  };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
   const PhysicalMutationPlan deletion = DeleteFixture(catalog);
@@ -442,6 +454,11 @@ int main() try {
   }
   for (const PhysicalPlan& set_plan : set_plans) {
     if (!verify_oom(set_plan, 320U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& ordered_plan : ordered_compound_plans) {
+    if (!verify_oom(ordered_plan, 512U)) {
       return 1;
     }
   }

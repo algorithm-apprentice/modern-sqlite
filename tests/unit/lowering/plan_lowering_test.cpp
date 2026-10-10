@@ -755,22 +755,6 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
-TEST(ReadLowering, DefersOrderedCompoundPlans) {
-  const CatalogSnapshotPtr catalog = TestCatalog();
-  constexpr std::array<std::string_view, 2> cases{
-      "SELECT 1 UNION SELECT 2 ORDER BY 1",
-      "SELECT 1 UNION ALL SELECT 2 ORDER BY 1",
-  };
-  for (const std::string_view sql : cases) {
-    SCOPED_TRACE(sql);
-    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
-    LowerPlanResult lowered = LowerPlan(plan);
-    ASSERT_FALSE(lowered.has_value());
-    EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
-    EXPECT_EQ("ordered compound SELECT lowering is not supported", lowered.error().detail);
-  }
-}
-
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
@@ -965,6 +949,302 @@ TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
     RequireStatus(vm.Bind(ParameterId{4}, SqlValue::Integer(1)));
     RequireStatus(
         vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(second, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(third, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  };
+  run(1, 2, 3);
+  RequireStatus(vm.Reset());
+  run(4, 5, 6);
+  RequireStatus(pager->EndRead());
+}
+
+TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 137}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const CustomEnvironment custom;
+
+  const BytecodeProgram stable =
+      LowerOrThrow("SELECT 1,'left' UNION ALL SELECT 1,'right' ORDER BY 1", catalog);
+  const auto stable_rows =
+      ExecuteRows(stable, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(2U, stable_rows.size());
+  EXPECT_EQ("left", TextBytes(stable_rows[0][1]));
+  EXPECT_EQ("right", TextBytes(stable_rows[1][1]));
+  EXPECT_GT(std::ranges::count(InstructionKinds(stable), InstructionKind::kCompareRecords), 0);
+
+  const BytecodeProgram grouped_stable = LowerOrThrow(
+      "SELECT 1,'left' UNION ALL SELECT 1,'middle' UNION ALL SELECT 1,'right' "
+      "ORDER BY 1",
+      catalog);
+  const auto grouped_stable_rows = ExecuteRows(
+      grouped_stable, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(3U, grouped_stable_rows.size());
+  EXPECT_EQ("left", TextBytes(grouped_stable_rows[0][1]));
+  EXPECT_EQ("middle", TextBytes(grouped_stable_rows[1][1]));
+  EXPECT_EQ("right", TextBytes(grouped_stable_rows[2][1]));
+
+  callback_count = 0;
+  const BytecodeProgram bounded = LowerOrThrow(
+      "SELECT id,volatile_counter() FROM items "
+      "UNION ALL SELECT id,volatile_counter() FROM items "
+      "ORDER BY 1 LIMIT 1",
+      catalog, custom.Binder());
+  const auto bounded_rows =
+      ExecuteRows(bounded, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, bounded_rows.size());
+  EXPECT_EQ(1, bounded_rows[0][0].integer_value());
+  EXPECT_EQ(1, bounded_rows[0][1].integer_value());
+  EXPECT_EQ(2U, callback_count);
+
+  const BytecodeProgram bounded_distinct = LowerOrThrow(
+      "SELECT DISTINCT id FROM items "
+      "UNION ALL SELECT id FROM items "
+      "ORDER BY 1 LIMIT 1",
+      catalog);
+  EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_distinct), InstructionKind::kOpenTopN));
+  const auto bounded_distinct_rows = ExecuteRows(
+      bounded_distinct, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, bounded_distinct_rows.size());
+  EXPECT_EQ(1, bounded_distinct_rows[0][0].integer_value());
+
+  const BytecodeProgram bounded_values =
+      LowerOrThrow("VALUES(3),(1),(2) UNION ALL SELECT 4 ORDER BY 1 LIMIT 1", catalog);
+  EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_values), InstructionKind::kOpenTopN));
+  const auto bounded_value_rows = ExecuteRows(bounded_values, *pager, catalog->version().generation,
+                                              VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, bounded_value_rows.size());
+  EXPECT_EQ(1, bounded_value_rows[0][0].integer_value());
+
+  const BytecodeProgram global_limit = LowerOrThrow(
+      "SELECT 3 UNION ALL SELECT 1 UNION ALL SELECT 2 "
+      "ORDER BY 1 LIMIT 2 OFFSET 1",
+      catalog);
+  const auto global_rows = ExecuteRows(global_limit, *pager, catalog->version().generation,
+                                       VmEnvironment::Core(), &memory);
+  ASSERT_EQ(2U, global_rows.size());
+  EXPECT_EQ(2, global_rows[0][0].integer_value());
+  EXPECT_EQ(3, global_rows[1][0].integer_value());
+
+  callback_count = 0;
+  const BytecodeProgram unlimited = LowerOrThrow(
+      "SELECT id,volatile_counter() FROM items "
+      "UNION ALL SELECT id,volatile_counter() FROM items "
+      "ORDER BY 1 LIMIT -1",
+      catalog, custom.Binder());
+  const auto unlimited_rows =
+      ExecuteRows(unlimited, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(6U, unlimited_rows.size());
+  EXPECT_EQ(1, unlimited_rows[0][1].integer_value());
+  EXPECT_EQ(4, unlimited_rows[1][1].integer_value());
+  EXPECT_EQ(6U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram overflow = LowerOrThrow(
+      "SELECT id,volatile_counter() FROM items "
+      "UNION ALL SELECT id,volatile_counter() FROM items "
+      "ORDER BY 1 LIMIT ?1 OFFSET ?2",
+      catalog, custom.Binder());
+  Vm overflow_vm = TakeValue(Vm::Create(overflow, custom.Vm()));
+  RequireStatus(overflow_vm.Bind(ParameterId{0},
+                                 SqlValue::Integer(std::numeric_limits<std::int64_t>::max())));
+  RequireStatus(overflow_vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
+  RequireStatus(overflow_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, memory}));
+  std::size_t overflow_rows = 0;
+  while (TakeValue(overflow_vm.Step()) == VmStep::kRow) {
+    ++overflow_rows;
+  }
+  EXPECT_EQ(5U, overflow_rows);
+  EXPECT_EQ(6U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram zero = LowerOrThrow(
+      "SELECT failing() UNION ALL SELECT failing() ORDER BY 1 LIMIT 0", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  const TemporaryStorageFactory file =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{1},
+                                                }));
+  const BytecodeProgram file_program = LowerOrThrow(
+      "SELECT 8 UNION ALL SELECT 3 UNION ALL SELECT 6 UNION ALL SELECT 1 "
+      "UNION ALL SELECT 7 UNION ALL SELECT 2 UNION ALL SELECT 5 UNION ALL SELECT 4 "
+      "ORDER BY 1",
+      catalog);
+  const auto file_rows = ExecuteRows(file_program, *pager, catalog->version().generation,
+                                     VmEnvironment::Core(), &file);
+  ASSERT_EQ(8U, file_rows.size());
+  for (std::size_t index = 0; index < file_rows.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), file_rows[index][0].integer_value());
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 139}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const CustomEnvironment custom;
+  const auto execute = [&](std::string_view sql) {
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    return ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(),
+                       &memory);
+  };
+
+  const auto union_rows = execute("SELECT 1.0 UNION SELECT 1 ORDER BY 1");
+  ASSERT_EQ(1U, union_rows.size());
+  EXPECT_EQ(SqlValueType::kInteger, union_rows[0][0].type());
+  EXPECT_EQ(1, union_rows[0][0].integer_value());
+
+  const auto grouped_union = execute("SELECT 1.0 UNION SELECT 1 UNION SELECT 1.0 ORDER BY 1");
+  ASSERT_EQ(1U, grouped_union.size());
+  EXPECT_EQ(SqlValueType::kReal, grouped_union[0][0].type());
+  EXPECT_EQ(1.0, grouped_union[0][0].real_value());
+
+  callback_count = 0;
+  const BytecodeProgram grouped_union_arm = LowerOrThrow(
+      "SELECT 'x' COLLATE NOCASE "
+      "UNION SELECT 'y' "
+      "UNION SELECT reverse_text_representative() FROM items "
+      "ORDER BY 1",
+      catalog, custom.Binder());
+  const auto grouped_union_arm_rows =
+      ExecuteRows(grouped_union_arm, *pager, catalog->version().generation,
+                  custom.Vm(), &memory);
+  ASSERT_EQ(4U, grouped_union_arm_rows.size());
+  EXPECT_EQ("a", TextBytes(grouped_union_arm_rows[0][0]));
+  EXPECT_EQ("B", TextBytes(grouped_union_arm_rows[1][0]));
+  EXPECT_EQ("x", TextBytes(grouped_union_arm_rows[2][0]));
+  EXPECT_EQ("y", TextBytes(grouped_union_arm_rows[3][0]));
+  EXPECT_EQ(3U, callback_count);
+
+  const auto intersect_rows = execute("SELECT 1 INTERSECT SELECT 1.0 ORDER BY 1");
+  ASSERT_EQ(1U, intersect_rows.size());
+  EXPECT_EQ(SqlValueType::kInteger, intersect_rows[0][0].type());
+  EXPECT_EQ(1, intersect_rows[0][0].integer_value());
+
+  const auto except_rows = execute("SELECT 2 UNION SELECT 1 EXCEPT SELECT 2 ORDER BY 1");
+  ASSERT_EQ(1U, except_rows.size());
+  EXPECT_EQ(1, except_rows[0][0].integer_value());
+
+  const auto set_then_order = execute(
+      "SELECT 'A' COLLATE NOCASE "
+      "UNION SELECT 'B' "
+      "UNION SELECT 'a' "
+      "ORDER BY 1 COLLATE BINARY");
+  ASSERT_EQ(2U, set_then_order.size());
+  EXPECT_EQ("B", TextBytes(set_then_order[0][0]));
+  EXPECT_EQ("a", TextBytes(set_then_order[1][0]));
+
+  const auto set_then_order_limit = execute(
+      "SELECT 'A' COLLATE NOCASE "
+      "UNION SELECT 'a' "
+      "UNION ALL SELECT 'B' "
+      "ORDER BY 1 COLLATE BINARY LIMIT 2");
+  ASSERT_EQ(2U, set_then_order_limit.size());
+  EXPECT_EQ("B", TextBytes(set_then_order_limit[0][0]));
+  EXPECT_EQ("a", TextBytes(set_then_order_limit[1][0]));
+
+  callback_count = 0;
+  const BytecodeProgram distinct_union = LowerOrThrow(
+      "SELECT 'x' COLLATE NOCASE "
+      "UNION SELECT DISTINCT reverse_text_representative() FROM items "
+      "ORDER BY 1",
+      catalog, custom.Binder());
+  const auto distinct_union_rows =
+      ExecuteRows(distinct_union, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(3U, distinct_union_rows.size());
+  EXPECT_EQ("a", TextBytes(distinct_union_rows[0][0]));
+  EXPECT_EQ("B", TextBytes(distinct_union_rows[1][0]));
+  EXPECT_EQ("x", TextBytes(distinct_union_rows[2][0]));
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram empty_left = LowerOrThrow(
+      "SELECT 1 WHERE 0 INTERSECT SELECT failing() ORDER BY 1", catalog, custom.Binder());
+  EXPECT_TRUE(
+      ExecuteRows(empty_left, *pager, catalog->version().generation, custom.Vm(), &memory).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram empty_except =
+      LowerOrThrow("SELECT 1 WHERE 0 EXCEPT SELECT failing() ORDER BY 1", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(empty_except, *pager, catalog->version().generation, custom.Vm(), &memory)
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram materialized =
+      LowerOrThrow("SELECT 1 UNION SELECT failing() ORDER BY 1 LIMIT 1", catalog, custom.Binder());
+  Vm materialized_vm = TakeValue(Vm::Create(materialized, custom.Vm()));
+  RequireStatus(materialized_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, memory}));
+  const auto materialized_failure = materialized_vm.Step();
+  ASSERT_FALSE(materialized_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, materialized_failure.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  const auto limit_one = execute("SELECT 3 UNION SELECT 1 ORDER BY 1 LIMIT +1");
+  ASSERT_EQ(1U, limit_one.size());
+  EXPECT_EQ(1, limit_one[0][0].integer_value());
+
+  callback_count = 0;
+  const BytecodeProgram bounded_union = LowerOrThrow(
+      "SELECT volatile_counter()%2 FROM items "
+      "UNION SELECT volatile_counter()%2 FROM items "
+      "ORDER BY 1 LIMIT 1",
+      catalog, custom.Binder());
+  const auto bounded_union_rows =
+      ExecuteRows(bounded_union, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, bounded_union_rows.size());
+  EXPECT_EQ(0, bounded_union_rows[0][0].integer_value());
+  EXPECT_EQ(6U, callback_count);
+  RequireStatus(pager->EndRead());
+}
+
+TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 149}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const BytecodeProgram program =
+      LowerOrThrow("VALUES(?1),(?2) UNION ALL SELECT ?3 ORDER BY 1 LIMIT ?4 OFFSET ?5", catalog);
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  const auto run = [&](std::int64_t first, std::int64_t second, std::int64_t third) {
+    RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(first)));
+    RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(second)));
+    RequireStatus(vm.Bind(ParameterId{2}, SqlValue::Integer(third)));
+    RequireStatus(vm.Bind(ParameterId{3}, SqlValue::Integer(2)));
+    RequireStatus(vm.Bind(ParameterId{4}, SqlValue::Integer(1)));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager, catalog->version().generation, memory}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ(second, vm.row()[0].integer_value());
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));

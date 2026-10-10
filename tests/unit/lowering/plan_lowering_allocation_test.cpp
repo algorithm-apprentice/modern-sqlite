@@ -417,6 +417,43 @@ int main() try {
     }
   }
 
+  const std::array<PhysicalPlan, 5> ordered_compound_plans{
+      PhysicalFixture(catalog,
+                      "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3"),
+      PhysicalFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 ORDER BY 1 LIMIT 1"),
+      PhysicalFixture(catalog,
+                      "SELECT Name FROM Items EXCEPT SELECT ?1 INTERSECT SELECT ?2 ORDER BY 1"),
+      PhysicalFixture(catalog,
+                      "SELECT Name FROM Items UNION SELECT ?1 "
+                      "ORDER BY 1 COLLATE BINARY LIMIT ?2"),
+      PhysicalFixture(catalog,
+                      "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
+  };
+  std::array<std::size_t, 5> ordered_compound_allocations{};
+  std::unique_ptr<BytecodeProgram> ordered_compound_published;
+  for (std::size_t plan_index = 0; plan_index < ordered_compound_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(ordered_compound_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations == 0U || allocations > 512U ||
+          (ordered_compound_allocations[plan_index] != 0U &&
+           allocations != ordered_compound_allocations[plan_index])) {
+        return 1;
+      }
+      ordered_compound_allocations[plan_index] = allocations;
+      if (plan_index + 1U == ordered_compound_plans.size() &&
+          ordered_compound_published == nullptr) {
+        ordered_compound_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   constexpr std::size_t kExpectedMutationAllocations = 21U;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
