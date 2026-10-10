@@ -100,8 +100,8 @@ struct OrderLayout {
 };
 
 struct AdvancedOrderLayout {
-  std::vector<BoundOrderingTerm> terms;
-  std::vector<LogicalCoreOrderLayout> core_layouts;
+  std::vector<BoundOrderingTerm> terms{};
+  std::vector<LogicalCoreOrderLayout> core_layouts{};
   bool set_then_order = false;
 };
 
