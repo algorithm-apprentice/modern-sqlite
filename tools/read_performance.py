@@ -692,12 +692,25 @@ def exact_ratio(numerator: int, denominator: int) -> dict[str, Any]:
     }
 
 
+def _wait_or_kill_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         if process.poll() is None:
             process.wait()
+        return
+    except PermissionError:
+        _wait_or_kill_process(process)
         return
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
@@ -708,12 +721,7 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
                 process.wait()
             return
         except PermissionError:
-            if process.poll() is None:
-                try:
-                    process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            _wait_or_kill_process(process)
             return
         time.sleep(0.01)
     try:

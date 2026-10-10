@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from tools import read_performance
 
@@ -1341,6 +1342,28 @@ class ReadPerformanceValidationTest(unittest.TestCase):
         self.assertEqual(b"ok\n", result.stdout)
         self.assertEqual(b"note\n", result.stderr)
         self.assertGreater(result.elapsed_ns, 0)
+
+    def test_stop_process_group_falls_back_when_sigterm_is_denied(self) -> None:
+        process = mock.Mock()
+        process.pid = 123
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd=["child"], timeout=1.0),
+            0,
+        ]
+
+        with mock.patch.object(
+            read_performance.os,
+            "killpg",
+            side_effect=PermissionError(1, "Operation not permitted"),
+        ):
+            read_performance._stop_process_group(process)
+
+        process.kill.assert_called_once_with()
+        self.assertEqual(
+            [mock.call(timeout=1.0), mock.call()],
+            process.wait.call_args_list,
+        )
 
     def test_new_output_path_rejects_existing_and_protected_aliases(self) -> None:
         existing = self.root / "existing"
