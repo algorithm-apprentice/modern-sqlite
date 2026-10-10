@@ -759,7 +759,7 @@ TEST(PhysicalPlan, SelectsArmLocalOrderingAndSetThenOrder) {
   ASSERT_NE(mixed.nodes().end(), mixed_order);
   const auto& mixed_plans = std::get<PhysicalAdvancedOrderNode>(mixed_order->payload).core_plans;
   ASSERT_EQ(2U, mixed_plans.size());
-  EXPECT_EQ(PhysicalSortStrategy::kExternal, mixed_plans[0].strategy);
+  EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, mixed_plans[0].strategy);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, mixed_plans[1].strategy);
 
   const PhysicalPlan ordered_union =

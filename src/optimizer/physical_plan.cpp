@@ -541,6 +541,15 @@ template <typename Bound>
   return core_start;
 }
 
+[[nodiscard]] bool UsesOrderedUnionAllRuntimeLimit(const BoundSelect& bound_select,
+                                                   bool set_then_order) {
+  const std::span<const CompoundOperator> operations = bound_select.compound_operators();
+  return !set_then_order && !bound_select.order_by().empty() && bound_select.limit() != nullptr &&
+         !operations.empty() && std::ranges::all_of(operations, [](CompoundOperator operation) {
+           return operation == CompoundOperator::kUnionAll;
+         });
+}
+
 [[nodiscard]] const LogicalOrderNode* LogicalOrderOf(const LogicalPlan& logical_plan) noexcept {
   if (logical_plan.bound_select().order_by().empty()) {
     return nullptr;
@@ -1535,6 +1544,9 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
       advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(logical_plan.bound_select(),
                                                                 advanced_order->set_then_order)
                                 : std::nullopt;
+  const bool ordered_union_all_runtime_limit =
+      advanced_order != nullptr &&
+      UsesOrderedUnionAllRuntimeLimit(logical_plan.bound_select(), advanced_order->set_then_order);
 
   std::size_t compound_index = 0;
   for (std::size_t index = 0; index < nodes.size(); ++index) {
@@ -1619,7 +1631,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
               }
             }
             for (std::size_t core = 0; core < node.core_layouts.size(); ++core) {
-              const bool bounded = node.core_layouts[core].schedule ==
+              const bool bounded = ordered_union_all_runtime_limit ||
+                                   node.core_layouts[core].schedule ==
                                        OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
                                    (ordered_union_limit_one_core.has_value() &&
                                     core >= *ordered_union_limit_one_core);
@@ -2174,6 +2187,10 @@ class PhysicalPlanBuilder final {
         advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(impl->logical_plan.bound_select(),
                                                                   advanced_order->set_then_order)
                                   : std::nullopt;
+    const bool ordered_union_all_runtime_limit =
+        advanced_order != nullptr &&
+        UsesOrderedUnionAllRuntimeLimit(impl->logical_plan.bound_select(),
+                                        advanced_order->set_then_order);
 
     std::size_t compound_index = 0;
     for (std::size_t logical_index = 0; logical_index < impl->logical_plan.nodes().size();
@@ -2254,6 +2271,7 @@ class PhysicalPlanBuilder final {
               for (std::size_t core = 0; core < node.core_layouts.size(); ++core) {
                 const LogicalCoreOrderLayout& layout = node.core_layouts[core];
                 const bool bounded =
+                    ordered_union_all_runtime_limit ||
                     layout.schedule == OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
                     (ordered_union_limit_one_core.has_value() &&
                      core >= *ordered_union_limit_one_core);
