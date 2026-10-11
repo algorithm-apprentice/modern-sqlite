@@ -94,9 +94,11 @@ Any failure blocks merging and new feature work until its root cause is fixed.
   production changes; ordinary pull requests do not receive the label. A
   dedicated workflow owns this optional check, so applying the label does not
   restart or cancel standard pull-request CI.
-- Pull requests require GCC Release, macOS Debug and Release, sanitizers, and
-  the Ubuntu performance contract. GCC Debug and the macOS performance
-  contract run on `main`.
+- Pull requests require GCC Release, macOS Debug and Release, production-code
+  sanitizers, and the Ubuntu performance contract. Per ADR-0065, sanitizer
+  compile instrumentation is private to the engine targets under `src/`,
+  while the complete sanitizer test preset still executes. GCC Debug and the
+  macOS performance contract run on `main`.
 - CI cancels superseded runs for the same pull request. Benchmark jobs build
   only the binaries required by their selected contract tests.
 - Compatible compiler/configuration pairs use isolated ccache namespaces.
@@ -128,3 +130,5 @@ Any failure blocks merging and new feature work until its root cause is fixed.
 - ADR-0009: Build and Toolchain Baseline
 - ADR-0010: Byte and Buffer Primitives
 - ADR-0045: Existing-Module SQLite Reference Alignment
+- ADR-0064: Production-Only Clang-Tidy Scope
+- ADR-0065: Production-Only Sanitizer Instrumentation
