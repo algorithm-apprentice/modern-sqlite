@@ -429,7 +429,7 @@ TEST(Parser, PreservesGeneratedAlwaysFallbackWordsInDeclaredTypes) {
 
 TEST(Parser, MatchesPinnedSqliteDifferentialCorpusPolicy) {
   const std::vector<ParserCorpusCase> cases = ReadParserCorpus();
-  ASSERT_EQ(78U, cases.size());
+  ASSERT_EQ(86U, cases.size());
 
   for (const ParserCorpusCase& test_case : cases) {
     SCOPED_TRACE(test_case.name);
@@ -694,6 +694,87 @@ TEST(Parser, ParsesFunctionsCollationAndParentheses) {
   EXPECT_EQ("nocase", SpanText(tree, collate.collation));
 }
 
+TEST(Parser, ParsesAggregateClausesAndFunctionModifiers) {
+  const ParseOutput output = ParseOrThrow(
+      "SELECT group_concat(DISTINCT x ORDER BY y DESC NULLS LAST) FILTER (WHERE z) "
+      "FROM t WHERE w GROUP BY g,h COLLATE nocase HAVING count(ORDER BY q)>0");
+  const SyntaxTree& tree = RequiredTree(output);
+  const SelectCore& core = FirstSelectCore(tree);
+  ASSERT_EQ(2U, core.group_by.size());
+  EXPECT_EQ("g", SpanText(tree, tree.expression(core.group_by[0]).span));
+  EXPECT_EQ("h COLLATE nocase", SpanText(tree, tree.expression(core.group_by[1]).span));
+  ASSERT_TRUE(core.having.has_value());
+  EXPECT_EQ("count(ORDER BY q)>0", SpanText(tree, tree.expression(*core.having).span));
+
+  const ExpressionId aggregate_id =
+      FindExpression(tree, "group_concat(DISTINCT x ORDER BY y DESC NULLS LAST) FILTER (WHERE z)");
+  const auto& aggregate = std::get<FunctionCallExpression>(tree.expression(aggregate_id).payload);
+  EXPECT_TRUE(aggregate.distinct);
+  ASSERT_EQ(1U, aggregate.arguments.size());
+  EXPECT_EQ("x", SpanText(tree, tree.expression(aggregate.arguments[0]).span));
+  ASSERT_EQ(1U, aggregate.order_by.size());
+  EXPECT_EQ("y DESC NULLS LAST", SpanText(tree, aggregate.order_by[0].span));
+  EXPECT_EQ(SortOrder::kDescending, aggregate.order_by[0].order);
+  EXPECT_EQ(NullOrder::kLast, aggregate.order_by[0].null_order);
+  ASSERT_TRUE(aggregate.filter.has_value());
+  EXPECT_EQ("z", SpanText(tree, tree.expression(*aggregate.filter).span));
+
+  const ExpressionId count_id = FindExpression(tree, "count(ORDER BY q)");
+  const auto& count = std::get<FunctionCallExpression>(tree.expression(count_id).payload);
+  EXPECT_TRUE(count.arguments.empty());
+  ASSERT_EQ(1U, count.order_by.size());
+  EXPECT_EQ("q", SpanText(tree, tree.expression(count.order_by[0].expression).span));
+  EXPECT_FALSE(count.filter.has_value());
+}
+
+TEST(Parser, PreservesZeroArgumentOrderingStarFiltersAndCompoundArmClauses) {
+  const ParseOutput functions = ParseOrThrow(
+      "SELECT f(ORDER BY x),f(ALL ORDER BY y),f(DISTINCT ORDER BY z),"
+      "count(*) FILTER (WHERE keep)");
+  const SyntaxTree& function_tree = RequiredTree(functions);
+
+  const auto& ordinary = std::get<FunctionCallExpression>(
+      function_tree.expression(FindExpression(function_tree, "f(ORDER BY x)")).payload);
+  EXPECT_TRUE(ordinary.arguments.empty());
+  EXPECT_FALSE(ordinary.distinct);
+  ASSERT_EQ(1U, ordinary.order_by.size());
+
+  const auto& all = std::get<FunctionCallExpression>(
+      function_tree.expression(FindExpression(function_tree, "f(ALL ORDER BY y)")).payload);
+  EXPECT_TRUE(all.arguments.empty());
+  EXPECT_FALSE(all.distinct);
+  ASSERT_EQ(1U, all.order_by.size());
+
+  const auto& distinct = std::get<FunctionCallExpression>(
+      function_tree.expression(FindExpression(function_tree, "f(DISTINCT ORDER BY z)")).payload);
+  EXPECT_TRUE(distinct.arguments.empty());
+  EXPECT_TRUE(distinct.distinct);
+  ASSERT_EQ(1U, distinct.order_by.size());
+
+  const auto& star = std::get<FunctionCallExpression>(
+      function_tree.expression(FindExpression(function_tree, "count(*) FILTER (WHERE keep)"))
+          .payload);
+  ASSERT_EQ(1U, star.arguments.size());
+  EXPECT_TRUE(std::holds_alternative<WildcardExpression>(
+      function_tree.expression(star.arguments[0]).payload));
+  ASSERT_TRUE(star.filter.has_value());
+  EXPECT_EQ("keep", SpanText(function_tree, function_tree.expression(*star.filter).span));
+
+  const ParseOutput compound = ParseOrThrow(
+      "SELECT a GROUP BY g HAVING h "
+      "UNION ALL SELECT b GROUP BY q HAVING r ORDER BY 1");
+  const SyntaxTree& compound_tree = RequiredTree(compound);
+  const SelectStatement& select = Select(compound_tree);
+  const auto& first = std::get<SelectCore>(select.first);
+  ASSERT_EQ(1U, first.group_by.size());
+  ASSERT_TRUE(first.having.has_value());
+  ASSERT_EQ(1U, select.compounds.size());
+  const auto& second = std::get<SelectCore>(select.compounds[0].core);
+  ASSERT_EQ(1U, second.group_by.size());
+  ASSERT_TRUE(second.having.has_value());
+  ASSERT_EQ(1U, select.order_by.size());
+}
+
 TEST(Parser, RejectsAQuantifiedFunctionWildcard) {
   ParseResult result = ParseOne(Utf8View{"SELECT f(ALL *)"});
   ASSERT_FALSE(result.has_value());
@@ -705,6 +786,95 @@ TEST(Parser, RejectsAQuantifiedFunctionWildcard) {
   ASSERT_FALSE(malformed_order.has_value());
   EXPECT_EQ(ParseErrorCode::kUnexpectedToken, malformed_order.error().code);
   EXPECT_EQ(TokenKind::kOrder, malformed_order.error().actual);
+}
+
+TEST(Parser, RejectsMalformedAggregateSyntaxAndDeferredWindows) {
+  struct Case {
+    std::string_view sql;
+    TokenKind actual;
+    ParseExpectation expected;
+  };
+  constexpr std::array cases{
+      Case{
+          .sql = "SELECT 1 GROUP",
+          .actual = TokenKind::kEndOfInput,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT 1 GROUP BY",
+          .actual = TokenKind::kEndOfInput,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT 1 GROUP BY 1,",
+          .actual = TokenKind::kEndOfInput,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT 1 HAVING",
+          .actual = TokenKind::kEndOfInput,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT f(ORDER BY)",
+          .actual = TokenKind::kRightParenthesis,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT f(1 ORDER BY 2,)",
+          .actual = TokenKind::kRightParenthesis,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT f(* ORDER BY 1)",
+          .actual = TokenKind::kOrder,
+          .expected = ParseExpectation::kCommaOrRightParenthesis,
+      },
+      Case{
+          .sql = "SELECT f() FILTER ()",
+          .actual = TokenKind::kRightParenthesis,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT f() FILTER (WHERE)",
+          .actual = TokenKind::kRightParenthesis,
+          .expected = ParseExpectation::kExpression,
+      },
+      Case{
+          .sql = "SELECT f() FILTER (WHERE 1",
+          .actual = TokenKind::kEndOfInput,
+          .expected = ParseExpectation::kRightParenthesis,
+      },
+      Case{
+          .sql = "SELECT (sum(1)) FILTER (WHERE 1)",
+          .actual = TokenKind::kFilter,
+          .expected = ParseExpectation::kEndOfStatement,
+      },
+      Case{
+          .sql = "SELECT sum(1) FILTER (WHERE 1) FILTER (WHERE 1)",
+          .actual = TokenKind::kFilter,
+          .expected = ParseExpectation::kEndOfStatement,
+      },
+      Case{
+          .sql = "VALUES(1) GROUP BY 1",
+          .actual = TokenKind::kGroup,
+          .expected = ParseExpectation::kEndOfStatement,
+      },
+  };
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const ParseResult parsed = ParseOne(Utf8View{test_case.sql});
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code);
+    EXPECT_EQ(test_case.actual, parsed.error().actual);
+    EXPECT_EQ(test_case.expected, parsed.error().expected);
+  }
+
+  const ParseResult filtered_window = ParseOne(Utf8View{"SELECT sum(x) FILTER (WHERE x) OVER ()"});
+  ASSERT_FALSE(filtered_window.has_value());
+  EXPECT_EQ(ParseErrorCode::kUnsupportedSyntax, filtered_window.error().code);
+  EXPECT_EQ(TokenKind::kOver, filtered_window.error().actual);
 }
 
 TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
@@ -917,6 +1087,16 @@ TEST(Parser, RejectsMalformedAndOversizedOrderByLists) {
   ASSERT_FALSE(oversized.has_value());
   EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, oversized.error().code);
   EXPECT_EQ("2", SpanText(Utf8View{"SELECT 1 ORDER BY 1,2"}, oversized.error().span));
+
+  for (const std::string_view sql : {
+           "SELECT 1 GROUP BY 1,2",
+           "SELECT f(1 ORDER BY 1,2)",
+       }) {
+    const ParseResult aggregate_oversized =
+        ParseOne(Utf8View{sql}, ParseOptions{.maximum_columns = 1});
+    ASSERT_FALSE(aggregate_oversized.has_value()) << sql;
+    EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, aggregate_oversized.error().code) << sql;
+  }
 }
 
 TEST(Parser, TreatsWildcardsAsCompleteResultColumns) {
@@ -971,10 +1151,6 @@ TEST(Parser, AppliesExactIdentifierClassesAndContextualWindowKeywords) {
   constexpr std::array contextual_cases{
       ContextualCase{.sql = "SELECT sum(x) OVER ()", .token = TokenKind::kOver},
       ContextualCase{.sql = "SELECT 1 WINDOW w AS ()", .token = TokenKind::kWindow},
-      ContextualCase{
-          .sql = "SELECT f(x) FILTER (WHERE x)",
-          .token = TokenKind::kFilter,
-      },
   };
   for (const ContextualCase& test_case : contextual_cases) {
     SCOPED_TRACE(test_case.sql);
@@ -1256,7 +1432,6 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
     TokenKind first_unsupported;
   };
   constexpr std::array cases{
-      Case{.sql = "SELECT 1 GROUP BY 1", .first_unsupported = TokenKind::kGroup},
       Case{.sql = "SELECT * FROM a JOIN b", .first_unsupported = TokenKind::kJoin},
       Case{.sql = "SELECT * FROM f(1)", .first_unsupported = TokenKind::kLeftParenthesis},
       Case{
@@ -1287,18 +1462,6 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
       },
       Case{.sql = "SELECT 1 IN (1)", .first_unsupported = TokenKind::kIn},
       Case{.sql = "SELECT CAST(1 AS TEXT)", .first_unsupported = TokenKind::kCast},
-      Case{
-          .sql = "SELECT f(ORDER BY 1)",
-          .first_unsupported = TokenKind::kOrder,
-      },
-      Case{
-          .sql = "SELECT f(ALL ORDER BY 1)",
-          .first_unsupported = TokenKind::kOrder,
-      },
-      Case{
-          .sql = "SELECT f(DISTINCT ORDER BY 1)",
-          .first_unsupported = TokenKind::kOrder,
-      },
       Case{
           .sql = "CREATE TABLE t(a DEFERRABLE)",
           .first_unsupported = TokenKind::kDeferrable,
@@ -1361,6 +1524,27 @@ TEST(Parser, EnforcesConservativeRecursiveParserDepth) {
   EXPECT_EQ(ParseErrorCode::kParserDepthExceeded, rejected.error().code);
   EXPECT_EQ(TokenKind::kLeftParenthesis, rejected.error().actual);
   EXPECT_EQ(ParseExpectation::kExpression, rejected.error().expected);
+
+  const auto make_ordered_functions = [](std::size_t nesting) {
+    std::string sql = "SELECT ";
+    for (std::size_t index = 0; index < nesting; ++index) {
+      sql.append("f(ORDER BY ");
+    }
+    sql.push_back('1');
+    sql.append(nesting, ')');
+    return sql;
+  };
+
+  const ParseOutput accepted_ordering =
+      ParseOrThrow(make_ordered_functions(kMaximumParserRecursionDepth - 1U));
+  EXPECT_TRUE(accepted_ordering.tree.has_value());
+
+  const ParseResult rejected_ordering =
+      ParseOne(Utf8View{make_ordered_functions(kMaximumParserRecursionDepth)});
+  ASSERT_FALSE(rejected_ordering.has_value());
+  EXPECT_EQ(ParseErrorCode::kParserDepthExceeded, rejected_ordering.error().code);
+  EXPECT_EQ(TokenKind::kInteger, rejected_ordering.error().actual);
+  EXPECT_EQ(ParseExpectation::kExpression, rejected_ordering.error().expected);
 }
 
 }  // namespace

@@ -22,6 +22,25 @@ struct ExpressionId {
   constexpr auto operator<=>(const ExpressionId&) const noexcept = default;
 };
 
+enum class SortOrder : std::uint8_t {
+  kDefault,
+  kAscending,
+  kDescending,
+};
+
+enum class NullOrder : std::uint8_t {
+  kDefault,
+  kFirst,
+  kLast,
+};
+
+struct OrderingTerm {
+  SourceSpan span;
+  ExpressionId expression;
+  SortOrder order = SortOrder::kDefault;
+  NullOrder null_order = NullOrder::kDefault;
+};
+
 struct QualifiedName {
   SourceSpan span;
   std::vector<SourceSpan> parts;
@@ -113,6 +132,8 @@ struct FunctionCallExpression {
   QualifiedName name;
   std::vector<ExpressionId> arguments{};
   bool distinct = false;
+  std::vector<OrderingTerm> order_by{};
+  std::optional<ExpressionId> filter{};
 };
 
 struct CollateExpression {
@@ -139,18 +160,6 @@ enum class SelectQuantifier : std::uint8_t {
   kDefault,
   kAll,
   kDistinct,
-};
-
-enum class SortOrder : std::uint8_t {
-  kDefault,
-  kAscending,
-  kDescending,
-};
-
-enum class NullOrder : std::uint8_t {
-  kDefault,
-  kFirst,
-  kLast,
 };
 
 enum class ConflictAction : std::uint8_t {
@@ -187,13 +196,6 @@ struct LimitClause {
   LimitSyntax syntax = LimitSyntax::kLimitOnly;
 };
 
-struct OrderingTerm {
-  SourceSpan span;
-  ExpressionId expression;
-  SortOrder order = SortOrder::kDefault;
-  NullOrder null_order = NullOrder::kDefault;
-};
-
 enum class CompoundOperator : std::uint8_t {
   kUnion,
   kUnionAll,
@@ -207,6 +209,8 @@ struct SelectCore {
   std::vector<ResultColumn> result_columns;
   std::optional<TableSource> from{};
   std::optional<ExpressionId> where{};
+  std::vector<ExpressionId> group_by{};
+  std::optional<ExpressionId> having{};
 };
 
 struct ValuesCore {
