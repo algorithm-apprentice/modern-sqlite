@@ -64,6 +64,11 @@ struct AccessPathCandidate {
   constexpr auto operator<=>(const AccessPathCandidate&) const noexcept = default;
 };
 
+enum class PhysicalScanDirection : std::uint8_t {
+  kForward,
+  kReverse,
+};
+
 struct PhysicalSingleRowNode {
   std::size_t core_index = 0;
 };
@@ -75,6 +80,7 @@ struct PhysicalTableScanNode {
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   RootPageId root_page{};
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
 };
 
 struct PhysicalRowIdLookupNode {
@@ -93,6 +99,8 @@ struct PhysicalIndexEquality {
   std::string_view collation_name = "BINARY";
   SortOrder order = SortOrder::kAscending;
   bool reject_null = true;
+
+  constexpr auto operator<=>(const PhysicalIndexEquality&) const noexcept = default;
 };
 
 struct PhysicalIndexBound {
@@ -100,6 +108,8 @@ struct PhysicalIndexBound {
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
   bool inclusive = false;
+
+  constexpr auto operator<=>(const PhysicalIndexBound&) const noexcept = default;
 };
 
 struct PhysicalIndexRange {
@@ -109,6 +119,8 @@ struct PhysicalIndexRange {
   SortOrder order = SortOrder::kAscending;
   std::optional<PhysicalIndexBound> lower{};
   std::optional<PhysicalIndexBound> upper{};
+
+  constexpr auto operator<=>(const PhysicalIndexRange&) const noexcept = default;
 };
 
 struct PhysicalIndexScanNode {
@@ -119,6 +131,7 @@ struct PhysicalIndexScanNode {
   std::vector<PhysicalIndexEquality> equalities{};
   std::optional<PhysicalIndexRange> range{};
   bool covering = false;
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
 };
 
 struct PhysicalGuardNode {
@@ -208,6 +221,50 @@ struct PhysicalAdvancedOrderNode {
   std::vector<PhysicalCoreOrderPlan> core_plans{};
   bool set_then_order = false;
   PhysicalSortStrategy final_strategy = PhysicalSortStrategy::kExternal;
+  bool input_order_satisfied = false;
+};
+
+enum class PhysicalAggregateStrategy : std::uint8_t {
+  kGlobal,
+  kIndexedMinMax,
+  kOrderedGroup,
+  kSortedGroup,
+};
+
+enum class PhysicalMinMaxNullStrategy : std::uint8_t {
+  kNone,
+  kNonNullFirstWithSingleNullFallback,
+};
+
+struct PhysicalMinMaxPlan {
+  BoundAggregateInvocationId invocation;
+  PhysicalMinMaxNullStrategy null_strategy = PhysicalMinMaxNullStrategy::kNone;
+  bool argument_fixed_by_equality = false;
+
+  constexpr auto operator<=>(const PhysicalMinMaxPlan&) const noexcept = default;
+};
+
+struct PhysicalGroupingOrderTerm {
+  std::uint32_t group_term_index = 0;
+  SortOrder order = SortOrder::kAscending;
+  BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
+
+  constexpr auto operator<=>(const PhysicalGroupingOrderTerm&) const noexcept = default;
+};
+
+struct PhysicalAggregateNode {
+  PhysicalNodeId input;
+  std::size_t core_index = 0;
+  PhysicalAggregateStrategy strategy = PhysicalAggregateStrategy::kGlobal;
+  std::optional<PhysicalMinMaxPlan> min_max{};
+  std::vector<PhysicalGroupingOrderTerm> grouping_order{};
+  bool at_most_one_row = false;
+};
+
+struct PhysicalHavingNode {
+  PhysicalNodeId input;
+  std::size_t core_index = 0;
+  BoundExpressionId predicate;
 };
 
 using PhysicalNodePayload =
@@ -215,7 +272,7 @@ using PhysicalNodePayload =
                  PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
                  PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
                  PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode, PhysicalCompoundNode,
-                 PhysicalAdvancedOrderNode>;
+                 PhysicalAdvancedOrderNode, PhysicalAggregateNode, PhysicalHavingNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -237,6 +294,8 @@ enum class PhysicalNodeKind : std::uint8_t {
   kDistinct,
   kCompound,
   kAdvancedOrder,
+  kAggregate,
+  kHaving,
 };
 
 [[nodiscard]] PhysicalNodeKind PhysicalNodeKindOf(const PhysicalNode& node) noexcept;

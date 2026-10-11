@@ -357,10 +357,12 @@ values, group records, sorters, aggregate state, registers, or bytecode.
 Direct `BindSelectStatement` accepts aggregate queries and publishes the
 contracts above.
 
-Logical planning detects any `BoundAggregateProgram` and returns the existing
-typed unsupported-feature error until package 9 adds aggregate physical
-planning. Read/write session preparation therefore remains a prepare-time
-failure rather than executing an aggregate query as an ordinary SELECT.
+This package originally stopped logical planning when it detected a
+`BoundAggregateProgram`. ADR-0061 supersedes that temporary boundary with
+immutable logical and physical aggregate plans. Lowering now returns the
+typed unsupported-feature error until aggregate bytecode and execution are
+implemented, so read/write session preparation still fails rather than
+executing an aggregate query as an ordinary SELECT.
 
 ### 11. Verify binding independently
 

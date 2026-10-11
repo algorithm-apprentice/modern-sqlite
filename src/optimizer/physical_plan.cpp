@@ -82,6 +82,14 @@ struct ReadAccessCandidate {
   return OptimizerFailure(OptimizerErrorCode::kInternalInvariant, detail);
 }
 
+template <typename T>
+[[nodiscard]] const T& AssumePresent(const std::optional<T>& value) noexcept {
+  if (!value.has_value()) {
+    std::terminate();
+  }
+  return *value;
+}
+
 [[nodiscard]] bool OrderingTermsEqual(const BoundOrderingTerm& left,
                                       const BoundOrderingTerm& right) noexcept {
   return left.expression == right.expression && left.collation == right.collation &&
@@ -470,12 +478,52 @@ template <typename Bound>
   };
 }
 
+[[nodiscard]] SourceInfo ResolveCoreSource(const BoundSelect& bound_select,
+                                           std::size_t core_index) {
+  const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
+  if (!core.table_source.has_value()) {
+    return SourceInfo{
+        .single_row = true,
+        .source_kind = BoundSourceKind::kCatalogTable,
+        .table = std::nullopt,
+        .root_page = RootPageId{},
+        .estimated_rows = 1,
+        .estimated_row_size = 1,
+        .rowid_eligible = false,
+    };
+  }
+  if (core.table_source->kind == BoundSourceKind::kSchemaTable) {
+    return SourceInfo{
+        .single_row = false,
+        .source_kind = BoundSourceKind::kSchemaTable,
+        .table = std::nullopt,
+        .root_page = RootPageId{1},
+        .estimated_rows = kDefaultEstimatedRows,
+        .estimated_row_size = 1,
+        .rowid_eligible = true,
+    };
+  }
+  const TableId table_id = core.table_source->table.value_or(TableId{});
+  const CatalogTable& table = bound_select.catalog()->table(table_id);
+  return SourceInfo{
+      .single_row = false,
+      .source_kind = BoundSourceKind::kCatalogTable,
+      .table = table_id,
+      .root_page = table.root_page,
+      .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
+      .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
+      .rowid_eligible = !table.without_rowid,
+  };
+}
+
 [[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalPlan& logical_plan) {
   return std::ranges::any_of(logical_plan.nodes(), [](const LogicalNode& node) {
     return std::holds_alternative<LogicalValuesNode>(node.payload) ||
            std::holds_alternative<LogicalDistinctNode>(node.payload) ||
            std::holds_alternative<LogicalCompoundNode>(node.payload) ||
-           std::holds_alternative<LogicalAdvancedOrderNode>(node.payload);
+           std::holds_alternative<LogicalAdvancedOrderNode>(node.payload) ||
+           std::holds_alternative<LogicalAggregateNode>(node.payload) ||
+           std::holds_alternative<LogicalHavingNode>(node.payload);
   });
 }
 
@@ -820,8 +868,9 @@ template <typename Bound>
   return true;
 }
 
-[[nodiscard]] bool IsIndexedColumnReference(const BoundSelect& bound_select, TableId table_id,
-                                            ColumnId column_id,
+[[nodiscard]] bool IsIndexedColumnReference(const BoundSelect& bound_select,
+                                            std::size_t source_column_begin,
+                                            std::size_t source_column_count, ColumnId column_id,
                                             BoundExpressionId expression_id) noexcept {
   expression_id = TransparentRowIdOperandId(bound_select, expression_id);
   if (!IsValidExpressionId(bound_select, expression_id)) {
@@ -829,12 +878,14 @@ template <typename Bound>
   }
   const auto* column =
       std::get_if<BoundColumnExpression>(&bound_select.expression(expression_id).payload);
-  if (column == nullptr || column->column.value() >= bound_select.source_columns().size()) {
+  const std::size_t source_index = column != nullptr ? column->column.value() : 0U;
+  if (column == nullptr || source_index < source_column_begin ||
+      source_index - source_column_begin >= source_column_count ||
+      source_index >= bound_select.source_columns().size()) {
     return false;
   }
-  const BoundSourceColumn& source = bound_select.source_columns()[column->column.value()];
-  return source.catalog_column == column_id && bound_select.table_source() != nullptr &&
-         bound_select.table_source()->table == table_id;
+  const BoundSourceColumn& source = bound_select.source_columns()[source_index];
+  return source.catalog_column == column_id;
 }
 
 [[nodiscard]] SqlComparison ReverseComparison(SqlComparison comparison) noexcept {
@@ -872,7 +923,8 @@ struct IndexConstraintMatch {
 };
 
 [[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
-    const BoundSelect& bound_select, TableId table_id, const CatalogIndexTerm& term,
+    const BoundSelect& bound_select, std::size_t source_column_begin,
+    std::size_t source_column_count, const CatalogIndexTerm& term,
     const ReadPredicateTerm& predicate) {
   const auto* indexed_column = std::get_if<ColumnId>(&term.target);
   if (indexed_column == nullptr) {
@@ -888,10 +940,10 @@ struct IndexConstraintMatch {
     return std::nullopt;
   }
 
-  const bool left_column =
-      IsIndexedColumnReference(bound_select, table_id, *indexed_column, comparison->left);
-  const bool right_column =
-      IsIndexedColumnReference(bound_select, table_id, *indexed_column, comparison->right);
+  const bool left_column = IsIndexedColumnReference(
+      bound_select, source_column_begin, source_column_count, *indexed_column, comparison->left);
+  const bool right_column = IsIndexedColumnReference(
+      bound_select, source_column_begin, source_column_count, *indexed_column, comparison->right);
   if (left_column == right_column) {
     return std::nullopt;
   }
@@ -988,7 +1040,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
 [[nodiscard]] bool IsCoveringIndex(const BoundSelect& bound_select, const CatalogTable& table,
                                    const CatalogIndex& index,
                                    std::span<const ReadPredicateTerm> predicates,
-                                   const std::vector<bool>& selected_terms) {
+                                   const std::vector<bool>& selected_terms,
+                                   const BoundAggregateProgram* aggregate = nullptr) {
   std::vector<bool> required_columns(table.columns.size(), false);
   bool required_rowid = false;
   for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
@@ -997,11 +1050,21 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                                &required_rowid);
     }
   }
-  for (const BoundResultColumn& result : bound_select.result_columns()) {
-    MarkRequiredSourceValues(bound_select, result.expression, &required_columns, &required_rowid);
-  }
-  for (const BoundOrderingTerm& ordering : bound_select.order_by()) {
-    MarkRequiredSourceValues(bound_select, ordering.expression, &required_columns, &required_rowid);
+  if (aggregate != nullptr) {
+    for (const BoundExpressionId expression : aggregate->source_leaves) {
+      MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+    }
+    for (const BoundExpressionId expression : aggregate->representative_leaves) {
+      MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+    }
+  } else {
+    for (const BoundResultColumn& result : bound_select.result_columns()) {
+      MarkRequiredSourceValues(bound_select, result.expression, &required_columns, &required_rowid);
+    }
+    for (const BoundOrderingTerm& ordering : bound_select.order_by()) {
+      MarkRequiredSourceValues(bound_select, ordering.expression, &required_columns,
+                               &required_rowid);
+    }
   }
 
   std::vector<bool> covered_columns(table.columns.size(), false);
@@ -1101,8 +1164,10 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
 }
 
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
-    const BoundSelect& bound_select, TableId table_id, IndexId index_id,
-    std::span<const ReadPredicateTerm> predicates) {
+    const BoundSelect& bound_select, TableId table_id, std::size_t source_column_begin,
+    std::size_t source_column_count, IndexId index_id,
+    std::span<const ReadPredicateTerm> predicates, const BoundAggregateProgram* aggregate = nullptr,
+    bool allow_noncovering_full_scan = false) {
   const CatalogSnapshot& catalog = *bound_select.catalog();
   const CatalogTable& table = catalog.table(table_id);
   const CatalogIndex& index = catalog.index(index_id);
@@ -1134,7 +1199,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
         continue;
       }
       const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, table_id, term, predicates[predicate_index]);
+          MatchIndexConstraint(bound_select, source_column_begin, source_column_count, term,
+                               predicates[predicate_index]);
       if (match.has_value() && match->kind == IndexConstraintKind::kEquality) {
         selected = predicate_index;
         selected_match = match;
@@ -1172,7 +1238,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
         continue;
       }
       const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, table_id, term, predicates[predicate_index]);
+          MatchIndexConstraint(bound_select, source_column_begin, source_column_count, term,
+                               predicates[predicate_index]);
       if (!match.has_value()) {
         continue;
       }
@@ -1227,8 +1294,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     return std::nullopt;
   }
   candidate.node.covering =
-      IsCoveringIndex(bound_select, table, index, predicates, candidate.selected_terms);
-  if (!constrained && !candidate.node.covering) {
+      IsCoveringIndex(bound_select, table, index, predicates, candidate.selected_terms, aggregate);
+  if (!constrained && !candidate.node.covering && !allow_noncovering_full_scan) {
     return std::nullopt;
   }
   return candidate;
@@ -1300,6 +1367,705 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
          selected.kind != PhysicalAccessKind::kRowIdLookup;
 }
 
+struct DirectSourceIdentity {
+  bool rowid = false;
+  std::optional<ColumnId> column{};
+
+  constexpr auto operator<=>(const DirectSourceIdentity&) const noexcept = default;
+};
+
+struct AggregateMinMaxChoice {
+  PhysicalMinMaxPlan plan;
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+};
+
+struct AggregateGroupingChoice {
+  std::vector<PhysicalGroupingOrderTerm> order{};
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  bool at_most_one_row = false;
+};
+
+struct AggregateCorePlan {
+  SourceInfo source{};
+  ReadPredicateAnalysis predicates{};
+  std::vector<ReadAccessCandidate> access_candidates{};
+  std::optional<std::size_t> selected_access{};
+  std::vector<BoundExpressionId> residuals{};
+  PhysicalAggregateStrategy strategy = PhysicalAggregateStrategy::kGlobal;
+  std::optional<PhysicalMinMaxPlan> min_max{};
+  std::vector<PhysicalGroupingOrderTerm> grouping_order{};
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  bool at_most_one_row = false;
+  bool order_satisfied = false;
+};
+
+[[nodiscard]] std::optional<DirectSourceIdentity> ResolveDirectSourceIdentity(
+    const BoundSelect& bound_select, const SourceInfo& source, BoundExpressionId id) noexcept {
+  id = TransparentRowIdOperandId(bound_select, id);
+  if (!IsValidExpressionId(bound_select, id)) {
+    return std::nullopt;
+  }
+  const BoundExpression& expression = bound_select.expression(id);
+  if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
+    return DirectSourceIdentity{.rowid = true, .column = std::nullopt};
+  }
+  const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
+  if (column == nullptr || column->column.value() >= bound_select.source_columns().size()) {
+    return std::nullopt;
+  }
+  const std::optional<ColumnId> catalog_column =
+      bound_select.source_columns()[column->column.value()].catalog_column;
+  if (!catalog_column.has_value()) {
+    return std::nullopt;
+  }
+  if (source.table.has_value()) {
+    const CatalogTable& table = bound_select.catalog()->table(*source.table);
+    if (table.rowid_alias == catalog_column) {
+      return DirectSourceIdentity{.rowid = true, .column = std::nullopt};
+    }
+  }
+  return DirectSourceIdentity{.rowid = false, .column = catalog_column};
+}
+
+[[nodiscard]] bool BoundExpressionsEquivalent(const BoundSelect& bound_select,
+                                              BoundExpressionId left_id,
+                                              BoundExpressionId right_id);
+
+[[nodiscard]] bool BoundArgumentListsEquivalent(const BoundSelect& bound_select,
+                                                std::span<const BoundExpressionId> left,
+                                                std::span<const BoundExpressionId> right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (!BoundExpressionsEquivalent(bound_select, left[index], right[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool LiteralValuesEquivalent(const SqlValue& left, const SqlValue& right) {
+  if (left.type() != right.type()) {
+    return false;
+  }
+  switch (left.type()) {
+    case SqlValueType::kNull:
+      return true;
+    case SqlValueType::kInteger:
+      return left.integer_value() == right.integer_value();
+    case SqlValueType::kReal:
+      return left.real_value() == right.real_value();
+    case SqlValueType::kText:
+      return left.text_value().value_or(Utf8View{}).bytes() ==
+             right.text_value().value_or(Utf8View{}).bytes();
+    case SqlValueType::kBlob:
+      return std::ranges::equal(left.blob_value().value_or(ByteView{}),
+                                right.blob_value().value_or(ByteView{}));
+  }
+  return false;
+}
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+[[nodiscard]] bool BoundExpressionsEquivalent(const BoundSelect& bound_select,
+                                              BoundExpressionId left_id,
+                                              BoundExpressionId right_id) {
+  const BoundExpression& left = bound_select.expression(left_id);
+  const BoundExpression& right = bound_select.expression(right_id);
+  if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&left.payload);
+      alias != nullptr) {
+    return BoundExpressionsEquivalent(bound_select, alias->target, right_id);
+  }
+  if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&right.payload);
+      alias != nullptr) {
+    return BoundExpressionsEquivalent(bound_select, left_id, alias->target);
+  }
+  if (left.payload.index() != right.payload.index()) {
+    return false;
+  }
+  if (const auto* literal = std::get_if<BoundLiteralExpression>(&left.payload);
+      literal != nullptr) {
+    return LiteralValuesEquivalent(literal->value,
+                                   std::get<BoundLiteralExpression>(right.payload).value);
+  }
+  if (std::holds_alternative<BoundRowIdExpression>(left.payload)) {
+    return true;
+  }
+  if (const auto* column = std::get_if<BoundColumnExpression>(&left.payload); column != nullptr) {
+    return column->column == std::get<BoundColumnExpression>(right.payload).column;
+  }
+  if (const auto* parameter = std::get_if<BoundParameterExpression>(&left.payload);
+      parameter != nullptr) {
+    return parameter->parameter == std::get<BoundParameterExpression>(right.payload).parameter;
+  }
+  if (const auto* unary = std::get_if<BoundUnaryExpression>(&left.payload); unary != nullptr) {
+    const auto& other = std::get<BoundUnaryExpression>(right.payload);
+    return unary->operation == other.operation &&
+           BoundExpressionsEquivalent(bound_select, unary->operand, other.operand);
+  }
+  if (const auto* binary = std::get_if<BoundBinaryExpression>(&left.payload); binary != nullptr) {
+    const auto& other = std::get<BoundBinaryExpression>(right.payload);
+    return binary->operation == other.operation &&
+           BoundExpressionsEquivalent(bound_select, binary->left, other.left) &&
+           BoundExpressionsEquivalent(bound_select, binary->right, other.right);
+  }
+  if (const auto* comparison = std::get_if<BoundComparisonExpression>(&left.payload);
+      comparison != nullptr) {
+    const auto& other = std::get<BoundComparisonExpression>(right.payload);
+    return comparison->comparison == other.comparison && comparison->collation == other.collation &&
+           BoundExpressionsEquivalent(bound_select, comparison->left, other.left) &&
+           BoundExpressionsEquivalent(bound_select, comparison->right, other.right);
+  }
+  if (const auto* truth = std::get_if<BoundTruthTestExpression>(&left.payload); truth != nullptr) {
+    const auto& other = std::get<BoundTruthTestExpression>(right.payload);
+    return truth->expected == other.expected && truth->negated == other.negated &&
+           BoundExpressionsEquivalent(bound_select, truth->operand, other.operand);
+  }
+  if (const auto* call = std::get_if<BoundScalarCallExpression>(&left.payload); call != nullptr) {
+    const auto& other = std::get<BoundScalarCallExpression>(right.payload);
+    return call->function == other.function && call->collation == other.collation &&
+           BoundArgumentListsEquivalent(bound_select, call->arguments, other.arguments);
+  }
+  if (const auto* call = std::get_if<BoundAggregateCallExpression>(&left.payload);
+      call != nullptr) {
+    return call->invocation == std::get<BoundAggregateCallExpression>(right.payload).invocation;
+  }
+  if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
+      coalesce != nullptr) {
+    return BoundArgumentListsEquivalent(bound_select, coalesce->arguments,
+                                        std::get<BoundCoalesceExpression>(right.payload).arguments);
+  }
+  if (const auto* conditional = std::get_if<BoundConditionalExpression>(&left.payload);
+      conditional != nullptr) {
+    return BoundArgumentListsEquivalent(
+        bound_select, conditional->arguments,
+        std::get<BoundConditionalExpression>(right.payload).arguments);
+  }
+  if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&left.payload);
+      likelihood != nullptr) {
+    const auto& other = std::get<BoundLikelihoodExpression>(right.payload);
+    return likelihood->probability == other.probability &&
+           BoundExpressionsEquivalent(bound_select, likelihood->operand, other.operand);
+  }
+  const auto& collate = std::get<BoundCollateExpression>(left.payload);
+  const auto& other = std::get<BoundCollateExpression>(right.payload);
+  return collate.collation == other.collation &&
+         BoundExpressionsEquivalent(bound_select, collate.operand, other.operand);
+}
+// NOLINTEND(bugprone-easily-swappable-parameters)
+
+[[nodiscard]] bool UsesDefaultNullPlacement(const BoundOrderingTerm& term) noexcept {
+  return term.null_placement == (term.order == SortOrder::kDescending ? BoundNullPlacement::kLast
+                                                                      : BoundNullPlacement::kFirst);
+}
+
+[[nodiscard]] bool OrderMatchesGrouping(const BoundSelect& bound_select,
+                                        const BoundAggregateProgram& aggregate) {
+  if (bound_select.order_by().size() != aggregate.group_by.size()) {
+    return false;
+  }
+  const SourceInfo source = ResolveCoreSource(bound_select, 0);
+  for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+    const BoundOrderingTerm& ordering = bound_select.order_by()[term];
+    const BoundGroupingTerm& grouping = aggregate.group_by[term];
+    const std::optional<DirectSourceIdentity> ordering_identity =
+        ResolveDirectSourceIdentity(bound_select, source, ordering.expression);
+    const std::optional<DirectSourceIdentity> grouping_identity =
+        ResolveDirectSourceIdentity(bound_select, source, grouping.expression);
+    const bool equivalent =
+        ordering_identity.has_value() && grouping_identity.has_value()
+            ? *ordering_identity == *grouping_identity
+            : BoundExpressionsEquivalent(bound_select, ordering.expression, grouping.expression);
+    if (ordering.collation != grouping.collation || !UsesDefaultNullPlacement(ordering) ||
+        !equivalent) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool GroupTermFixedByCandidate(const BoundSelect& bound_select,
+                                             const SourceInfo& source,
+                                             const BoundGroupingTerm& group_term,
+                                             const ReadAccessCandidate& candidate);
+
+void ConfigureAggregateOrder(const BoundSelect& bound_select,
+                             const BoundAggregateProgram& aggregate, AggregateCorePlan* plan) {
+  if (bound_select.query_cores().size() != 1U || !bound_select.compound_operators().empty() ||
+      bound_select.order_by().empty()) {
+    return;
+  }
+  if (plan->strategy == PhysicalAggregateStrategy::kGlobal ||
+      plan->strategy == PhysicalAggregateStrategy::kIndexedMinMax) {
+    plan->order_satisfied = true;
+    return;
+  }
+  if (!OrderMatchesGrouping(bound_select, aggregate)) {
+    return;
+  }
+  if (plan->at_most_one_row) {
+    plan->order_satisfied = true;
+    return;
+  }
+  if (plan->strategy == PhysicalAggregateStrategy::kSortedGroup) {
+    plan->grouping_order.clear();
+    plan->grouping_order.reserve(aggregate.group_by.size());
+    for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+      const BoundOrderingTerm& ordering = bound_select.order_by()[term];
+      plan->grouping_order.push_back(PhysicalGroupingOrderTerm{
+          .group_term_index = static_cast<std::uint32_t>(term),
+          .order = ordering.order,
+          .null_placement = ordering.null_placement,
+      });
+    }
+    plan->order_satisfied = true;
+    return;
+  }
+  if (plan->strategy != PhysicalAggregateStrategy::kOrderedGroup ||
+      !plan->selected_access.has_value()) {
+    return;
+  }
+
+  const ReadAccessCandidate& selected = plan->access_candidates[*plan->selected_access];
+  std::vector<std::size_t> varying_terms;
+  varying_terms.reserve(aggregate.group_by.size());
+  for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+    if (!GroupTermFixedByCandidate(bound_select, plan->source, aggregate.group_by[term],
+                                   selected)) {
+      varying_terms.push_back(term);
+    }
+  }
+  if (plan->grouping_order.size() != varying_terms.size()) {
+    return;
+  }
+  bool forward = true;
+  bool reverse = true;
+  for (std::size_t order_index = 0; order_index < plan->grouping_order.size(); ++order_index) {
+    const PhysicalGroupingOrderTerm& delivered = plan->grouping_order[order_index];
+    const std::size_t group_term = varying_terms[order_index];
+    const BoundOrderingTerm& requested = bound_select.order_by()[group_term];
+    if (delivered.group_term_index != group_term) {
+      forward = false;
+      reverse = false;
+      break;
+    }
+    forward = forward && delivered.order == requested.order &&
+              delivered.null_placement == requested.null_placement;
+    const SortOrder reverse_order =
+        delivered.order == SortOrder::kDescending ? SortOrder::kAscending : SortOrder::kDescending;
+    const BoundNullPlacement reverse_nulls = reverse_order == SortOrder::kDescending
+                                                 ? BoundNullPlacement::kLast
+                                                 : BoundNullPlacement::kFirst;
+    reverse =
+        reverse && reverse_order == requested.order && reverse_nulls == requested.null_placement;
+  }
+  if (forward) {
+    plan->order_satisfied = true;
+  } else if (reverse) {
+    plan->direction = PhysicalScanDirection::kReverse;
+    for (PhysicalGroupingOrderTerm& term : plan->grouping_order) {
+      term.order =
+          term.order == SortOrder::kDescending ? SortOrder::kAscending : SortOrder::kDescending;
+      term.null_placement = term.order == SortOrder::kDescending ? BoundNullPlacement::kLast
+                                                                 : BoundNullPlacement::kFirst;
+    }
+    plan->order_satisfied = true;
+  }
+}
+
+[[nodiscard]] bool CandidateHasExactOneRow(const BoundSelect& bound_select,
+                                           const ReadAccessCandidate& candidate) noexcept {
+  if (candidate.published.kind == PhysicalAccessKind::kRowIdLookup) {
+    return true;
+  }
+  const auto* index = std::get_if<IndexCandidatePlan>(&candidate.payload);
+  if (index == nullptr || (!index->node.range.has_value() && index->node.equalities.empty())) {
+    return false;
+  }
+  const CatalogIndex& catalog_index = bound_select.catalog()->index(index->node.index);
+  if (!catalog_index.unique || index->node.equalities.size() != catalog_index.key_term_count) {
+    return false;
+  }
+  return catalog_index.unique_not_null ||
+         std::ranges::all_of(index->node.equalities, [](const PhysicalIndexEquality& equality) {
+           return equality.reject_null;
+         });
+}
+
+[[nodiscard]] bool GroupTermFixedByCandidate(const BoundSelect& bound_select,
+                                             const SourceInfo& source,
+                                             const BoundGroupingTerm& group_term,
+                                             const ReadAccessCandidate& candidate) {
+  if (!ExpressionDependsOnSource(bound_select, group_term.expression)) {
+    return ExpressionIsDeterministic(bound_select, group_term.expression);
+  }
+  const std::optional<DirectSourceIdentity> identity =
+      ResolveDirectSourceIdentity(bound_select, source, group_term.expression);
+  if (!identity.has_value()) {
+    return false;
+  }
+  if (identity->rowid && candidate.published.kind == PhysicalAccessKind::kRowIdLookup) {
+    return true;
+  }
+  const auto* index = std::get_if<IndexCandidatePlan>(&candidate.payload);
+  if (index == nullptr || !identity->column.has_value()) {
+    return false;
+  }
+  const std::string& grouping_collation =
+      bound_select.collations()[group_term.collation.value()].name;
+  return std::ranges::any_of(index->node.equalities, [&](const PhysicalIndexEquality& equality) {
+    return equality.column == *identity->column &&
+           CatalogNamesEqual(equality.collation_name, grouping_collation);
+  });
+}
+
+[[nodiscard]] std::optional<AggregateGroupingChoice> AnalyzeGroupingCandidate(
+    const BoundSelect& bound_select, const SourceInfo& source,
+    const BoundAggregateProgram& aggregate, const ReadAccessCandidate& candidate) {
+  std::vector<bool> fixed(aggregate.group_by.size(), false);
+  bool all_fixed = true;
+  for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+    fixed[term] =
+        GroupTermFixedByCandidate(bound_select, source, aggregate.group_by[term], candidate);
+    all_fixed = all_fixed && fixed[term];
+  }
+  if (all_fixed || CandidateHasExactOneRow(bound_select, candidate)) {
+    return AggregateGroupingChoice{
+        .order = {},
+        .direction = PhysicalScanDirection::kForward,
+        .at_most_one_row = true,
+    };
+  }
+
+  std::vector<std::size_t> remaining;
+  remaining.reserve(aggregate.group_by.size());
+  for (std::size_t term = 0; term < fixed.size(); ++term) {
+    if (!fixed[term]) {
+      remaining.push_back(term);
+    }
+  }
+
+  if (candidate.published.kind == PhysicalAccessKind::kTableScan) {
+    if (remaining.size() != 1U) {
+      return std::nullopt;
+    }
+    const std::optional<DirectSourceIdentity> identity = ResolveDirectSourceIdentity(
+        bound_select, source, aggregate.group_by[remaining.front()].expression);
+    if (!identity.has_value() || !identity->rowid || !source.rowid_eligible) {
+      return std::nullopt;
+    }
+    return AggregateGroupingChoice{
+        .order =
+            {
+                PhysicalGroupingOrderTerm{
+                    .group_term_index = static_cast<std::uint32_t>(remaining.front()),
+                    .order = SortOrder::kAscending,
+                    .null_placement = BoundNullPlacement::kFirst,
+                },
+            },
+        .direction = PhysicalScanDirection::kForward,
+        .at_most_one_row = false,
+    };
+  }
+
+  const auto* index_plan = std::get_if<IndexCandidatePlan>(&candidate.payload);
+  if (index_plan == nullptr) {
+    return std::nullopt;
+  }
+  const CatalogIndex& index = bound_select.catalog()->index(index_plan->node.index);
+  if (index.statistics.unordered) {
+    return std::nullopt;
+  }
+  const std::size_t prefix = index_plan->node.equalities.size();
+  if (remaining.size() > index.key_term_count - std::min(prefix, index.key_term_count)) {
+    return std::nullopt;
+  }
+
+  std::vector<bool> matched(aggregate.group_by.size(), false);
+  std::vector<PhysicalGroupingOrderTerm> order;
+  order.reserve(remaining.size());
+  for (std::size_t offset = 0; offset < remaining.size(); ++offset) {
+    const std::size_t index_term = prefix + offset;
+    if (index_term >= index.key_term_count) {
+      return std::nullopt;
+    }
+    const CatalogIndexTerm& catalog_term = index.terms[index_term];
+    const auto* column = std::get_if<ColumnId>(&catalog_term.target);
+    if (column == nullptr) {
+      return std::nullopt;
+    }
+    std::optional<std::size_t> selected_group;
+    for (const std::size_t group_term : remaining) {
+      if (matched[group_term]) {
+        continue;
+      }
+      const BoundGroupingTerm& grouping = aggregate.group_by[group_term];
+      const std::optional<DirectSourceIdentity> identity =
+          ResolveDirectSourceIdentity(bound_select, source, grouping.expression);
+      if (identity.has_value() && identity->column == *column &&
+          CatalogNamesEqual(bound_select.collations()[grouping.collation.value()].name,
+                            catalog_term.collation_name)) {
+        selected_group = group_term;
+        break;
+      }
+    }
+    if (!selected_group.has_value()) {
+      return std::nullopt;
+    }
+    matched[*selected_group] = true;
+    const bool descending = catalog_term.order == SortOrder::kDescending;
+    order.push_back(PhysicalGroupingOrderTerm{
+        .group_term_index = static_cast<std::uint32_t>(*selected_group),
+        .order = descending ? SortOrder::kDescending : SortOrder::kAscending,
+        .null_placement = descending ? BoundNullPlacement::kLast : BoundNullPlacement::kFirst,
+    });
+  }
+  return AggregateGroupingChoice{
+      .order = std::move(order),
+      .direction = PhysicalScanDirection::kForward,
+      .at_most_one_row = false,
+  };
+}
+
+[[nodiscard]] std::optional<AggregateMinMaxChoice> AnalyzeMinMaxCandidate(
+    const BoundSelect& bound_select, const SourceInfo& source,
+    const BoundAggregateProgram& aggregate, const ReadAccessCandidate& candidate) {
+  if (aggregate.having.has_value() || aggregate.invocations.size() != 1U) {
+    return std::nullopt;
+  }
+  const BoundAggregateInvocationId invocation_id = aggregate.invocations.front();
+  const BoundAggregateInvocation& invocation =
+      bound_select.aggregate_invocations()[invocation_id.value()];
+  const BoundAggregateFunction& function =
+      bound_select.aggregate_functions()[invocation.function.value()];
+  if (function.extremum == BoundAggregateExtremumKind::kNone || invocation.arguments.size() != 1U ||
+      invocation.distinct || !invocation.order_by.empty() || invocation.filter.has_value()) {
+    return std::nullopt;
+  }
+  const std::optional<DirectSourceIdentity> identity =
+      ResolveDirectSourceIdentity(bound_select, source, invocation.arguments.front());
+  if (!identity.has_value()) {
+    return std::nullopt;
+  }
+  const bool minimum = function.extremum == BoundAggregateExtremumKind::kMinimum;
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  bool fixed = false;
+
+  if (candidate.published.kind == PhysicalAccessKind::kRowIdLookup && identity->rowid) {
+    fixed = true;
+  } else if (candidate.published.kind == PhysicalAccessKind::kTableScan && identity->rowid &&
+             source.rowid_eligible) {
+    direction = minimum ? PhysicalScanDirection::kForward : PhysicalScanDirection::kReverse;
+  } else {
+    const auto* index_plan = std::get_if<IndexCandidatePlan>(&candidate.payload);
+    if (index_plan == nullptr || !identity->column.has_value()) {
+      return std::nullopt;
+    }
+    const CatalogIndex& index = bound_select.catalog()->index(index_plan->node.index);
+    const std::string& invocation_collation =
+        bound_select.collations()[invocation.collation.value()].name;
+    for (const PhysicalIndexEquality& equality : index_plan->node.equalities) {
+      if (equality.column == *identity->column &&
+          CatalogNamesEqual(equality.collation_name, invocation_collation)) {
+        fixed = true;
+        break;
+      }
+    }
+    if (!fixed) {
+      const std::size_t term_index = index_plan->node.equalities.size();
+      if (term_index >= index.key_term_count || index.statistics.unordered) {
+        return std::nullopt;
+      }
+      const CatalogIndexTerm& term = index.terms[term_index];
+      const auto* column = std::get_if<ColumnId>(&term.target);
+      if (column == nullptr || *column != *identity->column ||
+          !CatalogNamesEqual(term.collation_name, invocation_collation)) {
+        return std::nullopt;
+      }
+      const bool physical_descending = term.order == SortOrder::kDescending;
+      const bool desired_descending = !minimum;
+      direction = physical_descending != desired_descending ? PhysicalScanDirection::kReverse
+                                                            : PhysicalScanDirection::kForward;
+    }
+  }
+
+  PhysicalMinMaxNullStrategy null_strategy = PhysicalMinMaxNullStrategy::kNone;
+  if (!identity->rowid && identity->column.has_value() && source.table.has_value()) {
+    const CatalogColumn& column =
+        bound_select.catalog()->table(*source.table).columns[identity->column->value];
+    if (!column.effective_not_null_conflict.has_value()) {
+      null_strategy = PhysicalMinMaxNullStrategy::kNonNullFirstWithSingleNullFallback;
+    }
+  }
+  return AggregateMinMaxChoice{
+      .plan =
+          PhysicalMinMaxPlan{
+              .invocation = invocation_id,
+              .null_strategy = null_strategy,
+              .argument_fixed_by_equality = fixed,
+          },
+      .direction = direction,
+  };
+}
+
+[[nodiscard]] AggregateCorePlan BuildAggregateCorePlan(const BoundSelect& bound_select,
+                                                       std::size_t core_index) {
+  const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
+  const BoundAggregateProgram& aggregate = *core.aggregate;
+  AggregateCorePlan plan{
+      .source = ResolveCoreSource(bound_select, core_index),
+  };
+  plan.predicates = AnalyzeReadPredicate(bound_select, plan.source, core.where);
+  if (plan.predicates.empty) {
+    plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
+                                               : PhysicalAggregateStrategy::kOrderedGroup;
+    plan.at_most_one_row = true;
+    ConfigureAggregateOrder(bound_select, aggregate, &plan);
+    return plan;
+  }
+  if (plan.source.single_row) {
+    plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
+                                               : PhysicalAggregateStrategy::kOrderedGroup;
+    plan.at_most_one_row = true;
+    ConfigureAggregateOrder(bound_select, aggregate, &plan);
+    return plan;
+  }
+
+  std::size_t index_count = 0;
+  if (plan.source.source_kind == BoundSourceKind::kCatalogTable && plan.source.table.has_value()) {
+    index_count = bound_select.catalog()->table_indexes(*plan.source.table).size();
+  }
+  plan.access_candidates.reserve(2U + index_count);
+  plan.access_candidates.push_back(ReadAccessCandidate{
+      .published =
+          AccessPathCandidate{
+              .kind = PhysicalAccessKind::kTableScan,
+              .cost = ScanCost(plan.source.estimated_rows, plan.source.estimated_row_size),
+          },
+  });
+  for (std::size_t term = 0; term < plan.predicates.terms.size(); ++term) {
+    const std::optional<BoundExpressionId> key =
+        RowIdLookupKey(bound_select, plan.source, plan.predicates.terms[term].predicate);
+    if (key.has_value()) {
+      plan.access_candidates.push_back(ReadAccessCandidate{
+          .published =
+              AccessPathCandidate{
+                  .kind = PhysicalAccessKind::kRowIdLookup,
+                  .cost = RowIdCost(plan.source.estimated_rows),
+              },
+          .payload =
+              RowIdCandidatePlan{
+                  .key = *key,
+                  .selected_term = term,
+              },
+      });
+      break;
+    }
+  }
+  if (plan.source.source_kind == BoundSourceKind::kCatalogTable && plan.source.table.has_value() &&
+      plan.source.rowid_eligible) {
+    for (const IndexId index_id : bound_select.catalog()->table_indexes(*plan.source.table)) {
+      std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
+          bound_select, *plan.source.table, core.source_column_begin, core.source_column_count,
+          index_id, plan.predicates.terms, &aggregate, true);
+      if (!candidate.has_value()) {
+        continue;
+      }
+      plan.access_candidates.push_back(ReadAccessCandidate{
+          .published = PublishIndexCandidate(bound_select, plan.source, *candidate),
+          .payload = std::move(*candidate),
+      });
+    }
+  }
+
+  std::size_t normal_access = 0;
+  for (std::size_t candidate = 1; candidate < plan.access_candidates.size(); ++candidate) {
+    const auto* index = std::get_if<IndexCandidatePlan>(&plan.access_candidates[candidate].payload);
+    const bool normal_eligible = index == nullptr || index->node.covering ||
+                                 !index->node.equalities.empty() || index->node.range.has_value();
+    if (normal_eligible && PreferCandidate(plan.access_candidates[candidate].published,
+                                           plan.access_candidates[normal_access].published)) {
+      normal_access = candidate;
+    }
+  }
+
+  std::optional<std::size_t> selected_ordered;
+  std::optional<AggregateMinMaxChoice> min_max;
+  if (aggregate.group_by.empty()) {
+    for (std::size_t candidate = 0; candidate < plan.access_candidates.size(); ++candidate) {
+      const std::optional<AggregateMinMaxChoice> choice = AnalyzeMinMaxCandidate(
+          bound_select, plan.source, aggregate, plan.access_candidates[candidate]);
+      if (!choice.has_value()) {
+        continue;
+      }
+      if (!selected_ordered.has_value() ||
+          PreferCandidate(plan.access_candidates[candidate].published,
+                          plan.access_candidates[*selected_ordered].published)) {
+        selected_ordered = candidate;
+        min_max = choice;
+      }
+    }
+    if (selected_ordered.has_value()) {
+      plan.strategy = PhysicalAggregateStrategy::kIndexedMinMax;
+      plan.min_max = min_max->plan;
+      plan.direction = min_max->direction;
+      plan.at_most_one_row = true;
+    } else {
+      plan.strategy = PhysicalAggregateStrategy::kGlobal;
+      plan.at_most_one_row = true;
+    }
+  } else {
+    std::optional<AggregateGroupingChoice> grouping;
+    for (std::size_t candidate = 0; candidate < plan.access_candidates.size(); ++candidate) {
+      std::optional<AggregateGroupingChoice> choice = AnalyzeGroupingCandidate(
+          bound_select, plan.source, aggregate, plan.access_candidates[candidate]);
+      if (!choice.has_value()) {
+        continue;
+      }
+      if (!selected_ordered.has_value() ||
+          PreferCandidate(plan.access_candidates[candidate].published,
+                          plan.access_candidates[*selected_ordered].published)) {
+        selected_ordered = candidate;
+        grouping = std::move(choice);
+      }
+    }
+    if (selected_ordered.has_value()) {
+      plan.strategy = PhysicalAggregateStrategy::kOrderedGroup;
+      plan.grouping_order = std::move(grouping->order);
+      plan.direction = grouping->direction;
+      plan.at_most_one_row = grouping->at_most_one_row;
+    } else {
+      plan.strategy = PhysicalAggregateStrategy::kSortedGroup;
+      plan.grouping_order.reserve(aggregate.group_by.size());
+      for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+        plan.grouping_order.push_back(PhysicalGroupingOrderTerm{
+            .group_term_index = static_cast<std::uint32_t>(term),
+            .order = SortOrder::kAscending,
+            .null_placement = BoundNullPlacement::kFirst,
+        });
+      }
+    }
+  }
+
+  plan.selected_access = selected_ordered.value_or(normal_access);
+  std::vector<bool> selected_terms(plan.predicates.terms.size(), false);
+  const ReadAccessCandidate& selected = plan.access_candidates[*plan.selected_access];
+  if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload); rowid != nullptr) {
+    selected_terms[rowid->selected_term] = true;
+  } else if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
+             index != nullptr) {
+    selected_terms = index->selected_terms;
+  }
+  plan.residuals.reserve(plan.predicates.terms.size());
+  for (std::size_t term = 0; term < plan.predicates.terms.size(); ++term) {
+    if (!selected_terms[term]) {
+      plan.residuals.push_back(plan.predicates.terms[term].predicate);
+    }
+  }
+  ConfigureAggregateOrder(bound_select, aggregate, &plan);
+  return plan;
+}
+
 [[nodiscard]] PhysicalAccessKind AccessKindOf(const PhysicalNode& node) noexcept {
   switch (PhysicalNodeKindOf(node)) {
     case PhysicalNodeKind::kSingleRow:
@@ -1322,6 +2088,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     case PhysicalNodeKind::kDistinct:
     case PhysicalNodeKind::kCompound:
     case PhysicalNodeKind::kAdvancedOrder:
+    case PhysicalNodeKind::kAggregate:
+    case PhysicalNodeKind::kHaving:
       break;
   }
   return PhysicalAccessKind::kEmpty;
@@ -1527,9 +2295,49 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
 [[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
     const LogicalPlan& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
-  if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value() ||
-      !candidates.empty() || selected_candidate_index != 0U) {
+  if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value()) {
     return std::unexpected{InvariantFailure("advanced physical plan arena is invalid")};
+  }
+  std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
+      logical_plan.bound_select().query_cores().size());
+  for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
+    const auto* select =
+        std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
+    if (select != nullptr && select->aggregate.has_value()) {
+      aggregate_plans[core] = BuildAggregateCorePlan(logical_plan.bound_select(), core);
+    }
+  }
+  if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value()) {
+    const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans.front());
+    std::vector<AccessPathCandidate> expected;
+    if (aggregate.predicates.empty) {
+      expected.push_back(AccessPathCandidate{
+          .kind = PhysicalAccessKind::kEmpty,
+          .cost = {},
+      });
+    } else if (aggregate.source.single_row) {
+      expected.push_back(AccessPathCandidate{
+          .kind = PhysicalAccessKind::kSingleRow,
+          .cost =
+              AccessPathCost{
+                  .estimated_input_rows = 1,
+                  .estimated_output_rows = 1,
+                  .work_units = 1,
+              },
+      });
+    } else {
+      expected.reserve(aggregate.access_candidates.size());
+      for (const ReadAccessCandidate& candidate : aggregate.access_candidates) {
+        expected.push_back(candidate.published);
+      }
+    }
+    if (!std::ranges::equal(candidates, expected) ||
+        selected_candidate_index != aggregate.selected_access.value_or(0U)) {
+      return std::unexpected{
+          InvariantFailure("aggregate access candidates do not match the selected core")};
+    }
+  } else if (!candidates.empty() || selected_candidate_index != 0U) {
+    return std::unexpected{InvariantFailure("advanced physical plan retained candidates")};
   }
 
   const LogicalAdvancedOrderNode* advanced_order = nullptr;
@@ -1556,9 +2364,48 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
         [&](const auto& node) {
           using Node = std::decay_t<decltype(node)>;
           if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
+            if (aggregate_plans[node.core_index].has_value() &&
+                aggregate_plans[node.core_index]->predicates.empty) {
+              return std::holds_alternative<PhysicalEmptyNode>(physical);
+            }
             const auto* value = std::get_if<PhysicalSingleRowNode>(&physical);
             return value != nullptr && value->core_index == node.core_index;
           } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
+            if (aggregate_plans[node.core_index].has_value()) {
+              const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
+              if (aggregate.predicates.empty) {
+                return std::holds_alternative<PhysicalEmptyNode>(physical);
+              }
+              if (aggregate.selected_access.has_value()) {
+                const ReadAccessCandidate& selected =
+                    aggregate.access_candidates[*aggregate.selected_access];
+                if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload);
+                    rowid != nullptr) {
+                  const auto* value = std::get_if<PhysicalRowIdLookupNode>(&physical);
+                  return value != nullptr && value->source_kind == aggregate.source.source_kind &&
+                         value->table == aggregate.source.table &&
+                         value->root_page == aggregate.source.root_page && value->key == rowid->key;
+                }
+                if (const auto* index_plan = std::get_if<IndexCandidatePlan>(&selected.payload);
+                    index_plan != nullptr) {
+                  const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
+                  return value != nullptr && value->table == index_plan->node.table &&
+                         value->table_root_page == index_plan->node.table_root_page &&
+                         value->index == index_plan->node.index &&
+                         value->index_root_page == index_plan->node.index_root_page &&
+                         value->equalities == index_plan->node.equalities &&
+                         value->range == index_plan->node.range &&
+                         value->covering == index_plan->node.covering &&
+                         value->direction == aggregate.direction;
+                }
+              }
+              const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
+              return value != nullptr && value->core_index == node.core_index &&
+                     value->source_kind == aggregate.source.source_kind &&
+                     value->table == aggregate.source.table &&
+                     value->root_page == aggregate.source.root_page &&
+                     value->direction == aggregate.direction;
+            }
             const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
             if (value == nullptr || value->core_index != node.core_index ||
                 value->source_kind != node.source_kind || value->table != node.table) {
@@ -1568,11 +2415,25 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                 node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()
                     ? logical_plan.bound_select().catalog()->table(*node.table).root_page
                     : RootPageId{1};
-            return value->root_page == expected_root;
+            return value->root_page == expected_root &&
+                   value->direction == PhysicalScanDirection::kForward;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
             if (value == nullptr || value->input.value() != node.input.value()) {
               return false;
+            }
+            const LogicalNodePayload& source = logical_plan.nodes()[node.input.value()].payload;
+            std::optional<std::size_t> core_index;
+            if (const auto* scan = std::get_if<LogicalScanNode>(&source); scan != nullptr) {
+              core_index = scan->core_index;
+            } else if (const auto* single = std::get_if<LogicalSingleRowNode>(&source);
+                       single != nullptr) {
+              core_index = single->core_index;
+            }
+            if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
+              const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
+              return value->predicates == aggregate.residuals &&
+                     value->guards == aggregate.predicates.guards;
             }
             const AdvancedPredicateParts expected =
                 SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
@@ -1586,6 +2447,28 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
             return value != nullptr && value->input.value() == node.input.value() &&
                    value->logical_projection.value() == index &&
                    value->core_index == node.core_index;
+          } else if constexpr (std::is_same_v<Node, LogicalOrderNode>) {
+            const auto* value = std::get_if<PhysicalSortNode>(&physical);
+            const bool input_order_satisfied = aggregate_plans.size() == 1U &&
+                                               aggregate_plans.front().has_value() &&
+                                               aggregate_plans.front()->order_satisfied;
+            const PhysicalSortStrategy strategy = logical_plan.bound_select().limit() == nullptr
+                                                      ? PhysicalSortStrategy::kExternal
+                                                      : PhysicalSortStrategy::kRuntimeLimit;
+            if (value == nullptr || value->input.value() != node.input.value() ||
+                value->payload_expressions != node.payload_expressions ||
+                value->output_fields != node.output_fields || value->schedule != node.schedule ||
+                value->strategy != strategy ||
+                value->input_order_satisfied != input_order_satisfied ||
+                value->terms.size() != node.terms.size()) {
+              return false;
+            }
+            for (std::size_t term = 0; term < node.terms.size(); ++term) {
+              if (!OrderingTermsEqual(value->terms[term], node.terms[term])) {
+                return false;
+              }
+            }
+            return true;
           } else if constexpr (std::is_same_v<Node, LogicalOutputNode>) {
             const auto* value = std::get_if<PhysicalOutputNode>(&physical);
             return value != nullptr && value->input.value() == node.input.value() &&
@@ -1619,10 +2502,14 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
             return value->strategy == expected;
           } else if constexpr (std::is_same_v<Node, LogicalAdvancedOrderNode>) {
             const auto* value = std::get_if<PhysicalAdvancedOrderNode>(&physical);
+            const bool input_order_satisfied = aggregate_plans.size() == 1U &&
+                                               aggregate_plans.front().has_value() &&
+                                               aggregate_plans.front()->order_satisfied;
             if (value == nullptr || value->input.value() != node.input.value() ||
                 value->terms.size() != node.terms.size() ||
                 value->core_plans.size() != node.core_layouts.size() ||
-                value->set_then_order != node.set_then_order) {
+                value->set_then_order != node.set_then_order ||
+                value->input_order_satisfied != input_order_satisfied) {
               return false;
             }
             for (std::size_t term = 0; term < node.terms.size(); ++term) {
@@ -1647,6 +2534,29 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                     ? PhysicalSortStrategy::kRuntimeLimit
                     : PhysicalSortStrategy::kExternal;
             return value->final_strategy == final_strategy;
+          } else if constexpr (std::is_same_v<Node, LogicalAggregateNode>) {
+            const auto* value = std::get_if<PhysicalAggregateNode>(&physical);
+            if (value == nullptr || value->input.value() != node.input.value() ||
+                value->core_index != node.core_index || node.core_index >= aggregate_plans.size() ||
+                !aggregate_plans[node.core_index].has_value()) {
+              return false;
+            }
+            const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
+            return value->strategy == aggregate.strategy && value->min_max == aggregate.min_max &&
+                   value->grouping_order == aggregate.grouping_order &&
+                   value->at_most_one_row == aggregate.at_most_one_row;
+          } else if constexpr (std::is_same_v<Node, LogicalHavingNode>) {
+            const auto* value = std::get_if<PhysicalHavingNode>(&physical);
+            if (value == nullptr || value->input.value() != node.input.value() ||
+                value->core_index != node.core_index || value->predicate != node.predicate ||
+                !IsValidExpressionId(logical_plan.bound_select(), value->predicate) ||
+                node.core_index >= logical_plan.bound_select().query_cores().size()) {
+              return false;
+            }
+            const auto* core = std::get_if<BoundSelectCore>(
+                &logical_plan.bound_select().query_cores()[node.core_index]);
+            return core != nullptr && core->aggregate.has_value() &&
+                   core->aggregate->having == value->predicate;
           } else {
             return false;
           }
@@ -1687,7 +2597,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   }
   if (const auto* scan = std::get_if<PhysicalTableScanNode>(&leaf.payload); scan != nullptr) {
     if (source.single_row || scan->source_kind != source.source_kind ||
-        scan->table != source.table || scan->root_page != source.root_page) {
+        scan->table != source.table || scan->root_page != source.root_page ||
+        scan->direction != PhysicalScanDirection::kForward) {
       return std::unexpected{InvariantFailure("physical table scan does not match logical source")};
     }
   } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf.payload);
@@ -1710,7 +2621,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
     const CatalogIndex& index = bound_select.catalog()->index(index_scan->index);
     if (index.table != index_scan->table || index.root_page != index_scan->index_root_page ||
         !IsSupportedIndexShape(bound_select, table, index) ||
-        index_scan->equalities.size() > index.key_term_count) {
+        index_scan->equalities.size() > index.key_term_count ||
+        index_scan->direction != PhysicalScanDirection::kForward) {
       return std::unexpected{InvariantFailure("physical index scan metadata is invalid")};
     }
     for (std::size_t term_index = 0; term_index < index_scan->equalities.size(); ++term_index) {
@@ -1718,7 +2630,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
       const CatalogIndexTerm& term = index.terms[term_index];
       const auto* column = std::get_if<ColumnId>(&term.target);
       const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, index_scan->table, term,
+          MatchIndexConstraint(bound_select, 0U, bound_select.source_columns().size(), term,
                                ReadPredicateTerm{
                                    .predicate = equality.predicate,
                                    .conjunct_position = equality.conjunct_position,
@@ -1749,7 +2661,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
       const auto validate_bound = [&](const PhysicalIndexBound& bound,
                                       IndexConstraintKind expected) {
         const std::optional<IndexConstraintMatch> match =
-            MatchIndexConstraint(bound_select, index_scan->table, term,
+            MatchIndexConstraint(bound_select, 0U, bound_select.source_columns().size(), term,
                                  ReadPredicateTerm{
                                      .predicate = bound.predicate,
                                      .conjunct_position = bound.conjunct_position,
@@ -1978,7 +2890,8 @@ class PhysicalPlanBuilder final {
         const CatalogSnapshot& catalog = *logical_plan.bound_select().catalog();
         for (const IndexId index_id : catalog.table_indexes(*source.table)) {
           std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
-              logical_plan.bound_select(), *source.table, index_id, predicates.terms);
+              logical_plan.bound_select(), *source.table, 0U,
+              logical_plan.bound_select().source_columns().size(), index_id, predicates.terms);
           if (!candidate.has_value()) {
             continue;
           }
@@ -2174,6 +3087,15 @@ class PhysicalPlanBuilder final {
     impl->nodes.reserve(impl->logical_plan.nodes().size());
     std::vector<PhysicalNodeId> mapped;
     mapped.reserve(impl->logical_plan.nodes().size());
+    std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
+        impl->logical_plan.bound_select().query_cores().size());
+    for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
+      const auto* select =
+          std::get_if<BoundSelectCore>(&impl->logical_plan.bound_select().query_cores()[core]);
+      if (select != nullptr && select->aggregate.has_value()) {
+        aggregate_plans[core] = BuildAggregateCorePlan(impl->logical_plan.bound_select(), core);
+      }
+    }
 
     const LogicalAdvancedOrderNode* advanced_order = nullptr;
     for (const LogicalNode& node : impl->logical_plan.nodes()) {
@@ -2200,8 +3122,45 @@ class PhysicalPlanBuilder final {
           [&](const auto& node) -> PhysicalNodePayload {
             using Node = std::decay_t<decltype(node)>;
             if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
+              if (aggregate_plans[node.core_index].has_value() &&
+                  aggregate_plans[node.core_index]->predicates.empty) {
+                return PhysicalEmptyNode{};
+              }
               return PhysicalSingleRowNode{.core_index = node.core_index};
             } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
+              if (aggregate_plans[node.core_index].has_value()) {
+                const AggregateCorePlan& aggregate =
+                    AssumePresent(aggregate_plans[node.core_index]);
+                if (aggregate.predicates.empty) {
+                  return PhysicalEmptyNode{};
+                }
+                if (aggregate.selected_access.has_value()) {
+                  const ReadAccessCandidate& selected =
+                      aggregate.access_candidates[*aggregate.selected_access];
+                  if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload);
+                      rowid != nullptr) {
+                    return PhysicalRowIdLookupNode{
+                        .source_kind = aggregate.source.source_kind,
+                        .table = aggregate.source.table,
+                        .root_page = aggregate.source.root_page,
+                        .key = rowid->key,
+                    };
+                  }
+                  if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
+                      index != nullptr) {
+                    PhysicalIndexScanNode scan = index->node;
+                    scan.direction = aggregate.direction;
+                    return scan;
+                  }
+                }
+                return PhysicalTableScanNode{
+                    .core_index = node.core_index,
+                    .source_kind = aggregate.source.source_kind,
+                    .table = aggregate.source.table,
+                    .root_page = aggregate.source.root_page,
+                    .direction = aggregate.direction,
+                };
+              }
               RootPageId root_page{1};
               if (node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()) {
                 root_page =
@@ -2214,6 +3173,23 @@ class PhysicalPlanBuilder final {
                   .root_page = root_page,
               };
             } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
+              const LogicalNodePayload& source =
+                  impl->logical_plan.nodes()[node.input.value()].payload;
+              std::optional<std::size_t> core_index;
+              if (const auto* scan = std::get_if<LogicalScanNode>(&source); scan != nullptr) {
+                core_index = scan->core_index;
+              } else if (const auto* single = std::get_if<LogicalSingleRowNode>(&source);
+                         single != nullptr) {
+                core_index = single->core_index;
+              }
+              if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
+                const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
+                return PhysicalFilterNode{
+                    .input = mapped[node.input.value()],
+                    .predicates = aggregate.residuals,
+                    .guards = aggregate.predicates.guards,
+                };
+              }
               AdvancedPredicateParts predicates =
                   SplitAdvancedPredicate(impl->logical_plan.bound_select(), node.predicate);
               return PhysicalFilterNode{
@@ -2232,6 +3208,21 @@ class PhysicalPlanBuilder final {
                   .input = mapped[node.input.value()],
                   .logical_projection = LogicalNodeId{static_cast<std::uint32_t>(logical_index)},
                   .core_index = node.core_index,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalOrderNode>) {
+              const bool input_order_satisfied = aggregate_plans.size() == 1U &&
+                                                 aggregate_plans.front().has_value() &&
+                                                 aggregate_plans.front()->order_satisfied;
+              return PhysicalSortNode{
+                  .input = mapped[node.input.value()],
+                  .terms = node.terms,
+                  .payload_expressions = node.payload_expressions,
+                  .output_fields = node.output_fields,
+                  .schedule = node.schedule,
+                  .strategy = impl->logical_plan.bound_select().limit() == nullptr
+                                  ? PhysicalSortStrategy::kExternal
+                                  : PhysicalSortStrategy::kRuntimeLimit,
+                  .input_order_satisfied = input_order_satisfied,
               };
             } else if constexpr (std::is_same_v<Node, LogicalOutputNode>) {
               return PhysicalOutputNode{
@@ -2290,6 +3281,25 @@ class PhysicalPlanBuilder final {
                       node.set_then_order && impl->logical_plan.bound_select().limit() != nullptr
                           ? PhysicalSortStrategy::kRuntimeLimit
                           : PhysicalSortStrategy::kExternal,
+                  .input_order_satisfied = aggregate_plans.size() == 1U &&
+                                           aggregate_plans.front().has_value() &&
+                                           aggregate_plans.front()->order_satisfied,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalAggregateNode>) {
+              const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
+              return PhysicalAggregateNode{
+                  .input = mapped[node.input.value()],
+                  .core_index = node.core_index,
+                  .strategy = aggregate.strategy,
+                  .min_max = aggregate.min_max,
+                  .grouping_order = aggregate.grouping_order,
+                  .at_most_one_row = aggregate.at_most_one_row,
+              };
+            } else if constexpr (std::is_same_v<Node, LogicalHavingNode>) {
+              return PhysicalHavingNode{
+                  .input = mapped[node.input.value()],
+                  .core_index = node.core_index,
+                  .predicate = node.predicate,
               };
             } else {
               return PhysicalEmptyNode{};
@@ -2301,6 +3311,31 @@ class PhysicalPlanBuilder final {
     }
 
     impl->root = mapped[impl->logical_plan.root().value()];
+    if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value()) {
+      const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans.front());
+      if (aggregate.predicates.empty) {
+        impl->candidates.push_back(AccessPathCandidate{
+            .kind = PhysicalAccessKind::kEmpty,
+            .cost = {},
+        });
+      } else if (aggregate.source.single_row) {
+        impl->candidates.push_back(AccessPathCandidate{
+            .kind = PhysicalAccessKind::kSingleRow,
+            .cost =
+                AccessPathCost{
+                    .estimated_input_rows = 1,
+                    .estimated_output_rows = 1,
+                    .work_units = 1,
+                },
+        });
+      } else {
+        impl->candidates.reserve(aggregate.access_candidates.size());
+        for (const ReadAccessCandidate& candidate : aggregate.access_candidates) {
+          impl->candidates.push_back(candidate.published);
+        }
+        impl->selected_candidate = aggregate.selected_access.value_or(0U);
+      }
+    }
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
     std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
         impl->logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
@@ -2546,6 +3581,10 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "compound";
     case PhysicalNodeKind::kAdvancedOrder:
       return "advanced_order";
+    case PhysicalNodeKind::kAggregate:
+      return "aggregate";
+    case PhysicalNodeKind::kHaving:
+      return "having";
   }
   return "unknown";
 }
@@ -2666,7 +3705,55 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
                  scan != nullptr) {
         std::string line = "CORE " + std::to_string(scan->core_index) + " SCAN ";
         AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &line);
+        if (scan->direction == PhysicalScanDirection::kReverse) {
+          line.append(" REVERSE");
+        }
         append_line(line);
+      } else if (std::holds_alternative<PhysicalEmptyNode>(node.payload)) {
+        append_line("EMPTY INPUT");
+      } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+                 lookup != nullptr) {
+        std::string line = "SEARCH ";
+        AppendExplainIdentifier(SourceName(plan, lookup->source_kind, lookup->table), &line);
+        line.append(" USING INTEGER PRIMARY KEY (rowid=?)");
+        append_line(line);
+      } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&node.payload);
+                 index_scan != nullptr) {
+        const CatalogSnapshot& catalog = *plan.logical_plan().bound_select().catalog();
+        const CatalogTable& table = catalog.table(index_scan->table);
+        const CatalogIndex& index = catalog.index(index_scan->index);
+        std::string line =
+            index_scan->equalities.empty() && !index_scan->range.has_value() ? "SCAN " : "SEARCH ";
+        AppendExplainIdentifier(table.name, &line);
+        line.append(index_scan->covering ? " USING COVERING INDEX " : " USING INDEX ");
+        AppendExplainIdentifier(index.name, &line);
+        if (index_scan->direction == PhysicalScanDirection::kReverse) {
+          line.append(" REVERSE");
+        }
+        append_line(line);
+      } else if (const auto* aggregate = std::get_if<PhysicalAggregateNode>(&node.payload);
+                 aggregate != nullptr) {
+        std::string line = "AGGREGATE CORE " + std::to_string(aggregate->core_index) + " ";
+        switch (aggregate->strategy) {
+          case PhysicalAggregateStrategy::kGlobal:
+            line.append("GLOBAL");
+            break;
+          case PhysicalAggregateStrategy::kIndexedMinMax:
+            line.append("INDEXED MIN/MAX");
+            break;
+          case PhysicalAggregateStrategy::kOrderedGroup:
+            line.append("GROUPS USING INPUT ORDER");
+            break;
+          case PhysicalAggregateStrategy::kSortedGroup:
+            line.append("GROUPS USING TEMP SORTER");
+            break;
+        }
+        append_line(line);
+      } else if (const auto* having = std::get_if<PhysicalHavingNode>(&node.payload);
+                 having != nullptr) {
+        append_line("HAVING CORE " + std::to_string(having->core_index));
+      } else if (const auto* sort = std::get_if<PhysicalSortNode>(&node.payload); sort != nullptr) {
+        append_line(sort->input_order_satisfied ? "ORDER USING INPUT ORDER" : "ORDER USING SORTER");
       } else if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&node.payload);
                  distinct != nullptr) {
         append_line("DISTINCT CORE " + std::to_string(distinct->core_index) +
@@ -2693,7 +3780,11 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
         append_line("COMPOUND USING " + strategy);
       } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&node.payload);
                  order != nullptr) {
-        append_line(order->set_then_order ? "ORDER SET RESULT" : "ORDER ARM STREAMS");
+        if (order->input_order_satisfied) {
+          append_line("ORDER USING INPUT ORDER");
+        } else {
+          append_line(order->set_then_order ? "ORDER SET RESULT" : "ORDER ARM STREAMS");
+        }
       }
     }
     return explain;

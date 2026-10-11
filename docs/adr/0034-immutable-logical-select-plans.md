@@ -43,7 +43,7 @@ that:
 - future joins, grouping, ordering, and compounds can extend reviewed plan
   variants instead of accumulating planner flags in a syntax structure.
 
-The current parser and binder intentionally support only:
+The initial parser and binder intentionally supported only:
 
 - zero or one table source;
 - optional WHERE;
@@ -52,8 +52,10 @@ The current parser and binder intentionally support only:
 - no joins, DISTINCT, aggregation, grouping, ordering, compounds, subqueries,
   or windows.
 
-The logical plan must remain the smallest representation of that current
-grammar. It must not pre-design multi-source schemas, statistics, costs,
+ADR-0054, ADR-0056, and ADR-0061 subsequently append ordering,
+VALUES/compound, and aggregate/HAVING nodes to the same immutable arena.
+Those extensions preserve this ownership boundary; joins, subqueries, and
+windows remain deferred. The logical plan must not pre-design statistics,
 physical cursors, registers, or bytecode control flow.
 
 ### Observable evaluation order

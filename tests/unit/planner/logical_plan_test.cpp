@@ -114,6 +114,8 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("distinct", LogicalNodeKindName(LogicalNodeKind::kDistinct));
   EXPECT_EQ("compound", LogicalNodeKindName(LogicalNodeKind::kCompound));
   EXPECT_EQ("advanced_order", LogicalNodeKindName(LogicalNodeKind::kAdvancedOrder));
+  EXPECT_EQ("aggregate", LogicalNodeKindName(LogicalNodeKind::kAggregate));
+  EXPECT_EQ("having", LogicalNodeKindName(LogicalNodeKind::kHaving));
   EXPECT_EQ("unknown",
             LogicalNodeKindName(static_cast<LogicalNodeKind>(255)));  // NOLINT
   EXPECT_EQ("insert", LogicalMutationKindName(LogicalMutationKind::kInsert));
@@ -137,13 +139,63 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalPlanError{.code = LogicalPlanErrorCode::kInternalInvariant}.base_error_code());
 }
 
-TEST(LogicalPlan, RejectsAggregateQueriesUntilAggregatePlanning) {
+TEST(LogicalPlan, BuildsAggregateQueries) {
   const CatalogSnapshotPtr catalog = TestCatalog();
-  BuildLogicalPlanResult plan = BuildLogicalPlan(BindOrThrow("SELECT count() FROM Items", catalog));
+  BuildLogicalPlanResult plan =
+      BuildLogicalPlan(BindOrThrow("SELECT Name,count() AS total FROM Items WHERE id>0 "
+                                   "GROUP BY Name HAVING total>0 LIMIT 1 OFFSET 1",
+                                   catalog));
 
-  ASSERT_FALSE(plan.has_value());
-  EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, plan.error().code);
-  EXPECT_EQ("aggregate planning is not implemented", plan.error().detail);
+  ASSERT_TRUE(plan.has_value()) << plan.error().detail;
+  ASSERT_EQ(6U, plan->nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kScan, LogicalNodeKindOf(plan->nodes()[0]));
+  EXPECT_EQ(LogicalNodeKind::kFilter, LogicalNodeKindOf(plan->nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kAggregate, LogicalNodeKindOf(plan->nodes()[2]));
+  EXPECT_EQ(LogicalNodeKind::kHaving, LogicalNodeKindOf(plan->nodes()[3]));
+  EXPECT_EQ(LogicalNodeKind::kLimit, LogicalNodeKindOf(plan->nodes()[4]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(plan->nodes()[5]));
+  const auto& aggregate = std::get<LogicalAggregateNode>(plan->nodes()[2].payload);
+  EXPECT_EQ(LogicalNodeId{1}, aggregate.input);
+  EXPECT_EQ(0U, aggregate.core_index);
+  const auto& having = std::get<LogicalHavingNode>(plan->nodes()[3].payload);
+  EXPECT_EQ(LogicalNodeId{2}, having.input);
+  EXPECT_EQ(0U, having.core_index);
+  const auto& core = std::get<BoundSelectCore>(plan->bound_select().query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  EXPECT_EQ(core.aggregate->having, std::optional<BoundExpressionId>{having.predicate});
+  EXPECT_EQ(LogicalNodeId{5}, plan->root());
+
+  const LogicalPlan ordered =
+      PlanOrThrow("SELECT count() FROM Items ORDER BY abs(?) NULLS LAST LIMIT 0", catalog);
+  ASSERT_EQ(5U, ordered.nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kScan, LogicalNodeKindOf(ordered.nodes()[0]));
+  EXPECT_EQ(LogicalNodeKind::kAggregate, LogicalNodeKindOf(ordered.nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kOrder, LogicalNodeKindOf(ordered.nodes()[2]));
+  EXPECT_EQ(LogicalNodeKind::kLimit, LogicalNodeKindOf(ordered.nodes()[3]));
+  EXPECT_EQ(LogicalNodeKind::kOutput, LogicalNodeKindOf(ordered.nodes()[4]));
+}
+
+TEST(LogicalPlan, BuildsAggregateDistinctAndCompoundCorePhases) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const LogicalPlan distinct = PlanOrThrow("SELECT DISTINCT count() FROM Items", catalog);
+  ASSERT_EQ(4U, distinct.nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kScan, LogicalNodeKindOf(distinct.nodes()[0]));
+  EXPECT_EQ(LogicalNodeKind::kAggregate, LogicalNodeKindOf(distinct.nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(distinct.nodes()[2]));
+  EXPECT_EQ(LogicalNodeKind::kDistinct, LogicalNodeKindOf(distinct.nodes()[3]));
+
+  const LogicalPlan compound = PlanOrThrow(
+      "SELECT count() FROM Items "
+      "UNION ALL SELECT count() FROM Items GROUP BY Name ORDER BY 1",
+      catalog);
+  ASSERT_EQ(9U, compound.nodes().size());
+  EXPECT_EQ(LogicalNodeKind::kAggregate, LogicalNodeKindOf(compound.nodes()[1]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(compound.nodes()[2]));
+  EXPECT_EQ(LogicalNodeKind::kAggregate, LogicalNodeKindOf(compound.nodes()[4]));
+  EXPECT_EQ(LogicalNodeKind::kProjection, LogicalNodeKindOf(compound.nodes()[5]));
+  EXPECT_EQ(LogicalNodeKind::kCompound, LogicalNodeKindOf(compound.nodes()[6]));
+  EXPECT_EQ(LogicalNodeKind::kAdvancedOrder, LogicalNodeKindOf(compound.nodes()[7]));
+  EXPECT_EQ(LogicalNodeKind::kOutput, LogicalNodeKindOf(compound.nodes()[8]));
 }
 
 TEST(LogicalStatementPlan, BuildsTypedMutationAndTransactionPayloads) {

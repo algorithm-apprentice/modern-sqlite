@@ -200,6 +200,23 @@ bool inject_failure = false;
   return std::move(*logical);
 }
 
+[[nodiscard]] modern_sqlite::LogicalPlan LogicalAggregateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  using namespace modern_sqlite;
+  BindSelectResult bound =
+      BindSelectStatement(ParseTree("SELECT Name,count() AS total FROM Items WHERE id>0 "
+                                    "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1"),
+                          catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind optimizer aggregate OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to build optimizer aggregate OOM fixture"};
+  }
+  return std::move(*logical);
+}
+
 [[nodiscard]] modern_sqlite::LogicalStatementPlan LogicalMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   using namespace modern_sqlite;
@@ -400,6 +417,38 @@ int main() try {
     }
   }
   if (!OptimizeLogicalPlan(LogicalCompoundFixture(catalog)).has_value()) {
+    return 1;
+  }
+
+  LogicalPlan aggregate_baseline_logical = LogicalAggregateFixture(indexed_catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const OptimizeLogicalPlanResult aggregate_baseline =
+      OptimizeLogicalPlan(std::move(aggregate_baseline_logical));
+  if (!aggregate_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t aggregate_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (aggregate_allocation_count == 0U || aggregate_allocation_count > 256U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < aggregate_allocation_count; ++failure) {
+    LogicalPlan logical = LogicalAggregateFixture(indexed_catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+          OptimizeLogicalPlan(std::move(logical));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  if (!OptimizeLogicalPlan(LogicalAggregateFixture(indexed_catalog)).has_value()) {
     return 1;
   }
 

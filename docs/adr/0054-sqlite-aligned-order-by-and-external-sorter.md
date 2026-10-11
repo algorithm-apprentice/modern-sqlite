@@ -525,6 +525,11 @@ ordering from:
 - compatible collation, direction, and NULL placement; and
 - a complete order, not a partial prefix.
 
+ADR-0061 is that reviewed follow-up for aggregate plans only. It may publish
+`input_order_satisfied=true` for at-most-one aggregate output or a complete
+GROUP BY delivery proof. Ordinary nonaggregate ORDER BY plans remain
+unchanged.
+
 Partial/block sorting remains disabled until its own baseline and reviewed
 optimizer extension.
 

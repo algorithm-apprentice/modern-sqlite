@@ -138,10 +138,22 @@ struct LogicalCompoundNode {
   std::vector<BoundCollationId> collations{};
 };
 
+struct LogicalAggregateNode {
+  LogicalNodeId input;
+  std::size_t core_index = 0;
+};
+
+struct LogicalHavingNode {
+  LogicalNodeId input;
+  std::size_t core_index = 0;
+  BoundExpressionId predicate;
+};
+
 using LogicalNodePayload =
     std::variant<LogicalSingleRowNode, LogicalScanNode, LogicalFilterNode, LogicalLimitNode,
                  LogicalProjectionNode, LogicalOrderNode, LogicalOutputNode, LogicalValuesNode,
-                 LogicalDistinctNode, LogicalCompoundNode, LogicalAdvancedOrderNode>;
+                 LogicalDistinctNode, LogicalCompoundNode, LogicalAdvancedOrderNode,
+                 LogicalAggregateNode, LogicalHavingNode>;
 
 struct LogicalNode {
   LogicalNodePayload payload;
@@ -159,6 +171,8 @@ enum class LogicalNodeKind : std::uint8_t {
   kDistinct,
   kCompound,
   kAdvancedOrder,
+  kAggregate,
+  kHaving,
 };
 
 [[nodiscard]] LogicalNodeKind LogicalNodeKindOf(const LogicalNode& node) noexcept;

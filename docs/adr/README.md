@@ -64,3 +64,4 @@ their corresponding implementation begins.
 58. [ADR-0058: Statement-Owned Temporary Storage Budgets](0058-statement-temporary-storage-budgets.md)
 59. [ADR-0059: SQLite-Aligned Aggregate Function State](0059-sqlite-aligned-aggregate-function-state.md)
 60. [ADR-0060: SQLite-Aligned Aggregate Binding](0060-sqlite-aligned-aggregate-binding.md)
+61. [ADR-0061: SQLite-Aligned Aggregate Planning](0061-sqlite-aligned-aggregate-planning.md)
