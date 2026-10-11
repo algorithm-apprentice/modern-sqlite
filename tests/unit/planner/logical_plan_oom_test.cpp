@@ -117,6 +117,18 @@ bool inject_failure = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundSelect BindAggregateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
+      ParseTree("SELECT Name,count() AS total FROM Items WHERE id>0 "
+                "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind aggregate logical-plan OOM fixture"};
+  }
+  return std::move(*bound);
+}
+
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   modern_sqlite::BindStatementResult bound = modern_sqlite::BindStatement(
@@ -243,6 +255,37 @@ int main() try {
     }
   }
   if (!BuildLogicalPlan(BindCompoundFixture(catalog)).has_value()) {
+    return 1;
+  }
+
+  BoundSelect aggregate_baseline_bound = BindAggregateFixture(catalog);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const BuildLogicalPlanResult aggregate_baseline =
+      BuildLogicalPlan(std::move(aggregate_baseline_bound));
+  if (!aggregate_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t aggregate_allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (aggregate_allocation_count == 0U || aggregate_allocation_count > 64U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < aggregate_allocation_count; ++failure) {
+    BoundSelect bound = BindAggregateFixture(catalog);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const BuildLogicalPlanResult unexpected = BuildLogicalPlan(std::move(bound));
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+  }
+  if (!BuildLogicalPlan(BindAggregateFixture(catalog)).has_value()) {
     return 1;
   }
 

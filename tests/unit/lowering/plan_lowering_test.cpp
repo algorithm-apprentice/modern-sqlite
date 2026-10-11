@@ -755,6 +755,16 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(PlanLowering, RejectsAggregatePlansUntilAggregateLowering) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan plan = OptimizeOrThrow("SELECT count() FROM Items", catalog);
+
+  LowerPlanResult lowered = LowerPlan(plan);
+  ASSERT_FALSE(lowered.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
+  EXPECT_EQ("aggregate lowering is not implemented", lowered.error().detail);
+}
+
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));

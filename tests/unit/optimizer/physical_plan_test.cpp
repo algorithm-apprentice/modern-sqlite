@@ -429,7 +429,7 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      ReturnOne},
   }};
-  static const FunctionRegistry registry{functions};
+  static const FunctionRegistry registry{functions, CoreFunctionRegistry().aggregate_functions()};
   static const std::array<const Collation*, 3> collations{
       &BinaryCollation(),
       &NoCaseCollation(),
@@ -547,6 +547,26 @@ class ReverseCollation final : public Collation {
   return std::move(*physical);
 }
 
+[[nodiscard]] const PhysicalAggregateNode& AggregateNode(const PhysicalPlan& plan) {
+  const auto node = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& candidate) {
+    return std::holds_alternative<PhysicalAggregateNode>(candidate.payload);
+  });
+  if (node == plan.nodes().end()) {
+    throw std::runtime_error{"physical plan has no aggregate node"};
+  }
+  return std::get<PhysicalAggregateNode>(node->payload);
+}
+
+[[nodiscard]] const PhysicalSortNode& SortNode(const PhysicalPlan& plan) {
+  const auto node = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& candidate) {
+    return std::holds_alternative<PhysicalSortNode>(candidate.payload);
+  });
+  if (node == plan.nodes().end()) {
+    throw std::runtime_error{"physical plan has no sort node"};
+  }
+  return std::get<PhysicalSortNode>(node->payload);
+}
+
 [[nodiscard]] PhysicalStatementPlan OptimizeStatementOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
     BindEnvironment environment = BindEnvironment::Core()) {
@@ -602,6 +622,8 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("distinct", PhysicalNodeKindName(PhysicalNodeKind::kDistinct));
   EXPECT_EQ("compound", PhysicalNodeKindName(PhysicalNodeKind::kCompound));
   EXPECT_EQ("advanced_order", PhysicalNodeKindName(PhysicalNodeKind::kAdvancedOrder));
+  EXPECT_EQ("aggregate", PhysicalNodeKindName(PhysicalNodeKind::kAggregate));
+  EXPECT_EQ("having", PhysicalNodeKindName(PhysicalNodeKind::kHaving));
   EXPECT_EQ("unknown",
             PhysicalNodeKindName(static_cast<PhysicalNodeKind>(255)));  // NOLINT
 
@@ -616,6 +638,332 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             OptimizerError{.code = OptimizerErrorCode::kUnsupportedFeature}.base_error_code());
   EXPECT_EQ(ErrorCode::kInternal,
             OptimizerError{.code = OptimizerErrorCode::kInternalInvariant}.base_error_code());
+}
+
+TEST(PhysicalPlan, PlansGlobalAggregate) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  BuildLogicalPlanResult logical =
+      BuildLogicalPlan(BindOrThrow("SELECT count() FROM Items", catalog));
+  ASSERT_TRUE(logical.has_value()) << logical.error().detail;
+
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  ASSERT_TRUE(physical.has_value()) << physical.error().detail;
+  ASSERT_EQ(3U, physical->nodes().size());
+  EXPECT_EQ(PhysicalNodeKind::kTableScan, PhysicalNodeKindOf(physical->nodes()[0]));
+  EXPECT_EQ(PhysicalNodeKind::kAggregate, PhysicalNodeKindOf(physical->nodes()[1]));
+  EXPECT_EQ(PhysicalNodeKind::kProjection, PhysicalNodeKindOf(physical->nodes()[2]));
+  const auto& aggregate = std::get<PhysicalAggregateNode>(physical->nodes()[1].payload);
+  EXPECT_EQ(PhysicalNodeId{0}, aggregate.input);
+  EXPECT_EQ(0U, aggregate.core_index);
+  EXPECT_EQ(PhysicalAggregateStrategy::kGlobal, aggregate.strategy);
+  EXPECT_FALSE(aggregate.min_max.has_value());
+  EXPECT_TRUE(aggregate.grouping_order.empty());
+  EXPECT_TRUE(aggregate.at_most_one_row);
+  ASSERT_EQ(1U, physical->candidates().size());
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, physical->selected_candidate()->kind);
+  EXPECT_EQ(
+      "CORE 0 SCAN \"Items\"\n"
+      "AGGREGATE CORE 0 GLOBAL",
+      ExplainPhysicalPlan(*physical));
+
+  const PhysicalPlan having =
+      OptimizeOrThrow("SELECT count() FROM Items HAVING count()>0", catalog);
+  const auto having_node = std::ranges::find_if(having.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalHavingNode>(node.payload);
+  });
+  ASSERT_NE(having.nodes().end(), having_node);
+  EXPECT_EQ(0U, std::get<PhysicalHavingNode>(having_node->payload).core_index);
+}
+
+TEST(PhysicalPlan, PlansStableSortedGrouping) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  BuildLogicalPlanResult logical = BuildLogicalPlan(
+      BindOrThrow("SELECT Name || '',count() FROM Items GROUP BY Name || ''", catalog));
+  ASSERT_TRUE(logical.has_value()) << logical.error().detail;
+
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  ASSERT_TRUE(physical.has_value()) << physical.error().detail;
+  ASSERT_EQ(3U, physical->nodes().size());
+  const auto& aggregate = std::get<PhysicalAggregateNode>(physical->nodes()[1].payload);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, aggregate.strategy);
+  EXPECT_FALSE(aggregate.min_max.has_value());
+  ASSERT_EQ(1U, aggregate.grouping_order.size());
+  EXPECT_EQ(0U, aggregate.grouping_order[0].group_term_index);
+  EXPECT_EQ(SortOrder::kAscending, aggregate.grouping_order[0].order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, aggregate.grouping_order[0].null_placement);
+  EXPECT_FALSE(aggregate.at_most_one_row);
+  EXPECT_EQ(
+      "CORE 0 SCAN \"Items\"\n"
+      "AGGREGATE CORE 0 GROUPS USING TEMP SORTER",
+      ExplainPhysicalPlan(*physical));
+}
+
+TEST(PhysicalPlan, PreservesEmptyAndSingleRowAggregateInputs) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const PhysicalPlan empty_global = OptimizeOrThrow("SELECT count() FROM Items WHERE 0", catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(empty_global.nodes().front().payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kGlobal, AggregateNode(empty_global).strategy);
+  EXPECT_TRUE(AggregateNode(empty_global).at_most_one_row);
+
+  const PhysicalPlan empty_group =
+      OptimizeOrThrow("SELECT Name,count() FROM Items WHERE 0 GROUP BY Name", catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(empty_group.nodes().front().payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(empty_group).strategy);
+  EXPECT_TRUE(AggregateNode(empty_group).at_most_one_row);
+
+  const PhysicalPlan single = OptimizeOrThrow("SELECT 1,count() GROUP BY 1", catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalSingleRowNode>(single.nodes().front().payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(single).strategy);
+  EXPECT_TRUE(AggregateNode(single).at_most_one_row);
+
+  const PhysicalPlan ordered_single =
+      OptimizeOrThrow("SELECT abs(?1),count() GROUP BY abs(?1) ORDER BY abs(?1) DESC", catalog);
+  EXPECT_TRUE(AggregateNode(ordered_single).at_most_one_row);
+  EXPECT_TRUE(SortNode(ordered_single).input_order_satisfied);
+}
+
+TEST(PhysicalPlan, PlansAggregateDistinctAndCompoundCores) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan compound = OptimizeOrThrow(
+      "SELECT count() FROM Items "
+      "UNION ALL SELECT count() FROM Items GROUP BY Name ORDER BY 1",
+      catalog);
+  std::vector<PhysicalAggregateStrategy> strategies;
+  for (const PhysicalNode& node : compound.nodes()) {
+    if (const auto* aggregate = std::get_if<PhysicalAggregateNode>(&node.payload);
+        aggregate != nullptr) {
+      strategies.push_back(aggregate->strategy);
+    }
+  }
+  EXPECT_EQ((std::vector{
+                PhysicalAggregateStrategy::kGlobal,
+                PhysicalAggregateStrategy::kSortedGroup,
+            }),
+            strategies);
+
+  const PhysicalPlan distinct =
+      OptimizeOrThrow("SELECT DISTINCT count() FROM Items ORDER BY 1", catalog);
+  const auto order = std::ranges::find_if(distinct.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(distinct.nodes().end(), order);
+  EXPECT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+
+  const CatalogSnapshotPtr indexed = IndexedCatalog();
+  const PhysicalPlan constrained = OptimizeOrThrow(
+      "SELECT count() "
+      "UNION ALL SELECT count() FROM Items WHERE Category=?1 GROUP BY Score",
+      indexed);
+  const auto index_scan = std::ranges::find_if(constrained.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+  });
+  ASSERT_NE(constrained.nodes().end(), index_scan);
+  EXPECT_EQ(1U, std::get<PhysicalIndexScanNode>(index_scan->payload).equalities.size());
+  const auto second_aggregate =
+      std::ranges::find_if(constrained.nodes(), [](const PhysicalNode& node) {
+        const auto* aggregate = std::get_if<PhysicalAggregateNode>(&node.payload);
+        return aggregate != nullptr && aggregate->core_index == 1U;
+      });
+  ASSERT_NE(constrained.nodes().end(), second_aggregate);
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup,
+            std::get<PhysicalAggregateNode>(second_aggregate->payload).strategy);
+}
+
+TEST(PhysicalPlan, SelectsIndexedMinMaxDirectionsAndFallbacks) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+
+  const PhysicalPlan minimum = OptimizeOrThrow("SELECT min(Score) FROM Items", catalog);
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(minimum.nodes().front().payload));
+  const auto& minimum_scan =
+      std::get<PhysicalIndexScanNode>(minimum.node(PhysicalNodeId{0}).payload);
+  EXPECT_EQ(IndexId{1}, minimum_scan.index);
+  EXPECT_TRUE(minimum_scan.covering);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, minimum_scan.direction);
+  const PhysicalAggregateNode& minimum_aggregate = AggregateNode(minimum);
+  EXPECT_EQ(PhysicalAggregateStrategy::kIndexedMinMax, minimum_aggregate.strategy);
+  ASSERT_TRUE(minimum_aggregate.min_max.has_value());
+  EXPECT_EQ(PhysicalMinMaxNullStrategy::kNonNullFirstWithSingleNullFallback,
+            minimum_aggregate.min_max->null_strategy);
+  EXPECT_FALSE(minimum_aggregate.min_max->argument_fixed_by_equality);
+  ASSERT_NE(nullptr, minimum.selected_candidate());
+  EXPECT_EQ(std::optional<IndexId>{IndexId{1}}, minimum.selected_candidate()->index);
+  EXPECT_EQ(
+      "SCAN \"Items\" USING COVERING INDEX \"items_score_desc\" REVERSE\n"
+      "AGGREGATE CORE 0 INDEXED MIN/MAX",
+      ExplainPhysicalPlan(minimum));
+
+  const PhysicalPlan maximum = OptimizeOrThrow("SELECT max(Score) FROM Items", catalog);
+  EXPECT_EQ(PhysicalScanDirection::kForward,
+            std::get<PhysicalIndexScanNode>(maximum.nodes().front().payload).direction);
+
+  const PhysicalPlan noncovering = OptimizeOrThrow("SELECT min(Score),Payload FROM Items", catalog);
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(noncovering.nodes().front().payload).covering);
+  EXPECT_EQ(PhysicalAggregateStrategy::kIndexedMinMax, AggregateNode(noncovering).strategy);
+
+  const PhysicalPlan fixed =
+      OptimizeOrThrow("SELECT min(Score) FROM Items WHERE Score=?1", catalog);
+  const PhysicalAggregateNode& fixed_aggregate = AggregateNode(fixed);
+  ASSERT_TRUE(fixed_aggregate.min_max.has_value());
+  EXPECT_TRUE(fixed_aggregate.min_max->argument_fixed_by_equality);
+
+  const PhysicalPlan fixed_null =
+      OptimizeOrThrow("SELECT min(Score) FROM Items WHERE Score IS NULL", catalog);
+  const PhysicalAggregateNode& fixed_null_aggregate = AggregateNode(fixed_null);
+  ASSERT_TRUE(fixed_null_aggregate.min_max.has_value());
+  EXPECT_TRUE(fixed_null_aggregate.min_max->argument_fixed_by_equality);
+  EXPECT_EQ(PhysicalMinMaxNullStrategy::kNonNullFirstWithSingleNullFallback,
+            fixed_null_aggregate.min_max->null_strategy);
+
+  const PhysicalPlan ranged =
+      OptimizeOrThrow("SELECT min(Score) FROM Items WHERE Score>=?1 AND Score<?2", catalog);
+  const auto& ranged_scan = std::get<PhysicalIndexScanNode>(ranged.node(PhysicalNodeId{0}).payload);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, ranged_scan.direction);
+  ASSERT_TRUE(ranged_scan.range.has_value());
+  EXPECT_TRUE(ranged_scan.range->lower.has_value());
+  EXPECT_TRUE(ranged_scan.range->upper.has_value());
+
+  for (const std::string_view sql : {
+           "SELECT min(Score),max(Score) FROM Items",
+           "SELECT min(Score) FILTER (WHERE Flag) FROM Items",
+           "SELECT min(Score) FROM Items HAVING min(Score)>0",
+           "SELECT min(Category COLLATE BINARY) FROM Items",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_EQ(PhysicalAggregateStrategy::kGlobal,
+              AggregateNode(OptimizeOrThrow(sql, catalog)).strategy);
+  }
+
+  const CatalogSnapshotPtr rowid_catalog = TestCatalog();
+  const PhysicalPlan rowid_min = OptimizeOrThrow("SELECT min(id) FROM Items", rowid_catalog);
+  EXPECT_EQ(PhysicalScanDirection::kForward,
+            std::get<PhysicalTableScanNode>(rowid_min.nodes().front().payload).direction);
+  const PhysicalAggregateNode& rowid_min_aggregate = AggregateNode(rowid_min);
+  ASSERT_TRUE(rowid_min_aggregate.min_max.has_value());
+  EXPECT_EQ(PhysicalMinMaxNullStrategy::kNone, rowid_min_aggregate.min_max->null_strategy);
+  const PhysicalPlan rowid_max = OptimizeOrThrow("SELECT max(_rowid_) FROM Items", rowid_catalog);
+  EXPECT_EQ(PhysicalScanDirection::kReverse,
+            std::get<PhysicalTableScanNode>(rowid_max.nodes().front().payload).direction);
+}
+
+TEST(PhysicalPlan, SelectsOrderedGroupingAndPreservesDeliveredTermOrder) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan permuted =
+      OptimizeOrThrow("SELECT Score,Category,count() FROM Items GROUP BY Score,Category", catalog);
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(permuted.nodes().front().payload));
+  const auto& scan = std::get<PhysicalIndexScanNode>(permuted.node(PhysicalNodeId{0}).payload);
+  EXPECT_EQ(IndexId{0}, scan.index);
+  const PhysicalAggregateNode& aggregate = AggregateNode(permuted);
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, aggregate.strategy);
+  ASSERT_EQ(2U, aggregate.grouping_order.size());
+  EXPECT_EQ(1U, aggregate.grouping_order[0].group_term_index);
+  EXPECT_EQ(SortOrder::kAscending, aggregate.grouping_order[0].order);
+  EXPECT_EQ(BoundNullPlacement::kFirst, aggregate.grouping_order[0].null_placement);
+  EXPECT_EQ(0U, aggregate.grouping_order[1].group_term_index);
+  EXPECT_EQ(SortOrder::kDescending, aggregate.grouping_order[1].order);
+  EXPECT_EQ(BoundNullPlacement::kLast, aggregate.grouping_order[1].null_placement);
+
+  const PhysicalPlan equality_prefix =
+      OptimizeOrThrow("SELECT Score,count() FROM Items WHERE Category=?1 GROUP BY Score", catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(equality_prefix).strategy);
+  ASSERT_EQ(1U, AggregateNode(equality_prefix).grouping_order.size());
+  EXPECT_EQ(SortOrder::kDescending, AggregateNode(equality_prefix).grouping_order[0].order);
+
+  const PhysicalPlan noncovering =
+      OptimizeOrThrow("SELECT Category,Payload,count() FROM Items GROUP BY Category", catalog);
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(noncovering.nodes().front().payload).covering);
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(noncovering).strategy);
+
+  const PhysicalPlan mismatch = OptimizeOrThrow(
+      "SELECT Category COLLATE BINARY,count() FROM Items "
+      "GROUP BY Category COLLATE BINARY",
+      catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(mismatch).strategy);
+
+  const PhysicalPlan equality_mismatch = OptimizeOrThrow(
+      "SELECT Category COLLATE BINARY,count() FROM Items WHERE Category=?1 "
+      "GROUP BY Category COLLATE BINARY",
+      catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(equality_mismatch).strategy);
+
+  const PhysicalPlan unordered =
+      OptimizeOrThrow("SELECT Code,count() FROM Items GROUP BY Code", catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(unordered).strategy);
+
+  const PhysicalPlan expression = OptimizeOrThrow(
+      "SELECT lower(Category),count() FROM Items GROUP BY lower(Category)", catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(expression).strategy);
+
+  const PhysicalPlan volatile_group =
+      OptimizeOrThrow("SELECT volatile_key(),count() FROM Items GROUP BY volatile_key()", catalog,
+                      TestEnvironment());
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(volatile_group).strategy);
+}
+
+TEST(PhysicalPlan, EliminatesOnlyProvenAggregateOrdering) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+
+  const PhysicalPlan global =
+      OptimizeOrThrow("SELECT count() FROM Items ORDER BY abs(?) ASC NULLS LAST", catalog);
+  EXPECT_TRUE(SortNode(global).input_order_satisfied);
+
+  const CatalogSnapshotPtr unordered_catalog = TestCatalog();
+  const PhysicalPlan hidden_order =
+      OptimizeOrThrow("SELECT count() FROM Items GROUP BY ?1 ORDER BY volatile_key()",
+                      unordered_catalog, TestEnvironment());
+  EXPECT_TRUE(AggregateNode(hidden_order).at_most_one_row);
+  EXPECT_FALSE(SortNode(hidden_order).input_order_satisfied);
+
+  const PhysicalPlan fixed_group_order = OptimizeOrThrow(
+      "SELECT abs(?1),count() FROM Items "
+      "GROUP BY abs(?1) ORDER BY abs(?1) DESC",
+      unordered_catalog);
+  EXPECT_TRUE(AggregateNode(fixed_group_order).at_most_one_row);
+  EXPECT_TRUE(SortNode(fixed_group_order).input_order_satisfied);
+
+  const PhysicalPlan sorted = OptimizeOrThrow(
+      "SELECT Name || '',count() FROM Items "
+      "GROUP BY Name || '' ORDER BY Name || '' DESC",
+      unordered_catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(sorted).strategy);
+  ASSERT_EQ(1U, AggregateNode(sorted).grouping_order.size());
+  EXPECT_EQ(SortOrder::kDescending, AggregateNode(sorted).grouping_order[0].order);
+  EXPECT_EQ(BoundNullPlacement::kLast, AggregateNode(sorted).grouping_order[0].null_placement);
+  EXPECT_TRUE(SortNode(sorted).input_order_satisfied);
+
+  const PhysicalPlan nondefault_nulls = OptimizeOrThrow(
+      "SELECT Name || '',count() FROM Items "
+      "GROUP BY Name || '' ORDER BY Name || '' ASC NULLS LAST",
+      unordered_catalog);
+  EXPECT_FALSE(SortNode(nondefault_nulls).input_order_satisfied);
+
+  const PhysicalPlan reversed = OptimizeOrThrow(
+      "SELECT Category,count() FROM Items GROUP BY Category ORDER BY Category DESC", catalog);
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(reversed).strategy);
+  EXPECT_EQ(PhysicalScanDirection::kReverse,
+            std::get<PhysicalIndexScanNode>(reversed.nodes().front().payload).direction);
+  EXPECT_EQ(SortOrder::kDescending, AggregateNode(reversed).grouping_order[0].order);
+  EXPECT_EQ(BoundNullPlacement::kLast, AggregateNode(reversed).grouping_order[0].null_placement);
+  EXPECT_TRUE(SortNode(reversed).input_order_satisfied);
+
+  const PhysicalPlan permutation = OptimizeOrThrow(
+      "SELECT Score,Category,count() FROM Items "
+      "GROUP BY Score,Category ORDER BY Score,Category",
+      catalog);
+  EXPECT_FALSE(SortNode(permutation).input_order_satisfied);
+
+  const PhysicalPlan fixed_prefix = OptimizeOrThrow(
+      "SELECT Category,Score,count() FROM Items WHERE Category=?1 "
+      "GROUP BY Category,Score ORDER BY Category,Score DESC",
+      catalog);
+  EXPECT_TRUE(SortNode(fixed_prefix).input_order_satisfied);
+
+  const CatalogSnapshotPtr rowid_catalog = TestCatalog();
+  const PhysicalPlan rowid_alias = OptimizeOrThrow(
+      "SELECT id,count() FROM Items GROUP BY _rowid_ ORDER BY id DESC", rowid_catalog);
+  EXPECT_EQ(PhysicalScanDirection::kReverse,
+            std::get<PhysicalTableScanNode>(rowid_alias.nodes().front().payload).direction);
+  EXPECT_TRUE(SortNode(rowid_alias).input_order_satisfied);
 }
 
 TEST(PhysicalPlan, OptimizesDistinctValuesAndCompoundQueries) {

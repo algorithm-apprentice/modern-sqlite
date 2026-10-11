@@ -252,6 +252,18 @@ int main() try {
   if (compound_allocations == 0U || compound_allocations > 128U) {
     return 1;
   }
+  constexpr std::string_view kAggregateSql =
+      "SELECT Name,count() AS total FROM Items WHERE id>0 "
+      "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1";
+  const std::size_t aggregate_allocations = OptimizeAllocationCount(kAggregateSql, indexed_catalog);
+  if (aggregate_allocations != 46U) {
+    return 1;
+  }
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    if (OptimizeAllocationCount(kAggregateSql, indexed_catalog) != aggregate_allocations) {
+      return 1;
+    }
+  }
 
   LogicalStatementPlan mutation_logical = LogicalMutationFixture(catalog);
   allocation_count.store(0, std::memory_order_relaxed);
@@ -291,6 +303,13 @@ int main() try {
   }
   std::unique_ptr<PhysicalPlan> compound =
       std::make_unique<PhysicalPlan>(std::move(*compound_built));
+  LogicalPlan aggregate_logical = LogicalFixture(kAggregateSql, indexed_catalog);
+  OptimizeLogicalPlanResult aggregate_built = OptimizeLogicalPlan(std::move(aggregate_logical));
+  if (!aggregate_built.has_value()) {
+    return 1;
+  }
+  std::unique_ptr<PhysicalPlan> aggregate =
+      std::make_unique<PhysicalPlan>(std::move(*aggregate_built));
 
   std::uint64_t checksum = 0;
   fail_allocations = true;
@@ -325,6 +344,16 @@ int main() try {
     const PhysicalNode& node = compound->node(PhysicalNodeId{index});
     checksum += static_cast<std::uint64_t>(PhysicalNodeKindOf(node));
     std::visit([&checksum](const auto&) { ++checksum; }, node.payload);
+  }
+  checksum += aggregate->nodes().size();
+  checksum += aggregate->candidates().size();
+  for (const PhysicalNode& node : aggregate->nodes()) {
+    if (const auto* aggregate_node = std::get_if<PhysicalAggregateNode>(&node.payload);
+        aggregate_node != nullptr) {
+      checksum += static_cast<std::uint64_t>(aggregate_node->strategy);
+      checksum += aggregate_node->grouping_order.size();
+      checksum += aggregate_node->at_most_one_row ? 1U : 0U;
+    }
   }
   const PhysicalMutationPlan& mutation = std::get<PhysicalMutationPlan>(mutation_plan);
   const auto& update = std::get<PhysicalUpdateMutation>(mutation.payload());

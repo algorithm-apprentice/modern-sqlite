@@ -10,7 +10,7 @@ semantics but no access path. The next dependency-graph node must choose the
 first physical read strategy without emitting bytecode or introducing the
 index and join machinery reserved for later work.
 
-The supported SQL remains deliberately small:
+The initial supported SQL was deliberately small:
 
 - zero or one source;
 - optional WHERE;
@@ -20,6 +20,11 @@ The supported SQL remains deliberately small:
   `sqlite_schema` source; and
 - no joins, ordering, grouping, aggregation, DISTINCT, compounds,
   subqueries, windows, or index hints.
+
+ADR-0052 later adds ordinary-index access, and ADR-0061 adds aggregate
+physical strategies plus aggregate-only reverse scan metadata. Ordinary
+nonaggregate plans retain the forward table/rowid/index behavior and cost
+contract defined here.
 
 The module-graph deliverable is:
 

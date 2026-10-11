@@ -502,14 +502,14 @@ TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {
   }
 }
 
-TEST(ReadSession, RejectsBoundAggregatesAtThePlannerBoundary) {
+TEST(ReadSession, RejectsPlannedAggregatesAtTheLoweringBoundary) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
 
   const auto prepared = session.Prepare(Utf8View{"SELECT count(),name FROM items GROUP BY name"});
   ASSERT_FALSE(prepared.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, prepared.error().code());
   EXPECT_NE(std::string_view::npos,
-            prepared.error().message().find("aggregate planning is not implemented"));
+            prepared.error().message().find("aggregate lowering is not implemented"));
 }
 
 TEST(ReadSession, ExecutesConstantsAfterThePublicSessionHandleIsDestroyed) {

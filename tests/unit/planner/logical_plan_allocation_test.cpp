@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -124,6 +125,18 @@ bool fail_allocations = false;
   return std::move(*bound);
 }
 
+[[nodiscard]] modern_sqlite::BoundSelect BindAggregateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
+      ParseTree("SELECT Name,count() AS total FROM Items WHERE id>0 "
+                "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1"),
+      catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind aggregate logical-plan allocation fixture"};
+  }
+  return std::move(*bound);
+}
+
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog) {
   modern_sqlite::BindStatementResult bound =
@@ -201,6 +214,28 @@ int main() try {
   std::unique_ptr<LogicalPlan> compound =
       std::make_unique<LogicalPlan>(std::move(*compound_result));
 
+  std::optional<std::size_t> aggregate_allocations;
+  std::unique_ptr<LogicalPlan> aggregate;
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    BoundSelect bound = BindAggregateFixture(catalog);
+    allocation_count.store(0, std::memory_order_relaxed);
+    count_allocations = true;
+    BuildLogicalPlanResult built = BuildLogicalPlan(std::move(bound));
+    count_allocations = false;
+    const std::size_t current = allocation_count.load(std::memory_order_relaxed);
+    if (!built.has_value() || current != 5U ||
+        (aggregate_allocations.has_value() && current != *aggregate_allocations)) {
+      return 1;
+    }
+    aggregate_allocations = current;
+    if (aggregate == nullptr) {
+      aggregate = std::make_unique<LogicalPlan>(std::move(*built));
+    }
+  }
+  if (aggregate == nullptr) {
+    return 1;
+  }
+
   const LogicalPlan& plan = *published;
   BoundStatement mutation_bound = BindMutationFixture(catalog);
   allocation_count.store(0, std::memory_order_relaxed);
@@ -237,6 +272,8 @@ int main() try {
   checksum += order.output_fields.size();
   checksum += compound->nodes().size();
   checksum += compound->root().value();
+  checksum += aggregate->nodes().size();
+  checksum += aggregate->root().value();
   const LogicalMutationPlan& mutation = std::get<LogicalMutationPlan>(mutation_plan);
   checksum += static_cast<std::uint64_t>(LogicalMutationKindOf(mutation.payload()));
   checksum += LogicalMutationKindName(LogicalMutationKindOf(mutation.payload())).size();

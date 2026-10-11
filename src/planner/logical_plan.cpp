@@ -390,6 +390,30 @@ struct AdvancedOrderLayout {
       input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
     }
 
+    if (select.aggregate.has_value()) {
+      if (index >= nodes.size()) {
+        return std::unexpected{InvariantError("advanced logical aggregate node is missing")};
+      }
+      const auto* aggregate = std::get_if<LogicalAggregateNode>(&nodes[index].payload);
+      if (aggregate == nullptr || aggregate->input != input ||
+          aggregate->core_index != core_index) {
+        return std::unexpected{InvariantError("advanced logical aggregate node is invalid")};
+      }
+      input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
+      if (select.aggregate->having.has_value()) {
+        if (index >= nodes.size()) {
+          return std::unexpected{InvariantError("advanced logical HAVING node is missing")};
+        }
+        const auto* having = std::get_if<LogicalHavingNode>(&nodes[index].payload);
+        if (having == nullptr || having->input != input || having->core_index != core_index ||
+            having->predicate != *select.aggregate->having ||
+            !IsValidExpressionId(bound_select, having->predicate)) {
+          return std::unexpected{InvariantError("advanced logical HAVING node is invalid")};
+        }
+        input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
+      }
+    }
+
     if (index >= nodes.size()) {
       return std::unexpected{InvariantError("advanced logical projection is missing")};
     }
@@ -515,9 +539,13 @@ struct AdvancedOrderLayout {
   }
 
   const bool ordered = !bound_select.order_by().empty();
+  const auto& core = std::get<BoundSelectCore>(bound_select.query_cores().front());
+  const BoundAggregateProgram* aggregate = core.aggregate.has_value() ? &*core.aggregate : nullptr;
   const std::size_t expected_node_count =
       2U + static_cast<std::size_t>(bound_select.where_expression().has_value()) +
-      static_cast<std::size_t>(bound_select.limit() != nullptr) + static_cast<std::size_t>(ordered);
+      static_cast<std::size_t>(bound_select.limit() != nullptr) +
+      static_cast<std::size_t>(ordered) + static_cast<std::size_t>(aggregate != nullptr) +
+      static_cast<std::size_t>(aggregate != nullptr && aggregate->having.has_value());
   if (nodes.size() != expected_node_count) {
     return std::unexpected{
         InvariantError("logical plan node count does not match bound statement")};
@@ -555,6 +583,25 @@ struct AdvancedOrderLayout {
     }
     input = LogicalNodeId{static_cast<std::uint32_t>(index)};
     ++index;
+  }
+
+  if (aggregate != nullptr) {
+    const auto* node = std::get_if<LogicalAggregateNode>(&nodes[index].payload);
+    if (node == nullptr || node->input != input || node->core_index != 0U) {
+      return std::unexpected{
+          InvariantError("logical aggregate node does not match the bound aggregate program")};
+    }
+    input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
+    if (aggregate->having.has_value()) {
+      const auto* having = std::get_if<LogicalHavingNode>(&nodes[index].payload);
+      if (having == nullptr || having->input != input || having->core_index != 0U ||
+          having->predicate != *aggregate->having ||
+          !IsValidExpressionId(bound_select, having->predicate)) {
+        return std::unexpected{
+            InvariantError("logical HAVING node does not match the bound predicate")};
+      }
+      input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
+    }
   }
 
   if (ordered) {
@@ -633,23 +680,18 @@ class LogicalPlanBuilder final {
       return std::unexpected{
           PlanError(LogicalPlanErrorCode::kInvalidInput, "bound select is invalid")};
     }
-    const bool aggregate =
-        std::ranges::any_of(bound_select.query_cores(), [](const BoundQueryCore& core) {
-          const auto* select = std::get_if<BoundSelectCore>(&core);
-          return select != nullptr && select->aggregate.has_value();
-        });
-    if (aggregate) {
-      return std::unexpected{PlanError(LogicalPlanErrorCode::kUnsupportedFeature,
-                                       "aggregate planning is not implemented")};
-    }
     if (IsAdvancedQuery(bound_select)) {
       return BuildAdvanced(std::move(bound_select));
     }
+    const auto& simple_core = std::get<BoundSelectCore>(bound_select.query_cores().front());
+    const BoundAggregateProgram* aggregate =
+        simple_core.aggregate.has_value() ? &*simple_core.aggregate : nullptr;
     const bool ordered = !bound_select.order_by().empty();
     const std::size_t node_count =
         2U + static_cast<std::size_t>(bound_select.where_expression().has_value()) +
         static_cast<std::size_t>(bound_select.limit() != nullptr) +
-        static_cast<std::size_t>(ordered);
+        static_cast<std::size_t>(ordered) + static_cast<std::size_t>(aggregate != nullptr) +
+        static_cast<std::size_t>(aggregate != nullptr && aggregate->having.has_value());
     auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
     impl->nodes.reserve(node_count);
 
@@ -677,6 +719,28 @@ class LogicalPlanBuilder final {
               },
       });
       input = LogicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
+    }
+
+    if (aggregate != nullptr) {
+      impl->nodes.push_back(LogicalNode{
+          .payload =
+              LogicalAggregateNode{
+                  .input = input,
+                  .core_index = 0,
+              },
+      });
+      input = LogicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
+      if (aggregate->having.has_value()) {
+        impl->nodes.push_back(LogicalNode{
+            .payload =
+                LogicalHavingNode{
+                    .input = input,
+                    .core_index = 0,
+                    .predicate = *aggregate->having,
+                },
+        });
+        input = LogicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
+      }
     }
 
     if (ordered) {
@@ -745,7 +809,7 @@ class LogicalPlanBuilder final {
  private:
   [[nodiscard]] static BuildLogicalPlanResult BuildAdvanced(BoundSelect bound_select) {
     auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
-    const std::size_t estimated_nodes = impl->bound_select.query_cores().size() * 4U +
+    const std::size_t estimated_nodes = impl->bound_select.query_cores().size() * 6U +
                                         impl->bound_select.compound_operators().size() + 3U;
     if (estimated_nodes > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected{InvariantError("advanced logical plan exceeds node identities")};
@@ -791,6 +855,26 @@ class LogicalPlanBuilder final {
                     .predicate = *select.where,
                 },
         });
+      }
+
+      if (select.aggregate.has_value()) {
+        input = append(LogicalNode{
+            .payload =
+                LogicalAggregateNode{
+                    .input = input,
+                    .core_index = core_index,
+                },
+        });
+        if (select.aggregate->having.has_value()) {
+          input = append(LogicalNode{
+              .payload =
+                  LogicalHavingNode{
+                      .input = input,
+                      .core_index = core_index,
+                      .predicate = *select.aggregate->having,
+                  },
+          });
+        }
       }
 
       std::vector<BoundExpressionId> projections;
@@ -1049,6 +1133,10 @@ std::string_view LogicalNodeKindName(LogicalNodeKind kind) noexcept {
       return "compound";
     case LogicalNodeKind::kAdvancedOrder:
       return "advanced_order";
+    case LogicalNodeKind::kAggregate:
+      return "aggregate";
+    case LogicalNodeKind::kHaving:
+      return "having";
   }
   return "unknown";
 }

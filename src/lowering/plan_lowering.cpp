@@ -133,6 +133,11 @@ class PlanLowerer final {
     if (bound_select_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound SELECT does not retain a catalog"));
     }
+    if (std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
+          return std::holds_alternative<PhysicalAggregateNode>(node.payload);
+        })) {
+      return std::unexpected(UnsupportedFailure("aggregate lowering is not implemented"));
+    }
     if (auto inspected = InspectPlan(); !inspected.has_value()) {
       return std::unexpected(std::move(inspected.error()));
     }
