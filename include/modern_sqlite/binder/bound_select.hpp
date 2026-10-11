@@ -45,12 +45,16 @@ struct BoundSourceColumnIdTag;
 struct BoundParameterIdTag;
 struct BoundCollationIdTag;
 struct BoundFunctionIdTag;
+struct BoundAggregateFunctionIdTag;
+struct BoundAggregateInvocationIdTag;
 
 using BoundExpressionId = BoundId<BoundExpressionIdTag>;
 using BoundSourceColumnId = BoundId<BoundSourceColumnIdTag>;
 using BoundParameterId = BoundId<BoundParameterIdTag>;
 using BoundCollationId = BoundId<BoundCollationIdTag>;
 using BoundFunctionId = BoundId<BoundFunctionIdTag>;
+using BoundAggregateFunctionId = BoundId<BoundAggregateFunctionIdTag>;
+using BoundAggregateInvocationId = BoundId<BoundAggregateInvocationIdTag>;
 
 enum class BoundSourceKind : std::uint8_t {
   kCatalogTable,
@@ -114,6 +118,19 @@ struct BoundScalarFunction {
   bool uses_collation = false;
 };
 
+enum class BoundAggregateExtremumKind : std::uint8_t {
+  kNone,
+  kMinimum,
+  kMaximum,
+};
+
+struct BoundAggregateFunction {
+  std::string name{};
+  bool deterministic = false;
+  bool uses_collation = false;
+  BoundAggregateExtremumKind extremum = BoundAggregateExtremumKind::kNone;
+};
+
 struct BoundParameter {
   std::optional<std::string> name{};
 };
@@ -123,6 +140,7 @@ struct BoundExpressionProperties {
   std::optional<BoundCollationId> collation{};
   bool has_explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
+  bool contains_aggregate = false;
 };
 
 struct BoundLiteralExpression {
@@ -175,6 +193,10 @@ struct BoundScalarCallExpression {
   std::vector<BoundExpressionId> arguments{};
 };
 
+struct BoundAggregateCallExpression {
+  BoundAggregateInvocationId invocation;
+};
+
 struct BoundCoalesceExpression {
   std::vector<BoundExpressionId> arguments{};
 };
@@ -198,7 +220,7 @@ using BoundExpressionPayload =
                  BoundParameterExpression, BoundUnaryExpression, BoundBinaryExpression,
                  BoundComparisonExpression, BoundTruthTestExpression, BoundAliasReferenceExpression,
                  BoundScalarCallExpression, BoundCoalesceExpression, BoundConditionalExpression,
-                 BoundLikelihoodExpression, BoundCollateExpression>;
+                 BoundLikelihoodExpression, BoundCollateExpression, BoundAggregateCallExpression>;
 
 struct BoundExpression {
   SourceSpan span{};
@@ -221,6 +243,7 @@ enum class BoundExpressionKind : std::uint8_t {
   kConditional,
   kLikelihood,
   kCollate,
+  kAggregateCall,
 };
 
 [[nodiscard]] BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept;
@@ -238,6 +261,44 @@ enum class BoundValuesEvaluationSchedule : std::uint8_t {
   kConsumerFiltered,
 };
 
+enum class BoundNullPlacement : std::uint8_t {
+  kFirst,
+  kLast,
+};
+
+struct BoundOrderingTerm {
+  BoundExpressionId expression;
+  BoundCollationId collation;
+  SortOrder order = SortOrder::kAscending;
+  BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
+  std::optional<std::size_t> result_column{};
+  bool explicit_collation = false;
+};
+
+struct BoundAggregateInvocation {
+  SourceSpan span{};
+  BoundAggregateFunctionId function;
+  BoundCollationId collation;
+  std::vector<BoundExpressionId> arguments{};
+  bool distinct = false;
+  std::vector<BoundOrderingTerm> order_by{};
+  std::optional<BoundExpressionId> filter{};
+};
+
+struct BoundGroupingTerm {
+  BoundExpressionId expression;
+  BoundCollationId collation;
+  std::optional<std::size_t> result_column{};
+};
+
+struct BoundAggregateProgram {
+  std::vector<BoundAggregateInvocationId> invocations{};
+  std::vector<BoundGroupingTerm> group_by{};
+  std::optional<BoundExpressionId> having{};
+  std::vector<BoundExpressionId> source_leaves{};
+  std::vector<BoundExpressionId> representative_leaves{};
+};
+
 struct BoundSelectCore {
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
   std::optional<BoundTableSource> table_source{};
@@ -245,6 +306,7 @@ struct BoundSelectCore {
   std::size_t source_column_count = 0;
   std::vector<BoundResultColumn> result_columns{};
   std::optional<BoundExpressionId> where{};
+  std::optional<BoundAggregateProgram> aggregate{};
 };
 
 struct BoundValuesCore {
@@ -260,20 +322,6 @@ struct BoundLimit {
   std::optional<BoundExpressionId> offset{};
 };
 
-enum class BoundNullPlacement : std::uint8_t {
-  kFirst,
-  kLast,
-};
-
-struct BoundOrderingTerm {
-  BoundExpressionId expression;
-  BoundCollationId collation;
-  SortOrder order = SortOrder::kAscending;
-  BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
-  std::optional<std::size_t> result_column{};
-  bool explicit_collation = false;
-};
-
 enum class BindErrorCode : std::uint8_t {
   kInvalidInput,
   kUnsupportedFeature,
@@ -283,8 +331,11 @@ enum class BindErrorCode : std::uint8_t {
   kNoTablesSpecified,
   kNoSuchFunction,
   kWrongFunctionArity,
+  kAggregateMisuse,
+  kHavingWithoutAggregate,
   kNoSuchCollation,
   kOrderByTermOutOfRange,
+  kGroupByTermOutOfRange,
   kCompoundOrderByTerm,
   kCompoundColumnCount,
   kValuesColumnCount,
@@ -292,6 +343,7 @@ enum class BindErrorCode : std::uint8_t {
   kInvalidVariableNumber,
   kParameterLimitExceeded,
   kFunctionArgumentLimitExceeded,
+  kAggregateTermLimitExceeded,
   kResultColumnLimitExceeded,
   kColumnCountMismatch,
   kDuplicateColumn,
@@ -317,6 +369,7 @@ struct BindOptions {
   std::size_t maximum_result_columns = 2'000;
   std::size_t maximum_function_arguments = 1'000;
   bool enable_double_quoted_strings = true;
+  std::size_t maximum_aggregate_terms = 2'000;
 };
 
 class BindEnvironment final {
@@ -359,6 +412,8 @@ class BoundSelect final {
   [[nodiscard]] std::span<const std::string> registered_collations() const noexcept;
   [[nodiscard]] std::span<const BoundCollation> collations() const noexcept;
   [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept;
+  [[nodiscard]] std::span<const BoundAggregateFunction> aggregate_functions() const noexcept;
+  [[nodiscard]] std::span<const BoundAggregateInvocation> aggregate_invocations() const noexcept;
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;

@@ -78,12 +78,11 @@ Behavioral probes against the pinned C API additionally establish that:
 - `?`, `?NNN`, and named variables share one 1-based SQLite variable
   namespace, with holes contributing to the published parameter count.
 
-The current syntax tree intentionally supports only zero or one table source.
-It has no joins, subqueries, grouping, ordering, compound queries, or window
-syntax. The bytecode and VM milestone likewise excludes aggregate and pattern
-execution. The binder must remain the smallest implementation that serves
-this read-only grammar rather than introducing speculative multi-source
-planner structures.
+The initial syntax tree intentionally supported only zero or one table source
+without grouping, ordering, compounds, or windows. ADR-0054, ADR-0056, and
+ADR-0060 subsequently extend the same immutable binder with ordering,
+VALUES/compounds, and aggregate programs. Joins, subqueries, and windows
+remain deferred, and aggregate execution remains outside the binder.
 
 ## Decision
 
@@ -121,6 +120,7 @@ struct BindOptions {
   std::size_t maximum_result_columns = 2'000;
   std::size_t maximum_function_arguments = 1'000;
   bool enable_double_quoted_strings = true;
+  std::size_t maximum_aggregate_terms = 2'000;
 };
 
 class BindEnvironment final {
@@ -157,6 +157,7 @@ without exposing mutable containers. It provides const accessors for:
 - the optional bound table source;
 - source-column descriptors;
 - owned collation, function, and parameter metadata;
+- owned aggregate-function and invocation metadata;
 - the immutable bound-expression arena;
 - expanded result columns;
 - the optional predicate and limit expressions; and
@@ -284,6 +285,7 @@ The bound arena contains a compact tagged union with these alternatives:
 - SQLite truth test;
 - resolved result-alias reference;
 - resolved eager scalar call;
+- resolved aggregate-call reference;
 - lazy coalesce;
 - lazy conditional;
 - planner likelihood hint; and

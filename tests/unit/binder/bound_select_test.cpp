@@ -167,6 +167,35 @@ const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core()
   return *std::move(created);
 }
 
+[[nodiscard]] CatalogSnapshotPtr CollatedRowIdCatalog() {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 19, .generation = 10},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY COLLATE NOCASE)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "Items",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .collation_name = "NOCASE",
+                  .primary_key = true,
+              },
+          },
+      .rowid_alias = ColumnId{0},
+  });
+  CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return *std::move(created);
+}
+
 [[nodiscard]] ExpressionId ColumnDefaultExpression(const SyntaxTree& tree,
                                                    std::size_t column_index) {
   const auto& table = std::get<CreateTableStatement>(tree.statement());
@@ -403,6 +432,7 @@ template <typename T>
 TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("literal", BoundExpressionKindName(BoundExpressionKind::kLiteral));
   EXPECT_EQ("truth_test", BoundExpressionKindName(BoundExpressionKind::kTruthTest));
+  EXPECT_EQ("aggregate_call", BoundExpressionKindName(BoundExpressionKind::kAggregateCall));
   EXPECT_EQ("unknown",
             BoundExpressionKindName(static_cast<BoundExpressionKind>(255)));  // NOLINT
 
@@ -411,6 +441,11 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("indexed_table_unsupported",
             BindErrorCodeName(BindErrorCode::kIndexedTableUnsupported));
   EXPECT_EQ("order_by_term_out_of_range", BindErrorCodeName(BindErrorCode::kOrderByTermOutOfRange));
+  EXPECT_EQ("group_by_term_out_of_range", BindErrorCodeName(BindErrorCode::kGroupByTermOutOfRange));
+  EXPECT_EQ("aggregate_misuse", BindErrorCodeName(BindErrorCode::kAggregateMisuse));
+  EXPECT_EQ("having_without_aggregate", BindErrorCodeName(BindErrorCode::kHavingWithoutAggregate));
+  EXPECT_EQ("aggregate_term_limit_exceeded",
+            BindErrorCodeName(BindErrorCode::kAggregateTermLimitExceeded));
   EXPECT_EQ("compound_order_by_term", BindErrorCodeName(BindErrorCode::kCompoundOrderByTerm));
   EXPECT_EQ("compound_column_count", BindErrorCodeName(BindErrorCode::kCompoundColumnCount));
   EXPECT_EQ("values_column_count", BindErrorCodeName(BindErrorCode::kValuesColumnCount));
@@ -420,6 +455,8 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ(ErrorCode::kGeneric, BindError{.code = BindErrorCode::kNoSuchColumn}.base_error_code());
   EXPECT_EQ(ErrorCode::kTooLarge,
             BindError{.code = BindErrorCode::kResultColumnLimitExceeded}.base_error_code());
+  EXPECT_EQ(ErrorCode::kTooLarge,
+            BindError{.code = BindErrorCode::kAggregateTermLimitExceeded}.base_error_code());
   EXPECT_EQ(ErrorCode::kProtocol,
             BindError{.code = BindErrorCode::kIndexedTableUnsupported}.base_error_code());
   EXPECT_EQ(ErrorCode::kMisuse, BindError{.code = BindErrorCode::kInvalidInput}.base_error_code());
@@ -1039,30 +1076,432 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
                   "wrong number of arguments to function abs()");
   ExpectBindError("SELECT unknown(1)", catalog, BindErrorCode::kNoSuchFunction,
                   "no such function: unknown");
-  ExpectBindError("SELECT count(*)", catalog, BindErrorCode::kUnsupportedFeature,
-                  "aggregate functions are not supported");
-  ExpectBindError("SELECT min(Name) FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
-                  "aggregate functions are not supported");
-  ExpectBindError("SELECT string_agg(Name, ',') FROM Items", catalog,
-                  BindErrorCode::kUnsupportedFeature, "aggregate functions are not supported");
   ExpectBindError("SELECT likelihood(1,1)", catalog, BindErrorCode::kInvalidLiteral,
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
   ExpectBindError("SELECT likelihood(1,(+0.5))", catalog, BindErrorCode::kInvalidLiteral,
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
 }
 
-TEST(Binder, RejectsParsedAggregateSyntaxUntilAggregateBinding) {
+TEST(Binder, EnforcesAggregateClauseLegality) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  ExpectBindError("SELECT Name FROM Items HAVING count()", catalog,
+                  BindErrorCode::kHavingWithoutAggregate, "HAVING clause on a non-aggregate query");
+  ExpectBindError("SELECT Name FROM Items ORDER BY count()", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function count()");
+  ExpectBindError("SELECT count() FROM Items WHERE count()", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function count()");
+  ExpectBindError("SELECT count() FROM Items WHERE sum(missing)", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing");
+  ExpectBindError("SELECT count() AS total FROM Items WHERE total", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "misuse of aggregate function through result alias");
+  ExpectBindError("SELECT count() FROM Items GROUP BY count()", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "aggregate functions are not allowed in the GROUP BY clause");
+  ExpectBindError("SELECT sum(count()) FROM Items", catalog, BindErrorCode::kAggregateMisuse,
+                  "misuse of aggregate function count()");
+}
+
+TEST(Binder, BindsAggregateModifiersAndPreservesScalarModifierErrors) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect aggregate = BindOrThrow(
+      "SELECT group_concat(DISTINCT Name ORDER BY Score DESC NULLS LAST) "
+      "FILTER (WHERE Id>0) FROM Items",
+      catalog);
+  ASSERT_EQ(1U, aggregate.aggregate_invocations().size());
+  const BoundAggregateInvocation& invocation = aggregate.aggregate_invocations().front();
+  EXPECT_TRUE(invocation.distinct);
+  ASSERT_EQ(1U, invocation.arguments.size());
+  ASSERT_EQ(1U, invocation.order_by.size());
+  EXPECT_EQ(SortOrder::kDescending, invocation.order_by[0].order);
+  EXPECT_EQ(BoundNullPlacement::kLast, invocation.order_by[0].null_placement);
+  ASSERT_TRUE(invocation.filter.has_value());
+
+  const BoundSelect zero_order = BindOrThrow("SELECT count(ORDER BY missing) FROM Items", catalog);
+  EXPECT_TRUE(zero_order.aggregate_invocations().front().order_by.empty());
+
+  const BoundSelect scalar_distinct =
+      BindOrThrow("SELECT min(DISTINCT Score,Id) FROM Items", catalog);
+  EXPECT_TRUE(std::holds_alternative<BoundScalarCallExpression>(
+      ResultExpression(scalar_distinct, 0).payload));
+
+  ExpectBindError("SELECT abs(1) FILTER (WHERE missing)", catalog, BindErrorCode::kAggregateMisuse,
+                  "FILTER may not be used with non-aggregate abs()");
+  ExpectBindError("SELECT abs(1 ORDER BY missing)", catalog, BindErrorCode::kAggregateMisuse,
+                  "ORDER BY may not be used with non-aggregate abs()");
+  ExpectBindError("SELECT coalesce(1,2 ORDER BY missing)", catalog, BindErrorCode::kAggregateMisuse,
+                  "ORDER BY may not be used with non-aggregate coalesce()");
+  ExpectBindError("SELECT iif(1,2) FILTER (WHERE missing)", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "FILTER may not be used with non-aggregate iif()");
+  ExpectBindError("SELECT abs(ORDER BY missing)", catalog, BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function abs()");
+  ExpectBindError("SELECT likely(*)", catalog, BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function likely()");
+  ExpectBindError("SELECT count(DISTINCT) FROM Items", catalog, BindErrorCode::kWrongFunctionArity,
+                  "DISTINCT aggregates must have exactly one argument");
+  ExpectBindError("SELECT count(DISTINCT) FILTER (WHERE missing) FROM Items", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing");
+  ExpectBindError("SELECT group_concat(Name ORDER BY sum(Score)) FROM Items", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+  ExpectBindError("SELECT sum(Score) FILTER (WHERE count()) FROM Items", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function count()");
+}
+
+TEST(Binder, LetsArgumentErrorsReplaceProvisionalFunctionLookupErrors) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   for (const std::string_view sql : {
-           "SELECT 1 GROUP BY 1",
-           "SELECT 1 HAVING 1",
-           "SELECT abs(1 ORDER BY 2)",
-           "SELECT abs(1) FILTER (WHERE 1)",
+           "SELECT unknown(missing)",
+           "SELECT abs(missing,1)",
+           "SELECT coalesce(missing)",
+           "SELECT sum(missing,1)",
        }) {
     SCOPED_TRACE(sql);
-    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
-                    "aggregate queries are not supported");
+    ExpectBindError(sql, catalog, BindErrorCode::kNoSuchColumn, "no such column: missing");
   }
+}
+
+TEST(Binder, BindsCoreAggregateInvocationsIntoOneProgram) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow("SELECT count(),sum(Score),min(Name) FROM Items", catalog);
+  ASSERT_EQ(1U, select.query_cores().size());
+  const auto& core = std::get<BoundSelectCore>(select.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  ASSERT_EQ(3U, core.aggregate->invocations.size());
+  ASSERT_EQ(3U, select.aggregate_invocations().size());
+
+  const auto count = std::get<BoundAggregateCallExpression>(
+      select.expression(core.result_columns[0].expression).payload);
+  const auto sum = std::get<BoundAggregateCallExpression>(
+      select.expression(core.result_columns[1].expression).payload);
+  const auto minimum = std::get<BoundAggregateCallExpression>(
+      select.expression(core.result_columns[2].expression).payload);
+  EXPECT_EQ(core.aggregate->invocations[0], count.invocation);
+  EXPECT_EQ(core.aggregate->invocations[1], sum.invocation);
+  EXPECT_EQ(core.aggregate->invocations[2], minimum.invocation);
+
+  ASSERT_EQ(3U, select.aggregate_functions().size());
+  EXPECT_EQ("count", select.aggregate_functions()[0].name);
+  EXPECT_EQ("sum", select.aggregate_functions()[1].name);
+  EXPECT_EQ("min", select.aggregate_functions()[2].name);
+  EXPECT_EQ(BoundAggregateExtremumKind::kMinimum, select.aggregate_functions()[2].extremum);
+}
+
+TEST(Binder, ResolvesEveryCoreAggregateArityAndCountStar) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow(
+      "SELECT count(),count(*),count(Name),sum(Score),total(Score),avg(Score),"
+      "min(Name),max(Name),group_concat(Name),group_concat(Name,','),"
+      "string_agg(Name,',') FROM Items",
+      catalog);
+  const auto& core = std::get<BoundSelectCore>(select.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  EXPECT_EQ(10U, core.aggregate->invocations.size());
+  EXPECT_EQ(std::get<BoundAggregateCallExpression>(ResultExpression(select, 0).payload).invocation,
+            std::get<BoundAggregateCallExpression>(ResultExpression(select, 1).payload).invocation);
+
+  ExpectBindError("SELECT sum(*) FROM Items", catalog, BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function sum()");
+  ExpectBindError("SELECT string_agg(Name) FROM Items", catalog, BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function string_agg()");
+}
+
+TEST(Binder, BindsAggregateClausesAliasesOrdinalsAndMetadata) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow(
+      "SELECT Name AS label,sum(Score) AS total FROM Items "
+      "WHERE Score>0 GROUP BY 1 COLLATE NOCASE "
+      "HAVING total>0 ORDER BY sum(Score)",
+      catalog);
+  const auto& core = std::get<BoundSelectCore>(select.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  ASSERT_EQ(1U, core.aggregate->invocations.size());
+  ASSERT_EQ(1U, core.aggregate->group_by.size());
+  ASSERT_TRUE(core.aggregate->having.has_value());
+
+  const BoundGroupingTerm& grouping = core.aggregate->group_by.front();
+  EXPECT_EQ(std::optional<std::size_t>{0}, grouping.result_column);
+  EXPECT_EQ("NOCASE", CollationName(select, grouping.collation));
+  const auto* grouping_alias =
+      std::get_if<BoundCollateExpression>(&select.expression(grouping.expression).payload);
+  ASSERT_NE(nullptr, grouping_alias);
+  EXPECT_TRUE(std::holds_alternative<BoundAliasReferenceExpression>(
+      select.expression(grouping_alias->operand).payload));
+
+  ASSERT_EQ(1U, select.aggregate_invocations().size());
+  const BoundAggregateInvocation& invocation = select.aggregate_invocations().front();
+  EXPECT_EQ("sum", select.aggregate_functions()[invocation.function.value()].name);
+  ASSERT_EQ(1U, invocation.arguments.size());
+  EXPECT_FALSE(invocation.distinct);
+  EXPECT_TRUE(invocation.order_by.empty());
+  EXPECT_FALSE(invocation.filter.has_value());
+
+  ASSERT_EQ(1U, select.order_by().size());
+  const auto order_call = std::get<BoundAggregateCallExpression>(
+      select.expression(select.order_by()[0].expression).payload);
+  EXPECT_EQ(invocation.function,
+            select.aggregate_invocations()[order_call.invocation.value()].function);
+
+  const BoundResultColumn& aggregate_result = core.result_columns[1];
+  EXPECT_EQ(TypeAffinity::kNone, aggregate_result.affinity);
+  EXPECT_FALSE(aggregate_result.declared_type.has_value());
+  EXPECT_EQ("total", aggregate_result.name);
+}
+
+TEST(Binder, SeparatesAggregateInvocationAndResultCollations) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect sum = BindOrThrow("SELECT sum(Score COLLATE unavailable) FROM Items", catalog);
+  ASSERT_EQ(1U, sum.aggregate_invocations().size());
+  EXPECT_EQ("BINARY", CollationName(sum, sum.aggregate_invocations().front().collation));
+  const BoundExpressionProperties& properties = ResultExpression(sum, 0).properties;
+  ASSERT_TRUE(properties.collation.has_value());
+  EXPECT_EQ("unavailable", CollationName(sum, *properties.collation));
+  EXPECT_TRUE(properties.has_explicit_collation);
+  EXPECT_TRUE(properties.contains_aggregate);
+
+  ExpectBindError("SELECT sum(DISTINCT Score COLLATE unavailable) FROM Items", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: unavailable");
+  ExpectBindError("SELECT min(Score COLLATE unavailable) FROM Items", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: unavailable");
+}
+
+TEST(Binder, DeduplicatesAggregateInvocationsInClauseOrderPerCore) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select = BindOrThrow(
+      "SELECT sum(Score),sum(Score) FROM Items "
+      "HAVING min(Name) IS NOT NULL ORDER BY max(Id),sum(Score)",
+      catalog);
+  const auto& core = std::get<BoundSelectCore>(select.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  ASSERT_EQ(3U, core.aggregate->invocations.size());
+  ASSERT_EQ(3U, select.aggregate_invocations().size());
+
+  const auto first_sum =
+      std::get<BoundAggregateCallExpression>(ResultExpression(select, 0).payload);
+  const auto second_sum =
+      std::get<BoundAggregateCallExpression>(ResultExpression(select, 1).payload);
+  EXPECT_EQ(first_sum.invocation, second_sum.invocation);
+  EXPECT_EQ("sum", select
+                       .aggregate_functions()
+                           [select.aggregate_invocations()[core.aggregate->invocations[0].value()]
+                                .function.value()]
+                       .name);
+  EXPECT_EQ("max", select
+                       .aggregate_functions()
+                           [select.aggregate_invocations()[core.aggregate->invocations[1].value()]
+                                .function.value()]
+                       .name);
+  EXPECT_EQ("min", select
+                       .aggregate_functions()
+                           [select.aggregate_invocations()[core.aggregate->invocations[2].value()]
+                                .function.value()]
+                       .name);
+
+  const BoundSelect compound =
+      BindOrThrow("SELECT sum(Score) FROM Items UNION ALL SELECT sum(Score) FROM Items", catalog);
+  ASSERT_EQ(2U, compound.query_cores().size());
+  ASSERT_EQ(2U, compound.aggregate_invocations().size());
+  const auto& left = std::get<BoundSelectCore>(compound.query_cores()[0]);
+  const auto& right = std::get<BoundSelectCore>(compound.query_cores()[1]);
+  ASSERT_TRUE(left.aggregate.has_value());
+  ASSERT_TRUE(right.aggregate.has_value());
+  EXPECT_NE(left.aggregate->invocations[0], right.aggregate->invocations[0]);
+
+  const BoundSelect compound_order = BindOrThrow(
+      "SELECT sum(Score) FROM Items UNION ALL "
+      "SELECT sum(Score) FROM Items ORDER BY sum(Score)",
+      catalog);
+  EXPECT_EQ(2U, compound_order.aggregate_invocations().size());
+  EXPECT_EQ(1U, compound_order.aggregate_functions().size());
+  ASSERT_EQ(1U, compound_order.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, compound_order.order_by()[0].result_column);
+  ExpectBindError(
+      "SELECT sum(Score) FROM Items UNION ALL "
+      "SELECT sum(Score) FROM Items ORDER BY sum(Id)",
+      catalog, BindErrorCode::kCompoundOrderByTerm,
+      "1 ORDER BY term does not match any column in the result set");
+
+  ExpectBindError("SELECT sum(Score),max(Id) FROM Items", catalog,
+                  BindErrorCode::kAggregateTermLimitExceeded, "too many aggregate terms",
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
+}
+
+TEST(Binder, CanonicalizesIntegerPrimaryKeyAliasesForAggregateIdentity) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect deduplicated = BindOrThrow("SELECT sum(Id),sum(_rowid_) FROM Items", catalog);
+  const auto& deduplicated_core = std::get<BoundSelectCore>(deduplicated.query_cores().front());
+  ASSERT_TRUE(deduplicated_core.aggregate.has_value());
+  ASSERT_EQ(1U, deduplicated_core.aggregate->invocations.size());
+  const auto id_sum =
+      std::get<BoundAggregateCallExpression>(ResultExpression(deduplicated, 0).payload);
+  const auto rowid_sum =
+      std::get<BoundAggregateCallExpression>(ResultExpression(deduplicated, 1).payload);
+  EXPECT_EQ(id_sum.invocation, rowid_sum.invocation);
+
+  const BoundSelect grouped =
+      BindOrThrow("SELECT Id,count() FROM Items GROUP BY _rowid_ HAVING Id=1", catalog,
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
+  const auto& grouped_core = std::get<BoundSelectCore>(grouped.query_cores().front());
+  ASSERT_TRUE(grouped_core.aggregate.has_value());
+  EXPECT_FALSE(grouped_core.aggregate->having.has_value());
+  EXPECT_TRUE(grouped_core.where.has_value());
+
+  const CatalogSnapshotPtr collated_catalog = CollatedRowIdCatalog();
+  const BoundSelect minimum =
+      BindOrThrow("SELECT min(Id),min(_rowid_) FROM Items", collated_catalog);
+  const auto& minimum_core = std::get<BoundSelectCore>(minimum.query_cores().front());
+  ASSERT_TRUE(minimum_core.aggregate.has_value());
+  ASSERT_EQ(1U, minimum_core.aggregate->invocations.size());
+  EXPECT_EQ("BINARY", CollationName(minimum, minimum.aggregate_invocations().front().collation));
+
+  const BoundSelect distinct =
+      BindOrThrow("SELECT count(DISTINCT Id),count(DISTINCT _rowid_) FROM Items", collated_catalog,
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
+  const auto& distinct_core = std::get<BoundSelectCore>(distinct.query_cores().front());
+  ASSERT_TRUE(distinct_core.aggregate.has_value());
+  EXPECT_EQ(1U, distinct_core.aggregate->invocations.size());
+
+  const BoundSelect explicit_collation =
+      BindOrThrow("SELECT min(Id COLLATE NOCASE),min(_rowid_) FROM Items", collated_catalog);
+  const auto& explicit_core = std::get<BoundSelectCore>(explicit_collation.query_cores().front());
+  ASSERT_TRUE(explicit_core.aggregate.has_value());
+  ASSERT_EQ(2U, explicit_core.aggregate->invocations.size());
+  EXPECT_EQ("NOCASE", CollationName(explicit_collation,
+                                    explicit_collation.aggregate_invocations()[0].collation));
+  EXPECT_EQ("BINARY", CollationName(explicit_collation,
+                                    explicit_collation.aggregate_invocations()[1].collation));
+}
+
+TEST(Binder, ResolvesGroupByOrdinalsAndRightmostResultMatches) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const BoundSelect ordinal =
+      BindOrThrow("SELECT Name,Name,count() FROM Items GROUP BY 1", catalog);
+  const auto& ordinal_core = std::get<BoundSelectCore>(ordinal.query_cores().front());
+  ASSERT_TRUE(ordinal_core.aggregate.has_value());
+  ASSERT_EQ(1U, ordinal_core.aggregate->group_by.size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, ordinal_core.aggregate->group_by[0].result_column);
+
+  const BoundSelect ordinary =
+      BindOrThrow("SELECT Name,Name,count() FROM Items GROUP BY Name", catalog);
+  const auto& ordinary_core = std::get<BoundSelectCore>(ordinary.query_cores().front());
+  ASSERT_TRUE(ordinary_core.aggregate.has_value());
+  EXPECT_EQ(std::optional<std::size_t>{1}, ordinary_core.aggregate->group_by[0].result_column);
+
+  const BoundSelect collated =
+      BindOrThrow("SELECT Name,count() FROM Items GROUP BY 1 COLLATE NOCASE", catalog);
+  const auto& collated_core = std::get<BoundSelectCore>(collated.query_cores().front());
+  ASSERT_TRUE(collated_core.aggregate.has_value());
+  EXPECT_EQ(std::optional<std::size_t>{0}, collated_core.aggregate->group_by[0].result_column);
+  EXPECT_EQ("NOCASE", CollationName(collated, collated_core.aggregate->group_by[0].collation));
+
+  const BoundSelect large =
+      BindOrThrow("SELECT Name,count() FROM Items GROUP BY 2147483648", catalog);
+  const auto& large_core = std::get<BoundSelectCore>(large.query_cores().front());
+  ASSERT_TRUE(large_core.aggregate.has_value());
+  EXPECT_FALSE(large_core.aggregate->group_by[0].result_column.has_value());
+
+  ExpectBindError("SELECT Name,count() FROM Items GROUP BY 0", catalog,
+                  BindErrorCode::kGroupByTermOutOfRange,
+                  "1 GROUP BY term out of range - should be between 1 and 2");
+  ExpectBindError("SELECT Name,count() FROM Items GROUP BY -1", catalog,
+                  BindErrorCode::kGroupByTermOutOfRange,
+                  "1 GROUP BY term out of range - should be between 1 and 2");
+  ExpectBindError("SELECT sum(Score),count() FROM Items GROUP BY 1", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "aggregate functions are not allowed in the GROUP BY clause");
+}
+
+TEST(Binder, GivesSourceColumnsPrecedenceOverAggregateAliases) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect select =
+      BindOrThrow("SELECT Id AS Score,count() FROM Items GROUP BY Score HAVING Score>0", catalog);
+  const auto& core = std::get<BoundSelectCore>(select.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  const auto* grouping = std::get_if<BoundColumnExpression>(
+      &select.expression(core.aggregate->group_by[0].expression).payload);
+  ASSERT_NE(nullptr, grouping);
+  EXPECT_EQ(BoundSourceColumnId{2}, grouping->column);
+
+  EXPECT_FALSE(core.aggregate->having.has_value());
+  ASSERT_TRUE(core.where.has_value());
+  const auto& comparison =
+      std::get<BoundComparisonExpression>(select.expression(*core.where).payload);
+  const auto* having_column =
+      std::get_if<BoundColumnExpression>(&select.expression(comparison.left).payload);
+  ASSERT_NE(nullptr, having_column);
+  EXPECT_EQ(BoundSourceColumnId{2}, having_column->column);
+}
+
+TEST(Binder, TransfersEligibleHavingLeavesAndPublishesAggregateLeafSets) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const BoundSelect transferred = BindOrThrow(
+      "SELECT Id,count() FROM Items WHERE Id>0 "
+      "GROUP BY Id HAVING Id=1 AND 1",
+      catalog);
+  const auto& transferred_core = std::get<BoundSelectCore>(transferred.query_cores().front());
+  ASSERT_TRUE(transferred_core.aggregate.has_value());
+  EXPECT_FALSE(transferred_core.aggregate->having.has_value());
+  EXPECT_TRUE(transferred_core.where.has_value());
+  ASSERT_EQ(1U, transferred_core.aggregate->source_leaves.size());
+  ASSERT_EQ(1U, transferred_core.aggregate->representative_leaves.size());
+  const auto* source = std::get_if<BoundColumnExpression>(
+      &transferred.expression(transferred_core.aggregate->source_leaves[0]).payload);
+  const auto* representative = std::get_if<BoundColumnExpression>(
+      &transferred.expression(transferred_core.aggregate->representative_leaves[0]).payload);
+  ASSERT_NE(nullptr, source);
+  ASSERT_NE(nullptr, representative);
+  EXPECT_EQ(BoundSourceColumnId{0}, source->column);
+  EXPECT_EQ(BoundSourceColumnId{0}, representative->column);
+
+  const BoundSelect collated = BindOrThrow(
+      "SELECT Name,count() FROM Items "
+      "GROUP BY Name COLLATE NOCASE HAVING Name='x' AND 1",
+      catalog);
+  const auto& collated_core = std::get<BoundSelectCore>(collated.query_cores().front());
+  ASSERT_TRUE(collated_core.aggregate.has_value());
+  ASSERT_TRUE(collated_core.aggregate->having.has_value());
+  EXPECT_TRUE(collated_core.where.has_value());
+
+  const BoundSelect always_false =
+      BindOrThrow("SELECT Name,count() FROM Items GROUP BY Name HAVING 0", catalog);
+  const auto& false_core = std::get<BoundSelectCore>(always_false.query_cores().front());
+  ASSERT_TRUE(false_core.aggregate.has_value());
+  EXPECT_TRUE(false_core.aggregate->having.has_value());
+
+  const BoundSelect aggregate =
+      BindOrThrow("SELECT Name,count() FROM Items GROUP BY Name HAVING count()>0", catalog);
+  const auto& aggregate_core = std::get<BoundSelectCore>(aggregate.query_cores().front());
+  ASSERT_TRUE(aggregate_core.aggregate.has_value());
+  EXPECT_TRUE(aggregate_core.aggregate->having.has_value());
+}
+
+TEST(Binder, SeparatesAggregateSourceAndRepresentativeLeaves) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+
+  const BoundSelect ordered = BindOrThrow(
+      "SELECT Name,group_concat(Score ORDER BY Id) FILTER (WHERE Score>0) "
+      "FROM Items GROUP BY Name",
+      catalog);
+  const auto& ordered_core = std::get<BoundSelectCore>(ordered.query_cores().front());
+  ASSERT_TRUE(ordered_core.aggregate.has_value());
+  EXPECT_EQ(3U, ordered_core.aggregate->source_leaves.size());
+  ASSERT_EQ(1U, ordered_core.aggregate->representative_leaves.size());
+
+  const BoundSelect minimum = BindOrThrow("SELECT Name,min(Score ORDER BY Id) FROM Items", catalog);
+  const auto& minimum_core = std::get<BoundSelectCore>(minimum.query_cores().front());
+  ASSERT_TRUE(minimum_core.aggregate.has_value());
+  ASSERT_EQ(1U, minimum_core.aggregate->source_leaves.size());
+  const auto* source = std::get_if<BoundColumnExpression>(
+      &minimum.expression(minimum_core.aggregate->source_leaves[0]).payload);
+  ASSERT_NE(nullptr, source);
+  EXPECT_EQ(BoundSourceColumnId{2}, source->column);
+  ASSERT_EQ(1U, minimum_core.aggregate->representative_leaves.size());
+
+  ExpectBindError("SELECT Id,sum(Score) FROM Items GROUP BY Name", catalog,
+                  BindErrorCode::kAggregateTermLimitExceeded, "too many aggregate terms",
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 2});
 }
 
 TEST(Binder, AssignsParametersInLexicalOrderAndRetainsFirstSpellings) {
@@ -1851,6 +2290,21 @@ TEST(Binder, RejectsUnsupportedScopesAndConfiguredLimits) {
   ExpectBindError("SELECT coalesce(1,2,3)", catalog, BindErrorCode::kFunctionArgumentLimitExceeded,
                   "too many arguments on function coalesce", BindEnvironment::Core(),
                   BindOptions{.maximum_function_arguments = 2});
+  ExpectBindError("SELECT count()", catalog, BindErrorCode::kAggregateTermLimitExceeded,
+                  "too many aggregate terms", BindEnvironment::Core(),
+                  BindOptions{.maximum_aggregate_terms = 0});
+  static_cast<void>(BindOrThrow("SELECT count() UNION ALL SELECT count()", catalog,
+                                BindEnvironment::Core(),
+                                BindOptions{.maximum_aggregate_terms = 1}));
+
+  BindSelectResult unrepresentable = BindSelectStatement(
+      ParseTree("SELECT 1"), catalog, BindEnvironment::Core(),
+      BindOptions{
+          .maximum_aggregate_terms =
+              static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) + 1U,
+      });
+  ASSERT_FALSE(unrepresentable.has_value());
+  EXPECT_EQ(BindErrorCode::kInvalidInput, unrepresentable.error().code);
   ExpectBindError("SELECT missing FROM Items", catalog, BindErrorCode::kNoSuchColumn,
                   "no such column: missing");
   ExpectBindError("SELECT 1 FROM Missing", catalog, BindErrorCode::kNoSuchTable,

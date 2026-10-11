@@ -137,6 +137,15 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalPlanError{.code = LogicalPlanErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(LogicalPlan, RejectsAggregateQueriesUntilAggregatePlanning) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  BuildLogicalPlanResult plan = BuildLogicalPlan(BindOrThrow("SELECT count() FROM Items", catalog));
+
+  ASSERT_FALSE(plan.has_value());
+  EXPECT_EQ(LogicalPlanErrorCode::kUnsupportedFeature, plan.error().code);
+  EXPECT_EQ("aggregate planning is not implemented", plan.error().detail);
+}
+
 TEST(LogicalStatementPlan, BuildsTypedMutationAndTransactionPayloads) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 

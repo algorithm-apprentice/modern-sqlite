@@ -39,6 +39,7 @@ struct ExpressionProperties {
   std::optional<BoundCollationId> collation;
   bool explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
+  bool contains_aggregate = false;
 };
 
 struct AliasEntry {
@@ -55,6 +56,7 @@ struct ParameterOccurrence {
 struct BindScope {
   bool source_columns = true;
   bool result_aliases = false;
+  bool allow_aggregates = false;
 };
 
 struct SourceState {
@@ -69,6 +71,25 @@ struct CoreBindingMetadata {
   std::size_t source_column_begin = 0;
   std::size_t source_column_count = 0;
   std::vector<std::optional<ExpressionId>> result_syntax{};
+};
+
+enum class AggregateOccurrencePhase : std::uint8_t {
+  kResult,
+  kOrderBy,
+  kHaving,
+};
+
+struct PendingAggregateInvocation {
+  BoundExpressionId expression;
+  BoundAggregateInvocation invocation;
+  AggregateOccurrencePhase phase = AggregateOccurrencePhase::kResult;
+};
+
+struct AggregateLeafIdentity {
+  bool rowid = false;
+  std::optional<BoundSourceColumnId> column{};
+
+  constexpr auto operator<=>(const AggregateLeafIdentity&) const noexcept = default;
 };
 
 struct DecodedNamePart {
@@ -351,6 +372,18 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
   }
 }
 
+[[nodiscard]] BoundAggregateExtremumKind ToBoundExtremum(AggregateExtremumKind extremum) noexcept {
+  switch (extremum) {
+    case AggregateExtremumKind::kNone:
+      return BoundAggregateExtremumKind::kNone;
+    case AggregateExtremumKind::kMinimum:
+      return BoundAggregateExtremumKind::kMinimum;
+    case AggregateExtremumKind::kMaximum:
+      return BoundAggregateExtremumKind::kMaximum;
+  }
+  return BoundAggregateExtremumKind::kNone;
+}
+
 }  // namespace
 
 struct BoundExpressionState {
@@ -367,6 +400,8 @@ struct BoundExpressionState {
 
 struct BoundSelect::Impl final : BoundExpressionState {
   std::vector<std::string> registered_collations;
+  std::vector<BoundAggregateFunction> aggregate_functions;
+  std::vector<BoundAggregateInvocation> aggregate_invocations;
   std::vector<BoundQueryCore> query_cores;
   std::vector<CompoundOperator> compound_operators;
   std::vector<BoundCollationId> compound_collations;
@@ -479,13 +514,20 @@ class StatementBinder final {
       if (!order_by.has_value()) {
         return std::unexpected(std::move(order_by.error()));
       }
+      BindExpected<void> group_by = BindGroupBy(core);
+      if (!group_by.has_value()) {
+        return std::unexpected(std::move(group_by.error()));
+      }
       if (core.quantifier == SelectQuantifier::kDistinct) {
         BindExpected<void> distinct = RequireResultCollations(core.span, impl_->result_columns);
         if (!distinct.has_value()) {
           return std::unexpected(std::move(distinct.error()));
         }
       }
-      FinishSelectQueryCore(core.quantifier);
+      BindExpected<void> finished = FinishSelectQueryCore(core.quantifier);
+      if (!finished.has_value()) {
+        return std::unexpected(std::move(finished.error()));
+      }
     } else {
       BindExpected<void> first = BindQueryCore(select.first);
       if (!first.has_value()) {
@@ -1572,7 +1614,8 @@ class StatementBinder final {
   [[nodiscard]] bool LimitsAreRepresentable() const noexcept {
     constexpr std::size_t maximum = std::numeric_limits<std::uint32_t>::max();
     return options_.maximum_parameters <= maximum && options_.maximum_result_columns <= maximum &&
-           options_.maximum_function_arguments <= maximum;
+           options_.maximum_function_arguments <= maximum &&
+           options_.maximum_aggregate_terms <= maximum;
   }
 
   void BeginQueryCore() {
@@ -1584,6 +1627,11 @@ class StatementBinder final {
     aliases_.clear();
     active_source_begin_ = impl_->source_columns.size();
     active_source_count_ = 0;
+    pending_aggregates_.clear();
+    active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
+    active_core_is_aggregate_ = false;
+    active_group_by_.clear();
+    active_having_.reset();
   }
 
   void RegisterActiveSourceCollations() {
@@ -1599,7 +1647,389 @@ class StatementBinder final {
     }
   }
 
-  void FinishSelectQueryCore(SelectQuantifier quantifier) {
+  [[nodiscard]] bool IsActiveRowIdAlias(BoundSourceColumnId column) const noexcept {
+    const std::size_t index = column.value();
+    if (index < active_source_begin_ || index - active_source_begin_ >= active_source_count_ ||
+        !impl_->table_source.has_value() ||
+        impl_->table_source->kind != BoundSourceKind::kCatalogTable ||
+        !impl_->table_source->table.has_value()) {
+      return false;
+    }
+    const BoundSourceColumn& source = impl_->source_columns[index];
+    const CatalogTable& table = catalog_->table(*impl_->table_source->table);
+    return source.catalog_column.has_value() && table.rowid_alias == source.catalog_column;
+  }
+
+  [[nodiscard]] std::optional<AggregateLeafIdentity> AggregateIdentity(
+      BoundExpressionId id) const noexcept {
+    const BoundExpression& expression = impl_->expressions[id.value()];
+    if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
+        column != nullptr) {
+      const bool rowid = IsActiveRowIdAlias(column->column);
+      return AggregateLeafIdentity{
+          .rowid = rowid,
+          .column = rowid ? std::nullopt : std::optional<BoundSourceColumnId>{column->column},
+      };
+    }
+    if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
+      return AggregateLeafIdentity{.rowid = true, .column = std::nullopt};
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] bool AggregateInvocationsEquivalent(const BoundAggregateInvocation& left,
+                                                    const BoundAggregateInvocation& right) const {
+    if (left.function != right.function || left.collation != right.collation ||
+        left.distinct != right.distinct || left.arguments.size() != right.arguments.size() ||
+        left.order_by.size() != right.order_by.size() ||
+        left.filter.has_value() != right.filter.has_value()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < left.arguments.size(); ++index) {
+      if (!BoundSemanticallyEquivalent(left.arguments[index], right.arguments[index])) {
+        return false;
+      }
+    }
+    for (std::size_t index = 0; index < left.order_by.size(); ++index) {
+      const BoundOrderingTerm& left_term = left.order_by[index];
+      const BoundOrderingTerm& right_term = right.order_by[index];
+      if (left_term.collation != right_term.collation || left_term.order != right_term.order ||
+          left_term.null_placement != right_term.null_placement ||
+          !BoundSemanticallyEquivalent(left_term.expression, right_term.expression)) {
+        return false;
+      }
+    }
+    return !left.filter.has_value() || BoundSemanticallyEquivalent(*left.filter, *right.filter);
+  }
+
+  [[nodiscard]] BoundExpressionId StripTopCollation(BoundExpressionId id) const noexcept {
+    const BoundExpression& expression = impl_->expressions[id.value()];
+    const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+    return collate != nullptr ? collate->operand : id;
+  }
+
+  [[nodiscard]] bool MatchesBinaryGroupTerm(BoundExpressionId id) const {
+    const BoundExpressionId comparable = StripTopCollation(id);
+    for (const BoundGroupingTerm& term : active_group_by_) {
+      const std::string& collation = impl_->collations[term.collation.value()].name;
+      if (NamesEqual(collation, "BINARY") &&
+          BoundSemanticallyEquivalent(comparable, StripTopCollation(term.expression))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool IsConstantOrBinaryGroupTerm(BoundExpressionId id) const {
+    if (MatchesBinaryGroupTerm(id)) {
+      return true;
+    }
+    const BoundExpression& expression = impl_->expressions[id.value()];
+    if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
+        std::holds_alternative<BoundParameterExpression>(expression.payload)) {
+      return true;
+    }
+    if (std::holds_alternative<BoundColumnExpression>(expression.payload) ||
+        std::holds_alternative<BoundRowIdExpression>(expression.payload) ||
+        std::holds_alternative<BoundAggregateCallExpression>(expression.payload)) {
+      return false;
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+        alias != nullptr) {
+      return IsConstantOrBinaryGroupTerm(alias->target);
+    }
+    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+        unary != nullptr) {
+      return IsConstantOrBinaryGroupTerm(unary->operand);
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+        binary != nullptr) {
+      return IsConstantOrBinaryGroupTerm(binary->left) &&
+             IsConstantOrBinaryGroupTerm(binary->right);
+    }
+    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+        comparison != nullptr) {
+      return IsConstantOrBinaryGroupTerm(comparison->left) &&
+             IsConstantOrBinaryGroupTerm(comparison->right);
+    }
+    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
+        truth != nullptr) {
+      return IsConstantOrBinaryGroupTerm(truth->operand);
+    }
+    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
+        call != nullptr) {
+      const BoundScalarFunction& function = impl_->functions[call->function.value()];
+      return function.deterministic &&
+             std::ranges::all_of(call->arguments, [this](BoundExpressionId argument) {
+               return IsConstantOrBinaryGroupTerm(argument);
+             });
+    }
+    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+        coalesce != nullptr) {
+      return std::ranges::all_of(coalesce->arguments, [this](BoundExpressionId argument) {
+        return IsConstantOrBinaryGroupTerm(argument);
+      });
+    }
+    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&expression.payload);
+        conditional != nullptr) {
+      return std::ranges::all_of(conditional->arguments, [this](BoundExpressionId argument) {
+        return IsConstantOrBinaryGroupTerm(argument);
+      });
+    }
+    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
+        likelihood != nullptr) {
+      return IsConstantOrBinaryGroupTerm(likelihood->operand);
+    }
+    const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+    return collate != nullptr && IsConstantOrBinaryGroupTerm(collate->operand);
+  }
+
+  void FlattenLogicalAnd(BoundExpressionId id, std::vector<BoundExpressionId>& leaves) const {
+    const BoundExpression& expression = impl_->expressions[id.value()];
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+        alias != nullptr) {
+      FlattenLogicalAnd(alias->target, leaves);
+      return;
+    }
+    const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+    if (binary != nullptr && binary->operation == BoundBinaryOperation::kLogicalAnd) {
+      FlattenLogicalAnd(binary->left, leaves);
+      FlattenLogicalAnd(binary->right, leaves);
+      return;
+    }
+    leaves.push_back(id);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendLogicalAnd(BoundExpressionId left,
+                                                                 BoundExpressionId right) {
+    const BoundExpression& left_expression = impl_->expressions[left.value()];
+    const BoundExpression& right_expression = impl_->expressions[right.value()];
+    const auto span = SourceSpan::FromBounds(
+        std::min(left_expression.span.begin(), right_expression.span.begin()),
+        std::max(left_expression.span.end(), right_expression.span.end()));
+    if (!span.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left_expression.span,
+                                         "aggregate AND span is invalid"));
+    }
+    return AppendExpression(*span,
+                            BoundBinaryExpression{
+                                .operation = BoundBinaryOperation::kLogicalAnd,
+                                .left = left,
+                                .right = right,
+                            },
+                            PropagatedExplicitProperties(std::array{left, right}));
+  }
+
+  [[nodiscard]] BindExpected<void> TransferHavingToWhere() {
+    if (active_group_by_.empty() || !active_having_.has_value()) {
+      return {};
+    }
+    std::vector<BoundExpressionId> leaves;
+    FlattenLogicalAnd(*active_having_, leaves);
+    std::optional<BoundExpressionId> remaining;
+    for (const BoundExpressionId leaf : leaves) {
+      const ExpressionProperties properties = Properties(leaf);
+      const bool movable = properties.truth_hint != BoundTruthHint::kAlwaysFalse &&
+                           !properties.contains_aggregate && IsConstantOrBinaryGroupTerm(leaf);
+      std::optional<BoundExpressionId>& destination = movable ? impl_->where : remaining;
+      if (!destination.has_value()) {
+        destination = leaf;
+        continue;
+      }
+      BindExpected<BoundExpressionId> combined = AppendLogicalAnd(*destination, leaf);
+      if (!combined.has_value()) {
+        return std::unexpected(std::move(combined.error()));
+      }
+      destination = *combined;
+    }
+    active_having_ = remaining;
+    return {};
+  }
+
+  void CollectAggregateLeaves(BoundExpressionId id, std::vector<BoundExpressionId>& leaves,
+                              std::vector<AggregateLeafIdentity>& identities) const {
+    const BoundExpression& expression = impl_->expressions[id.value()];
+    if (const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(id);
+        identity.has_value()) {
+      if (!std::ranges::contains(identities, *identity)) {
+        identities.push_back(*identity);
+        leaves.push_back(id);
+      }
+      return;
+    }
+    if (std::holds_alternative<BoundAggregateCallExpression>(expression.payload) ||
+        std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
+        std::holds_alternative<BoundParameterExpression>(expression.payload)) {
+      return;
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+        alias != nullptr) {
+      CollectAggregateLeaves(alias->target, leaves, identities);
+    } else if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+               unary != nullptr) {
+      CollectAggregateLeaves(unary->operand, leaves, identities);
+    } else if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+               binary != nullptr) {
+      CollectAggregateLeaves(binary->left, leaves, identities);
+      CollectAggregateLeaves(binary->right, leaves, identities);
+    } else if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+               comparison != nullptr) {
+      CollectAggregateLeaves(comparison->left, leaves, identities);
+      CollectAggregateLeaves(comparison->right, leaves, identities);
+    } else if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
+               truth != nullptr) {
+      CollectAggregateLeaves(truth->operand, leaves, identities);
+    } else if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
+               call != nullptr) {
+      for (const BoundExpressionId argument : call->arguments) {
+        CollectAggregateLeaves(argument, leaves, identities);
+      }
+    } else if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+               coalesce != nullptr) {
+      for (const BoundExpressionId argument : coalesce->arguments) {
+        CollectAggregateLeaves(argument, leaves, identities);
+      }
+    } else if (const auto* conditional =
+                   std::get_if<BoundConditionalExpression>(&expression.payload);
+               conditional != nullptr) {
+      for (const BoundExpressionId argument : conditional->arguments) {
+        CollectAggregateLeaves(argument, leaves, identities);
+      }
+    } else if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
+               likelihood != nullptr) {
+      CollectAggregateLeaves(likelihood->operand, leaves, identities);
+    } else if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+               collate != nullptr) {
+      CollectAggregateLeaves(collate->operand, leaves, identities);
+    }
+  }
+
+  [[nodiscard]] BindExpected<void> AnalyzeAggregateLeaves(BoundAggregateProgram& program) {
+    std::vector<AggregateLeafIdentity> source_identities;
+    std::vector<AggregateLeafIdentity> representative_identities;
+    for (const BoundGroupingTerm& term : program.group_by) {
+      CollectAggregateLeaves(term.expression, program.source_leaves, source_identities);
+    }
+    for (const BoundAggregateInvocationId id : program.invocations) {
+      const BoundAggregateInvocation& invocation = impl_->aggregate_invocations[id.value()];
+      for (const BoundExpressionId argument : invocation.arguments) {
+        CollectAggregateLeaves(argument, program.source_leaves, source_identities);
+      }
+      if (invocation.filter.has_value()) {
+        CollectAggregateLeaves(*invocation.filter, program.source_leaves, source_identities);
+      }
+      const BoundAggregateFunction& function =
+          impl_->aggregate_functions[invocation.function.value()];
+      if (function.extremum == BoundAggregateExtremumKind::kNone) {
+        for (const BoundOrderingTerm& term : invocation.order_by) {
+          CollectAggregateLeaves(term.expression, program.source_leaves, source_identities);
+        }
+      }
+    }
+    for (const BoundResultColumn& result : impl_->result_columns) {
+      CollectAggregateLeaves(result.expression, program.representative_leaves,
+                             representative_identities);
+    }
+    for (const BoundOrderingTerm& term : impl_->order_by) {
+      CollectAggregateLeaves(term.expression, program.representative_leaves,
+                             representative_identities);
+    }
+    if (program.having.has_value()) {
+      CollectAggregateLeaves(*program.having, program.representative_leaves,
+                             representative_identities);
+    }
+
+    std::vector<AggregateLeafIdentity> retained = source_identities;
+    for (const AggregateLeafIdentity& identity : representative_identities) {
+      if (!std::ranges::contains(retained, identity)) {
+        retained.push_back(identity);
+      }
+    }
+    if (retained.size() > options_.maximum_aggregate_terms) {
+      const SourceSpan span =
+          program.having.has_value() ? impl_->expressions[program.having->value()].span
+          : impl_->result_columns.front().expression.value() < impl_->expressions.size()
+              ? impl_->expressions[impl_->result_columns.front().expression.value()].span
+              : SourceSpan{};
+      return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded, span,
+                                         "too many aggregate terms"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<std::optional<BoundAggregateProgram>> FinalizeAggregateProgram() {
+    std::optional<BoundAggregateProgram> aggregate;
+    if (pending_aggregates_.empty() && active_group_by_.empty() && !active_having_.has_value()) {
+      return aggregate;
+    }
+    BoundAggregateProgram program;
+    program.invocations.reserve(pending_aggregates_.size());
+    constexpr std::array phases{
+        AggregateOccurrencePhase::kResult,
+        AggregateOccurrencePhase::kOrderBy,
+        AggregateOccurrencePhase::kHaving,
+    };
+    for (const AggregateOccurrencePhase phase : phases) {
+      for (PendingAggregateInvocation& pending : pending_aggregates_) {
+        if (pending.phase != phase) {
+          continue;
+        }
+        std::optional<BoundAggregateInvocationId> selected;
+        for (const BoundAggregateInvocationId id : program.invocations) {
+          if (AggregateInvocationsEquivalent(impl_->aggregate_invocations[id.value()],
+                                             pending.invocation)) {
+            selected = id;
+            break;
+          }
+        }
+        if (!selected.has_value()) {
+          if (program.invocations.size() >= options_.maximum_aggregate_terms) {
+            return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded,
+                                               pending.invocation.span,
+                                               "too many aggregate terms"));
+          }
+          if (impl_->aggregate_invocations.size() >= std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                               pending.invocation.span,
+                                               "bound aggregate invocation ID overflow"));
+          }
+          selected = BoundAggregateInvocationId{
+              static_cast<std::uint32_t>(impl_->aggregate_invocations.size())};
+          impl_->aggregate_invocations.push_back(std::move(pending.invocation));
+          program.invocations.push_back(*selected);
+        }
+        auto* call = std::get_if<BoundAggregateCallExpression>(
+            &impl_->expressions[pending.expression.value()].payload);
+        if (call == nullptr) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             impl_->expressions[pending.expression.value()].span,
+                                             "pending aggregate expression is invalid"));
+        }
+        call->invocation = *selected;
+      }
+    }
+    program.group_by = std::move(active_group_by_);
+    program.having = active_having_;
+    aggregate = std::move(program);
+    pending_aggregates_.clear();
+    return aggregate;
+  }
+
+  [[nodiscard]] BindExpected<void> FinishSelectQueryCore(SelectQuantifier quantifier) {
+    BindExpected<void> transferred = TransferHavingToWhere();
+    if (!transferred.has_value()) {
+      return transferred;
+    }
+    auto aggregate = FinalizeAggregateProgram();
+    if (!aggregate.has_value()) {
+      return std::unexpected(std::move(aggregate.error()));
+    }
+    if (aggregate->has_value()) {
+      BindExpected<void> analyzed = AnalyzeAggregateLeaves(**aggregate);
+      if (!analyzed.has_value()) {
+        return analyzed;
+      }
+    }
     core_metadata_.push_back(CoreBindingMetadata{
         .source_state = std::move(source_state_),
         .source_column_begin = active_source_begin_,
@@ -1613,15 +2043,13 @@ class StatementBinder final {
         .source_column_count = active_source_count_,
         .result_columns = std::move(impl_->result_columns),
         .where = impl_->where,
+        .aggregate = std::move(*aggregate),
     });
     impl_->where.reset();
+    return {};
   }
 
   [[nodiscard]] BindExpected<void> BindSelectCoreBody(const SelectCore& core) {
-    if (!core.group_by.empty() || core.having.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, core.span,
-                                         "aggregate queries are not supported"));
-    }
     BeginQueryCore();
     BindExpected<void> source = BindSource(core);
     if (!source.has_value()) {
@@ -1633,6 +2061,29 @@ class StatementBinder final {
     if (!results.has_value()) {
       return results;
     }
+    active_core_is_aggregate_ =
+        !core.group_by.empty() ||
+        std::ranges::any_of(impl_->result_columns, [this](const BoundResultColumn& result) {
+          return Properties(result.expression).contains_aggregate;
+        });
+    if (core.having.has_value()) {
+      if (!active_core_is_aggregate_) {
+        return std::unexpected(BinderError(BindErrorCode::kHavingWithoutAggregate,
+                                           tree_.expression(*core.having).span,
+                                           "HAVING clause on a non-aggregate query"));
+      }
+      active_aggregate_phase_ = AggregateOccurrencePhase::kHaving;
+      BindExpected<BoundExpressionId> having =
+          BindExpression(*core.having, BindScope{
+                                           .source_columns = true,
+                                           .result_aliases = true,
+                                           .allow_aggregates = true,
+                                       });
+      if (!having.has_value()) {
+        return std::unexpected(std::move(having.error()));
+      }
+      active_having_ = *having;
+    }
     if (core.where.has_value()) {
       BindExpected<BoundExpressionId> where =
           BindExpression(*core.where, BindScope{.source_columns = true, .result_aliases = true});
@@ -1641,6 +2092,7 @@ class StatementBinder final {
       }
       impl_->where = *where;
     }
+    active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
     return {};
   }
 
@@ -1752,8 +2204,11 @@ class StatementBinder final {
       if (!bound.has_value()) {
         return bound;
       }
-      FinishSelectQueryCore(select->quantifier);
-      return {};
+      BindExpected<void> group_by = BindGroupBy(*select);
+      if (!group_by.has_value()) {
+        return group_by;
+      }
+      return FinishSelectQueryCore(select->quantifier);
     }
     return BindValuesQueryCore(std::get<ValuesCore>(core));
   }
@@ -2035,13 +2490,26 @@ class StatementBinder final {
           }
 
           const std::size_t expression_count = impl_->expressions.size();
-          BindExpected<BoundExpressionId> bound = BindExpression(
-              comparable, BindScope{.source_columns = true, .result_aliases = false});
+          const std::size_t pending_count = pending_aggregates_.size();
+          const std::size_t collation_count = impl_->collations.size();
+          const std::size_t function_count = impl_->functions.size();
+          const std::size_t aggregate_function_count = impl_->aggregate_functions.size();
+          BindExpected<BoundExpressionId> bound =
+              BindExpression(comparable, BindScope{
+                                             .source_columns = true,
+                                             .result_aliases = false,
+                                             .allow_aggregates = true,
+                                         });
           if (!bound.has_value()) {
             impl_->expressions.resize(expression_count);
-            if (bound.error().code != BindErrorCode::kNoSuchColumn) {
-              return std::unexpected(std::move(bound.error()));
+            while (pending_aggregates_.size() > pending_count) {
+              pending_aggregates_.pop_back();
             }
+            while (impl_->aggregate_functions.size() > aggregate_function_count) {
+              impl_->aggregate_functions.pop_back();
+            }
+            impl_->functions.resize(function_count);
+            impl_->collations.resize(collation_count);
             continue;
           }
           for (std::size_t column = 0; column < results.size(); ++column) {
@@ -2051,6 +2519,14 @@ class StatementBinder final {
             }
           }
           impl_->expressions.resize(expression_count);
+          while (pending_aggregates_.size() > pending_count) {
+            pending_aggregates_.pop_back();
+          }
+          while (impl_->aggregate_functions.size() > aggregate_function_count) {
+            impl_->aggregate_functions.pop_back();
+          }
+          impl_->functions.resize(function_count);
+          impl_->collations.resize(collation_count);
         }
       }
 
@@ -2090,6 +2566,76 @@ class StatementBinder final {
           .null_placement = null_placement,
           .result_column = *result_column,
           .explicit_collation = OrderByHasExplicitCollation(term.expression),
+      });
+    }
+    active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindGroupBy(const SelectCore& core) {
+    active_group_by_.reserve(core.group_by.size());
+    for (std::size_t term_index = 0; term_index < core.group_by.size(); ++term_index) {
+      const ExpressionId syntax = core.group_by[term_index];
+      const SourceSpan span = tree_.expression(syntax).span;
+      std::optional<std::size_t> result_column;
+      BindExpected<std::optional<std::int64_t>> ordinal = ClassifyOrderByInteger(syntax, true);
+      if (!ordinal.has_value()) {
+        return std::unexpected(std::move(ordinal.error()));
+      }
+
+      BindExpected<BoundExpressionId> expression = std::unexpected(BinderError(
+          BindErrorCode::kInternalInvariant, span, "GROUP BY expression was not bound"));
+      if (ordinal->has_value()) {
+        if (**ordinal < 1 || std::cmp_greater(**ordinal, impl_->result_columns.size())) {
+          return std::unexpected(
+              BinderError(BindErrorCode::kGroupByTermOutOfRange, span,
+                          std::to_string(term_index + 1U) +
+                              " GROUP BY term out of range - should be between 1 and " +
+                              std::to_string(impl_->result_columns.size())));
+        }
+        result_column = static_cast<std::size_t>(**ordinal - 1);
+        expression = BindOrderByResultReference(syntax, *result_column);
+      } else {
+        expression = BindExpression(syntax, BindScope{
+                                                .source_columns = true,
+                                                .result_aliases = true,
+                                                .allow_aggregates = true,
+                                            });
+      }
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      if (Properties(*expression).contains_aggregate) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kAggregateMisuse, span,
+                        "aggregate functions are not allowed in the GROUP BY clause"));
+      }
+
+      if (!result_column.has_value()) {
+        for (std::size_t index = impl_->result_columns.size(); index > 0U; --index) {
+          if (BoundSemanticallyEquivalent(*expression,
+                                          impl_->result_columns[index - 1U].expression)) {
+            result_column = index - 1U;
+            break;
+          }
+        }
+      }
+
+      const ExpressionProperties properties = Properties(*expression);
+      BindExpected<BoundCollationId> collation =
+          properties.collation.has_value() ? BindExpected<BoundCollationId>{*properties.collation}
+                                           : InternCollation("BINARY", span);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      BindExpected<void> required = RequireCollation(*collation, span);
+      if (!required.has_value()) {
+        return required;
+      }
+      active_group_by_.push_back(BoundGroupingTerm{
+          .expression = *expression,
+          .collation = *collation,
+          .result_column = result_column,
       });
     }
     return {};
@@ -2470,8 +3016,12 @@ class StatementBinder final {
         continue;
       }
 
-      BindExpected<BoundExpressionId> bound = BindExpression(
-          result.expression, BindScope{.source_columns = true, .result_aliases = false});
+      BindExpected<BoundExpressionId> bound =
+          BindExpression(result.expression, BindScope{
+                                                .source_columns = true,
+                                                .result_aliases = false,
+                                                .allow_aggregates = true,
+                                            });
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
@@ -2654,6 +3204,18 @@ class StatementBinder final {
     return true;
   }
 
+  [[nodiscard]] const BoundAggregateInvocation* AggregateInvocationForExpression(
+      BoundExpressionId expression, const BoundAggregateCallExpression& call) const noexcept {
+    for (const PendingAggregateInvocation& pending : pending_aggregates_) {
+      if (pending.expression == expression) {
+        return &pending.invocation;
+      }
+    }
+    return call.invocation.value() < impl_->aggregate_invocations.size()
+               ? &impl_->aggregate_invocations[call.invocation.value()]
+               : nullptr;
+  }
+
   // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
   [[nodiscard]] bool SyntaxExpressionsEquivalent(ExpressionId left_id, ExpressionId right_id) {
     const Expression& left = ParenthesesTransparentExpression(left_id);
@@ -2761,6 +3323,12 @@ class StatementBinder final {
         alias != nullptr) {
       return BoundSemanticallyEquivalent(left_id, alias->target);
     }
+    const std::optional<AggregateLeafIdentity> left_identity = AggregateIdentity(left_id);
+    const std::optional<AggregateLeafIdentity> right_identity = AggregateIdentity(right_id);
+    if (left_identity.has_value() || right_identity.has_value()) {
+      return left_identity.has_value() && right_identity.has_value() &&
+             *left_identity == *right_identity;
+    }
     if (left.payload.index() != right.payload.index()) {
       return false;
     }
@@ -2784,12 +3352,6 @@ class StatementBinder final {
           return std::ranges::equal(literal->value.blob_value().value_or(ByteView{}),
                                     other.blob_value().value_or(ByteView{}));
       }
-    }
-    if (std::holds_alternative<BoundRowIdExpression>(left.payload)) {
-      return true;
-    }
-    if (const auto* column = std::get_if<BoundColumnExpression>(&left.payload); column != nullptr) {
-      return column->column == std::get<BoundColumnExpression>(right.payload).column;
     }
     if (const auto* parameter = std::get_if<BoundParameterExpression>(&left.payload);
         parameter != nullptr) {
@@ -2824,6 +3386,16 @@ class StatementBinder final {
       const auto& other = std::get<BoundScalarCallExpression>(right.payload);
       return call->function == other.function && call->collation == other.collation &&
              BoundArgumentsEquivalent(call->arguments, other.arguments);
+    }
+    if (const auto* call = std::get_if<BoundAggregateCallExpression>(&left.payload);
+        call != nullptr) {
+      const auto& other = std::get<BoundAggregateCallExpression>(right.payload);
+      const BoundAggregateInvocation* left_invocation =
+          AggregateInvocationForExpression(left_id, *call);
+      const BoundAggregateInvocation* right_invocation =
+          AggregateInvocationForExpression(right_id, other);
+      return left_invocation != nullptr && right_invocation != nullptr &&
+             AggregateInvocationsEquivalent(*left_invocation, *right_invocation);
     }
     if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
         coalesce != nullptr) {
@@ -2861,6 +3433,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindOrderBy(const SelectStatement& select) {
+    active_aggregate_phase_ = AggregateOccurrencePhase::kOrderBy;
     impl_->order_by.reserve(select.order_by.size());
     for (std::size_t term_index = 0; term_index < select.order_by.size(); ++term_index) {
       const OrderingTerm& term = select.order_by[term_index];
@@ -2889,8 +3462,11 @@ class StatementBinder final {
       BindExpected<BoundExpressionId> expression =
           result_column.has_value()
               ? BindOrderByResultReference(term.expression, *result_column)
-              : BindExpression(term.expression,
-                               BindScope{.source_columns = true, .result_aliases = true});
+              : BindExpression(term.expression, BindScope{
+                                                    .source_columns = true,
+                                                    .result_aliases = true,
+                                                    .allow_aggregates = active_core_is_aggregate_,
+                                                });
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
       }
@@ -3003,21 +3579,23 @@ class StatementBinder final {
     const std::size_t source_end = active_source_begin_ + active_source_count_;
     for (std::size_t index = active_source_begin_; index < source_end; ++index) {
       const BoundSourceColumn& column = impl_->source_columns[index];
+      const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
+      const std::string_view collation_name =
+          IsActiveRowIdAlias(column_id) ? std::string_view{"BINARY"} : column.collation_name;
       BindExpected<std::optional<BoundCollationId>> collation =
-          InternOptionalCollation(column.collation_name, span);
+          InternOptionalCollation(collation_name, span);
       if (!collation.has_value()) {
         return std::unexpected(std::move(collation.error()));
       }
-      BindExpected<BoundExpressionId> expression =
-          AppendExpression(span,
-                           BoundColumnExpression{
-                               .column = BoundSourceColumnId{static_cast<std::uint32_t>(index)},
-                           },
-                           ExpressionProperties{
-                               .affinity = column.affinity,
-                               .collation = *collation,
-                               .explicit_collation = false,
-                           });
+      BindExpected<BoundExpressionId> expression = AppendExpression(span,
+                                                                    BoundColumnExpression{
+                                                                        .column = column_id,
+                                                                    },
+                                                                    ExpressionProperties{
+                                                                        .affinity = column.affinity,
+                                                                        .collation = *collation,
+                                                                        .explicit_collation = false,
+                                                                    });
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
       }
@@ -3352,6 +3930,11 @@ class StatementBinder final {
       for (const AliasEntry& alias : aliases_) {
         if (NamesEqual(alias.name, name)) {
           const ExpressionProperties properties = Properties(alias.target);
+          if (properties.contains_aggregate && !scope.allow_aggregates) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kAggregateMisuse, span,
+                            "misuse of aggregate function through result alias"));
+          }
           BindExpected<BoundExpressionId> expression = AppendExpression(
               span, BoundAliasReferenceExpression{.target = alias.target}, properties);
           if (!expression.has_value()) {
@@ -3421,8 +4004,10 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<BoundExpressionId> BindColumn(BoundSourceColumnId id,
                                                            SourceSpan span) {
     const BoundSourceColumn& column = impl_->source_columns[id.value()];
+    const std::string_view collation_name =
+        IsActiveRowIdAlias(id) ? std::string_view{"BINARY"} : column.collation_name;
     BindExpected<std::optional<BoundCollationId>> collation =
-        InternOptionalCollation(column.collation_name, span);
+        InternOptionalCollation(collation_name, span);
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
@@ -3487,6 +4072,7 @@ class StatementBinder final {
     }
     ExpressionProperties properties;
     const ExpressionProperties child = Properties(*operand);
+    properties.contains_aggregate = child.contains_aggregate;
     if (unary.op == UnaryOperator::kPositive) {
       properties = child;
       properties.affinity = TypeAffinity::kNone;
@@ -3637,12 +4223,168 @@ class StatementBinder final {
             literal->kind == LiteralKind::kString || literal->kind == LiteralKind::kBlob);
   }
 
+  [[nodiscard]] BindExpected<BoundOrderingTerm> BindAggregateOrderingTerm(const OrderingTerm& term,
+                                                                          BindScope scope) {
+    scope.allow_aggregates = false;
+    BindExpected<BoundExpressionId> expression = BindExpression(term.expression, scope);
+    if (!expression.has_value()) {
+      return std::unexpected(std::move(expression.error()));
+    }
+    const ExpressionProperties properties = Properties(*expression);
+    BindExpected<BoundCollationId> collation =
+        properties.collation.has_value() ? BindExpected<BoundCollationId>{*properties.collation}
+                                         : InternCollation("BINARY", term.span);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    BindExpected<void> required = RequireCollation(*collation, term.span);
+    if (!required.has_value()) {
+      return std::unexpected(std::move(required.error()));
+    }
+    const SortOrder order =
+        term.order == SortOrder::kDescending ? SortOrder::kDescending : SortOrder::kAscending;
+    const BoundNullPlacement null_placement =
+        term.null_order == NullOrder::kFirst  ? BoundNullPlacement::kFirst
+        : term.null_order == NullOrder::kLast ? BoundNullPlacement::kLast
+        : order == SortOrder::kDescending     ? BoundNullPlacement::kLast
+                                              : BoundNullPlacement::kFirst;
+    return BoundOrderingTerm{
+        .expression = *expression,
+        .collation = *collation,
+        .order = order,
+        .null_placement = null_placement,
+        .result_column = std::nullopt,
+        .explicit_collation = OrderByHasExplicitCollation(term.expression),
+    };
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindAggregateCall(
+      const AggregateFunction& function, const FunctionCallExpression& call, SourceSpan span,
+      BindScope scope, bool has_wildcard) {
+    BindScope argument_scope = scope;
+    argument_scope.allow_aggregates = false;
+    std::vector<BoundExpressionId> arguments;
+    if (!has_wildcard) {
+      BindExpected<std::vector<BoundExpressionId>> bound =
+          BindArguments(call.arguments, argument_scope);
+      if (!bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      arguments = std::move(*bound);
+    }
+    if (!scope.allow_aggregates) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kAggregateMisuse, span,
+                      "misuse of aggregate function " + std::string{function.name()} + "()"));
+    }
+
+    std::vector<BoundOrderingTerm> order_by;
+    if (!arguments.empty()) {
+      order_by.reserve(call.order_by.size());
+      for (const OrderingTerm& term : call.order_by) {
+        BindExpected<BoundOrderingTerm> bound = BindAggregateOrderingTerm(term, argument_scope);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        order_by.push_back(*bound);
+      }
+    }
+
+    std::optional<BoundExpressionId> filter;
+    if (call.filter.has_value()) {
+      BindScope filter_scope = scope;
+      filter_scope.allow_aggregates = false;
+      BindExpected<BoundExpressionId> bound = BindExpression(*call.filter, filter_scope);
+      if (!bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      filter = *bound;
+    }
+
+    if (call.distinct && arguments.size() != 1U) {
+      return std::unexpected(BinderError(BindErrorCode::kWrongFunctionArity, span,
+                                         "DISTINCT aggregates must have exactly one argument"));
+    }
+
+    BindExpected<BoundAggregateFunctionId> bound_function = InternAggregateFunction(function, span);
+    if (!bound_function.has_value()) {
+      return std::unexpected(std::move(bound_function.error()));
+    }
+    const bool requires_argument_collation =
+        (function.uses_collation() || call.distinct) && !arguments.empty();
+    BindExpected<BoundCollationId> collation = requires_argument_collation
+                                                   ? SelectFunctionCollation(arguments, span)
+                                                   : InternCollation("BINARY", span);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    if (requires_argument_collation) {
+      BindExpected<void> required = RequireCollation(*collation, span);
+      if (!required.has_value()) {
+        return std::unexpected(std::move(required.error()));
+      }
+    }
+    if (pending_aggregates_.size() >= std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "pending aggregate invocation ID overflow"));
+    }
+    ExpressionProperties properties = PropagatedExplicitProperties(arguments);
+    properties.affinity = TypeAffinity::kNone;
+    properties.contains_aggregate = true;
+    const BoundAggregateInvocationId pending_id{
+        static_cast<std::uint32_t>(pending_aggregates_.size())};
+    BindExpected<BoundExpressionId> expression =
+        AppendExpression(span, BoundAggregateCallExpression{.invocation = pending_id}, properties);
+    if (!expression.has_value()) {
+      return std::unexpected(std::move(expression.error()));
+    }
+    pending_aggregates_.push_back(PendingAggregateInvocation{
+        .expression = *expression,
+        .invocation =
+            BoundAggregateInvocation{
+                .span = span,
+                .function = *bound_function,
+                .collation = *collation,
+                .arguments = std::move(arguments),
+                .distinct = call.distinct,
+                .order_by = std::move(order_by),
+                .filter = filter,
+            },
+        .phase = active_aggregate_phase_,
+    });
+    return *expression;
+  }
+
+  [[nodiscard]] BindExpected<void> BindArgumentsBeforeFunctionError(
+      const FunctionCallExpression& call, BindScope scope, bool has_wildcard) {
+    if (has_wildcard) {
+      return {};
+    }
+    BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
+    if (!arguments.has_value()) {
+      return std::unexpected(std::move(arguments.error()));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> RejectScalarModifiers(const FunctionCallExpression& call,
+                                                         SourceSpan span, std::string_view name,
+                                                         std::size_t argument_count) const {
+    if (call.filter.has_value()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kAggregateMisuse, span,
+                      "FILTER may not be used with non-aggregate " + std::string{name} + "()"));
+    }
+    if (!call.order_by.empty() && argument_count != 0U) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kAggregateMisuse, span,
+                      "ORDER BY may not be used with non-aggregate " + std::string{name} + "()"));
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindCall(const FunctionCallExpression& call,
                                                          SourceSpan span, BindScope scope) {
-    if (!call.order_by.empty() || call.filter.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                         "aggregate queries are not supported"));
-    }
     BindExpected<DecodedNameParts> parts = NameParts(call.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -3653,31 +4395,38 @@ class StatementBinder final {
                       "no such function: " + std::string{SpanText(call.name.span)}));
     }
     const std::string_view name = parts->front();
-    if (call.arguments.size() > options_.maximum_function_arguments) {
+    const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
+      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
+    });
+    const std::size_t argument_count = has_wildcard ? 0U : call.arguments.size();
+    if (argument_count > options_.maximum_function_arguments) {
       return std::unexpected(BinderError(BindErrorCode::kFunctionArgumentLimitExceeded, span,
                                          "too many arguments on function " + std::string{name}));
     }
 
-    const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
-      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
-    });
     const Result<const ScalarFunction*> resolved =
-        environment_.functions().Resolve(name, call.arguments.size());
+        environment_.functions().Resolve(name, argument_count);
     if (resolved.has_value()) {
-      if (has_wildcard) {
-        return UnsupportedAggregate(span);
+      std::vector<BoundExpressionId> arguments;
+      if (!has_wildcard) {
+        BindExpected<std::vector<BoundExpressionId>> bound = BindArguments(call.arguments, scope);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        arguments = std::move(*bound);
       }
-      BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
-      if (!arguments.has_value()) {
-        return std::unexpected(std::move(arguments.error()));
+      BindExpected<void> modifiers =
+          RejectScalarModifiers(call, span, (*resolved)->name(), argument_count);
+      if (!modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
       }
-      const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
+      const ExpressionProperties properties = PropagatedExplicitProperties(arguments);
       BindExpected<BoundFunctionId> function = InternFunction(**resolved, span);
       if (!function.has_value()) {
         return std::unexpected(std::move(function.error()));
       }
       BindExpected<BoundCollationId> collation = (*resolved)->uses_collation()
-                                                     ? SelectFunctionCollation(*arguments, span)
+                                                     ? SelectFunctionCollation(arguments, span)
                                                      : InternCollation("BINARY", span);
       if (!collation.has_value()) {
         return std::unexpected(std::move(collation.error()));
@@ -3686,7 +4435,7 @@ class StatementBinder final {
                               BoundScalarCallExpression{
                                   .function = *function,
                                   .collation = *collation,
-                                  .arguments = std::move(*arguments),
+                                  .arguments = std::move(arguments),
                               },
                               properties);
     }
@@ -3695,11 +4444,19 @@ class StatementBinder final {
       const bool valid =
           NamesEqual(name, "ifnull") ? call.arguments.size() == 2U : call.arguments.size() >= 2U;
       if (!valid) {
+        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+        if (!arguments.has_value()) {
+          return std::unexpected(std::move(arguments.error()));
+        }
         return WrongArity(call.name.span, name);
       }
       BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
       if (!arguments.has_value()) {
         return std::unexpected(std::move(arguments.error()));
+      }
+      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+      if (!modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
       }
       const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
       return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(*arguments)},
@@ -3707,23 +4464,39 @@ class StatementBinder final {
     }
     if (NamesEqual(name, "iif") || NamesEqual(name, "if")) {
       if (call.arguments.size() < 2U) {
+        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+        if (!arguments.has_value()) {
+          return std::unexpected(std::move(arguments.error()));
+        }
         return WrongArity(call.name.span, name);
       }
       BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
       if (!arguments.has_value()) {
         return std::unexpected(std::move(arguments.error()));
       }
+      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+      if (!modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
+      }
       const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
       return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(*arguments)},
                               properties);
     }
     if (NamesEqual(name, "likely") || NamesEqual(name, "unlikely")) {
-      if (call.arguments.size() != 1U) {
+      if (argument_count != 1U) {
+        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+        if (!arguments.has_value()) {
+          return std::unexpected(std::move(arguments.error()));
+        }
         return WrongArity(call.name.span, name);
       }
       BindExpected<BoundExpressionId> operand = BindExpression(call.arguments.front(), scope);
       if (!operand.has_value()) {
         return std::unexpected(std::move(operand.error()));
+      }
+      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+      if (!modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
       }
       return AppendExpression(span,
                               BoundLikelihoodExpression{
@@ -3734,6 +4507,10 @@ class StatementBinder final {
     }
     if (NamesEqual(name, "likelihood")) {
       if (call.arguments.size() != 2U) {
+        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+        if (!arguments.has_value()) {
+          return std::unexpected(std::move(arguments.error()));
+        }
         return WrongArity(call.name.span, name);
       }
       const Expression& probability_expression =
@@ -3755,6 +4532,10 @@ class StatementBinder final {
       if (!operand.has_value()) {
         return std::unexpected(std::move(operand.error()));
       }
+      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+      if (!modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
+      }
       return AppendExpression(span,
                               BoundLikelihoodExpression{
                                   .operand = *operand,
@@ -3763,11 +4544,24 @@ class StatementBinder final {
                               PropagatedExplicitProperties(std::array{*operand}));
     }
 
-    if (has_wildcard || AggregateFunctionNameExists(name)) {
-      return UnsupportedAggregate(span);
+    const Result<const AggregateFunction*> aggregate =
+        environment_.functions().ResolveAggregate(name, argument_count);
+    if (aggregate.has_value()) {
+      return BindAggregateCall(**aggregate, call, span, scope, has_wildcard);
     }
-    if (FunctionNameExists(name)) {
+    if (FunctionNameExists(name) || AggregateFunctionNameExists(name) ||
+        NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull") || NamesEqual(name, "iif") ||
+        NamesEqual(name, "if") || NamesEqual(name, "likely") || NamesEqual(name, "unlikely") ||
+        NamesEqual(name, "likelihood")) {
+      BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+      if (!arguments.has_value()) {
+        return std::unexpected(std::move(arguments.error()));
+      }
       return WrongArity(call.name.span, name);
+    }
+    BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
+    if (!arguments.has_value()) {
+      return std::unexpected(std::move(arguments.error()));
     }
     return std::unexpected(BinderError(BindErrorCode::kNoSuchFunction, call.name.span,
                                        "no such function: " + std::string{name}));
@@ -3871,6 +4665,7 @@ class StatementBinder final {
                 .collation = properties.collation,
                 .has_explicit_collation = properties.explicit_collation,
                 .truth_hint = properties.truth_hint,
+                .contains_aggregate = properties.contains_aggregate,
             },
         .payload = std::move(payload),
     });
@@ -3884,22 +4679,22 @@ class StatementBinder final {
         .collation = properties.collation,
         .explicit_collation = properties.has_explicit_collation,
         .truth_hint = properties.truth_hint,
+        .contains_aggregate = properties.contains_aggregate,
     };
   }
 
   [[nodiscard]] ExpressionProperties PropagatedExplicitProperties(
       std::span<const BoundExpressionId> expressions) const noexcept {
+    ExpressionProperties result;
     for (const BoundExpressionId expression : expressions) {
       const ExpressionProperties properties = Properties(expression);
-      if (properties.explicit_collation) {
-        return ExpressionProperties{
-            .affinity = TypeAffinity::kNone,
-            .collation = properties.collation,
-            .explicit_collation = true,
-        };
+      result.contains_aggregate = result.contains_aggregate || properties.contains_aggregate;
+      if (!result.explicit_collation && properties.explicit_collation) {
+        result.collation = properties.collation;
+        result.explicit_collation = true;
       }
     }
-    return {};
+    return result;
   }
 
   template <std::size_t Size>
@@ -3956,6 +4751,32 @@ class StatementBinder final {
         .name = std::string{function.name()},
         .deterministic = function.is_deterministic(),
         .uses_collation = function.uses_collation(),
+    });
+    return id;
+  }
+
+  [[nodiscard]] BindExpected<BoundAggregateFunctionId> InternAggregateFunction(
+      const AggregateFunction& function, SourceSpan span) {
+    const BoundAggregateExtremumKind extremum = ToBoundExtremum(function.extremum_kind());
+    for (std::size_t index = 0; index < impl_->aggregate_functions.size(); ++index) {
+      const BoundAggregateFunction& existing = impl_->aggregate_functions[index];
+      if (NamesEqual(existing.name, function.name()) &&
+          existing.deterministic == function.is_deterministic() &&
+          existing.uses_collation == function.uses_collation() && existing.extremum == extremum) {
+        return BoundAggregateFunctionId{static_cast<std::uint32_t>(index)};
+      }
+    }
+    if (impl_->aggregate_functions.size() >= std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "bound aggregate function ID overflow"));
+    }
+    const BoundAggregateFunctionId id{
+        static_cast<std::uint32_t>(impl_->aggregate_functions.size())};
+    impl_->aggregate_functions.push_back(BoundAggregateFunction{
+        .name = std::string{function.name()},
+        .deterministic = function.is_deterministic(),
+        .uses_collation = function.uses_collation(),
+        .extremum = extremum,
     });
     return id;
   }
@@ -4037,6 +4858,11 @@ class StatementBinder final {
   std::vector<AliasEntry> aliases_;
   std::size_t active_source_begin_ = 0;
   std::size_t active_source_count_ = 0;
+  AggregateOccurrencePhase active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
+  bool active_core_is_aggregate_ = false;
+  std::vector<BoundGroupingTerm> active_group_by_;
+  std::optional<BoundExpressionId> active_having_;
+  std::vector<PendingAggregateInvocation> pending_aggregates_;
   std::vector<CoreBindingMetadata> core_metadata_;
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
 };
@@ -4069,6 +4895,8 @@ std::string_view BoundExpressionKindName(BoundExpressionKind kind) noexcept {
       return "alias_reference";
     case BoundExpressionKind::kScalarCall:
       return "scalar_call";
+    case BoundExpressionKind::kAggregateCall:
+      return "aggregate_call";
     case BoundExpressionKind::kCoalesce:
       return "coalesce";
     case BoundExpressionKind::kConditional:
@@ -4099,10 +4927,16 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "no_such_function";
     case BindErrorCode::kWrongFunctionArity:
       return "wrong_function_arity";
+    case BindErrorCode::kAggregateMisuse:
+      return "aggregate_misuse";
+    case BindErrorCode::kHavingWithoutAggregate:
+      return "having_without_aggregate";
     case BindErrorCode::kNoSuchCollation:
       return "no_such_collation";
     case BindErrorCode::kOrderByTermOutOfRange:
       return "order_by_term_out_of_range";
+    case BindErrorCode::kGroupByTermOutOfRange:
+      return "group_by_term_out_of_range";
     case BindErrorCode::kCompoundOrderByTerm:
       return "compound_order_by_term";
     case BindErrorCode::kCompoundColumnCount:
@@ -4117,6 +4951,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "parameter_limit_exceeded";
     case BindErrorCode::kFunctionArgumentLimitExceeded:
       return "function_argument_limit_exceeded";
+    case BindErrorCode::kAggregateTermLimitExceeded:
+      return "aggregate_term_limit_exceeded";
     case BindErrorCode::kResultColumnLimitExceeded:
       return "result_column_limit_exceeded";
     case BindErrorCode::kColumnCountMismatch:
@@ -4143,9 +4979,11 @@ ErrorCode BindError::base_error_code() const noexcept {
       return ErrorCode::kMisuse;
     case BindErrorCode::kParameterLimitExceeded:
     case BindErrorCode::kFunctionArgumentLimitExceeded:
+    case BindErrorCode::kAggregateTermLimitExceeded:
     case BindErrorCode::kResultColumnLimitExceeded:
       return ErrorCode::kTooLarge;
     case BindErrorCode::kOrderByTermOutOfRange:
+    case BindErrorCode::kGroupByTermOutOfRange:
     case BindErrorCode::kCompoundOrderByTerm:
     case BindErrorCode::kCompoundColumnCount:
     case BindErrorCode::kValuesColumnCount:
@@ -4161,6 +4999,8 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kNoTablesSpecified:
     case BindErrorCode::kNoSuchFunction:
     case BindErrorCode::kWrongFunctionArity:
+    case BindErrorCode::kAggregateMisuse:
+    case BindErrorCode::kHavingWithoutAggregate:
     case BindErrorCode::kNoSuchCollation:
     case BindErrorCode::kInvalidLiteral:
     case BindErrorCode::kInvalidVariableNumber:
@@ -4231,6 +5071,16 @@ std::span<const BoundCollation> BoundSelect::collations() const noexcept {
 std::span<const BoundScalarFunction> BoundSelect::functions() const noexcept {
   return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
                           : std::span<const BoundScalarFunction>{};
+}
+
+std::span<const BoundAggregateFunction> BoundSelect::aggregate_functions() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundAggregateFunction>{impl_->aggregate_functions}
+                          : std::span<const BoundAggregateFunction>{};
+}
+
+std::span<const BoundAggregateInvocation> BoundSelect::aggregate_invocations() const noexcept {
+  return impl_ != nullptr ? std::span<const BoundAggregateInvocation>{impl_->aggregate_invocations}
+                          : std::span<const BoundAggregateInvocation>{};
 }
 
 std::span<const BoundParameter> BoundSelect::parameters() const noexcept {

@@ -169,6 +169,19 @@ int main() try {
   if (compound_allocations == 0 || compound_allocations > 512U) {
     return 1;
   }
+  constexpr std::string_view kAggregateSql =
+      "SELECT id,group_concat(DISTINCT Name ORDER BY id) "
+      "FILTER (WHERE id>0) FROM Items WHERE id>0 "
+      "GROUP BY id HAVING id>0 ORDER BY sum(id)";
+  const std::size_t aggregate_allocations = BindAllocationCount(kAggregateSql, catalog);
+  if (aggregate_allocations == 0 || aggregate_allocations > 512U) {
+    return 1;
+  }
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    if (BindAllocationCount(kAggregateSql, catalog) != aggregate_allocations) {
+      return 1;
+    }
+  }
   const std::size_t update_allocations = BindStatementAllocationCount(
       "UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Score>?2", catalog);
   const std::size_t create_allocations = BindStatementAllocationCount(
@@ -210,6 +223,11 @@ int main() try {
     return 1;
   }
   const BoundSelect& select = *published;
+  BindSelectResult aggregate_bound = BindSelectStatement(ParseTree(kAggregateSql), catalog);
+  if (!aggregate_bound.has_value()) {
+    return 1;
+  }
+  const BoundSelect aggregate_select = std::move(*aggregate_bound);
   BindStatementResult update_result =
       BindStatement(ParseTree("UPDATE Items SET Name=?1, id=id+1 WHERE Score>?2"), catalog);
   if (!update_result.has_value() || !std::holds_alternative<BoundUpdate>(*update_result)) {
@@ -224,12 +242,26 @@ int main() try {
   checksum += select.source_columns().size();
   checksum += select.collations().size();
   checksum += select.functions().size();
+  checksum += select.aggregate_functions().size();
+  checksum += select.aggregate_invocations().size();
   checksum += select.parameters().size();
   checksum += select.result_columns().size();
   for (const BoundExpression& expression : select.expressions()) {
     checksum += static_cast<std::uint64_t>(BoundExpressionKindOf(expression));
     checksum += BoundExpressionKindName(BoundExpressionKindOf(expression)).size();
     std::visit([&checksum](const auto&) { ++checksum; }, expression.payload);
+  }
+  checksum += aggregate_select.aggregate_functions().size();
+  checksum += aggregate_select.aggregate_invocations().size();
+  for (const BoundQueryCore& core : aggregate_select.query_cores()) {
+    if (const auto* selected = std::get_if<BoundSelectCore>(&core);
+        selected != nullptr && selected->aggregate.has_value()) {
+      checksum += selected->aggregate->invocations.size();
+      checksum += selected->aggregate->group_by.size();
+      checksum += selected->aggregate->source_leaves.size();
+      checksum += selected->aggregate->representative_leaves.size();
+      checksum += selected->aggregate->having.has_value() ? 1U : 0U;
+    }
   }
   checksum += update.source().size_bytes();
   checksum += update.target().columns.size();

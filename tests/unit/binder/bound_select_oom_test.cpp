@@ -106,6 +106,10 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main() try {
   using namespace modern_sqlite;
 
+  constexpr std::string_view kAggregateSql =
+      "SELECT id,group_concat(DISTINCT Name ORDER BY id) "
+      "FILTER (WHERE id>0) FROM Items WHERE id>0 "
+      "GROUP BY id HAVING id>0 ORDER BY sum(id)";
   constexpr std::array kSql{
       std::string_view{"SELECT Name COLLATE NOCASE, abs(?), coalesce(NULL,Name), "
                        "x'00112233445566778899AABBCCDDEEFF' AS payload "
@@ -114,6 +118,7 @@ int main() try {
       std::string_view{"VALUES(?1,?2 IS NULL),(?3,?4) "
                        "UNION SELECT Name,id FROM Items "
                        "ORDER BY 1 COLLATE NOCASE LIMIT ?5"},
+      kAggregateSql,
       std::string_view{"INSERT INTO Items(Name,id) VALUES(abs(?1),?2)"},
       std::string_view{"UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Name=?2"},
       std::string_view{"DELETE FROM Items WHERE id=?1"},
@@ -167,6 +172,35 @@ int main() try {
 
     const BindStatementResult recovered = BindStatement(ParseTree(sql), catalog);
     if (!recovered.has_value()) {
+      return 1;
+    }
+  }
+
+  SyntaxTree aggregate_baseline_tree = ParseTree(kAggregateSql);
+  allocation_index.store(0, std::memory_order_relaxed);
+  const BindStatementResult aggregate_baseline =
+      BindStatement(std::move(aggregate_baseline_tree), catalog);
+  if (!aggregate_baseline.has_value()) {
+    return 1;
+  }
+  const std::size_t aggregate_allocations = allocation_index.load(std::memory_order_relaxed);
+  if (aggregate_allocations == 0U || aggregate_allocations > 1024U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < aggregate_allocations; ++failure) {
+    SyntaxTree tree = ParseTree(kAggregateSql);
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const BindStatementResult unexpected =
+          BindStatement(std::move(tree), catalog);
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
       return 1;
     }
   }

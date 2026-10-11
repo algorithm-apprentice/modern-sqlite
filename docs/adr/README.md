@@ -63,3 +63,4 @@ their corresponding implementation begins.
 57. [ADR-0057: SQLite-Aligned Aggregate Roadmap](0057-sqlite-aligned-aggregates-and-grouping.md)
 58. [ADR-0058: Statement-Owned Temporary Storage Budgets](0058-statement-temporary-storage-budgets.md)
 59. [ADR-0059: SQLite-Aligned Aggregate Function State](0059-sqlite-aligned-aggregate-function-state.md)
+60. [ADR-0060: SQLite-Aligned Aggregate Binding](0060-sqlite-aligned-aggregate-binding.md)

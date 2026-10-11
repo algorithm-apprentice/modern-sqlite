@@ -633,6 +633,15 @@ class LogicalPlanBuilder final {
       return std::unexpected{
           PlanError(LogicalPlanErrorCode::kInvalidInput, "bound select is invalid")};
     }
+    const bool aggregate =
+        std::ranges::any_of(bound_select.query_cores(), [](const BoundQueryCore& core) {
+          const auto* select = std::get_if<BoundSelectCore>(&core);
+          return select != nullptr && select->aggregate.has_value();
+        });
+    if (aggregate) {
+      return std::unexpected{PlanError(LogicalPlanErrorCode::kUnsupportedFeature,
+                                       "aggregate planning is not implemented")};
+    }
     if (IsAdvancedQuery(bound_select)) {
       return BuildAdvanced(std::move(bound_select));
     }
