@@ -808,6 +808,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/benchmarks/distinct_compound_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/write_performance.cpp"
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/cmake/clang_tidy_scope/src/production.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/cmake/clang_tidy_scope/tests/test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"

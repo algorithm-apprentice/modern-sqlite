@@ -88,8 +88,12 @@ Any failure blocks merging and new feature work until its root cause is fixed.
   Debug and Release builds cover header and build-configuration changes.
 - Every pull request also analyzes one stable smoke translation unit so
   workflow-only changes exercise the real clang-tidy command path.
-- `main` always runs the full clang-tidy target. A pull request may request the
-  same full target with the `full-quality` label.
+- `main` always runs clang-tidy across the production targets rooted under
+  `src/`. Per ADR-0064, a pull request may request the same scope with the
+  `full-quality` label for shared-header, build-configuration, or broad
+  production changes; ordinary pull requests do not receive the label. A
+  dedicated workflow owns this optional check, so applying the label does not
+  restart or cancel standard pull-request CI.
 - Pull requests require GCC Release, macOS Debug and Release, sanitizers, and
   the Ubuntu performance contract. GCC Debug and the macOS performance
   contract run on `main`.

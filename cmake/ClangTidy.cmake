@@ -3,6 +3,44 @@ function(modern_sqlite_enable_clang_tidy target)
     return()
   endif()
 
+  get_target_property(target_source_directory "${target}" SOURCE_DIR)
+  get_target_property(target_sources "${target}" SOURCES)
+  if(NOT target_sources)
+    return()
+  endif()
+
+  set(production_source_directory "${PROJECT_SOURCE_DIR}/src")
+  set(has_production_source OFF)
+  foreach(source IN LISTS target_sources)
+    if(source MATCHES "^\\$<")
+      return()
+    endif()
+    if(NOT source MATCHES "\\.(cc|cpp|cxx)$")
+      continue()
+    endif()
+
+    set(source_path "${source}")
+    cmake_path(
+      ABSOLUTE_PATH source_path
+      BASE_DIRECTORY "${target_source_directory}"
+      NORMALIZE
+    )
+    cmake_path(
+      IS_PREFIX production_source_directory
+      "${source_path}"
+      NORMALIZE
+      is_production_source
+    )
+    if(NOT is_production_source)
+      return()
+    endif()
+    set(has_production_source ON)
+  endforeach()
+
+  if(NOT has_production_source)
+    return()
+  endif()
+
   find_program(MODERN_SQLITE_CLANG_TIDY_EXECUTABLE NAMES clang-tidy REQUIRED)
   set(
     clang_tidy_command

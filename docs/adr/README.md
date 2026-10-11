@@ -67,3 +67,4 @@ their corresponding implementation begins.
 61. [ADR-0061: SQLite-Aligned Aggregate Planning](0061-sqlite-aligned-aggregate-planning.md)
 62. [ADR-0062: Typed Aggregate Bytecode and VM State](0062-typed-aggregate-bytecode-and-vm.md)
 63. [ADR-0063: SQLite-Aligned Global Aggregate Execution](0063-global-aggregate-execution.md)
+64. [ADR-0064: Production-Only Clang-Tidy Scope](0064-production-only-clang-tidy-scope.md)
