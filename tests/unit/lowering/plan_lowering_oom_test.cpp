@@ -179,6 +179,24 @@ bool inject_failure = false;
   return std::move(*physical);
 }
 
+[[nodiscard]] modern_sqlite::PhysicalPlan AggregateFixture(
+    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql) {
+  using namespace modern_sqlite;
+  BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
+  if (!bound.has_value()) {
+    throw std::runtime_error{"failed to bind aggregate lowering OOM fixture"};
+  }
+  BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  if (!logical.has_value()) {
+    throw std::runtime_error{"failed to plan aggregate lowering OOM fixture"};
+  }
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  if (!physical.has_value()) {
+    throw std::runtime_error{"failed to optimize aggregate lowering OOM fixture"};
+  }
+  return std::move(*physical);
+}
+
 [[nodiscard]] modern_sqlite::PhysicalPlan PhysicalIndexFixture(
     const modern_sqlite::CatalogSnapshotPtr& catalog,
     std::string_view sql = "SELECT id, Name FROM Items WHERE Name=?1") {
@@ -371,6 +389,12 @@ int main() try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
+  const std::array<PhysicalPlan, 4> aggregate_plans{
+      AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
+      AggregateFixture(catalog, "SELECT max(id) FROM Items"),
+      AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
+      AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
+  };
   const PhysicalPlan distinct =
       DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");
   const PhysicalPlan ordered_distinct = DistinctFixture(
@@ -459,6 +483,11 @@ int main() try {
   }
   for (const PhysicalPlan& ordered_plan : ordered_compound_plans) {
     if (!verify_oom(ordered_plan, 512U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& aggregate_plan : aggregate_plans) {
+    if (!verify_oom(aggregate_plan, 256U)) {
       return 1;
     }
   }

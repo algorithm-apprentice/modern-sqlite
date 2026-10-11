@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -89,6 +90,8 @@ int main() try {
   ReadStatement ordered = Prepare(session, "SELECT id FROM items ORDER BY id DESC");
   ReadStatement compound =
       Prepare(session, "SELECT id FROM items UNION SELECT id FROM items ORDER BY 1");
+  ReadStatement aggregate =
+      Prepare(session, "SELECT count(),min(category),group_concat(name) FROM items");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -199,6 +202,24 @@ int main() try {
   }
   ResetCount();
   if (!compound.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto aggregate_row = aggregate.Step();
+  if (!aggregate_row.has_value() || *aggregate_row != ReadStep::kRow ||
+      aggregate.row().size() != 3U ||
+      aggregate.row()[0].integer_value() != std::optional<std::int64_t>{3} ||
+      !AtMostAllocations(64U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto aggregate_done = aggregate.Step();
+  if (!aggregate_done.has_value() || *aggregate_done != ReadStep::kDone || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!aggregate.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 

@@ -255,6 +255,10 @@ aggregate lowering is not implemented
 All new behavior is verified through hand-authored typed programs. Package 11
 will allocate descriptors and emit global aggregate lifecycles.
 
+Delivery update: ADR-0063 now allocates those descriptors and emits the
+accepted ungrouped global and indexed-MIN/MAX lifecycles. This package's
+direct-program boundary remains the historical scope of package 10.
+
 ### 9. Verify lifecycle, state semantics, errors, and allocation
 
 Development follows red-green-refactor. Tests cover:

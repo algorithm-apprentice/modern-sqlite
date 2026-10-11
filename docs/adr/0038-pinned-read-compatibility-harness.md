@@ -454,6 +454,10 @@ mismatches. When a later dependency-graph node implements a feature, that
 node moves its cases from `unsupported` to `compare` and regenerates the
 pinned oracle.
 
+ADR-0063 performs that promotion for its accepted ungrouped global aggregate
+subset. Grouped aggregate execution remains represented by the explicit
+`unsupported-group-by` boundary.
+
 ## Canonical outcome format
 
 Every engine outcome has `format_version: 1` and one `kind`. Every explicit

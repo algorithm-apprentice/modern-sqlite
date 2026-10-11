@@ -388,6 +388,11 @@ package 11, but the failure moves from planning to the correct next
 architecture boundary. ADR-0062 adds aggregate bytecode and VM state without
 changing that public lowering guard.
 
+Delivery update: ADR-0063 supersedes this guard for its accepted ungrouped
+global and indexed-MIN/MAX subset. Grouped aggregates, modifiers,
+representative rows, and compound aggregate execution remain outside that
+later boundary.
+
 ### 10. Verify plan shape, ownership, limits, and allocation
 
 Development follows red-green-refactor. Tests cover:

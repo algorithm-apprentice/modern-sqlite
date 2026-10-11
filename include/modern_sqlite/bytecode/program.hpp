@@ -330,6 +330,16 @@ struct NextInstruction {
   InstructionAddress next_target;
 };
 
+struct LastInstruction {
+  CursorId cursor;
+  InstructionAddress empty_target;
+};
+
+struct PreviousInstruction {
+  CursorId cursor;
+  InstructionAddress previous_target;
+};
+
 struct ClearRowIdListInstruction {};
 
 struct AppendRowIdListInstruction {
@@ -382,6 +392,8 @@ struct SeekIndexInstruction {
 enum class IndexRangeEndMode : std::uint8_t {
   kInclusive,
   kExclusive,
+  kReverseInclusive,
+  kReverseExclusive,
 };
 
 struct CheckIndexRangeInstruction {
@@ -726,7 +738,7 @@ using Instruction = std::variant<
     ReadRelationFieldInstruction, NextRelationInstruction, ResetRelationInstruction,
     CloseRelationInstruction, CompareRecordsInstruction, OpenAggregateInstruction,
     StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
-    CloseAggregateInstruction>;
+    CloseAggregateInstruction, LastInstruction, PreviousInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -813,6 +825,8 @@ enum class InstructionKind : std::uint8_t {
   kFinalizeAggregate,
   kResetAggregate,
   kCloseAggregate,
+  kLast,
+  kPrevious,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -1081,6 +1095,9 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> Append(Instruction instruction);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitRewind(CursorId cursor, Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNext(CursorId cursor, Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitLast(CursorId cursor, Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitPrevious(CursorId cursor,
+                                                               Label previous_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitRewindRowIdList(RegisterId output,
                                                                       Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRowIdList(RegisterId output,
@@ -1131,6 +1148,14 @@ class ProgramBuilder final {
     Label target;
   };
   struct PendingNext {
+    CursorId cursor;
+    Label target;
+  };
+  struct PendingLast {
+    CursorId cursor;
+    Label target;
+  };
+  struct PendingPrevious {
     CursorId cursor;
     Label target;
   };
@@ -1219,11 +1244,11 @@ class ProgramBuilder final {
   };
 
   using PendingInstruction =
-      std::variant<Instruction, PendingRewind, PendingNext, PendingRewindRowIdList,
-                   PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
-                   PendingRewindTopN, PendingNextTopN, PendingInsertRelation,
-                   PendingContainsRelation, PendingRewindRelation, PendingNextRelation,
-                   PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
+      std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
+                   PendingRewindRowIdList, PendingNextRowIdList, PendingRewindSorter,
+                   PendingNextSorter, PendingCheckTopN, PendingRewindTopN, PendingNextTopN,
+                   PendingInsertRelation, PendingContainsRelation, PendingRewindRelation,
+                   PendingNextRelation, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
                    PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,

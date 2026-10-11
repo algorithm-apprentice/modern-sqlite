@@ -172,7 +172,7 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   static_assert(!std::is_convertible_v<AggregateId, RelationId>);
   static_assert(sizeof(Instruction) <= 32);
 
-  const std::array<Instruction, 23> instructions = {
+  const std::array<Instruction, 25> instructions = {
       HaltInstruction{},
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
@@ -205,6 +205,8 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
       CloseCursorInstruction{.cursor = Cursor(0)},
       RewindInstruction{.cursor = Cursor(0), .empty_target = Address(1)},
       NextInstruction{.cursor = Cursor(0), .next_target = Address(1)},
+      LastInstruction{.cursor = Cursor(0), .empty_target = Address(1)},
+      PreviousInstruction{.cursor = Cursor(0), .previous_target = Address(1)},
       SeekRowIdInstruction{
           .cursor = Cursor(0),
           .key = Reg(0),
@@ -239,12 +241,20 @@ TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
       },
       ResultRowInstruction{.first = Reg(0), .count = 1},
   };
-  const std::array<std::string_view, 23> names = {
-      "halt",       "load_constant",  "load_parameter",  "copy",          "unary",
-      "binary",     "apply_affinity", "must_be_integer", "real_affinity", "real_storage_affinity",
-      "cast",       "open_read",      "close",           "rewind",        "next",
-      "seek_rowid", "read_field",     "read_rowid",      "compare",       "call_scalar",
-      "jump",       "jump_if",        "result_row",
+  const std::array<std::string_view, 25> names = {
+      "halt",           "load_constant",
+      "load_parameter", "copy",
+      "unary",          "binary",
+      "apply_affinity", "must_be_integer",
+      "real_affinity",  "real_storage_affinity",
+      "cast",           "open_read",
+      "close",          "rewind",
+      "next",           "last",
+      "previous",       "seek_rowid",
+      "read_field",     "read_rowid",
+      "compare",        "call_scalar",
+      "jump",           "jump_if",
+      "result_row",
   };
 
   for (std::size_t index = 0; index < instructions.size(); ++index) {
@@ -1904,6 +1914,14 @@ TEST(BytecodeProgramTest, BuilderRejectsDirectNumericBranchesAndForeignLabels) {
   });
   ASSERT_FALSE(direct_index_range.has_value());
   EXPECT_EQ(direct_index_range.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  const auto direct_last =
+      first->Append(LastInstruction{.cursor = Cursor(0), .empty_target = Address(0)});
+  ASSERT_FALSE(direct_last.has_value());
+  EXPECT_EQ(direct_last.error().code, ProgramErrorCode::kBranchRequiresLabel);
+  const auto direct_previous =
+      first->Append(PreviousInstruction{.cursor = Cursor(0), .previous_target = Address(0)});
+  ASSERT_FALSE(direct_previous.has_value());
+  EXPECT_EQ(direct_previous.error().code, ProgramErrorCode::kBranchRequiresLabel);
   const auto direct_sorter =
       first->Append(RewindSorterInstruction{.sorter = Sorter(0), .empty_target = Address(0)});
   ASSERT_FALSE(direct_sorter.has_value());
@@ -1989,6 +2007,32 @@ TEST(BytecodeProgramTest, BuilderResolvesCursorControlFlowLabels) {
   ASSERT_TRUE(program.has_value());
   EXPECT_EQ(std::get<RewindInstruction>(program->instructions()[1]).empty_target, Address(4));
   EXPECT_EQ(std::get<NextInstruction>(program->instructions()[3]).next_target, Address(2));
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesReverseCursorControlFlowLabels) {
+  auto created = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+
+  auto cursor = builder.AddCursor(RowIdCursorDescriptor());
+  auto loop = builder.CreateLabel();
+  auto done = builder.CreateLabel();
+  ASSERT_TRUE(cursor.has_value());
+  ASSERT_TRUE(loop.has_value());
+  ASSERT_TRUE(done.has_value());
+  ASSERT_TRUE(builder.Append(OpenReadCursorInstruction{.cursor = *cursor}));
+  ASSERT_TRUE(builder.EmitLast(*cursor, *done));
+  ASSERT_TRUE(builder.BindLabel(*loop).has_value());
+  ASSERT_TRUE(builder.Append(ReadRowIdInstruction{.cursor = *cursor, .output = Reg(0)}));
+  ASSERT_TRUE(builder.EmitPrevious(*cursor, *loop));
+  ASSERT_TRUE(builder.BindLabel(*done).has_value());
+  ASSERT_TRUE(builder.Append(CloseCursorInstruction{.cursor = *cursor}));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(std::get<LastInstruction>(program->instructions()[1]).empty_target, Address(4));
+  EXPECT_EQ(std::get<PreviousInstruction>(program->instructions()[3]).previous_target, Address(2));
 }
 
 TEST(BytecodeProgramTest, BuilderResolvesSeekSuccessAndMissingPaths) {

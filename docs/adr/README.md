@@ -66,3 +66,4 @@ their corresponding implementation begins.
 60. [ADR-0060: SQLite-Aligned Aggregate Binding](0060-sqlite-aligned-aggregate-binding.md)
 61. [ADR-0061: SQLite-Aligned Aggregate Planning](0061-sqlite-aligned-aggregate-planning.md)
 62. [ADR-0062: Typed Aggregate Bytecode and VM State](0062-typed-aggregate-bytecode-and-vm.md)
+63. [ADR-0063: SQLite-Aligned Global Aggregate Execution](0063-global-aggregate-execution.md)

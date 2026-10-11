@@ -252,6 +252,8 @@ template <typename T>
   switch (mode) {
     case IndexRangeEndMode::kInclusive:
     case IndexRangeEndMode::kExclusive:
+    case IndexRangeEndMode::kReverseInclusive:
+    case IndexRangeEndMode::kReverseExclusive:
       return true;
   }
   return false;
@@ -1029,6 +1031,16 @@ template <typename T>
               return result;
             }
             return check_target(operation.next_target, index);
+          } else if constexpr (std::is_same_v<Operation, LastInstruction>) {
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            return check_target(operation.empty_target, index);
+          } else if constexpr (std::is_same_v<Operation, PreviousInstruction>) {
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            return check_target(operation.previous_target, index);
           } else if constexpr (std::is_same_v<Operation, ClearRowIdListInstruction>) {
             return ProgramResult<void>{};
           } else if constexpr (std::is_same_v<Operation, AppendRowIdListInstruction>) {
@@ -2390,6 +2402,25 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, LastInstruction>) {
+            if (auto result = require_open(operation.cursor); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kPositioned);
+            if (auto result = fallthrough(); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return merge_state(operation.empty_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, PreviousInstruction>) {
+            if (auto result = require_positioned(operation.cursor); !result) {
+              return result;
+            }
+            if (auto result = merge_state(operation.previous_target.value(), state); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ClearRowIdListInstruction>) {
             if (rowid_list_state() != CursorState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyOpen,
@@ -2752,6 +2783,10 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "rewind";
     case InstructionKind::kNext:
       return "next";
+    case InstructionKind::kLast:
+      return "last";
+    case InstructionKind::kPrevious:
+      return "previous";
     case InstructionKind::kClearRowIdList:
       return "clear_rowid_list";
     case InstructionKind::kAppendRowIdList:
@@ -3419,6 +3454,8 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
   }
   if (std::holds_alternative<RewindInstruction>(instruction) ||
       std::holds_alternative<NextInstruction>(instruction) ||
+      std::holds_alternative<LastInstruction>(instruction) ||
+      std::holds_alternative<PreviousInstruction>(instruction) ||
       std::holds_alternative<RewindRowIdListInstruction>(instruction) ||
       std::holds_alternative<NextRowIdListInstruction>(instruction) ||
       std::holds_alternative<RewindSorterInstruction>(instruction) ||
@@ -3453,6 +3490,21 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitNext(CursorId cursor, Labe
     return std::unexpected(checked.error());
   }
   return AppendPending(PendingNext{.cursor = cursor, .target = next_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitLast(CursorId cursor, Label empty_target) {
+  if (auto checked = CheckLabel(empty_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingLast{.cursor = cursor, .target = empty_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitPrevious(CursorId cursor,
+                                                               Label previous_target) {
+  if (auto checked = CheckLabel(previous_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingPrevious{.cursor = cursor, .target = previous_target});
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitRewindRowIdList(RegisterId output,
@@ -3680,6 +3732,16 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
             return NextInstruction{
                 .cursor = operation.cursor,
                 .next_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingLast>) {
+            return LastInstruction{
+                .cursor = operation.cursor,
+                .empty_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingPrevious>) {
+            return PreviousInstruction{
+                .cursor = operation.cursor,
+                .previous_target = target(operation.target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingRewindRowIdList>) {
             return RewindRowIdListInstruction{
