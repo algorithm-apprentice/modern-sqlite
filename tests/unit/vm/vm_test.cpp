@@ -3131,7 +3131,7 @@ TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
 
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));

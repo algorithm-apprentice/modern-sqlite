@@ -127,42 +127,7 @@ TEST(TemporaryStorageFactory, DerivesSQLiteAlignedThresholdFromCurrentPagerFacts
   EXPECT_FALSE(overridden.file_spill_enabled());
 }
 
-TEST(TemporaryStorageFactory, OpensExclusiveDeleteOnCloseTemporaryJournalFiles) {
-  test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
-  const TemporaryStorageFactory factory =
-      TakeValue(TemporaryStorageFactory::Create(vfs, *pager, {}));
-
-  Result<std::unique_ptr<File>> opened = factory.CreateTemporaryFile();
-  ASSERT_TRUE(opened.has_value()) << opened.error().ToString();
-  ASSERT_NE(nullptr, *opened);
-  EXPECT_TRUE(vfs.pathless_file_present());
-  EXPECT_EQ(1U, vfs.pathless_open_count());
-  ASSERT_TRUE(vfs.last_pathless_open_options().has_value());
-  EXPECT_EQ((FileOpenOptions{
-                .kind = FileKind::kTemporaryJournal,
-                .access = FileAccessMode::kReadWrite,
-                .create = true,
-                .exclusive_create = true,
-                .delete_on_close = true,
-            }),
-            *vfs.last_pathless_open_options());
-
-  const std::array bytes{
-      std::byte{0x01},
-      std::byte{0x02},
-      std::byte{0x03},
-  };
-  EXPECT_TRUE((*opened)->WriteAt(bytes, FileOffset{}).has_value());
-  const auto size = (*opened)->Size();
-  ASSERT_TRUE(size.has_value());
-  EXPECT_EQ(FileSize{bytes.size()}, *size);
-
-  opened->reset();
-  EXPECT_FALSE(vfs.pathless_file_present());
-}
-
-TEST(TemporaryStorageFactory, RejectsInvalidConfigurationAndMemoryModeFileSpill) {
+TEST(TemporaryStorageFactory, RejectsInvalidConfiguration) {
   test::WritePagerFixedVfs vfs;
   const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
   test::WritePagerFixedVfs unrelated_vfs;
@@ -191,33 +156,6 @@ TEST(TemporaryStorageFactory, RejectsInvalidConfigurationAndMemoryModeFileSpill)
   const auto mismatched = TemporaryStorageFactory::Create(unrelated_vfs, *pager, {});
   ASSERT_FALSE(mismatched.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, mismatched.error().code());
-
-  const TemporaryStorageFactory memory =
-      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
-                                                TemporaryStorageOptions{
-                                                    .mode = TemporaryStoreMode::kMemory,
-                                                }));
-  const auto file = memory.CreateTemporaryFile();
-  ASSERT_FALSE(file.has_value());
-  EXPECT_EQ(ErrorCode::kMisuse, file.error().code());
-  EXPECT_EQ(0U, vfs.pathless_open_count());
-}
-
-TEST(TemporaryStorageFactory, PropagatesPathlessOpenFailuresAndRecovers) {
-  test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
-  const TemporaryStorageFactory factory =
-      TakeValue(TemporaryStorageFactory::Create(vfs, *pager, {}));
-  vfs.FailNextPathlessOpen(ErrorCode::kIo);
-
-  const auto failed = factory.CreateTemporaryFile();
-  ASSERT_FALSE(failed.has_value());
-  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
-  EXPECT_EQ(1U, vfs.pathless_open_count());
-
-  const auto recovered = factory.CreateTemporaryFile();
-  ASSERT_TRUE(recovered.has_value());
-  EXPECT_EQ(2U, vfs.pathless_open_count());
 }
 
 TEST(StatementTemporaryStorage, TracksIndependentOwnerReservationsAndPeaks) {

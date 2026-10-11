@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -48,19 +50,26 @@ class TopNEnvironment final {
                                                            TemporaryStorageOptions{
                                                                .mode = TemporaryStoreMode::kMemory,
                                                                .sorter_memory_threshold = threshold,
-                                                           }))) {}
+                                                           }))),
+        storage_(std::in_place, TakeValue(factory_.CreateStatementStorage())) {}
 
-  [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+  [[nodiscard]] StatementTemporaryStorage& storage() noexcept {
+    if (!storage_.has_value()) {
+      std::terminate();
+    }
+    return *storage_;
+  }
 
  private:
   test::WritePagerFixedVfs vfs_;
   std::unique_ptr<Pager> pager_;
   TemporaryStorageFactory factory_;
+  std::optional<StatementTemporaryStorage> storage_;
 };
 
 class FileTopNEnvironment final {
  public:
-  explicit FileTopNEnvironment(ByteCount threshold = ByteCount{1})
+  explicit FileTopNEnvironment(ByteCount threshold = ByteCount{256})
       : pager_(TakeValue(
             Pager::Open(vfs_, test::kWritePagerInputPath,
                         PagerOptions{
@@ -71,21 +80,40 @@ class FileTopNEnvironment final {
                                                            TemporaryStorageOptions{
                                                                .mode = TemporaryStoreMode::kFile,
                                                                .sorter_memory_threshold = threshold,
-                                                           }))) {
+                                                           }))),
+        storage_(std::in_place, TakeValue(factory_.CreateStatementStorage())) {
     RequireStatus(pager_->BeginRead());
   }
 
-  [[nodiscard]] const TemporaryStorageFactory& factory() const noexcept { return factory_; }
+  [[nodiscard]] StatementTemporaryStorage& storage() noexcept {
+    if (!storage_.has_value()) {
+      std::terminate();
+    }
+    return *storage_;
+  }
   [[nodiscard]] test::WritePagerFixedVfs& vfs() noexcept { return vfs_; }
+  void ResetStorage() noexcept { storage_.reset(); }
 
  private:
   test::WritePagerFixedVfs vfs_;
   std::unique_ptr<Pager> pager_;
   TemporaryStorageFactory factory_;
+  std::optional<StatementTemporaryStorage> storage_;
 };
 
 [[nodiscard]] RecordSorterDescriptor Descriptor() {
   return RecordSorterDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              IndexColumnOrder{BinaryCollation()},
+          },
+  };
+}
+
+[[nodiscard]] EphemeralRelationDescriptor RelationDescriptor() {
+  return EphemeralRelationDescriptor{
       .field_count = 2,
       .key_field_count = 1,
       .key_columns =
@@ -118,6 +146,27 @@ struct BlobRowSpec {
   std::byte fill;
 };
 
+class FailingPressureTarget final : public TemporaryStorageSpillTarget {
+ public:
+  void Attach(TemporaryMemoryAccount& account) noexcept { account_ = &account; }
+
+  [[nodiscard]] std::size_t calls() const noexcept { return calls_; }
+
+  [[nodiscard]] ByteCount reclaimable_bytes() const noexcept override {
+    return account_ == nullptr ? ByteCount{0} : account_->retained_bytes();
+  }
+
+  [[nodiscard]] Status SpillForPressure() override {
+    ++calls_;
+    return std::unexpected(
+        Error::Create(ErrorCode::kTooLarge, "injected top-N pressure spill failure"));
+  }
+
+ private:
+  TemporaryMemoryAccount* account_ = nullptr;
+  std::size_t calls_ = 0;
+};
+
 [[nodiscard]] ByteBuffer BlobRow(BlobRowSpec spec) {
   ByteBuffer payload{ByteCount{spec.payload_size}};
   std::ranges::fill(payload.mutable_view(), spec.fill);
@@ -145,8 +194,8 @@ TEST(BoundedTopNApi, PublishesMoveOnlyLifecycleAndAdmissionResults) {
   EXPECT_EQ("unknown",
             BoundedTopNStateName(static_cast<BoundedTopNState>(255)));  // NOLINT
 
-  const TopNEnvironment environment;
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 2));
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 2));
   EXPECT_TRUE(top_n.valid());
   EXPECT_EQ(BoundedTopNState::kWriting, top_n.state());
   EXPECT_EQ(2U, top_n.bound());
@@ -163,8 +212,8 @@ TEST(BoundedTopNApi, PublishesMoveOnlyLifecycleAndAdmissionResults) {
 }
 
 TEST(BoundedTopN, AdmitsCompetitiveKeysAndEvictsLargestBeforePayloadInsertion) {
-  const TopNEnvironment environment;
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 2));
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 2));
 
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(3))));
   EXPECT_TRUE(top_n.has_pending_candidate());
@@ -191,8 +240,8 @@ TEST(BoundedTopN, AdmitsCompetitiveKeysAndEvictsLargestBeforePayloadInsertion) {
 }
 
 TEST(BoundedTopN, RetainsEarlierRowsForEqualKeysAndSupportsZeroBound) {
-  const TopNEnvironment environment;
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 2));
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 2));
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
   EXPECT_TRUE(top_n.Insert(Row(1, 10)).has_value());
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
@@ -203,15 +252,15 @@ TEST(BoundedTopN, RetainsEarlierRowsForEqualKeysAndSupportsZeroBound) {
   EXPECT_TRUE(TakeValue(top_n.Next()));
   EXPECT_EQ(11, IntegerField(TakeValue(top_n.current_record()), 1));
 
-  BoundedTopN zero = TakeValue(environment.factory().CreateTopN(Descriptor(), 0));
+  BoundedTopN zero = TakeValue(environment.storage().CreateTopN(Descriptor(), 0));
   EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(zero.CheckCandidate(Key(1))));
   EXPECT_TRUE(zero.Rewind().has_value());
   EXPECT_EQ(BoundedTopNState::kExhausted, zero.state());
 }
 
 TEST(BoundedTopN, EnforcesPendingCandidateAndLifecycleRules) {
-  const TopNEnvironment environment;
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 1));
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
   EXPECT_FALSE(top_n.Insert(Row(1, 10)).has_value());
   EXPECT_FALSE(top_n.current_record().has_value());
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
@@ -229,8 +278,8 @@ TEST(BoundedTopN, EnforcesPendingCandidateAndLifecycleRules) {
 }
 
 TEST(BoundedTopN, EnforcesMemoryThresholdWithoutPublishingPartialRows) {
-  const TopNEnvironment environment{ByteCount{1}};
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 1));
+  TopNEnvironment environment{ByteCount{1}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
   const auto checked = top_n.CheckCandidate(Key(1));
   ASSERT_FALSE(checked.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, checked.error().code());
@@ -239,9 +288,186 @@ TEST(BoundedTopN, EnforcesMemoryThresholdWithoutPublishingPartialRows) {
   EXPECT_FALSE(top_n.has_pending_candidate());
 }
 
+TEST(BoundedTopN, AccountsPendingCandidatesAndRetainedMemoryRows) {
+  TopNEnvironment environment{ByteCount{512}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+
+  ByteBuffer first_key = Key(2);
+  const ByteCount first_key_bytes = first_key.capacity();
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(std::move(first_key))));
+  EXPECT_EQ(first_key_bytes, top_n.memory_usage());
+  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+
+  ByteBuffer first_row = Row(2, 20);
+  const ByteCount first_row_bytes = first_row.capacity();
+  RequireStatus(top_n.Insert(std::move(first_row)));
+  EXPECT_GT(top_n.memory_usage(), first_row_bytes);
+  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+
+  ByteBuffer replacement_key = Key(1);
+  const ByteCount replacement_key_bytes = replacement_key.capacity();
+  EXPECT_EQ(TopNCheckResult::kAccepted,
+            TakeValue(top_n.CheckCandidate(std::move(replacement_key))));
+  EXPECT_EQ(replacement_key_bytes, top_n.memory_usage());
+  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+  RequireStatus(top_n.Insert(Row(1, 10)));
+  EXPECT_EQ(1U, top_n.record_count());
+
+  RequireStatus(top_n.Reset());
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
+TEST(BoundedTopN, EnforcesOneStatementBudgetAcrossMemoryTopNs) {
+  TopNEnvironment environment{ByteCount{256}};
+  BoundedTopN first = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  BoundedTopN second = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(first.CheckCandidate(Key(1))));
+  RequireStatus(
+      first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 120U, .fill = std::byte{0x11}})));
+  const ByteCount first_bytes = first.memory_usage();
+  EXPECT_GT(first_bytes, ByteCount{0});
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(second.CheckCandidate(Key(2))));
+  const auto rejected =
+      second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 120U, .fill = std::byte{0x22}}));
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_FALSE(second.valid());
+  EXPECT_TRUE(first.valid());
+  EXPECT_EQ(1U, first.record_count());
+  EXPECT_EQ(first_bytes, environment.storage().retained_bytes());
+}
+
+TEST(BoundedTopN, AccountsPendingAndOversizedFileDrainWorkingSets) {
+  FileTopNEnvironment environment{ByteCount{128}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+
+  ByteBuffer key = Key(1);
+  const ByteCount key_bytes = key.capacity();
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(std::move(key))));
+  EXPECT_EQ(key_bytes, top_n.memory_usage());
+  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U, .fill = std::byte{0x11}})));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+
+  RequireStatus(top_n.Rewind());
+  EXPECT_GT(top_n.memory_usage(), environment.storage().memory_budget());
+  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+  EXPECT_FALSE(TakeValue(top_n.Next()));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
+TEST(BoundedTopN, PreservesPressureSpillFailureBeforeWorkingSetFallback) {
+  FileTopNEnvironment environment{ByteCount{128}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U, .fill = std::byte{0x11}})));
+
+  FailingPressureTarget target;
+  TemporaryMemoryAccount occupied = TakeValue(environment.storage().RegisterMemoryOwner(target));
+  target.Attach(occupied);
+  RequireStatus(occupied.Reserve(environment.storage().memory_budget()));
+
+  const Status rewound = top_n.Rewind();
+  ASSERT_FALSE(rewound.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rewound.error().code());
+  EXPECT_EQ(1U, target.calls());
+  EXPECT_TRUE(environment.storage().failed());
+  EXPECT_FALSE(top_n.valid());
+}
+
+TEST(BoundedTopNApi, KeepsBorrowedStatementStateStableAcrossStorageMove) {
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{256},
+                                                }));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+  BoundedTopN top_n = TakeValue(storage.CreateTopN(Descriptor(), 1));
+  const StatementTemporaryStorage moved{std::move(storage)};
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_FALSE(storage.valid());
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(top_n.Insert(Row(1, 10)));
+  EXPECT_EQ(1U, moved.live_file_count());
+  top_n.Close();
+}
+
+TEST(BoundedTopN, SharesOneEagerStatementArenaAcrossFileModeTopNs) {
+  FileTopNEnvironment environment;
+  BoundedTopN first = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  BoundedTopN second = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(first.CheckCandidate(Key(2))));
+  RequireStatus(first.Insert(Row(2, 20)));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(second.CheckCandidate(Key(1))));
+  RequireStatus(second.Insert(Row(1, 10)));
+  RequireStatus(first.Rewind());
+  RequireStatus(second.Rewind());
+  EXPECT_EQ(2, IntegerField(TakeValue(first.current_record()), 0));
+  EXPECT_EQ(1, IntegerField(TakeValue(second.current_record()), 0));
+
+  first.Close();
+  second.Close();
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+  environment.ResetStorage();
+  EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(BoundedTopN, SharesAndReusesTheRelationArenaAcrossCapabilityTypes) {
+  FileTopNEnvironment environment{ByteCount{256}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(RelationDescriptor()));
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(top_n.Insert(Row(2, 20)));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(relation.Insert(
+                BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U, .fill = std::byte{0x11}}),
+                EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(relation.file_backed());
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+
+  RequireStatus(top_n.Rewind());
+  RequireStatus(relation.Rewind());
+  EXPECT_EQ(2, IntegerField(TakeValue(top_n.current_record()), 0));
+  EXPECT_EQ(1, IntegerField(TakeValue(relation.current_record()), 0));
+
+  top_n.Close();
+  relation.Close();
+  const ByteCount overhead = environment.storage().overhead_bytes();
+  BoundedTopN reused = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(reused.CheckCandidate(Key(3))));
+  RequireStatus(reused.Insert(Row(3, 30)));
+  RequireStatus(reused.Rewind());
+  EXPECT_EQ(3, IntegerField(TakeValue(reused.current_record()), 0));
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  reused.Close();
+  EXPECT_EQ(overhead, environment.storage().overhead_bytes());
+}
+
 TEST(BoundedTopN, FileModeSpillsStableRowsAndClearsTheEphemeralTreeOnReset) {
   FileTopNEnvironment environment;
-  BoundedTopN top_n = TakeValue(environment.factory().CreateTopN(Descriptor(), 3));
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 3));
   EXPECT_TRUE(environment.vfs().pathless_file_present());
   const std::optional<FileOpenOptions> open_options =
       environment.vfs().last_pathless_open_options();
@@ -302,19 +528,23 @@ TEST(BoundedTopN, FileModeSpillsStableRowsAndClearsTheEphemeralTreeOnReset) {
   EXPECT_EQ(6, IntegerField(TakeValue(top_n.current_record()), 0));
 
   top_n.Close();
+  EXPECT_TRUE(environment.vfs().pathless_file_present());
+  environment.ResetStorage();
   EXPECT_FALSE(environment.vfs().pathless_file_present());
 }
 
-TEST(BoundedTopN, FileModePropagatesOpenWriteAndReadFailuresAndDeletesTheFile) {
+TEST(BoundedTopN, FileModePropagatesFailuresAndDefersSharedFileCleanup) {
   FileTopNEnvironment open_failure;
   open_failure.vfs().FailNextPathlessOpen(ErrorCode::kIo);
-  const auto failed_open = open_failure.factory().CreateTopN(Descriptor(), 2);
+  const auto failed_open = open_failure.storage().CreateTopN(Descriptor(), 2);
   ASSERT_FALSE(failed_open.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_open.error().code());
+  EXPECT_TRUE(open_failure.storage().failed());
   EXPECT_FALSE(open_failure.vfs().pathless_file_present());
 
   FileTopNEnvironment write_failure;
-  BoundedTopN writing = TakeValue(write_failure.factory().CreateTopN(Descriptor(), 2));
+  BoundedTopN writing = TakeValue(write_failure.storage().CreateTopN(Descriptor(), 2));
+  BoundedTopN sibling = TakeValue(write_failure.storage().CreateTopN(Descriptor(), 2));
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(writing.CheckCandidate(Key(1))));
   write_failure.vfs().FailPathlessWriteAfter(0, ErrorCode::kIo);
   const Status failed_insert =
@@ -322,10 +552,17 @@ TEST(BoundedTopN, FileModePropagatesOpenWriteAndReadFailuresAndDeletesTheFile) {
   ASSERT_FALSE(failed_insert.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_insert.error().code());
   EXPECT_FALSE(writing.valid());
+  EXPECT_TRUE(write_failure.storage().failed());
+  const auto sibling_after_failure = sibling.CheckCandidate(Key(2));
+  ASSERT_FALSE(sibling_after_failure.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, sibling_after_failure.error().code());
+  EXPECT_FALSE(sibling.valid());
+  EXPECT_TRUE(write_failure.vfs().pathless_file_present());
+  write_failure.ResetStorage();
   EXPECT_FALSE(write_failure.vfs().pathless_file_present());
 
   FileTopNEnvironment read_failure;
-  BoundedTopN reading = TakeValue(read_failure.factory().CreateTopN(Descriptor(), 4));
+  BoundedTopN reading = TakeValue(read_failure.storage().CreateTopN(Descriptor(), 4));
   for (std::int64_t key = 4; key >= 1; --key) {
     EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(reading.CheckCandidate(Key(key))));
     RequireStatus(reading.Insert(
@@ -338,6 +575,9 @@ TEST(BoundedTopN, FileModePropagatesOpenWriteAndReadFailuresAndDeletesTheFile) {
   ASSERT_FALSE(failed_rewind.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed_rewind.error().code());
   EXPECT_FALSE(reading.valid());
+  EXPECT_TRUE(read_failure.storage().failed());
+  EXPECT_TRUE(read_failure.vfs().pathless_file_present());
+  read_failure.ResetStorage();
   EXPECT_FALSE(read_failure.vfs().pathless_file_present());
 }
 

@@ -2255,9 +2255,13 @@ struct Vm::Impl {
     if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
       return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
     }
+    auto storage = EnsureStatementTemporaryStorage();
+    if (!storage.has_value()) {
+      return std::unexpected(std::move(storage.error()));
+    }
     auto created =
-        temporary_storage_->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)),
-                                       static_cast<std::size_t>(unsigned_bound));
+        (*storage)->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)),
+                               static_cast<std::size_t>(unsigned_bound));
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
