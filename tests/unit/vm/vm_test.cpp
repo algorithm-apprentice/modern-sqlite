@@ -243,6 +243,149 @@ class TemporaryDatabase final {
   };
 }
 
+[[nodiscard]] AggregateDescriptor AggregateDescriptorFor(SymbolId function, SymbolId collation,
+                                                         std::uint32_t argument_count) {
+  return AggregateDescriptor{
+      .function = function,
+      .collation = collation,
+      .argument_count = argument_count,
+  };
+}
+
+[[nodiscard]] BytecodeProgram BuildAggregateSumProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.symbols = {"sum", "BINARY"};
+  input.constants.push_back(SqlValue::Integer(2));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(4));
+  input.aggregates.push_back(AggregateDescriptorFor(Symbol(0), Symbol(1), 1));
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "effect",
+          .declared_type = "INTEGER",
+          .affinity = TypeAffinity::kInteger,
+      },
+      ResultColumnMetadata{
+          .name = "sum",
+          .declared_type = std::nullopt,
+          .affinity = TypeAffinity::kNone,
+      },
+  };
+  input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(1),
+      },
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(1),
+      },
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = Reg(2)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      ResetAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = std::nullopt,
+      },
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = Reg(2)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      CloseAggregateInstruction{.aggregate = AggregateId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildAggregateMinEffectProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.symbols = {"min", "BINARY"};
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(5));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.aggregates.push_back(AggregateDescriptorFor(Symbol(0), Symbol(1), 1));
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "value",
+          .declared_type = std::nullopt,
+          .affinity = TypeAffinity::kNone,
+      },
+  };
+  input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(1),
+      },
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(1),
+      },
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(1),
+      },
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = Reg(2)},
+      ResultRowInstruction{.first = Reg(2), .count = 1},
+      CloseAggregateInstruction{.aggregate = AggregateId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildAggregateConcatErrorProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 2;
+  input.symbols = {"group_concat", "BINARY"};
+  input.constants.push_back(SqlValue::Text("abc"));
+  input.constants.push_back(SqlValue::Text("def"));
+  input.aggregates.push_back(AggregateDescriptorFor(Symbol(0), Symbol(1), 1));
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "stepped",
+          .declared_type = "TEXT",
+          .affinity = TypeAffinity::kText,
+      },
+  };
+  input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+      },
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = Reg(0),
+      },
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = Reg(1)},
+      CloseAggregateInstruction{.aggregate = AggregateId(0)},
+      HaltInstruction{},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
 [[nodiscard]] BytecodeProgram BuildSorterProgram(const Pager& pager) {
   ProgramInput input;
   input.schema_version = CurrentSchema(pager);
@@ -2969,6 +3112,125 @@ TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
   ASSERT_FALSE(attached.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
   EXPECT_FALSE(vm.has_execution_context());
+}
+
+TEST_F(VmTest, ExecutesAggregateLifecycleAndResetReuse) {
+  const BytecodeProgram program = BuildAggregateSumProgram(*pager_);
+  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  ExpectInteger(vm.row()[0], static_cast<std::int64_t>(
+                                 BytecodeAggregateStepEffect::kNoRepresentativePreference));
+  ExpectInteger(vm.row()[1], 5);
+
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  ExpectInteger(vm.row()[0], static_cast<std::int64_t>(
+                                 BytecodeAggregateStepEffect::kNoRepresentativePreference));
+  ExpectInteger(vm.row()[1], 4);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(vm.row()[1], 5);
+}
+
+TEST_F(VmTest, PublishesMinMaxRepresentativeEffectsAndCleansAbortedState) {
+  const BytecodeProgram program = BuildAggregateMinEffectProgram(*pager_);
+  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+
+  const std::array expected{
+      BytecodeAggregateStepEffect::kReplaceRepresentative,
+      BytecodeAggregateStepEffect::kKeepRepresentative,
+      BytecodeAggregateStepEffect::kReplaceRepresentative,
+  };
+  for (const BytecodeAggregateStepEffect effect : expected) {
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), static_cast<std::int64_t>(effect));
+  }
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 1);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm),
+                static_cast<std::int64_t>(BytecodeAggregateStepEffect::kReplaceRepresentative));
+}
+
+TEST_F(VmTest, ResolvesAggregateDescriptorsAtCreation) {
+  const auto program_with = [&](std::string function, std::uint32_t argument_count,
+                                std::string collation) {
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.symbols.push_back(std::move(function));
+    input.symbols.push_back(std::move(collation));
+    input.aggregates.push_back(AggregateDescriptorFor(Symbol(0), Symbol(1), argument_count));
+    input.instructions = {HaltInstruction{}};
+    return TakeProgramValue(BytecodeProgram::Create(input));
+  };
+
+  const BytecodeProgram unknown = program_with("missing", 1, "BINARY");
+  const auto unknown_vm = Vm::Create(unknown, VmEnvironment::Core());
+  ASSERT_FALSE(unknown_vm.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, unknown_vm.error().code());
+
+  const BytecodeProgram wrong_arity = program_with("sum", 0, "BINARY");
+  const auto wrong_arity_vm = Vm::Create(wrong_arity, VmEnvironment::Core());
+  ASSERT_FALSE(wrong_arity_vm.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, wrong_arity_vm.error().code());
+
+  const BytecodeProgram missing_collation = program_with("sum", 1, "missing");
+  const auto missing_collation_vm = Vm::Create(missing_collation, VmEnvironment::Core());
+  ASSERT_FALSE(missing_collation_vm.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, missing_collation_vm.error().code());
+}
+
+TEST_F(VmTest, FinalizesEmptyAggregateAndReportsDelayedErrors) {
+  ProgramInput empty_input;
+  empty_input.schema_version = CurrentSchema(*pager_);
+  empty_input.register_count = 1;
+  empty_input.symbols = {"count", "BINARY"};
+  empty_input.aggregates.push_back(AggregateDescriptorFor(Symbol(0), Symbol(1), 0));
+  empty_input.result_columns = {
+      ResultColumnMetadata{
+          .name = "count",
+          .declared_type = std::nullopt,
+          .affinity = TypeAffinity::kNone,
+      },
+  };
+  empty_input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = Reg(0)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+  };
+  const BytecodeProgram empty_program = TakeProgramValue(BytecodeProgram::Create(empty_input));
+  Vm empty = CreateAttachedVm(empty_program, *pager_, kCatalogGeneration);
+  EXPECT_EQ(VmStep::kRow, TakeValue(empty.Step()));
+  ExpectInteger(OnlyRowValue(empty), 0);
+  EXPECT_EQ(VmStep::kDone, TakeValue(empty.Step()));
+
+  const BytecodeProgram delayed_program = BuildAggregateConcatErrorProgram(*pager_);
+  Vm delayed = TakeValue(
+      Vm::Create(delayed_program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 5}));
+  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(delayed.Step()));
+  EXPECT_EQ("def", OnlyRowValue(delayed).text_value().value_or(Utf8View{}).bytes());
+  const auto finalized = delayed.Step();
+  ASSERT_FALSE(finalized.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, finalized.error().code());
+  EXPECT_EQ(VmState::kError, delayed.state());
+
+  RequireStatus(delayed.Reset());
+  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(delayed.Step()));
 }
 
 TEST_F(VmTest, ExecutesSorterBytecodeAndCanResetForAnotherRun) {

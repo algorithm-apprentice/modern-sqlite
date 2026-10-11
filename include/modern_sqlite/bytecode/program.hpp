@@ -39,6 +39,7 @@ struct SorterIdTag;
 struct TopNIdTag;
 struct RelationIdTag;
 struct RecordComparisonIdTag;
+struct AggregateIdTag;
 struct ParameterIdTag;
 struct ConstantIdTag;
 struct SymbolIdTag;
@@ -53,6 +54,7 @@ using SorterId = BytecodeId<SorterIdTag>;
 using TopNId = BytecodeId<TopNIdTag>;
 using RelationId = BytecodeId<RelationIdTag>;
 using RecordComparisonId = BytecodeId<RecordComparisonIdTag>;
+using AggregateId = BytecodeId<AggregateIdTag>;
 using ParameterId = BytecodeId<ParameterIdTag>;
 using ConstantId = BytecodeId<ConstantIdTag>;
 using SymbolId = BytecodeId<SymbolIdTag>;
@@ -177,6 +179,14 @@ struct OrderingRecordDescriptor {
   std::uint32_t field_count = 0;
   std::uint32_t key_field_count = 0;
   std::vector<OrderingColumnMetadata> key_columns;
+};
+
+struct AggregateDescriptor {
+  SymbolId function;
+  SymbolId collation;
+  std::uint32_t argument_count = 0;
+
+  constexpr auto operator<=>(const AggregateDescriptor&) const noexcept = default;
 };
 
 struct ReadCursorDescriptor {
@@ -662,6 +672,35 @@ struct CompareRecordsInstruction {
   RegisterId output;
 };
 
+enum class BytecodeAggregateStepEffect : std::int64_t {
+  kNoRepresentativePreference = 0,
+  kKeepRepresentative = 1,
+  kReplaceRepresentative = 2,
+};
+
+struct OpenAggregateInstruction {
+  AggregateId aggregate;
+};
+
+struct StepAggregateInstruction {
+  AggregateId aggregate;
+  RegisterId first_argument;
+  std::optional<RegisterId> effect_output{};
+};
+
+struct FinalizeAggregateInstruction {
+  AggregateId aggregate;
+  RegisterId output;
+};
+
+struct ResetAggregateInstruction {
+  AggregateId aggregate;
+};
+
+struct CloseAggregateInstruction {
+  AggregateId aggregate;
+};
+
 using Instruction = std::variant<
     HaltInstruction, LoadConstantInstruction, LoadParameterInstruction, CopyInstruction,
     UnaryInstruction, BinaryInstruction, ApplyAffinityInstruction, MustBeIntegerInstruction,
@@ -685,7 +724,9 @@ using Instruction = std::variant<
     ResetTopNInstruction, CloseTopNInstruction, OpenRelationInstruction, InsertRelationInstruction,
     ContainsRelationInstruction, DeleteRelationInstruction, RewindRelationInstruction,
     ReadRelationFieldInstruction, NextRelationInstruction, ResetRelationInstruction,
-    CloseRelationInstruction, CompareRecordsInstruction>;
+    CloseRelationInstruction, CompareRecordsInstruction, OpenAggregateInstruction,
+    StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
+    CloseAggregateInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -767,6 +808,11 @@ enum class InstructionKind : std::uint8_t {
   kResetRelation,
   kCloseRelation,
   kCompareRecords,
+  kOpenAggregate,
+  kStepAggregate,
+  kFinalizeAggregate,
+  kResetAggregate,
+  kCloseAggregate,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -791,6 +837,7 @@ struct ProgramInput {
   std::vector<OrderingRecordDescriptor> record_comparisons;
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
+  std::vector<AggregateDescriptor> aggregates;
 };
 
 struct ProgramLimits {
@@ -809,6 +856,7 @@ struct ProgramLimits {
   std::size_t maximum_owned_bytes = 1'000'000'000;
   std::size_t maximum_analysis_words = 16'000'000;
   std::size_t maximum_analysis_edge_words = 250'000'000;
+  std::size_t maximum_aggregates = 100'000;
 };
 
 enum class ProgramErrorCode : std::uint8_t {
@@ -872,6 +920,9 @@ enum class ProgramErrorCode : std::uint8_t {
   kIndexOperationRequiresIndex,
   kFallthroughPastEnd,
   kUnreachableInstruction,
+  kAggregateLimitExceeded,
+  kInvalidAggregate,
+  kInvalidAggregateDescriptor,
 };
 
 struct ProgramError {
@@ -956,6 +1007,9 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const Instruction> instructions() const noexcept {
     return input_.instructions;
   }
+  [[nodiscard]] std::span<const AggregateDescriptor> aggregates() const noexcept {
+    return input_.aggregates;
+  }
   [[nodiscard]] const ProgramVerificationMetrics& verification_metrics() const noexcept {
     return metrics_;
   }
@@ -970,6 +1024,7 @@ class BytecodeProgram final {
   [[nodiscard]] const OrderingRecordDescriptor& record_comparison(
       RecordComparisonId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
+  [[nodiscard]] const AggregateDescriptor& aggregate(AggregateId id) const noexcept;
 
  private:
   BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics) noexcept
@@ -1014,6 +1069,7 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<RelationId> AddRelation(OrderingRecordDescriptor relation);
   [[nodiscard]] ProgramResult<RecordComparisonId> AddRecordComparison(
       OrderingRecordDescriptor comparison);
+  [[nodiscard]] ProgramResult<AggregateId> AddAggregate(AggregateDescriptor aggregate);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});

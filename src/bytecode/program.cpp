@@ -35,6 +35,12 @@ enum class CapabilityState : std::uint8_t {
   kExhausted = 4,
 };
 
+enum class AggregateCapabilityState : std::uint8_t {
+  kClosed = 0,
+  kAccumulating = 1,
+  kFinalized = 2,
+};
+
 [[nodiscard]] constexpr ProgramError MakeProgramError(ProgramErrorCode code) noexcept {
   return ProgramError{.code = code};
 }
@@ -444,6 +450,10 @@ template <typename T>
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
   }
+  if (!AddArrayBytes<AggregateDescriptor>(ElementCount(input.aggregates, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
   return total;
 }
 
@@ -549,6 +559,7 @@ template <typename T>
   }
 
   clone.instructions.assign(input.instructions.begin(), input.instructions.end());
+  clone.aggregates.assign(input.aggregates.begin(), input.aggregates.end());
   return clone;
 }
 
@@ -600,6 +611,10 @@ template <typename T>
   if (input.result_columns.size() > limits.maximum_result_columns ||
       input.result_columns.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kResultColumnLimitExceeded));
+  }
+  if (input.aggregates.size() > limits.maximum_aggregates ||
+      input.aggregates.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAggregateLimitExceeded));
   }
   return {};
 }
@@ -799,6 +814,15 @@ template <typename T>
       return checked;
     }
   }
+  for (std::size_t aggregate_index = 0; aggregate_index < input.aggregates.size();
+       ++aggregate_index) {
+    const AggregateDescriptor& descriptor = input.aggregates[aggregate_index];
+    if (descriptor.function.value() >= input.symbols.size() ||
+        descriptor.collation.value() >= input.symbols.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidAggregateDescriptor,
+                                     ProgramError::kNoInstruction, aggregate_index));
+    }
+  }
   return {};
 }
 
@@ -876,6 +900,12 @@ template <typename T>
     if (id.value() >= input.record_comparisons.size()) {
       return std::unexpected(
           ErrorAt(ProgramErrorCode::kInvalidRecordComparison, instruction, id.value()));
+    }
+    return {};
+  };
+  const auto check_aggregate = [&](AggregateId id, std::size_t instruction) -> ProgramResult<void> {
+    if (id.value() >= input.aggregates.size()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidAggregate, instruction, id.value()));
     }
     return {};
   };
@@ -1546,6 +1576,28 @@ template <typename T>
               return result;
             }
             return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, OpenAggregateInstruction> ||
+                               std::is_same_v<Operation, ResetAggregateInstruction> ||
+                               std::is_same_v<Operation, CloseAggregateInstruction>) {
+            return check_aggregate(operation.aggregate, index);
+          } else if constexpr (std::is_same_v<Operation, StepAggregateInstruction>) {
+            if (auto result = check_aggregate(operation.aggregate, index); !result) {
+              return result;
+            }
+            const AggregateDescriptor& descriptor = input.aggregates[operation.aggregate.value()];
+            if (auto result = check_range(operation.first_argument, descriptor.argument_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            return operation.effect_output.has_value()
+                       ? check_register(*operation.effect_output, index)
+                       : ProgramResult<void>{};
+          } else if constexpr (std::is_same_v<Operation, FinalizeAggregateInstruction>) {
+            if (auto result = check_aggregate(operation.aggregate, index); !result) {
+              return result;
+            }
+            return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, CompareInstruction>) {
             if (!IsValid(operation.comparison) || !IsValid(operation.affinity)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1660,10 +1712,11 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   const std::size_t rowid_list_state_index = storage_cursor_count;
   const std::size_t cursor_words = CeilingDivide(state_cursor_count, kCursorsPerWord);
   const std::size_t capability_count =
-      input.sorters.size() + input.top_ns.size() + input.relations.size();
+      input.sorters.size() + input.top_ns.size() + input.relations.size() + input.aggregates.size();
   const std::size_t capability_offset = register_words + cursor_words;
   const std::size_t top_n_offset = capability_offset + input.sorters.size();
   const std::size_t relation_offset = top_n_offset + input.top_ns.size();
+  const std::size_t aggregate_offset = relation_offset + input.relations.size();
   const std::size_t state_words = capability_offset + capability_count;
 
   std::size_t stored_state_words = 0;
@@ -1822,6 +1875,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     const auto set_relation_state = [&](RelationId relation, CapabilityState value) noexcept {
       state[relation_offset + relation.value()] = static_cast<std::uint64_t>(value);
     };
+    const auto aggregate_state = [&](AggregateId aggregate) noexcept {
+      return static_cast<AggregateCapabilityState>(state[aggregate_offset + aggregate.value()]);
+    };
+    const auto set_aggregate_state = [&](AggregateId aggregate,
+                                         AggregateCapabilityState value) noexcept {
+      state[aggregate_offset + aggregate.value()] = static_cast<std::uint64_t>(value);
+    };
     const auto fallthrough = [&]() -> ProgramResult<void> {
       if (instruction_index + 1 >= instruction_count) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kFallthroughPastEnd, instruction_index));
@@ -1926,11 +1986,45 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       }
       return {};
     };
+    const auto require_aggregate_open = [&](AggregateId aggregate) -> ProgramResult<void> {
+      if (aggregate_state(aggregate) == AggregateCapabilityState::kClosed) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCapabilityNotOpen, instruction_index, aggregate.value()));
+      }
+      return {};
+    };
+    const auto require_aggregate_accumulating = [&](AggregateId aggregate) -> ProgramResult<void> {
+      if (auto result = require_aggregate_open(aggregate); !result) {
+        return result;
+      }
+      if (aggregate_state(aggregate) != AggregateCapabilityState::kAccumulating) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                       instruction_index, aggregate.value()));
+      }
+      return {};
+    };
+    const auto require_aggregate_finalized = [&](AggregateId aggregate) -> ProgramResult<void> {
+      if (auto result = require_aggregate_open(aggregate); !result) {
+        return result;
+      }
+      if (aggregate_state(aggregate) != AggregateCapabilityState::kFinalized) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                       instruction_index, aggregate.value()));
+      }
+      return {};
+    };
 
     const auto transferred = std::visit(
         [&](const auto& operation) -> ProgramResult<void> {
           using Operation = std::decay_t<decltype(operation)>;
           if constexpr (std::is_same_v<Operation, HaltInstruction>) {
+            for (std::size_t aggregate = 0; aggregate < input.aggregates.size(); ++aggregate) {
+              if (aggregate_state(AggregateId(static_cast<std::uint32_t>(aggregate))) ==
+                  AggregateCapabilityState::kAccumulating) {
+                return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                               instruction_index, aggregate));
+              }
+            }
             return {};
           } else if constexpr (std::is_same_v<Operation, LoadConstantInstruction> ||
                                std::is_same_v<Operation, LoadParameterInstruction> ||
@@ -2144,6 +2238,49 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
                                              instruction_index, operation.relation.value()));
             }
             set_relation_state(operation.relation, CapabilityState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OpenAggregateInstruction>) {
+            if (aggregate_state(operation.aggregate) != AggregateCapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyOpen,
+                                             instruction_index, operation.aggregate.value()));
+            }
+            set_aggregate_state(operation.aggregate, AggregateCapabilityState::kAccumulating);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, StepAggregateInstruction>) {
+            if (auto result = require_aggregate_accumulating(operation.aggregate); !result) {
+              return result;
+            }
+            const AggregateDescriptor& descriptor = input.aggregates[operation.aggregate.value()];
+            if (auto result = require_range(operation.first_argument, descriptor.argument_count);
+                !result) {
+              return result;
+            }
+            if (operation.effect_output.has_value()) {
+              initialize(*operation.effect_output);
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, FinalizeAggregateInstruction>) {
+            if (auto result = require_aggregate_accumulating(operation.aggregate); !result) {
+              return result;
+            }
+            initialize(operation.output);
+            set_aggregate_state(operation.aggregate, AggregateCapabilityState::kFinalized);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResetAggregateInstruction>) {
+            if (auto result = require_aggregate_finalized(operation.aggregate); !result) {
+              return result;
+            }
+            set_aggregate_state(operation.aggregate, AggregateCapabilityState::kAccumulating);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CloseAggregateInstruction>) {
+            if (aggregate_state(operation.aggregate) == AggregateCapabilityState::kClosed) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
+                                             instruction_index, operation.aggregate.value()));
+            }
+            if (auto result = require_aggregate_finalized(operation.aggregate); !result) {
+              return result;
+            }
+            set_aggregate_state(operation.aggregate, AggregateCapabilityState::kClosed);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareRecordsInstruction>) {
             const std::uint32_t field_count =
@@ -2733,6 +2870,16 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "close_relation";
     case InstructionKind::kCompareRecords:
       return "compare_records";
+    case InstructionKind::kOpenAggregate:
+      return "open_aggregate";
+    case InstructionKind::kStepAggregate:
+      return "step_aggregate";
+    case InstructionKind::kFinalizeAggregate:
+      return "finalize_aggregate";
+    case InstructionKind::kResetAggregate:
+      return "reset_aggregate";
+    case InstructionKind::kCloseAggregate:
+      return "close_aggregate";
   }
   return "unknown";
 }
@@ -2754,6 +2901,7 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kOwnedBytesLimitExceeded:
     case ProgramErrorCode::kAnalysisLimitExceeded:
     case ProgramErrorCode::kAnalysisWorkLimitExceeded:
+    case ProgramErrorCode::kAggregateLimitExceeded:
       return ErrorCode::kTooLarge;
     case ProgramErrorCode::kEmptyProgram:
     case ProgramErrorCode::kInvalidRootPage:
@@ -2800,6 +2948,8 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kIndexOperationRequiresIndex:
     case ProgramErrorCode::kFallthroughPastEnd:
     case ProgramErrorCode::kUnreachableInstruction:
+    case ProgramErrorCode::kInvalidAggregate:
+    case ProgramErrorCode::kInvalidAggregateDescriptor:
       return ErrorCode::kMisuse;
   }
   return ErrorCode::kInternal;
@@ -2894,6 +3044,10 @@ const OrderingRecordDescriptor& BytecodeProgram::record_comparison(
 
 const Instruction& BytecodeProgram::instruction(InstructionAddress address) const noexcept {
   return input_.instructions[address.value()];
+}
+
+const AggregateDescriptor& BytecodeProgram::aggregate(AggregateId id) const noexcept {
+  return input_.aggregates[id.value()];
 }
 
 ProgramBuilder::ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
@@ -3149,6 +3303,26 @@ ProgramResult<RecordComparisonId> ProgramBuilder::AddRecordComparison(
     throw;
   }
   return RecordComparisonId(static_cast<std::uint32_t>(input_.record_comparisons.size() - 1U));
+}
+
+ProgramResult<AggregateId> ProgramBuilder::AddAggregate(AggregateDescriptor aggregate) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.aggregates.size() >= limits_.maximum_aggregates ||
+      input_.aggregates.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAggregateLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(sizeof(AggregateDescriptor)); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    input_.aggregates.push_back(aggregate);
+  } catch (...) {
+    owned_bytes_ -= sizeof(AggregateDescriptor);
+    throw;
+  }
+  return AggregateId(static_cast<std::uint32_t>(input_.aggregates.size() - 1U));
 }
 
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(

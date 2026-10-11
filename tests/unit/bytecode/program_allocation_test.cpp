@@ -42,6 +42,12 @@ int main() try {
   };
   input.constants.push_back(SqlValue::Text("payload"));
   input.symbols.emplace_back("BINARY");
+  input.symbols.emplace_back("sum");
+  input.aggregates.push_back(AggregateDescriptor{
+      .function = SymbolId(1),
+      .collation = SymbolId(0),
+      .argument_count = 1,
+  });
   input.sorters.push_back(OrderingRecordDescriptor{
       .field_count = 2,
       .key_field_count = 1,
@@ -153,10 +159,16 @@ int main() try {
     checksum += comparison.key_field_count;
     checksum += comparison.key_columns.size();
   }
+  for (const AggregateDescriptor& aggregate : program.aggregates()) {
+    checksum += aggregate.function.value();
+    checksum += aggregate.collation.value();
+    checksum += aggregate.argument_count;
+  }
   checksum += program.sorter(SorterId(0)).field_count;
   checksum += program.top_n(TopNId(0)).field_count;
   checksum += program.relation(RelationId(0)).field_count;
   checksum += program.record_comparison(RecordComparisonId(0)).field_count;
+  checksum += program.aggregate(AggregateId(0)).argument_count;
   checksum += static_cast<std::size_t>(program.statement_kind());
   checksum += static_cast<std::size_t>(program.transaction_access());
   checksum += static_cast<std::size_t>(program.rollback_mode());

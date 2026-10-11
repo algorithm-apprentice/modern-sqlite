@@ -326,7 +326,8 @@ Development is red-green-refactor. Package-local tests cover:
   conversion, growth, and finalization cleanup; and
 - no allocation or file ownership outside the state object.
 
-Binder, bytecode, VM, session, differential SQL execution, DISTINCT, FILTER
+ADR-0060 and ADR-0062 later add binder metadata plus typed bytecode/VM state
+over this contract. Session-visible SQL execution, DISTINCT, FILTER
 scheduling, local ordering, and grouped representative snapshots remain owned
 by later packages.
 

@@ -385,8 +385,8 @@ aggregate lowering is not implemented
 
 Read-session preparation therefore remains a prepare-time failure until
 package 11, but the failure moves from planning to the correct next
-architecture boundary. Package 10 may add aggregate bytecode and VM state
-without making SQL execution public.
+architecture boundary. ADR-0062 adds aggregate bytecode and VM state without
+changing that public lowering guard.
 
 ### 10. Verify plan shape, ownership, limits, and allocation
 

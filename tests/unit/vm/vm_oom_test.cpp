@@ -158,6 +158,50 @@ int main() try {
     return 1;
   }
 
+  ProgramInput aggregate_input;
+  aggregate_input.schema_version = input.schema_version;
+  aggregate_input.register_count = 1;
+  aggregate_input.symbols = {"sum", "BINARY"};
+  aggregate_input.constants.push_back(SqlValue::Integer(1));
+  aggregate_input.aggregates.push_back(AggregateDescriptor{
+      .function = SymbolId(0),
+      .collation = SymbolId(1),
+      .argument_count = 1,
+  });
+  aggregate_input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = RegisterId(0),
+      },
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = RegisterId(0)},
+      CloseAggregateInstruction{.aggregate = AggregateId(0)},
+      HaltInstruction{},
+  };
+  auto aggregate_program = BytecodeProgram::Create(aggregate_input);
+  if (!aggregate_program.has_value()) {
+    return 1;
+  }
+  auto aggregate_vm = Vm::Create(*aggregate_program, VmEnvironment::Core());
+  if (!aggregate_vm.has_value() ||
+      !aggregate_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto aggregate_failure = aggregate_vm->Step();
+  fail_allocations = false;
+  if (aggregate_failure.has_value() ||
+      aggregate_failure.error().code() != ErrorCode::kOutOfMemory ||
+      aggregate_vm->state() != VmState::kError || !aggregate_vm->Reset().has_value() ||
+      !aggregate_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto aggregate_recovered = aggregate_vm->Step();
+  if (!aggregate_recovered.has_value() || *aggregate_recovered != VmStep::kDone) {
+    return 1;
+  }
+
   ProgramInput branch_input;
   branch_input.schema_version = input.schema_version;
   branch_input.register_count = 1;

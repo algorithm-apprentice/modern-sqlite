@@ -624,6 +624,11 @@ Symbol strings and result names must be valid strings for the existing
 runtime contracts. Unknown function or collation names are not verifier
 errors because connection-owned registration is a VM concern.
 
+ADR-0054 and ADR-0056 later append sorter, top-N, and relation capabilities.
+ADR-0062 appends aggregate descriptors plus open, step, finalize, reset, and
+close instructions with verified lifecycle state. Existing instruction kinds
+and variant indices remain unchanged.
+
 ### Control-flow and definite-state verification
 
 The verifier then performs a deterministic forward worklist analysis from
