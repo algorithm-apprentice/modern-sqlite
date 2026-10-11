@@ -469,6 +469,26 @@ class Validator final {
                 }
                 previous_end = argument_span.end();
               }
+              for (const OrderingTerm& term : call.order_by) {
+                const Status term_status = ValidateOrderingTerm(term, expression.span, index);
+                if (!term_status.has_value()) {
+                  return term_status;
+                }
+                if (term.span.begin() < previous_end) {
+                  return Misuse("function ordering terms must follow arguments");
+                }
+                previous_end = term.span.end();
+              }
+              if (call.filter.has_value()) {
+                const Status filter_status =
+                    ReferenceExpression(*call.filter, expression.span, index);
+                if (!filter_status.has_value()) {
+                  return filter_status;
+                }
+                if (expressions_[call.filter->value].span.begin() < previous_end) {
+                  return Misuse("function FILTER must follow arguments and ordering");
+                }
+              }
               return Status{};
             },
             [this, &expression, index](const CollateExpression& collate) {
@@ -553,6 +573,18 @@ class Validator final {
     return {};
   }
 
+  [[nodiscard]] Status ValidateOrderingTerm(const OrderingTerm& term, SourceSpan owner,
+                                            std::optional<std::size_t> maximum_index) {
+    const Status span_status = ValidateContainedSpan(term.span, owner);
+    if (!span_status.has_value()) {
+      return span_status;
+    }
+    if (!IsValid(term.order) || !IsValid(term.null_order)) {
+      return Misuse("ordering term is invalid");
+    }
+    return ReferenceExpression(term.expression, term.span, maximum_index);
+  }
+
   [[nodiscard]] Status ValidateLimit(const LimitClause& limit, SourceSpan statement_span) {
     const Status span_status = ValidateContainedSpan(limit.span, statement_span);
     if (!span_status.has_value()) {
@@ -630,6 +662,27 @@ class Validator final {
       const SourceSpan where_span = expressions_[core.where->value].span;
       if (where_span.begin() < clause_end) {
         return Misuse("select WHERE clause is out of order");
+      }
+      clause_end = where_span.end();
+    }
+    for (const ExpressionId expression : core.group_by) {
+      const Status group_status = ReferenceExpression(expression, core.span, std::nullopt);
+      if (!group_status.has_value()) {
+        return group_status;
+      }
+      const SourceSpan group_span = expressions_[expression.value].span;
+      if (group_span.begin() < clause_end) {
+        return Misuse("select GROUP BY expressions are out of order");
+      }
+      clause_end = group_span.end();
+    }
+    if (core.having.has_value()) {
+      const Status having_status = ReferenceExpression(*core.having, core.span, std::nullopt);
+      if (!having_status.has_value()) {
+        return having_status;
+      }
+      if (expressions_[core.having->value].span.begin() < clause_end) {
+        return Misuse("select HAVING clause is out of order");
       }
     }
     return {};
@@ -716,16 +769,12 @@ class Validator final {
 
     ByteOffset previous_order_end = clause_end;
     for (const OrderingTerm& term : select.order_by) {
-      if (!Contains(select.span, term.span) || !IsValid(term.order) || !IsValid(term.null_order)) {
-        return Misuse("select ORDER BY term is invalid");
+      const Status term_status = ValidateOrderingTerm(term, select.span, std::nullopt);
+      if (!term_status.has_value()) {
+        return term_status;
       }
       if (term.span.begin() < previous_order_end) {
         return Misuse("select ORDER BY terms overlap or are out of order");
-      }
-      const Status expression_status =
-          ReferenceExpression(term.expression, term.span, std::nullopt);
-      if (!expression_status.has_value()) {
-        return expression_status;
       }
       previous_order_end = term.span.end();
       clause_end = term.span.end();

@@ -129,6 +129,46 @@ VALUES does not become an aggregate core. Joins, subqueries, CTEs, views,
 INSERT SELECT, windows, user-defined aggregate registration, percentile/JSON
 aggregates, and schema/mutation features remain in ADR-0053 order.
 
+#### Package-6 syntax contract
+
+The immutable syntax representation extends only existing expression and
+`SelectCore` records:
+
+- `FunctionCallExpression` keeps its ordered ordinary arguments and
+  `distinct` flag, and adds ordered local `OrderingTerm` values plus an
+  optional FILTER predicate expression;
+- the existing `OrderingTerm` shape is shared by top-level and function-local
+  ordering so expression spans, ASC/DESC, and NULLS FIRST/LAST stay identical;
+- `SelectCore` adds ordered GROUP BY expression IDs and an optional HAVING
+  expression ID; and
+- function and core spans extend through their final accepted modifier or
+  clause while every referenced expression remains owned once by the
+  postorder syntax arena.
+
+The parser performs no aggregate classification, function lookup, arity
+checking, alias/ordinal resolution, or scalar-versus-aggregate modifier
+checking. It follows the pinned grammar literally:
+
+- GROUP BY requires one or more expressions, HAVING is syntactically accepted
+  with or without GROUP BY, and both apply independently to every SELECT arm;
+- VALUES remains unable to own GROUP BY or HAVING;
+- local ORDER BY accepts the same term grammar as top-level ORDER BY after
+  zero or more ordinary arguments, including `f(ORDER BY x)`,
+  `f(ALL ORDER BY x)`, and `f(DISTINCT ORDER BY x)`;
+- the bare-star production remains separate, so `f(*)` may have FILTER but
+  `f(* ORDER BY x)` is malformed;
+- FILTER has exactly `FILTER (WHERE expression)` shape after the function's
+  closing parenthesis and is retained for later binding even on scalar
+  functions; and
+- OVER, WINDOW, WITHIN GROUP, and every other deferred expression or SELECT
+  production remain explicit unsupported syntax.
+
+`ParseOptions::maximum_columns` bounds GROUP BY terms and function-local
+ordering terms in addition to its existing result, VALUES, indexed-term, and
+top-level ORDER BY uses. Malformed accepted productions keep the existing
+allocation-free `kUnexpectedToken` expectations; only still-deferred complete
+productions use `kUnsupportedSyntax`.
+
 ### 3. Preserve SQLite clause resolution
 
 For a singleton SELECT:

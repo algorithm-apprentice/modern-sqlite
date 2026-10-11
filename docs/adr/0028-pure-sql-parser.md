@@ -164,11 +164,12 @@ missing function `)` after a valid final argument uses
 parenthesized expression still needs its delimiter uses
 `kRightParenthesis`.
 
-For example, `SELECT x GROUP BY y` reports `GROUP`, `kUnsupportedSyntax`,
-`kNone`, and the byte after `GROUP`. A contextual `OVER` that remains a
-keyword reports `kOver`; one reclassified as a name reports `kIdentifier`.
-SQLite's rendered `near "<token>"` text is presentation policy for a later API
-boundary.
+For example, `SELECT x WINDOW w AS ()` reports `WINDOW`,
+`kUnsupportedSyntax`, `kNone`, and the byte after `WINDOW`. A contextual
+`OVER` that remains a keyword reports `kOver`; one reclassified as a name
+reports `kIdentifier`. SQLite's rendered `near "<token>"` text is presentation
+policy for a later API boundary. ADR-0057 package 6 supersedes the original
+GROUP BY, HAVING, FILTER, and function-local ORDER BY deferrals.
 
 Expected syntax and compatibility failures use `std::expected`; exceptions
 are not normal parser control flow. Allocation failure continues to propagate
@@ -289,8 +290,8 @@ may raise this limit without changing the AST.
 `ParseOptions` adds preparation-boundary limits without changing default
 language acceptance. `maximum_source_bytes` is checked before tokenization.
 `maximum_columns` is checked before appending SELECT result columns, SELECT
-ORDER BY terms, CREATE TABLE columns, table-constraint indexed terms, or
-CREATE INDEX terms.
+GROUP BY terms, SELECT or function-local ORDER BY terms, CREATE TABLE columns,
+table-constraint indexed terms, or CREATE INDEX terms.
 Exceeding either option reports `kResourceLimitExceeded`. The defaults match
 the catalog loader's SQLite-derived source and column limits.
 
@@ -340,9 +341,10 @@ the binder. Current-time spellings retain their three distinct literal kinds.
 
 Function `ALL` is accepted as the default argument mode because SQLite
 accepts it and the AST needs no semantic distinction from omission.
-Function `DISTINCT` sets the existing boolean. Function-local `ORDER BY`,
-`FILTER`, `OVER`, ordered-set syntax, subqueries, vector expressions, `CASE`,
-`CAST`, `RAISE`, and all other unmodeled expressions are unsupported.
+Function `DISTINCT` sets the existing boolean. ADR-0057 package 6 accepts function-local `ORDER BY` and
+`FILTER (WHERE expression)` without performing aggregate classification.
+`OVER`, ordered-set syntax, subqueries, vector expressions, `CASE`, `CAST`,
+`RAISE`, and all other unmodeled expressions remain unsupported.
 SQLite's separate bare-asterisk function production remains separate:
 `f(*)` is accepted, while `f(ALL *)` and `f(DISTINCT *)` are syntax errors.
 
@@ -354,6 +356,8 @@ The supported form is:
 SELECT [ALL | DISTINCT] result-column [, ...]
   [FROM qualified-table-name [AS] alias]
   [WHERE expression]
+  [GROUP BY expression [, ...]]
+  [HAVING expression]
   [LIMIT expression
     | LIMIT expression OFFSET expression
     | LIMIT offset-expression , limit-expression]
@@ -366,8 +370,9 @@ operators. The table source is zero or one named table with an optional
 alias. Comma sources, joins, table-valued functions, subqueries, and
 `INDEXED BY` are unsupported.
 
-`GROUP BY`, `HAVING`, `WINDOW`, `VALUES`, compounds, CTEs, and other absent
-clauses report `kUnsupportedSyntax`.
+GROUP BY and HAVING are retained on each ordinary SELECT core by ADR-0057.
+WINDOW, CTEs, and other absent clauses report `kUnsupportedSyntax`. VALUES and
+compound SELECT follow ADR-0056.
 
 ADR-0054 later extends this syntax contract with simple-SELECT ORDER BY terms,
 including ASC/DESC and NULLS FIRST/LAST. The parser now represents that clause

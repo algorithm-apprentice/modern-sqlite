@@ -121,8 +121,9 @@ Every `Expression` contains a full syntax span and one payload from:
 - `WildcardExpression` with the `*` span and an optional qualifier;
 - `UnaryExpression` with a typed operator, operator span, and operand ID;
 - `BinaryExpression` with a typed operator, operator span, and left/right IDs;
-- `FunctionCallExpression` with an exact name, ordered argument IDs, and the
-  presence of `DISTINCT`;
+- `FunctionCallExpression` with an exact name, ordered argument IDs, the
+  presence of `DISTINCT`, ordered function-local `OrderingTerm` values, and
+  an optional FILTER predicate expression;
 - `CollateExpression` with an operand ID, the `COLLATE` keyword span, and the
   collation-name span; or
 - `ParenthesizedExpression` with its inner expression ID.
@@ -160,7 +161,9 @@ The root `Statement` is a variant of:
   original clause span and syntax form.
 
 Joins, subqueries, compound SELECT, GROUP BY, HAVING, ORDER BY, windows, CTEs,
-and VALUES are deliberately absent from this node.
+and VALUES were deliberately absent from this initial node. ADR-0054,
+ADR-0056, and ADR-0057 subsequently extend the same immutable arena with
+ORDER BY, VALUES/compounds, and aggregate syntax without changing ownership.
 
 The shared `ConflictAction` enumeration distinguishes default, ROLLBACK,
 ABORT, FAIL, IGNORE, and REPLACE behavior. The shared `IndexedTerm` record

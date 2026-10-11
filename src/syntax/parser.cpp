@@ -554,11 +554,8 @@ class Parser final {
       quantified = true;
     }
 
-    if (Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy) {
-      return std::unexpected(Unsupported(Peek()));
-    }
-
     std::vector<ExpressionId> arguments;
+    bool bare_star = false;
     if (Peek().kind == TokenKind::kAsterisk && !quantified) {
       const Token asterisk = Consume();
       ExpressionResult wildcard = AppendExpression(asterisk.span,
@@ -570,7 +567,9 @@ class Parser final {
         return std::unexpected(wildcard.error());
       }
       arguments.push_back(*wildcard);
-    } else if (Peek().kind != TokenKind::kRightParenthesis) {
+      bare_star = true;
+    } else if (Peek().kind != TokenKind::kRightParenthesis &&
+               !(Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy)) {
       while (true) {
         ExpressionResult argument = ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U);
         if (!argument.has_value()) {
@@ -586,9 +585,13 @@ class Parser final {
       }
     }
 
-    if ((Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy) ||
-        Peek().kind == TokenKind::kFilter || Peek().kind == TokenKind::kOver) {
-      return std::unexpected(Unsupported(Peek()));
+    std::vector<OrderingTerm> order_by;
+    if (!bare_star && Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy) {
+      auto parsed_order_by = ParseOrderByClause(recursion_depth + 1U);
+      if (!parsed_order_by.has_value()) {
+        return std::unexpected(parsed_order_by.error());
+      }
+      order_by = std::move(*parsed_order_by);
     }
     TokenResult right_parenthesis =
         Expect(TokenKind::kRightParenthesis, ParseExpectation::kCommaOrRightParenthesis);
@@ -596,15 +599,50 @@ class Parser final {
       return std::unexpected(right_parenthesis.error());
     }
 
+    std::optional<ExpressionId> filter;
+    ByteOffset end = right_parenthesis->span.end();
+    if (ConsumeIf(TokenKind::kFilter)) {
+      TokenResult filter_left = Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
+      if (!filter_left.has_value()) {
+        return std::unexpected(filter_left.error());
+      }
+      TokenResult where = Expect(TokenKind::kWhere, ParseExpectation::kExpression);
+      if (!where.has_value()) {
+        return std::unexpected(where.error());
+      }
+      ExpressionResult predicate = ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U);
+      if (!predicate.has_value()) {
+        return std::unexpected(predicate.error());
+      }
+      TokenResult filter_right =
+          Expect(TokenKind::kRightParenthesis, ParseExpectation::kRightParenthesis);
+      if (!filter_right.has_value()) {
+        return std::unexpected(filter_right.error());
+      }
+      filter = *predicate;
+      end = filter_right->span.end();
+    }
+    if (Peek().kind == TokenKind::kOver) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+
     std::size_t depth = 1U;
     for (const ExpressionId argument : arguments) {
       depth = std::max(depth, Depth(argument) + 1U);
     }
-    return AppendExpression(MakeSpan(name_token.span.begin(), right_parenthesis->span.end()),
+    for (const OrderingTerm& term : order_by) {
+      depth = std::max(depth, Depth(term.expression) + 1U);
+    }
+    if (filter.has_value()) {
+      depth = std::max(depth, Depth(*filter) + 1U);
+    }
+    return AppendExpression(MakeSpan(name_token.span.begin(), end),
                             FunctionCallExpression{
                                 .name = name,
                                 .arguments = std::move(arguments),
                                 .distinct = distinct,
+                                .order_by = std::move(order_by),
+                                .filter = filter,
                             },
                             depth, name_token);
   }
@@ -922,7 +960,6 @@ class Parser final {
       case TokenKind::kPointer:
       case TokenKind::kEscape:
       case TokenKind::kOver:
-      case TokenKind::kFilter:
       case TokenKind::kWindow:
         return true;
       default:
@@ -1151,9 +1188,10 @@ class Parser final {
     return std::unexpected(Unexpected(Peek(), ParseExpectation::kExpression));
   }
 
-  [[nodiscard]] std::expected<OrderingTerm, ParseError> ParseOrderingTerm() {
+  [[nodiscard]] std::expected<OrderingTerm, ParseError> ParseOrderingTerm(
+      std::size_t recursion_depth = 1U) {
     const ByteOffset begin = Peek().span.begin();
-    ExpressionResult expression = ParseGeneralExpression();
+    ExpressionResult expression = ParseExpression(0, ExpressionOptions{}, recursion_depth);
     if (!expression.has_value()) {
       return std::unexpected(expression.error());
     }
@@ -1170,7 +1208,8 @@ class Parser final {
     };
   }
 
-  [[nodiscard]] std::expected<std::vector<OrderingTerm>, ParseError> ParseOrderByClause() {
+  [[nodiscard]] std::expected<std::vector<OrderingTerm>, ParseError> ParseOrderByClause(
+      std::size_t recursion_depth = 1U) {
     static_cast<void>(Consume());
     TokenResult by = Expect(TokenKind::kBy, ParseExpectation::kExpression);
     if (!by.has_value()) {
@@ -1180,7 +1219,7 @@ class Parser final {
       return std::unexpected(ResourceLimit(Peek()));
     }
     std::vector<OrderingTerm> terms;
-    auto first = ParseOrderingTerm();
+    auto first = ParseOrderingTerm(recursion_depth);
     if (!first.has_value()) {
       return std::unexpected(first.error());
     }
@@ -1189,13 +1228,35 @@ class Parser final {
       if (terms.size() >= options_.maximum_columns) {
         return std::unexpected(ResourceLimit(Peek()));
       }
-      auto term = ParseOrderingTerm();
+      auto term = ParseOrderingTerm(recursion_depth);
       if (!term.has_value()) {
         return std::unexpected(term.error());
       }
       terms.push_back(*term);
     }
     return terms;
+  }
+
+  [[nodiscard]] std::expected<std::vector<ExpressionId>, ParseError> ParseNonemptyExpressionList() {
+    if (options_.maximum_columns == 0U) {
+      return std::unexpected(ResourceLimit(Peek()));
+    }
+    ExpressionResult first = ParseGeneralExpression();
+    if (!first.has_value()) {
+      return std::unexpected(first.error());
+    }
+    std::vector<ExpressionId> expressions{*first};
+    while (ConsumeIf(TokenKind::kComma)) {
+      if (expressions.size() >= options_.maximum_columns) {
+        return std::unexpected(ResourceLimit(Peek()));
+      }
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      expressions.push_back(*expression);
+    }
+    return expressions;
   }
 
   [[nodiscard]] QueryCoreResult ParseSimpleSelectCore() {
@@ -1254,8 +1315,29 @@ class Parser final {
       where = *expression;
     }
 
-    if (Peek().kind == TokenKind::kGroup || Peek().kind == TokenKind::kHaving ||
-        Peek().kind == TokenKind::kWindow) {
+    std::vector<ExpressionId> group_by;
+    if (ConsumeIf(TokenKind::kGroup)) {
+      TokenResult by = Expect(TokenKind::kBy, ParseExpectation::kExpression);
+      if (!by.has_value()) {
+        return std::unexpected(by.error());
+      }
+      auto expressions = ParseNonemptyExpressionList();
+      if (!expressions.has_value()) {
+        return std::unexpected(expressions.error());
+      }
+      group_by = std::move(*expressions);
+    }
+
+    std::optional<ExpressionId> having;
+    if (ConsumeIf(TokenKind::kHaving)) {
+      ExpressionResult expression = ParseGeneralExpression();
+      if (!expression.has_value()) {
+        return std::unexpected(expression.error());
+      }
+      having = *expression;
+    }
+
+    if (Peek().kind == TokenKind::kWindow) {
       return std::unexpected(Unsupported(Peek()));
     }
 
@@ -1286,6 +1368,8 @@ class Parser final {
                 .result_columns = std::move(columns),
                 .from = std::move(from),
                 .where = where,
+                .group_by = std::move(group_by),
+                .having = having,
             },
         .order_by = std::move(order_by),
         .limit = limit,

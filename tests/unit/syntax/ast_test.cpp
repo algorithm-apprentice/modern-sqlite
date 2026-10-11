@@ -517,6 +517,99 @@ TEST(SyntaxTree, RepresentsSelectClausesAndNormalizesLimitOperands) {
   EXPECT_EQ(LimitSyntax::kOffsetKeyword, select.limit->syntax);
 }
 
+TEST(SyntaxTree, RepresentsAggregateClausesAndFunctionModifiers) {
+  const std::string source =
+      "SELECT f(x ORDER BY y DESC NULLS LAST) FILTER (WHERE z) "
+      "FROM t WHERE w GROUP BY g HAVING h";
+  const SourceSpan function = FindSpan(source, "f(x ORDER BY y DESC NULLS LAST) FILTER (WHERE z)");
+  const SourceSpan function_name = FindSpan(source, "f");
+  const SourceSpan argument = FindSpan(source, "x");
+  const SourceSpan ordering = FindSpan(source, "y DESC NULLS LAST");
+  const SourceSpan order_expression = FindSpan(source, "y");
+  const SourceSpan filter = FindSpan(source, "z");
+  const SourceSpan where = FindSpan(source, "w");
+  const SourceSpan group = FindSpan(source, "g");
+  const SourceSpan having = FindSpan(source, "h");
+  const SourceSpan table = FindSpan(source, "t", function.end().value());
+
+  std::vector<Expression> expressions{
+      Expression{
+          .span = argument,
+          .payload = IdentifierExpression{.name = Name(argument, {argument})},
+      },
+      Expression{
+          .span = order_expression,
+          .payload = IdentifierExpression{.name = Name(order_expression, {order_expression})},
+      },
+      Expression{
+          .span = filter,
+          .payload = IdentifierExpression{.name = Name(filter, {filter})},
+      },
+      Expression{
+          .span = function,
+          .payload =
+              FunctionCallExpression{
+                  .name = Name(function_name, {function_name}),
+                  .arguments = {ExpressionId{0}},
+                  .order_by =
+                      {
+                          OrderingTerm{
+                              .span = ordering,
+                              .expression = ExpressionId{1},
+                              .order = SortOrder::kDescending,
+                              .null_order = NullOrder::kLast,
+                          },
+                      },
+                  .filter = ExpressionId{2},
+              },
+      },
+      Expression{
+          .span = where,
+          .payload = IdentifierExpression{.name = Name(where, {where})},
+      },
+      Expression{
+          .span = group,
+          .payload = IdentifierExpression{.name = Name(group, {group})},
+      },
+      Expression{
+          .span = having,
+          .payload = IdentifierExpression{.name = Name(having, {having})},
+      },
+  };
+  Statement statement = SelectStatement{
+      .span = Span(0, source.size()),
+      .first =
+          SelectCore{
+              .span = Span(0, source.size()),
+              .result_columns =
+                  {
+                      ResultColumn{.span = function, .expression = ExpressionId{3}},
+                  },
+              .from =
+                  TableSource{
+                      .span = table,
+                      .name = Name(table, {table}),
+                  },
+              .where = ExpressionId{4},
+              .group_by = {ExpressionId{5}},
+              .having = ExpressionId{6},
+          },
+  };
+
+  auto result = SyntaxTree::Create(source, std::move(expressions), std::move(statement));
+
+  ASSERT_TRUE(result.has_value()) << result.error().ToString();
+  const auto& select = std::get<SelectStatement>(result->statement());
+  const auto& core = std::get<SelectCore>(select.first);
+  ASSERT_EQ(1U, core.group_by.size());
+  EXPECT_EQ(ExpressionId{5}, core.group_by[0]);
+  EXPECT_EQ(ExpressionId{6}, core.having);
+  const auto& call = std::get<FunctionCallExpression>(result->expression(ExpressionId{3}).payload);
+  ASSERT_EQ(1U, call.order_by.size());
+  EXPECT_EQ(ExpressionId{1}, call.order_by[0].expression);
+  EXPECT_EQ(ExpressionId{2}, call.filter);
+}
+
 TEST(SyntaxTree, PreservesCommaLimitSyntaxWithNormalizedOperands) {
   const std::string source = "SELECT 1 LIMIT 2, 3";
   const SourceSpan result_value = FindSpan(source, "1");
@@ -1561,6 +1654,96 @@ TEST(SyntaxTree, RejectsQualifiedFormsForbiddenBySQLiteGrammar) {
                     .span = term,
                     .expression = ExpressionId{0},
                 },
+            },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));
+  }
+}
+
+TEST(SyntaxTree, RejectsMisorderedAggregateSyntax) {
+  {
+    const std::string source = "SELECT f(x ORDER BY y)";
+    const SourceSpan x = FindSpan(source, "x");
+    const SourceSpan y = FindSpan(source, "y");
+    const SourceSpan function = FindSpan(source, "f(x ORDER BY y)");
+    const SourceSpan function_name = FindSpan(source, "f");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = x,
+            .payload = IdentifierExpression{.name = Name(x, {x})},
+        },
+        Expression{
+            .span = y,
+            .payload = IdentifierExpression{.name = Name(y, {y})},
+        },
+        Expression{
+            .span = function,
+            .payload =
+                FunctionCallExpression{
+                    .name = Name(function_name, {function_name}),
+                    .arguments = {ExpressionId{1}},
+                    .order_by = {{.span = x, .expression = ExpressionId{0}}},
+                },
+        },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions),
+                                    SingleResultSelect(Span(0, 22), function, ExpressionId{2})));
+  }
+  {
+    const std::string source = "SELECT f(x ORDER BY y) FILTER (WHERE z)";
+    const SourceSpan x = FindSpan(source, "x");
+    const SourceSpan y = FindSpan(source, "y");
+    const SourceSpan function = FindSpan(source, "f(x ORDER BY y) FILTER (WHERE z)");
+    const SourceSpan function_name = FindSpan(source, "f");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = x,
+            .payload = IdentifierExpression{.name = Name(x, {x})},
+        },
+        Expression{
+            .span = y,
+            .payload = IdentifierExpression{.name = Name(y, {y})},
+        },
+        Expression{
+            .span = function,
+            .payload =
+                FunctionCallExpression{
+                    .name = Name(function_name, {function_name}),
+                    .order_by = {{.span = y, .expression = ExpressionId{1}}},
+                    .filter = ExpressionId{0},
+                },
+        },
+    };
+    ExpectMisuse(SyntaxTree::Create(source, std::move(expressions),
+                                    SingleResultSelect(Span(0, 39), function, ExpressionId{2})));
+  }
+  {
+    const std::string source = "SELECT a GROUP BY g HAVING h";
+    const SourceSpan a = FindSpan(source, "a");
+    const SourceSpan g = FindSpan(source, "g");
+    const SourceSpan h = FindSpan(source, "h");
+    std::vector<Expression> expressions{
+        Expression{
+            .span = a,
+            .payload = IdentifierExpression{.name = Name(a, {a})},
+        },
+        Expression{
+            .span = g,
+            .payload = IdentifierExpression{.name = Name(g, {g})},
+        },
+        Expression{
+            .span = h,
+            .payload = IdentifierExpression{.name = Name(h, {h})},
+        },
+    };
+    Statement statement = SelectStatement{
+        .span = Span(0, source.size()),
+        .first =
+            SelectCore{
+                .span = Span(0, source.size()),
+                .result_columns = {{.span = a, .expression = ExpressionId{0}}},
+                .group_by = {ExpressionId{2}},
+                .having = ExpressionId{1},
             },
     };
     ExpectMisuse(SyntaxTree::Create(source, std::move(expressions), std::move(statement)));

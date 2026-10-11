@@ -1049,6 +1049,20 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
 }
 
+TEST(Binder, RejectsParsedAggregateSyntaxUntilAggregateBinding) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT 1 GROUP BY 1",
+           "SELECT 1 HAVING 1",
+           "SELECT abs(1 ORDER BY 2)",
+           "SELECT abs(1) FILTER (WHERE 1)",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
+                    "aggregate queries are not supported");
+  }
+}
+
 TEST(Binder, AssignsParametersInLexicalOrderAndRetainsFirstSpellings) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select = BindOrThrow("SELECT ?, ?5, :x, :x, @x, $x, ?2 LIMIT ?10, ?", catalog);

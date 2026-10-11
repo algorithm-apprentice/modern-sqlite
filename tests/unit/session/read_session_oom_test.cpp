@@ -366,6 +366,48 @@ int main() try {
     }
   }
 
+  constexpr std::string_view kAggregateSyntax =
+      "SELECT abs(1 ORDER BY 2) FILTER (WHERE 1) GROUP BY 1 HAVING 1";
+  std::size_t aggregate_prepare_allocations = 0;
+  {
+    auto session = ReadSession::Open(prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto prepared = session->Prepare(Utf8View{kAggregateSyntax});
+    if (prepared.has_value() || prepared.error().code() != ErrorCode::kGeneric) {
+      return 1;
+    }
+    aggregate_prepare_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (aggregate_prepare_allocations == 0U || aggregate_prepare_allocations > 256U) {
+    return 1;
+  }
+
+  for (std::size_t failure = 0; failure < aggregate_prepare_allocations; ++failure) {
+    const auto locks = std::make_shared<LockTrackingState>();
+    auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto prepared = session->Prepare(Utf8View{kAggregateSyntax});
+      returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom || locks->shared_lock_held) {
+      return 1;
+    }
+  }
+
   const ReadSessionOptions sorter_options{
       .temporary_storage =
           TemporaryStorageOptions{

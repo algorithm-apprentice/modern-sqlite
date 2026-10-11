@@ -1623,6 +1623,10 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindSelectCoreBody(const SelectCore& core) {
+    if (!core.group_by.empty() || core.having.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, core.span,
+                                         "aggregate queries are not supported"));
+    }
     BeginQueryCore();
     BindExpected<void> source = BindSource(core);
     if (!source.has_value()) {
@@ -2166,7 +2170,13 @@ class StatementBinder final {
          (core.from->alias.has_value() && !SpanIsValid(*core.from->alias)))) {
       return false;
     }
-    return !core.where.has_value() || IdIsValid(*core.where);
+    if (core.where.has_value() && !IdIsValid(*core.where)) {
+      return false;
+    }
+    if (!std::ranges::all_of(core.group_by, [this](ExpressionId id) { return IdIsValid(id); })) {
+      return false;
+    }
+    return !core.having.has_value() || IdIsValid(*core.having);
   }
 
   [[nodiscard]] bool ValidateQueryCore(const QueryCore& core) const noexcept {
@@ -2243,7 +2253,12 @@ class StatementBinder final {
         call != nullptr) {
       return QualifiedNameIsValid(call->name) &&
              std::ranges::all_of(call->arguments,
-                                 [this](ExpressionId id) { return IdIsValid(id); });
+                                 [this](ExpressionId id) { return IdIsValid(id); }) &&
+             std::ranges::all_of(call->order_by,
+                                 [this](const OrderingTerm& term) {
+                                   return SpanIsValid(term.span) && IdIsValid(term.expression);
+                                 }) &&
+             (!call->filter.has_value() || IdIsValid(*call->filter));
     }
     if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
         collate != nullptr) {
@@ -2705,13 +2720,26 @@ class StatementBinder final {
     if (const auto* call = std::get_if<FunctionCallExpression>(&left.payload); call != nullptr) {
       const auto& other = std::get<FunctionCallExpression>(right.payload);
       if (call->distinct != other.distinct || !SyntaxNamesEquivalent(call->name, other.name) ||
-          call->arguments.size() != other.arguments.size()) {
+          call->arguments.size() != other.arguments.size() ||
+          call->order_by.size() != other.order_by.size() ||
+          call->filter.has_value() != other.filter.has_value()) {
         return false;
       }
       for (std::size_t index = 0; index < call->arguments.size(); ++index) {
         if (!SyntaxExpressionsEquivalent(call->arguments[index], other.arguments[index])) {
           return false;
         }
+      }
+      for (std::size_t index = 0; index < call->order_by.size(); ++index) {
+        const OrderingTerm& left_term = call->order_by[index];
+        const OrderingTerm& right_term = other.order_by[index];
+        if (left_term.order != right_term.order || left_term.null_order != right_term.null_order ||
+            !SyntaxExpressionsEquivalent(left_term.expression, right_term.expression)) {
+          return false;
+        }
+      }
+      if (call->filter.has_value() && !SyntaxExpressionsEquivalent(*call->filter, *other.filter)) {
+        return false;
       }
       return true;
     }
@@ -3616,6 +3644,10 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindCall(const FunctionCallExpression& call,
                                                          SourceSpan span, BindScope scope) {
+    if (!call.order_by.empty() || call.filter.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                         "aggregate queries are not supported"));
+    }
     BindExpected<DecodedNameParts> parts = NameParts(call.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));

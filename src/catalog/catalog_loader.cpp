@@ -449,6 +449,12 @@ void NormalizeDefaultVariables(std::vector<Expression>& expressions, ExpressionI
     } else if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
                function != nullptr) {
       pending.insert(pending.end(), function->arguments.begin(), function->arguments.end());
+      for (const OrderingTerm& term : function->order_by) {
+        pending.push_back(term.expression);
+      }
+      if (function->filter.has_value()) {
+        pending.push_back(*function->filter);
+      }
     } else if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
                collate != nullptr) {
       pending.push_back(collate->operand);
@@ -478,6 +484,12 @@ void NormalizeDefaultVariables(std::vector<Expression>& expressions, ExpressionI
     } else if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
                function != nullptr) {
       pending.insert(pending.end(), function->arguments.begin(), function->arguments.end());
+      for (const OrderingTerm& term : function->order_by) {
+        pending.push_back(term.expression);
+      }
+      if (function->filter.has_value()) {
+        pending.push_back(*function->filter);
+      }
     } else if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
                collate != nullptr) {
       pending.push_back(collate->operand);
@@ -985,6 +997,10 @@ class CatalogLoader final {
                  function != nullptr) {
         if (function->distinct) {
           return std::unexpected(Corruption("schema expression contains a DISTINCT function call"));
+        }
+        if (!function->order_by.empty() || function->filter.has_value()) {
+          return std::unexpected(
+              Corruption("schema expression contains aggregate function modifiers"));
         }
         if (context != SchemaExpressionContext::kDefault) {
           auto valid = ValidateKnownFunction(tree, *function, context);
