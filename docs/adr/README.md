@@ -69,3 +69,4 @@ their corresponding implementation begins.
 63. [ADR-0063: SQLite-Aligned Global Aggregate Execution](0063-global-aggregate-execution.md)
 64. [ADR-0064: Production-Only Clang-Tidy Scope](0064-production-only-clang-tidy-scope.md)
 65. [ADR-0065: Production-Only Sanitizer Instrumentation](0065-production-only-sanitizer-instrumentation.md)
+66. [ADR-0066: Markdown-Only Workflow Skipping](0066-markdown-only-workflow-skipping.md)

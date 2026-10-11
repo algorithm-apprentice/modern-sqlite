@@ -6,9 +6,13 @@ on:
       - opened
       - synchronize
       - reopened
+    paths-ignore:
+      - "**/*.md"
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
 
 permissions:
   contents: read

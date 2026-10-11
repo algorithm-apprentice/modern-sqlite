@@ -101,6 +101,9 @@ Any failure blocks merging and new feature work until its root cause is fixed.
   macOS performance contract run on `main`.
 - CI cancels superseded runs for the same pull request. Benchmark jobs build
   only the binaries required by their selected contract tests.
+- Per ADR-0066, automatic workflows skip changes whose complete changed-file
+  set contains only Markdown. Any non-Markdown artifact retains every
+  applicable gate, and manual full-quality dispatch remains available.
 - Compatible compiler/configuration pairs use isolated ccache namespaces.
   Debug, Release, sanitizer, and operating-system caches are never mixed.
 - Review checks pattern reuse in addition to local functional correctness.
@@ -132,3 +135,4 @@ Any failure blocks merging and new feature work until its root cause is fixed.
 - ADR-0045: Existing-Module SQLite Reference Alignment
 - ADR-0064: Production-Only Clang-Tidy Scope
 - ADR-0065: Production-Only Sanitizer Instrumentation
+- ADR-0066: Markdown-Only Workflow Skipping
