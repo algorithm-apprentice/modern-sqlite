@@ -1628,6 +1628,21 @@ set_tests_properties(
 )
 
 add_test(
+  NAME cmake.sanitizer_scope
+  COMMAND
+    "${CMAKE_COMMAND}"
+    -S "${PROJECT_SOURCE_DIR}/tests/cmake/sanitizer_scope"
+    -B "${PROJECT_BINARY_DIR}/tests/sanitizer-scope"
+    -DMODERN_SQLITE_REPOSITORY_ROOT=${PROJECT_SOURCE_DIR}
+)
+set_tests_properties(
+  cmake.sanitizer_scope
+  PROPERTIES
+    LABELS cmake
+    TIMEOUT 10
+)
+
+add_test(
   NAME tools.changed_clang_tidy_scope
   COMMAND
     "${Python3_EXECUTABLE}"

@@ -68,3 +68,4 @@ their corresponding implementation begins.
 62. [ADR-0062: Typed Aggregate Bytecode and VM State](0062-typed-aggregate-bytecode-and-vm.md)
 63. [ADR-0063: SQLite-Aligned Global Aggregate Execution](0063-global-aggregate-execution.md)
 64. [ADR-0064: Production-Only Clang-Tidy Scope](0064-production-only-clang-tidy-scope.md)
+65. [ADR-0065: Production-Only Sanitizer Instrumentation](0065-production-only-sanitizer-instrumentation.md)

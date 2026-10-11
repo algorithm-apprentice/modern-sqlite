@@ -26,7 +26,7 @@ function(modern_sqlite_enable_sanitizers target)
     list(JOIN sanitizers "," sanitizer_list)
     target_compile_options(
       "${target}"
-      INTERFACE
+      PRIVATE
         "-fsanitize=${sanitizer_list}"
         -fno-omit-frame-pointer
         -fno-sanitize-recover=all

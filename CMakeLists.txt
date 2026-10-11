@@ -56,7 +56,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/Sanitizers.cmake")
 
 add_library(modern_sqlite_project_options INTERFACE)
 target_compile_features(modern_sqlite_project_options INTERFACE cxx_std_23)
-modern_sqlite_enable_sanitizers(modern_sqlite_project_options)
 
 add_library(modern_sqlite_project_warnings INTERFACE)
 modern_sqlite_set_project_warnings(modern_sqlite_project_warnings INTERFACE)
@@ -86,6 +85,7 @@ target_link_libraries(
   PRIVATE
     modern_sqlite_project_warnings
 )
+modern_sqlite_enable_sanitizers(modern_sqlite_instrumentation)
 modern_sqlite_enable_clang_tidy(modern_sqlite_instrumentation)
 
 set(
@@ -150,6 +150,7 @@ target_link_libraries(
   PRIVATE
     modern_sqlite_project_warnings
 )
+modern_sqlite_enable_sanitizers(modern_sqlite)
 modern_sqlite_enable_clang_tidy(modern_sqlite)
 
 if(MODERN_SQLITE_BUILD_FUZZERS)
@@ -210,6 +211,7 @@ if(MODERN_SQLITE_BUILD_FUZZERS)
     PRIVATE
       -fsanitize=fuzzer-no-link
   )
+  modern_sqlite_enable_sanitizers(modern_sqlite_fuzz_engine)
   modern_sqlite_enable_clang_tidy(modern_sqlite_fuzz_engine)
 
   add_executable(
@@ -513,6 +515,7 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
       modern_sqlite_project_warnings
       modern_sqlite::instrumentation
   )
+  modern_sqlite_enable_sanitizers(modern_sqlite_diagnostic_engine)
   modern_sqlite_enable_clang_tidy(modern_sqlite_diagnostic_engine)
 
   add_executable(
@@ -810,6 +813,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/bootstrap/toolchain_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/cmake/clang_tidy_scope/src/production.cpp"
   "${PROJECT_SOURCE_DIR}/tests/cmake/clang_tidy_scope/tests/test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/cmake/sanitizer_scope/src/production.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/cmake/sanitizer_scope/tests/test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
