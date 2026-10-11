@@ -1,0 +1,57 @@
+name: Full quality
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - labeled
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-quality:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'full-quality'
+      ) ||
+      (
+        github.event.action != 'labeled' &&
+        contains(github.event.pull_request.labels.*.name, 'full-quality')
+      )
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install quality tools
+        run: |
+          brew install llvm ninja
+          python3 -m venv .quality-tools
+          .quality-tools/bin/pip install clang-format==23.1.2
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"
+      - name: Check engineering discipline
+        run: python3 tools/check_engineering_discipline.py
+      - name: Configure
+        run: |
+          cmake --preset clang-tidy \
+            -DMODERN_SQLITE_CLANG_FORMAT_EXECUTABLE="$PWD/.quality-tools/bin/clang-format" \
+            -DMODERN_SQLITE_CLANG_TIDY_EXECUTABLE="$(brew --prefix llvm)/bin/clang-tidy"
+      - name: Build with clang-tidy
+        run: >
+          cmake --build --preset clang-tidy
+          --parallel 3
+          --target modern_sqlite modern_sqlite_instrumentation
+      - name: Check formatting
+        run: cmake --build --preset clang-tidy --target check-format

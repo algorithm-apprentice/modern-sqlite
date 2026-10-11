@@ -1613,6 +1613,51 @@ set_tests_properties(
 )
 
 add_test(
+  NAME cmake.clang_tidy_scope
+  COMMAND
+    "${CMAKE_COMMAND}"
+    -S "${PROJECT_SOURCE_DIR}/tests/cmake/clang_tidy_scope"
+    -B "${PROJECT_BINARY_DIR}/tests/clang-tidy-scope"
+    -DMODERN_SQLITE_REPOSITORY_ROOT=${PROJECT_SOURCE_DIR}
+)
+set_tests_properties(
+  cmake.clang_tidy_scope
+  PROPERTIES
+    LABELS cmake
+    TIMEOUT 10
+)
+
+add_test(
+  NAME tools.changed_clang_tidy_scope
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest
+    tests/tools/run_changed_clang_tidy_test.py
+)
+set_tests_properties(
+  tools.changed_clang_tidy_scope
+  PROPERTIES
+    LABELS tools
+    TIMEOUT 10
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_test(
+  NAME tools.ci_workflow_policy
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    -m unittest
+    tests/tools/ci_workflow_policy_test.py
+)
+set_tests_properties(
+  tools.ci_workflow_policy
+  PROPERTIES
+    LABELS tools
+    TIMEOUT 10
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_test(
   NAME cli.storage_inspector
   COMMAND
     "${Python3_EXECUTABLE}"

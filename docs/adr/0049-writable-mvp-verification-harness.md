@@ -546,7 +546,7 @@ Node completion requires:
 - GCC warnings-as-errors;
 - ASan/UBSan;
 - TSan when supported by the local toolchain;
-- full Clang-Tidy, including benchmark-only translation units;
+- production-only clang-tidy over translation units rooted under `src/`;
 - formatting and whitespace checks;
 - engineering-discipline and project-graph validation;
 - a bounded optional libFuzzer corpus replay when the toolchain probe

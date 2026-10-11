@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PRODUCTION_SOURCE_ROOT = (ROOT / "src").resolve()
 SOURCE_SUFFIXES = {".cc", ".cpp", ".cxx"}
 
 
@@ -54,6 +56,14 @@ def compile_commands(build_directory: Path) -> dict[Path, str]:
     }
 
 
+def is_production_source(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(PRODUCTION_SOURCE_ROOT)
+    except ValueError:
+        return False
+    return True
+
+
 def main() -> int:
     args = parse_arguments()
     paths = changed_files(args.base_ref)
@@ -61,10 +71,18 @@ def main() -> int:
     sources = {
         (ROOT / path).resolve()
         for path in paths
-        if path.suffix in SOURCE_SUFFIXES and (ROOT / path).resolve() in database
+        if path.suffix in SOURCE_SUFFIXES
+        and is_production_source(ROOT / path)
+        and (ROOT / path).resolve() in database
     }
     if args.smoke_source is not None:
         smoke_source = (ROOT / args.smoke_source).resolve()
+        if not is_production_source(smoke_source):
+            print(
+                f"Smoke source is outside src/: {args.smoke_source}",
+                file=sys.stderr,
+            )
+            return 1
         if smoke_source not in database:
             print(
                 f"Smoke source is missing from compile_commands.json: {args.smoke_source}",
