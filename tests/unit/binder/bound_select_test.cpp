@@ -1043,6 +1043,8 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
                   "aggregate functions are not supported");
   ExpectBindError("SELECT min(Name) FROM Items", catalog, BindErrorCode::kUnsupportedFeature,
                   "aggregate functions are not supported");
+  ExpectBindError("SELECT string_agg(Name, ',') FROM Items", catalog,
+                  BindErrorCode::kUnsupportedFeature, "aggregate functions are not supported");
   ExpectBindError("SELECT likelihood(1,1)", catalog, BindErrorCode::kInvalidLiteral,
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
   ExpectBindError("SELECT likelihood(1,(+0.5))", catalog, BindErrorCode::kInvalidLiteral,

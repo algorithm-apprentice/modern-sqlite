@@ -8,9 +8,12 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "modern_sqlite/base/bytes.hpp"
@@ -20,6 +23,15 @@
 
 namespace modern_sqlite {
 namespace {
+
+static_assert(!std::is_copy_constructible_v<AggregateState>);
+static_assert(!std::is_copy_assignable_v<AggregateState>);
+static_assert(std::is_nothrow_move_constructible_v<AggregateState>);
+static_assert(std::is_nothrow_move_assignable_v<AggregateState>);
+static_assert(!std::is_copy_constructible_v<AggregateFunction>);
+static_assert(!std::is_copy_assignable_v<AggregateFunction>);
+static_assert(!std::is_move_constructible_v<AggregateFunction>);
+static_assert(!std::is_move_assignable_v<AggregateFunction>);
 
 [[nodiscard]] std::string TextFromBytes(std::initializer_list<std::uint8_t> bytes) {
   std::string result;
@@ -46,6 +58,41 @@ namespace {
     return std::unexpected(std::move(function.error()));
   }
   return (*function)->Invoke(ScalarFunctionContext{collation}, arguments);
+}
+
+[[nodiscard]] const AggregateFunction& ResolveAggregate(std::string_view name,
+                                                        std::size_t argument_count) {
+  auto function = CoreFunctionRegistry().ResolveAggregate(name, argument_count);
+  if (!function.has_value()) {
+    throw std::runtime_error(function.error().ToString());
+  }
+  return **function;
+}
+
+AggregateStepEffect StepAggregate(const AggregateFunction& function, AggregateState& state,
+                                  std::span<const SqlValue> arguments,
+                                  const Collation& collation = BinaryCollation(),
+                                  ByteCount maximum_value_bytes = ByteCount{1'000'000'000}) {
+  auto stepped =
+      function.Step(state, AggregateFunctionContext{collation, maximum_value_bytes}, arguments);
+  if (!stepped.has_value()) {
+    throw std::runtime_error(stepped.error().ToString());
+  }
+  return *stepped;
+}
+
+AggregateStepEffect StepOne(const AggregateFunction& function, AggregateState& state,
+                            SqlValue value, const Collation& collation = BinaryCollation(),
+                            ByteCount maximum_value_bytes = ByteCount{1'000'000'000}) {
+  const std::array arguments{std::move(value)};
+  return StepAggregate(function, state, arguments, collation, maximum_value_bytes);
+}
+
+AggregateStepEffect StepTwo(const AggregateFunction& function, AggregateState& state,
+                            SqlValue first, SqlValue second,
+                            ByteCount maximum_value_bytes = ByteCount{1'000'000'000}) {
+  const std::array arguments{std::move(first), std::move(second)};
+  return StepAggregate(function, state, arguments, BinaryCollation(), maximum_value_bytes);
 }
 
 void ExpectNull(const Result<SqlValue>& result) {
@@ -256,6 +303,370 @@ TEST(FunctionRegistryTest, KeepsInstrumentationProbeOutOfOrdinaryRegistry) {
   ASSERT_FALSE(function.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, function.error().code());
   EXPECT_EQ("no such function: modern_sqlite_probe", function.error().message());
+}
+
+TEST(AggregateFunctionRegistryTest, ResolvesCountAndOwnsLazyState) {
+  const auto function = CoreFunctionRegistry().ResolveAggregate("COUNT", 0);
+  ASSERT_TRUE(function.has_value());
+  EXPECT_EQ("count", (*function)->name());
+  EXPECT_TRUE((*function)->is_deterministic());
+  EXPECT_FALSE((*function)->uses_collation());
+  EXPECT_EQ(AggregateExtremumKind::kNone, (*function)->extremum_kind());
+
+  AggregateState state = (*function)->CreateState();
+  EXPECT_TRUE(state.valid());
+  EXPECT_FALSE(state.initialized());
+  EXPECT_FALSE(state.finalized());
+
+  const auto stepped =
+      (*function)->Step(state, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}},
+                        std::span<const SqlValue>{});
+  ASSERT_TRUE(stepped.has_value());
+  EXPECT_EQ(AggregateStepEffect::kNoRepresentativePreference, *stepped);
+  EXPECT_TRUE(state.initialized());
+
+  ExpectInteger((*function)->Finalize(state), 1);
+  EXPECT_TRUE(state.finalized());
+  state.Reset();
+  EXPECT_FALSE(state.initialized());
+  EXPECT_FALSE(state.finalized());
+}
+
+TEST(AggregateFunctionRegistryTest, PublishesCoreMetadataAndSeparateScalarResolution) {
+  struct ExpectedAggregate {
+    std::string_view name;
+    std::size_t argument_count;
+    bool uses_collation;
+    AggregateExtremumKind extremum;
+  };
+  constexpr std::array expected{
+      ExpectedAggregate{.name = "count",
+                        .argument_count = 0,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "count",
+                        .argument_count = 1,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "sum",
+                        .argument_count = 1,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "total",
+                        .argument_count = 1,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "avg",
+                        .argument_count = 1,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "min",
+                        .argument_count = 1,
+                        .uses_collation = true,
+                        .extremum = AggregateExtremumKind::kMinimum},
+      ExpectedAggregate{.name = "max",
+                        .argument_count = 1,
+                        .uses_collation = true,
+                        .extremum = AggregateExtremumKind::kMaximum},
+      ExpectedAggregate{.name = "group_concat",
+                        .argument_count = 1,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "group_concat",
+                        .argument_count = 2,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+      ExpectedAggregate{.name = "string_agg",
+                        .argument_count = 2,
+                        .uses_collation = false,
+                        .extremum = AggregateExtremumKind::kNone},
+  };
+
+  EXPECT_EQ(expected.size(), CoreFunctionRegistry().aggregate_functions().size());
+  for (const ExpectedAggregate& expected_function : expected) {
+    SCOPED_TRACE(expected_function.name);
+    const auto resolved = CoreFunctionRegistry().ResolveAggregate(expected_function.name,
+                                                                  expected_function.argument_count);
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_TRUE((*resolved)->arity().is_exact());
+    EXPECT_TRUE((*resolved)->is_deterministic());
+    EXPECT_EQ(expected_function.uses_collation, (*resolved)->uses_collation());
+    EXPECT_EQ(expected_function.extremum, (*resolved)->extremum_kind());
+  }
+
+  EXPECT_TRUE(CoreFunctionRegistry().Resolve("min", 2).has_value());
+  EXPECT_TRUE(CoreFunctionRegistry().ResolveAggregate("min", 1).has_value());
+  const auto scalar_min = CoreFunctionRegistry().Resolve("min", 1);
+  const auto aggregate_min = CoreFunctionRegistry().ResolveAggregate("min", 2);
+  ASSERT_FALSE(scalar_min.has_value());
+  ASSERT_FALSE(aggregate_min.has_value());
+  EXPECT_EQ("wrong number of arguments to function min()", scalar_min.error().message());
+  EXPECT_EQ("wrong number of arguments to function min()", aggregate_min.error().message());
+
+  const auto missing = CoreFunctionRegistry().ResolveAggregate("missing", 1);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ("no such function: missing", missing.error().message());
+}
+
+TEST(AggregateFunctionStateTest, EnforcesMoveDescriptorAndFinalizationLifecycle) {
+  const AggregateFunction& count = ResolveAggregate("count", 0);
+  const AggregateFunction& sum = ResolveAggregate("sum", 1);
+  AggregateState state = count.CreateState();
+  AggregateState moved{std::move(state)};
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_FALSE(state.valid());
+  EXPECT_TRUE(moved.valid());
+
+  const auto invalid_step =
+      count.Step(state, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}},
+                 std::span<const SqlValue>{});
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(invalid_step.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_step.error().code());
+
+  const std::array one{SqlValue::Integer(1)};
+  const auto wrong_function =
+      sum.Step(moved, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}}, one);
+  ASSERT_FALSE(wrong_function.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, wrong_function.error().code());
+
+  EXPECT_EQ(AggregateStepEffect::kNoRepresentativePreference,
+            StepAggregate(count, moved, std::span<const SqlValue>{}));
+  ExpectInteger(count.Finalize(moved), 1);
+  const auto finalized_step =
+      count.Step(moved, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}},
+                 std::span<const SqlValue>{});
+  const auto finalized_again = count.Finalize(moved);
+  ASSERT_FALSE(finalized_step.has_value());
+  ASSERT_FALSE(finalized_again.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, finalized_step.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, finalized_again.error().code());
+
+  moved.Reset();
+  EXPECT_FALSE(moved.initialized());
+  EXPECT_FALSE(moved.finalized());
+  ExpectInteger(count.Finalize(moved), 0);
+
+  AggregateState wrong_arity_state = count.CreateState();
+  const auto wrong_arity = count.Step(
+      wrong_arity_state, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}}, one);
+  ASSERT_FALSE(wrong_arity.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, wrong_arity.error().code());
+}
+
+TEST(CoreAggregateTest, CountHandlesEmptyNullAndZeroArgumentInputs) {
+  const AggregateFunction& count_all = ResolveAggregate("count", 0);
+  const AggregateFunction& count_value = ResolveAggregate("count", 1);
+
+  AggregateState empty = count_all.CreateState();
+  ExpectInteger(count_all.Finalize(empty), 0);
+
+  AggregateState all = count_all.CreateState();
+  StepAggregate(count_all, all, std::span<const SqlValue>{});
+  StepAggregate(count_all, all, std::span<const SqlValue>{});
+  ExpectInteger(count_all.Finalize(all), 2);
+
+  AggregateState values = count_value.CreateState();
+  EXPECT_FALSE(values.initialized());
+  StepOne(count_value, values, SqlValue{});
+  EXPECT_TRUE(values.initialized());
+  StepOne(count_value, values, SqlValue::Integer(1));
+  StepOne(count_value, values, TextValue("x"));
+  ExpectInteger(count_value.Finalize(values), 2);
+}
+
+TEST(CoreAggregateTest, NumericAggregatesMatchSQLiteTypesOverflowAndCompensation) {
+  const AggregateFunction& sum = ResolveAggregate("sum", 1);
+  const AggregateFunction& total = ResolveAggregate("total", 1);
+  const AggregateFunction& average = ResolveAggregate("avg", 1);
+
+  AggregateState empty_sum = sum.CreateState();
+  AggregateState empty_total = total.CreateState();
+  AggregateState empty_average = average.CreateState();
+  ExpectNull(sum.Finalize(empty_sum));
+  ExpectReal(total.Finalize(empty_total), 0.0);
+  ExpectNull(average.Finalize(empty_average));
+
+  AggregateState null_sum = sum.CreateState();
+  StepOne(sum, null_sum, SqlValue{});
+  EXPECT_TRUE(null_sum.initialized());
+  ExpectNull(sum.Finalize(null_sum));
+
+  AggregateState integer_sum = sum.CreateState();
+  StepOne(sum, integer_sum, TextValue("1"));
+  StepOne(sum, integer_sum, TextValue("2"));
+  ExpectInteger(sum.Finalize(integer_sum), 3);
+
+  AggregateState decimal_text = sum.CreateState();
+  StepOne(sum, decimal_text, TextValue("1.0"));
+  ExpectReal(sum.Finalize(decimal_text), 1.0);
+
+  AggregateState mixed_sum = sum.CreateState();
+  StepOne(sum, mixed_sum, TextValue("1"));
+  StepOne(sum, mixed_sum, TextValue("2.5"));
+  StepOne(sum, mixed_sum, TextValue("bad"));
+  StepOne(sum, mixed_sum, BlobValue("3"));
+  ExpectReal(sum.Finalize(mixed_sum), 6.5);
+
+  AggregateState overflow = sum.CreateState();
+  StepOne(sum, overflow, SqlValue::Integer(std::numeric_limits<std::int64_t>::max()));
+  StepOne(sum, overflow, SqlValue::Integer(1));
+  const auto overflow_result = sum.Finalize(overflow);
+  ASSERT_FALSE(overflow_result.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, overflow_result.error().code());
+  EXPECT_EQ("integer overflow", overflow_result.error().message());
+  EXPECT_TRUE(overflow.finalized());
+  EXPECT_FALSE(overflow.initialized());
+  overflow.Reset();
+
+  AggregateState cleared = sum.CreateState();
+  StepOne(sum, cleared, SqlValue::Integer(std::numeric_limits<std::int64_t>::max()));
+  StepOne(sum, cleared, SqlValue::Integer(1));
+  StepOne(sum, cleared, SqlValue::Real(0.0));
+  const auto cleared_result = sum.Finalize(cleared);
+  ASSERT_TRUE(cleared_result.has_value());
+  ASSERT_TRUE(cleared_result->real_value().has_value());
+  EXPECT_DOUBLE_EQ(9.2233720368547758e+18, *cleared_result->real_value());
+
+  AggregateState text_cleared = sum.CreateState();
+  StepOne(sum, text_cleared, SqlValue::Integer(std::numeric_limits<std::int64_t>::max()));
+  StepOne(sum, text_cleared, SqlValue::Integer(1));
+  StepOne(sum, text_cleared, TextValue("1e0"));
+  const auto text_cleared_result = sum.Finalize(text_cleared);
+  ASSERT_TRUE(text_cleared_result.has_value());
+  EXPECT_EQ(SqlValueType::kReal, text_cleared_result->type());
+
+  AggregateState total_overflow = total.CreateState();
+  AggregateState average_overflow = average.CreateState();
+  for (const std::int64_t value : {std::numeric_limits<std::int64_t>::max(), INT64_C(1)}) {
+    StepOne(total, total_overflow, SqlValue::Integer(value));
+    StepOne(average, average_overflow, SqlValue::Integer(value));
+  }
+  ExpectReal(total.Finalize(total_overflow), 9.2233720368547758e+18);
+  ExpectReal(average.Finalize(average_overflow), 4.6116860184273879e+18);
+
+  AggregateState compensated = sum.CreateState();
+  StepOne(sum, compensated, SqlValue::Real(1e16));
+  StepOne(sum, compensated, SqlValue::Real(1.0));
+  StepOne(sum, compensated, SqlValue::Real(-1e16));
+  ExpectReal(sum.Finalize(compensated), 1.0);
+
+  AggregateState positive_infinity = sum.CreateState();
+  StepOne(sum, positive_infinity, SqlValue::Real(std::numeric_limits<double>::infinity()));
+  const auto positive_result = sum.Finalize(positive_infinity);
+  ASSERT_TRUE(positive_result.has_value());
+  ASSERT_TRUE(positive_result->real_value().has_value());
+  EXPECT_TRUE(std::isinf(*positive_result->real_value()));
+
+  AggregateState opposite_infinities = total.CreateState();
+  StepOne(total, opposite_infinities, SqlValue::Real(std::numeric_limits<double>::infinity()));
+  StepOne(total, opposite_infinities, SqlValue::Real(-std::numeric_limits<double>::infinity()));
+  ExpectNull(total.Finalize(opposite_infinities));
+}
+
+TEST(CoreAggregateTest, MinMaxPreserveFirstTiesCollationAndRepresentativeEffects) {
+  const AggregateFunction& minimum = ResolveAggregate("min", 1);
+  const AggregateFunction& maximum = ResolveAggregate("max", 1);
+
+  AggregateState all_null = minimum.CreateState();
+  EXPECT_EQ(AggregateStepEffect::kReplaceRepresentative, StepOne(minimum, all_null, SqlValue{}));
+  EXPECT_TRUE(all_null.initialized());
+  EXPECT_EQ(AggregateStepEffect::kReplaceRepresentative, StepOne(minimum, all_null, SqlValue{}));
+  ExpectNull(minimum.Finalize(all_null));
+
+  AggregateState text_minimum = minimum.CreateState();
+  EXPECT_EQ(AggregateStepEffect::kReplaceRepresentative,
+            StepOne(minimum, text_minimum, TextValue("b"), NoCaseCollation()));
+  EXPECT_EQ(AggregateStepEffect::kKeepRepresentative,
+            StepOne(minimum, text_minimum, TextValue("B"), NoCaseCollation()));
+  EXPECT_EQ(AggregateStepEffect::kReplaceRepresentative,
+            StepOne(minimum, text_minimum, TextValue("a"), NoCaseCollation()));
+  EXPECT_EQ(AggregateStepEffect::kKeepRepresentative,
+            StepOne(minimum, text_minimum, SqlValue{}, NoCaseCollation()));
+  ExpectText(minimum.Finalize(text_minimum), "a");
+
+  AggregateState numeric_tie = maximum.CreateState();
+  EXPECT_EQ(AggregateStepEffect::kReplaceRepresentative,
+            StepOne(maximum, numeric_tie, SqlValue::Integer(1)));
+  EXPECT_EQ(AggregateStepEffect::kKeepRepresentative,
+            StepOne(maximum, numeric_tie, SqlValue::Real(1.0)));
+  ExpectInteger(maximum.Finalize(numeric_tie), 1);
+
+  const std::string payload(128, 'x');
+  SqlValue argument = TextValue(payload);
+  const std::optional<Utf8View> argument_text = argument.text_value();
+  ASSERT_TRUE(argument_text.has_value());
+  const char* const argument_data = argument_text->data();
+  AggregateState cloned = minimum.CreateState();
+  StepOne(minimum, cloned, std::move(argument));
+  const auto result = minimum.Finalize(cloned);
+  ExpectText(result, payload);
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->text_value().has_value());
+  EXPECT_NE(argument_data, result->text_value()->data());
+}
+
+TEST(CoreAggregateTest, GroupConcatMatchesSQLiteSeparatorsTypesLimitsAndLazyState) {
+  const AggregateFunction& one_argument = ResolveAggregate("group_concat", 1);
+  const AggregateFunction& two_arguments = ResolveAggregate("group_concat", 2);
+  const AggregateFunction& string_agg = ResolveAggregate("string_agg", 2);
+
+  AggregateState empty = one_argument.CreateState();
+  ExpectNull(one_argument.Finalize(empty));
+
+  AggregateState lazy = one_argument.CreateState();
+  StepOne(one_argument, lazy, SqlValue{});
+  EXPECT_FALSE(lazy.initialized());
+  lazy.Reset();
+
+  AggregateState default_separator = one_argument.CreateState();
+  StepOne(one_argument, default_separator, TextValue("a"));
+  StepOne(one_argument, default_separator, SqlValue{});
+  StepOne(one_argument, default_separator, TextValue("b"));
+  StepOne(one_argument, default_separator, TextValue(""));
+  ExpectText(one_argument.Finalize(default_separator), "a,b,");
+
+  AggregateState row_separators = two_arguments.CreateState();
+  StepTwo(two_arguments, row_separators, TextValue("a"), TextValue("/"));
+  StepTwo(two_arguments, row_separators, SqlValue{}, TextValue("ignored"));
+  StepTwo(two_arguments, row_separators, TextValue("b"), SqlValue{});
+  StepTwo(two_arguments, row_separators, TextValue(""), TextValue(":"));
+  ExpectText(two_arguments.Finalize(row_separators), "ab:");
+
+  AggregateState alias = string_agg.CreateState();
+  StepTwo(string_agg, alias, TextValue("a"), TextValue("/"));
+  StepTwo(string_agg, alias, TextValue("b"), TextValue("|"));
+  ExpectText(string_agg.Finalize(alias), "a|b");
+
+  AggregateState converted = two_arguments.CreateState();
+  StepTwo(two_arguments, converted, SqlValue::Integer(1), TextValue("|"));
+  StepTwo(two_arguments, converted, SqlValue::Real(1.25), TextValue("|"));
+  StepTwo(two_arguments, converted, BlobValue(TextFromBytes({0x41, 0x00, 0x42})), TextValue("|"));
+  ExpectText(two_arguments.Finalize(converted),
+             TextFromBytes({0x31, 0x7c, 0x31, 0x2e, 0x32, 0x35, 0x7c, 0x41, 0x00, 0x42}));
+
+  AggregateState exact_limit = one_argument.CreateState();
+  StepOne(one_argument, exact_limit, TextValue("a"), BinaryCollation(), ByteCount{3});
+  StepOne(one_argument, exact_limit, TextValue("b"), BinaryCollation(), ByteCount{3});
+  ExpectText(one_argument.Finalize(exact_limit), "a,b");
+
+  AggregateState unused_separator = two_arguments.CreateState();
+  StepTwo(two_arguments, unused_separator, TextValue("a"), TextValue("oversized"), ByteCount{1});
+  ExpectText(two_arguments.Finalize(unused_separator), "a");
+
+  AggregateState empty_at_zero_limit = one_argument.CreateState();
+  StepOne(one_argument, empty_at_zero_limit, TextValue(""), BinaryCollation(), ByteCount{0});
+  ExpectText(one_argument.Finalize(empty_at_zero_limit), "");
+
+  AggregateState exceeded = one_argument.CreateState();
+  EXPECT_EQ(AggregateStepEffect::kNoRepresentativePreference,
+            StepOne(one_argument, exceeded, TextValue("a"), BinaryCollation(), ByteCount{2}));
+  EXPECT_EQ(AggregateStepEffect::kNoRepresentativePreference,
+            StepOne(one_argument, exceeded, TextValue("b"), BinaryCollation(), ByteCount{2}));
+  const auto too_large = one_argument.Finalize(exceeded);
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, too_large.error().code());
+  EXPECT_EQ("string or blob too big", too_large.error().message());
 }
 
 TEST(CoreFunctionTest, TypeofReturnsSQLiteStorageClassNames) {

@@ -237,11 +237,6 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
   }
 }
 
-[[nodiscard]] bool IsKnownAggregateName(std::string_view name) noexcept {
-  return NamesEqual(name, "avg") || NamesEqual(name, "count") || NamesEqual(name, "group_concat") ||
-         NamesEqual(name, "sum") || NamesEqual(name, "total");
-}
-
 [[nodiscard]] std::string StripNumericUnderscores(std::string_view token) {
   std::string stripped;
   stripped.reserve(token.size());
@@ -3768,8 +3763,7 @@ class StatementBinder final {
                               PropagatedExplicitProperties(std::array{*operand}));
     }
 
-    if (has_wildcard || IsKnownAggregateName(name) ||
-        ((NamesEqual(name, "min") || NamesEqual(name, "max")) && call.arguments.size() == 1U)) {
+    if (has_wildcard || AggregateFunctionNameExists(name)) {
       return UnsupportedAggregate(span);
     }
     if (FunctionNameExists(name)) {
@@ -3783,6 +3777,12 @@ class StatementBinder final {
     return std::ranges::any_of(
         environment_.functions().functions(),
         [name](const ScalarFunction& function) { return NamesEqual(function.name(), name); });
+  }
+
+  [[nodiscard]] bool AggregateFunctionNameExists(std::string_view name) const noexcept {
+    return std::ranges::any_of(
+        environment_.functions().aggregate_functions(),
+        [name](const AggregateFunction& function) { return NamesEqual(function.name(), name); });
   }
 
   [[nodiscard]] const Expression& ParenthesesTransparentExpression(ExpressionId id) const noexcept {

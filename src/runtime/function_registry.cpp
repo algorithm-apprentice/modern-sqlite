@@ -7,11 +7,14 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
@@ -135,6 +138,274 @@ namespace {
       return std::string{AsStringView(RequiredBlob(value))};
   }
   std::terminate();
+}
+
+struct AggregateTextRepresentation {
+  const SqlValue* borrowed = nullptr;
+  std::optional<std::string> owned;
+
+  [[nodiscard]] std::string_view bytes() const noexcept {
+    if (owned.has_value()) {
+      return *owned;
+    }
+    if (borrowed == nullptr || borrowed->type() == SqlValueType::kNull) {
+      return {};
+    }
+    if (borrowed->type() == SqlValueType::kText) {
+      return RequiredText(*borrowed);
+    }
+    if (borrowed->type() == SqlValueType::kBlob) {
+      return AsStringView(RequiredBlob(*borrowed));
+    }
+    std::terminate();
+  }
+};
+
+[[nodiscard]] AggregateTextRepresentation AggregateText(const SqlValue& value) {
+  if (value.type() == SqlValueType::kText || value.type() == SqlValueType::kBlob ||
+      value.type() == SqlValueType::kNull) {
+    return AggregateTextRepresentation{
+        .borrowed = &value,
+        .owned = std::nullopt,
+    };
+  }
+  return AggregateTextRepresentation{
+      .borrowed = nullptr,
+      .owned = TextRepresentation(value),
+  };
+}
+
+struct CountAggregateState {
+  std::int64_t count = 0;
+};
+
+struct NumericAggregateState {
+  double real_sum = 0.0;
+  double error = 0.0;
+  std::int64_t integer_sum = 0;
+  std::int64_t count = 0;
+  bool approximate = false;
+  bool overflow = false;
+};
+
+struct MinMaxAggregateState {
+  std::optional<SqlValue> best;
+};
+
+struct GroupConcatAggregateState {
+  std::string text;
+  std::optional<Error> error;
+  bool has_value = false;
+};
+
+using AggregatePayload = std::variant<std::monostate, CountAggregateState, NumericAggregateState,
+                                      MinMaxAggregateState, GroupConcatAggregateState>;
+
+[[nodiscard]] bool AddInt64(std::int64_t left, std::int64_t right, std::int64_t& result) noexcept {
+  if ((right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) ||
+      (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)) {
+    return false;
+  }
+  result = left + right;
+  return true;
+}
+
+void KahanBabuskaNeumaierStep(NumericAggregateState& state, double value) noexcept {
+  const double sum = state.real_sum;
+  const double next = sum + value;
+  if (std::fabs(sum) > std::fabs(value)) {
+    state.error += (sum - next) + value;
+  } else {
+    state.error += (value - next) + sum;
+  }
+  state.real_sum = next;
+}
+
+void KahanBabuskaNeumaierStepInt64(NumericAggregateState& state, std::int64_t value) noexcept {
+  constexpr std::int64_t kExactDoubleLimit = INT64_C(4503599627370496);
+  if (value <= -kExactDoubleLimit || value >= kExactDoubleLimit) {
+    const std::int64_t small = value % INT64_C(16384);
+    const std::int64_t large = value - small;
+    KahanBabuskaNeumaierStep(state, static_cast<double>(large));
+    KahanBabuskaNeumaierStep(state, static_cast<double>(small));
+    return;
+  }
+  KahanBabuskaNeumaierStep(state, static_cast<double>(value));
+}
+
+void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t value) noexcept {
+  constexpr std::int64_t kExactDoubleLimit = INT64_C(4503599627370496);
+  if (value <= -kExactDoubleLimit || value >= kExactDoubleLimit) {
+    const std::int64_t small = value % INT64_C(16384);
+    state.real_sum = static_cast<double>(value - small);
+    state.error = static_cast<double>(small);
+    return;
+  }
+  state.real_sum = static_cast<double>(value);
+  state.error = 0.0;
+}
+
+[[nodiscard]] SqlValue NumericAggregateValue(const SqlValue& value) {
+  if (value.type() == SqlValueType::kInteger || value.type() == SqlValueType::kReal ||
+      value.type() == SqlValueType::kNull) {
+    return value.Clone();
+  }
+  if (value.type() == SqlValueType::kBlob) {
+    return CastValue(value.Clone(), CastTarget::kReal);
+  }
+  const std::string_view text = RequiredText(value);
+  if (text.find_first_of(".eE") != std::string_view::npos) {
+    return CastValue(value.Clone(), CastTarget::kReal);
+  }
+  SqlValue numeric = ApplyAffinity(value.Clone(), TypeAffinity::kNumeric);
+  if (numeric.type() == SqlValueType::kInteger || numeric.type() == SqlValueType::kReal) {
+    return numeric;
+  }
+  return CastValue(std::move(numeric), CastTarget::kReal);
+}
+
+[[nodiscard]] Result<AggregateStepEffect> StepCount(CountAggregateState& state,
+                                                    std::span<const SqlValue> arguments) {
+  if (!arguments.empty() && arguments.front().type() == SqlValueType::kNull) {
+    return AggregateStepEffect::kNoRepresentativePreference;
+  }
+  if (state.count == std::numeric_limits<std::int64_t>::max()) {
+    return std::unexpected(Error::Create(ErrorCode::kTooLarge, "count overflow"));
+  }
+  ++state.count;
+  return AggregateStepEffect::kNoRepresentativePreference;
+}
+
+[[nodiscard]] Result<AggregateStepEffect> StepNumeric(NumericAggregateState& state,
+                                                      std::span<const SqlValue> arguments) {
+  const SqlValue value = NumericAggregateValue(arguments.front());
+  if (value.type() == SqlValueType::kNull) {
+    return AggregateStepEffect::kNoRepresentativePreference;
+  }
+  if (state.count == std::numeric_limits<std::int64_t>::max()) {
+    return std::unexpected(Error::Create(ErrorCode::kTooLarge, "aggregate count overflow"));
+  }
+  ++state.count;
+
+  if (!state.approximate) {
+    if (value.type() == SqlValueType::kInteger) {
+      const std::int64_t integer = RequiredInteger(value);
+      std::int64_t sum = 0;
+      if (AddInt64(state.integer_sum, integer, sum)) {
+        state.integer_sum = sum;
+        return AggregateStepEffect::kNoRepresentativePreference;
+      }
+      state.overflow = true;
+      InitializeKahanBabuskaNeumaier(state, state.integer_sum);
+      state.approximate = true;
+      KahanBabuskaNeumaierStepInt64(state, integer);
+      return AggregateStepEffect::kNoRepresentativePreference;
+    }
+    InitializeKahanBabuskaNeumaier(state, state.integer_sum);
+    state.approximate = true;
+    KahanBabuskaNeumaierStep(state, RequiredReal(value));
+    return AggregateStepEffect::kNoRepresentativePreference;
+  }
+
+  if (value.type() == SqlValueType::kInteger) {
+    KahanBabuskaNeumaierStepInt64(state, RequiredInteger(value));
+  } else {
+    state.overflow = false;
+    KahanBabuskaNeumaierStep(state, RequiredReal(value));
+  }
+  return AggregateStepEffect::kNoRepresentativePreference;
+}
+
+[[nodiscard]] Result<AggregateStepEffect> StepMinMax(MinMaxAggregateState& state,
+                                                     const AggregateFunctionContext& context,
+                                                     const SqlValue& value, bool select_minimum) {
+  if (value.type() == SqlValueType::kNull) {
+    return state.best.has_value() ? AggregateStepEffect::kKeepRepresentative
+                                  : AggregateStepEffect::kReplaceRepresentative;
+  }
+  if (!state.best.has_value()) {
+    state.best.emplace(value.Clone());
+    return AggregateStepEffect::kReplaceRepresentative;
+  }
+  const std::weak_ordering ordering = CompareSqlValues(*state.best, value, context.collation());
+  const bool replace = select_minimum ? ordering == std::weak_ordering::greater
+                                      : ordering == std::weak_ordering::less;
+  if (!replace) {
+    return AggregateStepEffect::kKeepRepresentative;
+  }
+  SqlValue replacement = value.Clone();
+  state.best = std::move(replacement);
+  return AggregateStepEffect::kReplaceRepresentative;
+}
+
+void LatchAggregateError(GroupConcatAggregateState& state, Error error) noexcept {
+  if (!state.error.has_value()) {
+    state.error.emplace(std::move(error));
+  }
+}
+
+void LatchTooLarge(GroupConcatAggregateState& state) noexcept {
+  if (state.error.has_value()) {
+    return;
+  }
+  try {
+    state.error.emplace(Error::Create(ErrorCode::kTooLarge, "string or blob too big"));
+  } catch (const std::bad_alloc&) {
+    state.error.emplace(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    state.error.emplace(Error::OutOfMemory());
+  }
+}
+
+void AppendAggregateText(GroupConcatAggregateState& state, std::string_view text,
+                         ByteCount maximum_value_bytes) noexcept {
+  if (state.error.has_value()) {
+    return;
+  }
+  const std::size_t maximum = maximum_value_bytes.value();
+  if (text.size() > maximum || state.text.size() > maximum - text.size()) {
+    LatchTooLarge(state);
+    return;
+  }
+  try {
+    state.text.append(text);
+  } catch (const std::bad_alloc&) {
+    LatchAggregateError(state, Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    LatchAggregateError(state, Error::OutOfMemory());
+  }
+}
+
+[[nodiscard]] Result<AggregateStepEffect> StepGroupConcat(GroupConcatAggregateState& state,
+                                                          const AggregateFunctionContext& context,
+                                                          std::span<const SqlValue> arguments) {
+  if (arguments.front().type() == SqlValueType::kNull) {
+    return AggregateStepEffect::kNoRepresentativePreference;
+  }
+
+  const bool first = !state.has_value;
+  if (arguments.size() == 1U) {
+    if (!first) {
+      AppendAggregateText(state, ",", context.maximum_value_bytes());
+    }
+  } else {
+    const AggregateTextRepresentation separator = AggregateText(arguments[1]);
+    if (!first) {
+      AppendAggregateText(state, separator.bytes(), context.maximum_value_bytes());
+    }
+  }
+
+  const AggregateTextRepresentation value = AggregateText(arguments.front());
+  AppendAggregateText(state, value.bytes(), context.maximum_value_bytes());
+  state.has_value = true;
+  return AggregateStepEffect::kNoRepresentativePreference;
+}
+
+[[nodiscard]] double NumericAggregateResult(const NumericAggregateState& state) noexcept {
+  if (!state.approximate) {
+    return static_cast<double>(state.integer_sum);
+  }
+  return std::isfinite(state.error) ? state.real_sum + state.error : state.real_sum;
 }
 
 [[nodiscard]] Result<SqlValue> TypeofFunction(const ScalarFunctionContext&,
@@ -318,11 +589,222 @@ constexpr std::array kCoreFunctions{
 #endif
 };
 
-constexpr FunctionRegistry kCoreRegistry{
-    std::span<const ScalarFunction>{kCoreFunctions},
+}  // namespace
+
+struct AggregateState::Impl {
+  AggregatePayload payload;
 };
 
-}  // namespace
+AggregateState::AggregateState(const AggregateFunction& function) noexcept : function_(&function) {}
+
+AggregateState::AggregateState(AggregateState&& other) noexcept
+    : function_(std::exchange(other.function_, nullptr)),
+      impl_(std::move(other.impl_)),
+      finalized_(std::exchange(other.finalized_, false)) {}
+
+AggregateState& AggregateState::operator=(AggregateState&& other) noexcept {
+  if (this != &other) {
+    function_ = std::exchange(other.function_, nullptr);
+    impl_ = std::move(other.impl_);
+    finalized_ = std::exchange(other.finalized_, false);
+  }
+  return *this;
+}
+
+AggregateState::~AggregateState() = default;
+
+bool AggregateState::valid() const noexcept { return function_ != nullptr; }
+
+bool AggregateState::initialized() const noexcept { return valid() && impl_ != nullptr; }
+
+bool AggregateState::finalized() const noexcept { return valid() && finalized_; }
+
+void AggregateState::Reset() noexcept {
+  impl_.reset();
+  finalized_ = false;
+}
+
+AggregateState AggregateFunction::CreateState() const noexcept { return AggregateState{*this}; }
+
+Result<AggregateStepEffect> AggregateFunction::Step(AggregateState& state,
+                                                    const AggregateFunctionContext& context,
+                                                    std::span<const SqlValue> arguments) const {
+  try {
+    if (!state.valid()) {
+      return std::unexpected(Error::Create(ErrorCode::kMisuse, "aggregate state is invalid"));
+    }
+    if (state.function_ != this) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kMisuse, "aggregate state belongs to another function"));
+    }
+    if (state.finalized_) {
+      return std::unexpected(Error::Create(ErrorCode::kMisuse, "aggregate state is finalized"));
+    }
+    if (!arity_.Accepts(arguments.size())) {
+      return std::unexpected(Error::Create(
+          ErrorCode::kGeneric,
+          FunctionErrorMessage("wrong number of arguments to function ", name_, "()")));
+    }
+
+    if (kind_ == Kind::kGroupConcat && arguments.front().type() == SqlValueType::kNull) {
+      return AggregateStepEffect::kNoRepresentativePreference;
+    }
+
+    const auto ensure_state = [&state]<typename State>() -> Result<State*> {
+      if (state.impl_ == nullptr) {
+        auto impl = std::make_unique<AggregateState::Impl>();
+        impl->payload.template emplace<State>();
+        state.impl_ = std::move(impl);
+      }
+      State* const payload = std::get_if<State>(&state.impl_->payload);
+      if (payload == nullptr) {
+        return std::unexpected(
+            Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));
+      }
+      return payload;
+    };
+
+    switch (kind_) {
+      case Kind::kCount: {
+        auto payload = ensure_state.template operator()<CountAggregateState>();
+        if (!payload.has_value()) {
+          return std::unexpected(std::move(payload.error()));
+        }
+        return StepCount(**payload, arguments);
+      }
+      case Kind::kSum:
+      case Kind::kTotal:
+      case Kind::kAverage: {
+        auto payload = ensure_state.template operator()<NumericAggregateState>();
+        if (!payload.has_value()) {
+          return std::unexpected(std::move(payload.error()));
+        }
+        return StepNumeric(**payload, arguments);
+      }
+      case Kind::kMinimum:
+      case Kind::kMaximum: {
+        auto payload = ensure_state.template operator()<MinMaxAggregateState>();
+        if (!payload.has_value()) {
+          return std::unexpected(std::move(payload.error()));
+        }
+        return StepMinMax(**payload, context, arguments.front(), kind_ == Kind::kMinimum);
+      }
+      case Kind::kGroupConcat: {
+        auto payload = ensure_state.template operator()<GroupConcatAggregateState>();
+        if (!payload.has_value()) {
+          return std::unexpected(std::move(payload.error()));
+        }
+        return StepGroupConcat(**payload, context, arguments);
+      }
+    }
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+  return std::unexpected(Error::Create(ErrorCode::kInternal, "aggregate function kind is invalid"));
+}
+
+Result<SqlValue> AggregateFunction::Finalize(AggregateState& state) const {
+  try {
+    if (!state.valid()) {
+      return std::unexpected(Error::Create(ErrorCode::kMisuse, "aggregate state is invalid"));
+    }
+    if (state.function_ != this) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kMisuse, "aggregate state belongs to another function"));
+    }
+    if (state.finalized_) {
+      return std::unexpected(Error::Create(ErrorCode::kMisuse, "aggregate state is finalized"));
+    }
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+
+  try {
+    Result<SqlValue> result = SqlValue{};
+    if (state.impl_ == nullptr) {
+      if (kind_ == Kind::kCount) {
+        result = SqlValue::Integer(0);
+      } else if (kind_ == Kind::kTotal) {
+        result = SqlValue::Real(0.0);
+      }
+    } else {
+      switch (kind_) {
+        case Kind::kCount: {
+          const auto* payload = std::get_if<CountAggregateState>(&state.impl_->payload);
+          if (payload == nullptr) {
+            result = std::unexpected(
+                Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));
+          } else {
+            result = SqlValue::Integer(payload->count);
+          }
+          break;
+        }
+        case Kind::kSum:
+        case Kind::kTotal:
+        case Kind::kAverage: {
+          const auto* payload = std::get_if<NumericAggregateState>(&state.impl_->payload);
+          if (payload == nullptr) {
+            result = std::unexpected(
+                Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));
+            break;
+          }
+          if (payload->count == 0 && (kind_ == Kind::kSum || kind_ == Kind::kAverage)) {
+            result = SqlValue{};
+          } else if (kind_ == Kind::kSum && payload->approximate && payload->overflow) {
+            result = std::unexpected(Error::Create(ErrorCode::kGeneric, "integer overflow"));
+          } else if (kind_ == Kind::kSum && !payload->approximate) {
+            result = SqlValue::Integer(payload->integer_sum);
+          } else {
+            double numeric = NumericAggregateResult(*payload);
+            if (kind_ == Kind::kAverage) {
+              numeric /= static_cast<double>(payload->count);
+            }
+            result = SqlValue::Real(numeric);
+          }
+          break;
+        }
+        case Kind::kMinimum:
+        case Kind::kMaximum: {
+          auto* payload = std::get_if<MinMaxAggregateState>(&state.impl_->payload);
+          if (payload == nullptr) {
+            result = std::unexpected(
+                Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));
+          } else if (payload->best.has_value()) {
+            result = std::move(*payload->best);
+          }
+          break;
+        }
+        case Kind::kGroupConcat: {
+          auto* payload = std::get_if<GroupConcatAggregateState>(&state.impl_->payload);
+          if (payload == nullptr) {
+            result = std::unexpected(
+                Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));
+          } else if (payload->error.has_value()) {
+            result = std::unexpected(std::move(*payload->error));
+          } else if (payload->has_value) {
+            result = SqlValue::Text(std::move(payload->text));
+          }
+          break;
+        }
+      }
+    }
+    state.impl_.reset();
+    state.finalized_ = true;
+    return result;
+  } catch (const std::bad_alloc&) {
+    state.impl_.reset();
+    state.finalized_ = true;
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    state.impl_.reset();
+    state.finalized_ = true;
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
 
 Result<SqlValue> ScalarFunction::Invoke(const ScalarFunctionContext& context,
                                         std::span<const SqlValue> arguments) const {
@@ -368,6 +850,73 @@ Result<const ScalarFunction*> FunctionRegistry::Resolve(std::string_view name,
       Error::Create(ErrorCode::kGeneric, FunctionErrorMessage("no such function: ", name)));
 }
 
-const FunctionRegistry& CoreFunctionRegistry() noexcept { return kCoreRegistry; }
+Result<const AggregateFunction*> FunctionRegistry::ResolveAggregate(
+    std::string_view name, std::size_t argument_count) const {
+  const AggregateFunction* best = nullptr;
+  bool name_found = false;
+  for (const AggregateFunction& function : aggregate_functions_) {
+    if (!FunctionNamesEqual(function.name(), name)) {
+      continue;
+    }
+    name_found = true;
+    if (!function.arity().Accepts(argument_count)) {
+      continue;
+    }
+    if (best == nullptr || (!best->arity().is_exact() && function.arity().is_exact())) {
+      best = &function;
+    }
+  }
+
+  if (best != nullptr) {
+    return best;
+  }
+  if (name_found) {
+    return std::unexpected(
+        Error::Create(ErrorCode::kGeneric,
+                      FunctionErrorMessage("wrong number of arguments to function ", name, "()")));
+  }
+  return std::unexpected(
+      Error::Create(ErrorCode::kGeneric, FunctionErrorMessage("no such function: ", name)));
+}
+
+const FunctionRegistry& CoreFunctionRegistry() noexcept {
+  static constexpr std::array kCoreAggregateFunctions{
+      AggregateFunction{"count", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kCount},
+      AggregateFunction{"count", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kCount},
+      AggregateFunction{"sum", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kSum},
+      AggregateFunction{"total", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kTotal},
+      AggregateFunction{"avg", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kAverage},
+      AggregateFunction{"min", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kRequired, AggregateExtremumKind::kMinimum,
+                        AggregateFunction::Kind::kMinimum},
+      AggregateFunction{"max", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kRequired, AggregateExtremumKind::kMaximum,
+                        AggregateFunction::Kind::kMaximum},
+      AggregateFunction{"group_concat", FunctionArity::Exact(1),
+                        FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                        AggregateExtremumKind::kNone, AggregateFunction::Kind::kGroupConcat},
+      AggregateFunction{"group_concat", FunctionArity::Exact(2),
+                        FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                        AggregateExtremumKind::kNone, AggregateFunction::Kind::kGroupConcat},
+      AggregateFunction{"string_agg", FunctionArity::Exact(2), FunctionDeterminism::kDeterministic,
+                        FunctionCollationUse::kNone, AggregateExtremumKind::kNone,
+                        AggregateFunction::Kind::kGroupConcat},
+  };
+  static constexpr FunctionRegistry kCoreRegistry{
+      std::span<const ScalarFunction>{kCoreFunctions},
+      std::span<const AggregateFunction>{kCoreAggregateFunctions},
+  };
+  return kCoreRegistry;
+}
 
 }  // namespace modern_sqlite
