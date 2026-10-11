@@ -440,6 +440,27 @@ void RequireStatus(Status status) {
   return result;
 }
 
+[[nodiscard]] std::vector<IndexSeekMode> IndexSeekModes(const BytecodeProgram& program) {
+  std::vector<IndexSeekMode> result;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
+      result.push_back(seek->mode);
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] std::vector<IndexRangeEndMode> IndexRangeEndModes(const BytecodeProgram& program) {
+  std::vector<IndexRangeEndMode> result;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* check = std::get_if<CheckIndexRangeInstruction>(&instruction);
+        check != nullptr) {
+      result.push_back(check->mode);
+    }
+  }
+  return result;
+}
+
 [[nodiscard]] std::filesystem::path FixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "catalog_loader" / "sqlite-3.54.0-catalog.db";
@@ -723,7 +744,7 @@ struct CustomEnvironment {
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      FailAfterOne},
   }};
-  FunctionRegistry registry{functions};
+  FunctionRegistry registry{functions, CoreFunctionRegistry().aggregate_functions()};
   std::array<const Collation*, 3> collations{
       &BinaryCollation(),
       &NoCaseCollation(),
@@ -755,14 +776,122 @@ TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
             PlanLoweringError{.code = PlanLoweringErrorCode::kInternalInvariant}.base_error_code());
 }
 
-TEST(PlanLowering, RejectsAggregatePlansUntilAggregateLowering) {
+TEST(PlanLowering, LowersGlobalAggregatePlans) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan plan = OptimizeOrThrow("SELECT count() FROM Items", catalog);
 
   LowerPlanResult lowered = LowerPlan(plan);
-  ASSERT_FALSE(lowered.has_value());
-  EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
-  EXPECT_EQ("aggregate lowering is not implemented", lowered.error().detail);
+  ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
+  const std::vector<InstructionKind> kinds = InstructionKinds(*lowered);
+  EXPECT_EQ(1U, std::ranges::count(kinds, InstructionKind::kOpenAggregate));
+  EXPECT_EQ(1U, std::ranges::count(kinds, InstructionKind::kStepAggregate));
+  EXPECT_EQ(1U, std::ranges::count(kinds, InstructionKind::kFinalizeAggregate));
+  EXPECT_EQ(1U, std::ranges::count(kinds, InstructionKind::kCloseAggregate));
+}
+
+TEST(PlanLowering, RunsOrderOnlyAggregatesAndSkipsGlobalScalarOrderKeys) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const CustomEnvironment custom;
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT count() FROM Items ORDER BY sum(id), failing()", catalog, custom.Binder());
+  const std::vector<InstructionKind> kinds = InstructionKinds(program);
+
+  EXPECT_EQ(2U, std::ranges::count(kinds, InstructionKind::kOpenAggregate));
+  EXPECT_EQ(2U, std::ranges::count(kinds, InstructionKind::kStepAggregate));
+  EXPECT_EQ(2U, std::ranges::count(kinds, InstructionKind::kFinalizeAggregate));
+  EXPECT_EQ(0U, std::ranges::count(kinds, InstructionKind::kCallScalar));
+  EXPECT_EQ(0U, std::ranges::count(kinds, InstructionKind::kOpenSorter));
+  EXPECT_EQ(0U, std::ranges::count(kinds, InstructionKind::kOpenTopN));
+}
+
+TEST(PlanLowering, LowersIndexedMinMaxDirectionsAndReverseRanges) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+
+  const BytecodeProgram minimum = LowerOrThrow("SELECT min(Score) FROM Items", catalog);
+  const std::vector<InstructionKind> minimum_kinds = InstructionKinds(minimum);
+  EXPECT_EQ(0U, std::ranges::count(minimum_kinds, InstructionKind::kLast));
+  EXPECT_EQ(1U, std::ranges::count(minimum_kinds, InstructionKind::kPrevious));
+  EXPECT_EQ(2U, std::ranges::count(minimum_kinds, InstructionKind::kSeekIndex));
+  EXPECT_EQ(2U, std::ranges::count(minimum_kinds, InstructionKind::kStepAggregate));
+
+  const BytecodeProgram maximum = LowerOrThrow("SELECT max(Score) FROM Items", catalog);
+  const std::vector<InstructionKind> maximum_kinds = InstructionKinds(maximum);
+  EXPECT_EQ(1U, std::ranges::count(maximum_kinds, InstructionKind::kRewind));
+  EXPECT_EQ(1U, std::ranges::count(maximum_kinds, InstructionKind::kNext));
+  EXPECT_EQ(1U, std::ranges::count(maximum_kinds, InstructionKind::kSeekIndex));
+  EXPECT_EQ(2U, std::ranges::count(maximum_kinds, InstructionKind::kStepAggregate));
+
+  const BytecodeProgram ranged =
+      LowerOrThrow("SELECT min(Score) FROM Items WHERE Score>=?1 AND Score<?2", catalog);
+  const auto seek = std::ranges::find_if(ranged.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<SeekIndexInstruction>(instruction);
+  });
+  const auto end = std::ranges::find_if(ranged.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<CheckIndexRangeInstruction>(instruction);
+  });
+  ASSERT_NE(ranged.instructions().end(), seek);
+  ASSERT_NE(ranged.instructions().end(), end);
+  EXPECT_EQ(IndexSeekMode::kLessOrEqual, std::get<SeekIndexInstruction>(*seek).mode);
+  EXPECT_EQ(IndexRangeEndMode::kReverseExclusive, std::get<CheckIndexRangeInstruction>(*end).mode);
+}
+
+TEST(PlanLowering, SeeksPastNullableMinMaxNullRegions) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+
+  const BytecodeProgram ascending_min = LowerOrThrow("SELECT min(Name) FROM Items", catalog);
+  const std::vector<IndexSeekMode> ascending_min_seeks = IndexSeekModes(ascending_min);
+  ASSERT_FALSE(ascending_min_seeks.empty());
+  EXPECT_EQ(IndexSeekMode::kGreater, ascending_min_seeks.front());
+
+  const BytecodeProgram descending_min = LowerOrThrow("SELECT min(Score) FROM Items", catalog);
+  const std::vector<IndexSeekMode> descending_min_seeks = IndexSeekModes(descending_min);
+  ASSERT_FALSE(descending_min_seeks.empty());
+  EXPECT_EQ(IndexSeekMode::kLess, descending_min_seeks.front());
+
+  const BytecodeProgram ascending_max = LowerOrThrow("SELECT max(Name) FROM Items", catalog);
+  const std::vector<IndexRangeEndMode> ascending_max_ends = IndexRangeEndModes(ascending_max);
+  ASSERT_FALSE(ascending_max_ends.empty());
+  EXPECT_EQ(IndexRangeEndMode::kReverseExclusive, ascending_max_ends.front());
+
+  const BytecodeProgram descending_max = LowerOrThrow("SELECT max(Score) FROM Items", catalog);
+  const std::vector<IndexRangeEndMode> descending_max_ends = IndexRangeEndModes(descending_max);
+  ASSERT_FALSE(descending_max_ends.empty());
+  EXPECT_EQ(IndexRangeEndMode::kExclusive, descending_max_ends.front());
+}
+
+TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+  const CustomEnvironment custom;
+
+  const BytecodeProgram zero =
+      LowerOrThrow("SELECT sum(failing()) FROM items LIMIT 0", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+
+  const BytecodeProgram offset = LowerOrThrow(
+      "SELECT failing(),count() FROM items LIMIT -1 OFFSET 1", catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(offset, *pager, catalog->version().generation, custom.Vm()).empty());
+
+  const BytecodeProgram immediate =
+      LowerOrThrow("SELECT sum(failing()) FROM items", catalog, custom.Binder());
+  Vm immediate_vm = TakeValue(Vm::Create(immediate, custom.Vm()));
+  RequireStatus(immediate_vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation}));
+  const auto immediate_error = immediate_vm.Step();
+  ASSERT_FALSE(immediate_error.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, immediate_error.error().code());
+
+  const BytecodeProgram delayed =
+      LowerOrThrow("SELECT group_concat(name) FROM items", catalog, custom.Binder());
+  Vm delayed_vm = TakeValue(Vm::Create(delayed, custom.Vm(), VmLimits{.maximum_value_bytes = 5}));
+  RequireStatus(
+      delayed_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  const auto delayed_error = delayed_vm.Step();
+  ASSERT_FALSE(delayed_error.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, delayed_error.error().code());
 }
 
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {

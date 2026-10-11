@@ -522,6 +522,61 @@ int main() try {
     }
   }
 
+  std::size_t aggregate_step_allocations = 0;
+  {
+    auto session = ReadSession::Open(prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, "SELECT group_concat(?1)");
+    if (!statement.Bind(1, SqlValue::Text("aggregate")).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto stepped = statement.Step();
+    if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 1U) {
+      return 1;
+    }
+    aggregate_step_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (aggregate_step_allocations == 0U || aggregate_step_allocations > 128U) {
+    return 1;
+  }
+
+  for (std::size_t failure = 0; failure < aggregate_step_allocations; ++failure) {
+    auto session = ReadSession::Open(prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, "SELECT group_concat(?1)");
+    if (!statement.Bind(1, SqlValue::Text("aggregate")).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto stepped = statement.Step();
+      returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom) {
+      return 1;
+    }
+    const Status reset = statement.Reset();
+    if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+      return 1;
+    }
+    const auto recovered = statement.Step();
+    if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 1U) {
+      return 1;
+    }
+  }
+
   {
     auto session = ReadSession::Open(prepare_path);
     if (!session.has_value()) {

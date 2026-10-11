@@ -1968,6 +1968,55 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const LastInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    auto has_entry = std::visit(
+        [](auto& cursor) -> Result<bool> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return std::unexpected(VmError(ErrorCode::kInternal, "last used a closed cursor"));
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+            return std::unexpected(VmError(ErrorCode::kInternal, "last used a mutation cursor"));
+          } else {
+            return cursor.Last();
+          }
+        },
+        runtime.storage);
+    if (!has_entry.has_value()) {
+      return std::unexpected(std::move(has_entry.error()));
+    }
+    if (!*has_entry) {
+      program_counter_ = operation.empty_target.value();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const PreviousInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    auto has_entry = std::visit(
+        [](auto& cursor) -> Result<bool> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return std::unexpected(VmError(ErrorCode::kInternal, "previous used a closed cursor"));
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "previous used a mutation cursor"));
+          } else {
+            return cursor.Previous();
+          }
+        },
+        runtime.storage);
+    if (!has_entry.has_value()) {
+      return std::unexpected(std::move(has_entry.error()));
+    }
+    if (*has_entry) {
+      program_counter_ = operation.previous_target.value();
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ClearRowIdListInstruction&) {
     rowid_list_.clear();
     rowid_list_index_ = 0;
@@ -2137,6 +2186,12 @@ struct Vm::Impl {
         break;
       case IndexRangeEndMode::kExclusive:
         ended = *comparison != std::weak_ordering::less;
+        break;
+      case IndexRangeEndMode::kReverseInclusive:
+        ended = *comparison == std::weak_ordering::less;
+        break;
+      case IndexRangeEndMode::kReverseExclusive:
+        ended = *comparison != std::weak_ordering::greater;
         break;
       default:
         return std::unexpected(VmError(ErrorCode::kInternal, "unknown index range end mode"));

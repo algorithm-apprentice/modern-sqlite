@@ -329,6 +329,33 @@ int main() try {
     }
   }
 
+  const std::array<PhysicalPlan, 4> aggregate_plans{
+      PhysicalFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
+      PhysicalFixture(catalog, "SELECT max(id) FROM Items"),
+      PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
+      PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
+  };
+  constexpr std::array<std::size_t, 4> kExpectedAggregateAllocations{41U, 37U, 46U, 51U};
+  std::unique_ptr<BytecodeProgram> aggregate_published;
+  for (std::size_t plan_index = 0; plan_index < aggregate_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(aggregate_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations != kExpectedAggregateAllocations[plan_index]) {
+        return 1;
+      }
+      if (plan_index + 1U == aggregate_plans.size() && aggregate_published == nullptr) {
+        aggregate_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
   const std::array<PhysicalPlan, 2> distinct_plans{
       PhysicalFixture(catalog, "SELECT DISTINCT Name FROM Items LIMIT ?1"),
       PhysicalFixture(catalog, "SELECT DISTINCT Name FROM Items ORDER BY id LIMIT ?1 OFFSET ?2"),
@@ -604,7 +631,8 @@ int main() try {
       return 1;
     }
   }
-  if (published == nullptr || distinct_published == nullptr || streaming_published == nullptr) {
+  if (published == nullptr || aggregate_published == nullptr || distinct_published == nullptr ||
+      streaming_published == nullptr) {
     return 1;
   }
 
@@ -632,6 +660,8 @@ int main() try {
   checksum += streaming_published->cursors().size();
   checksum += streaming_published->relations().size();
   checksum += streaming_published->instructions().size();
+  checksum += aggregate_published->aggregates().size();
+  checksum += aggregate_published->instructions().size();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

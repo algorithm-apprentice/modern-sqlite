@@ -1041,7 +1041,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                                    const CatalogIndex& index,
                                    std::span<const ReadPredicateTerm> predicates,
                                    const std::vector<bool>& selected_terms,
-                                   const BoundAggregateProgram* aggregate = nullptr) {
+                                   const BoundSelectCore* aggregate_core = nullptr) {
   std::vector<bool> required_columns(table.columns.size(), false);
   bool required_rowid = false;
   for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
@@ -1050,12 +1050,24 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
                                &required_rowid);
     }
   }
-  if (aggregate != nullptr) {
-    for (const BoundExpressionId expression : aggregate->source_leaves) {
+  if (aggregate_core != nullptr && aggregate_core->aggregate.has_value()) {
+    const BoundAggregateProgram& aggregate = *aggregate_core->aggregate;
+    for (const BoundExpressionId expression : aggregate.source_leaves) {
       MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
     }
-    for (const BoundExpressionId expression : aggregate->representative_leaves) {
-      MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+    if (aggregate.group_by.empty()) {
+      for (const BoundResultColumn& result : aggregate_core->result_columns) {
+        MarkRequiredSourceValues(bound_select, result.expression, &required_columns,
+                                 &required_rowid);
+      }
+      if (aggregate.having.has_value()) {
+        MarkRequiredSourceValues(bound_select, *aggregate.having, &required_columns,
+                                 &required_rowid);
+      }
+    } else {
+      for (const BoundExpressionId expression : aggregate.representative_leaves) {
+        MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+      }
     }
   } else {
     for (const BoundResultColumn& result : bound_select.result_columns()) {
@@ -1166,7 +1178,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
     const BoundSelect& bound_select, TableId table_id, std::size_t source_column_begin,
     std::size_t source_column_count, IndexId index_id,
-    std::span<const ReadPredicateTerm> predicates, const BoundAggregateProgram* aggregate = nullptr,
+    std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* aggregate_core = nullptr,
     bool allow_noncovering_full_scan = false) {
   const CatalogSnapshot& catalog = *bound_select.catalog();
   const CatalogTable& table = catalog.table(table_id);
@@ -1293,8 +1305,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   if (!constrained && index.statistics.unordered) {
     return std::nullopt;
   }
-  candidate.node.covering =
-      IsCoveringIndex(bound_select, table, index, predicates, candidate.selected_terms, aggregate);
+  candidate.node.covering = IsCoveringIndex(bound_select, table, index, predicates,
+                                            candidate.selected_terms, aggregate_core);
   if (!constrained && !candidate.node.covering && !allow_noncovering_full_scan) {
     return std::nullopt;
   }
@@ -1967,7 +1979,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
     for (const IndexId index_id : bound_select.catalog()->table_indexes(*plan.source.table)) {
       std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
           bound_select, *plan.source.table, core.source_column_begin, core.source_column_count,
-          index_id, plan.predicates.terms, &aggregate, true);
+          index_id, plan.predicates.terms, &core, true);
       if (!candidate.has_value()) {
         continue;
       }

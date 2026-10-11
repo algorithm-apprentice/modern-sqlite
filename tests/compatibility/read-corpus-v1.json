@@ -1025,14 +1025,94 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
-      "feature": "aggregate-function",
-      "id": "unsupported-aggregate",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-functions",
       "operations": [
+        {"op": "step"},
+        {"op": "step"},
         {"op": "finalize"}
       ],
-      "sql_hex": "53454c45435420636f756e74282a292046524f4d206974656d73"
+      "sql_hex": "53454c45435420636f756e74282a292c636f756e742873636f7265292c73756d286964292c746f74616c2873636f7265292c6176672873636f7265292c6d696e286e616d65292c6d6178286e616d65292c67726f75705f636f6e6361742863617465676f72792c277c27292c737472696e675f616767286e616d652c272f27292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-empty",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292c73756d2873636f7265292c746f74616c2873636f7265292c6176672873636f7265292c6d696e286e616d65292c6d6178286e616d65292c67726f75705f636f6e636174286e616d65292046524f4d206974656d732057484552452030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-having-reset",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "3"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "-1"}},
+        {"index": 3, "op": "bind", "value": {"type": "integer", "value": "0"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "4"}},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206974656d7320484156494e4720636f756e74282a293e3f31204c494d4954203f32204f4646534554203f33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-limit-zero",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"hex": "6e6f742d616e2d696e7465676572", "type": "text"}},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046524f4d206974656d73204c494d49542030204f4646534554203f31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-order-elision",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046524f4d206974656d73204f5244455220425920616273282d3932323333373230333638353437373538303829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-rowid-min",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206d696e286964292046524f4d206974656d732057484552452073636f72653e3f31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "global-aggregate",
+      "id": "global-aggregate-null-fallback",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206d696e2863617465676f7279292046524f4d206974656d732057484552452073636f7265204953204e554c4c"
     },
     {
       "database": "core",
@@ -1233,6 +1313,7 @@
     "empty-input",
     "execution-errors",
     "expressions",
+    "global-aggregate",
     "limit-offset",
     "lifecycle",
     "metadata",

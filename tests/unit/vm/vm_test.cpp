@@ -2753,6 +2753,27 @@ TEST_F(VmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
   ExpectInteger(vm.row()[1], 13);
 }
 
+TEST_F(VmTest, ScansIndexRecordsInReverse) {
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 2, 0, {}, {"BINARY"}, {BinaryIndexDescriptor()},
+      {ResultColumn("binary_key"), ResultColumn("id")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          LastInstruction{.cursor = Cursor(0), .empty_target = Address(6)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          PreviousInstruction{.cursor = Cursor(0), .previous_target = Address(2)},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
+  ASSERT_EQ(vm.row().size(), 2U);
+  ExpectText(vm.row()[0], "bin-zero");
+  ExpectInteger(vm.row()[1], 0);
+}
+
 TEST_F(VmTest, SeeksAndBoundsDuplicateIndexPrefixes) {
   const auto build = [&](std::string_view key, IndexRangeEndMode end_mode) {
     std::vector<SqlValue> constants;
@@ -2812,6 +2833,61 @@ TEST_F(VmTest, SeeksAndBoundsDuplicateIndexPrefixes) {
   {
     const BytecodeProgram missing = build("zzz", IndexRangeEndMode::kInclusive);
     Vm vm = CreateCoreVm(missing);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+
+  const auto build_reverse = [&](IndexRangeEndMode end_mode) {
+    std::vector<SqlValue> constants;
+    constants.push_back(SqlValue::Text("bin-05"));
+    return BuildProgram(
+        *pager_, 3, 0, std::move(constants), {"BINARY"}, {BinaryIndexDescriptor()},
+        {ResultColumn("binary_key"), ResultColumn("id")},
+        {
+            LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+            OpenReadCursorInstruction{.cursor = Cursor(0)},
+            SeekIndexInstruction{
+                .cursor = Cursor(0),
+                .first_key = Reg(0),
+                .key_count = 1,
+                .missing_target = Address(8),
+                .mode = IndexSeekMode::kLessOrEqual,
+            },
+            CheckIndexRangeInstruction{
+                .cursor = Cursor(0),
+                .first_key = Reg(0),
+                .key_count = 1,
+                .end_target = Address(10),
+                .mode = end_mode,
+            },
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(2)},
+            ResultRowInstruction{.first = Reg(1), .count = 2},
+            PreviousInstruction{.cursor = Cursor(0), .previous_target = Address(3)},
+            CloseCursorInstruction{.cursor = Cursor(0)},
+            HaltInstruction{},
+            CloseCursorInstruction{.cursor = Cursor(0)},
+            HaltInstruction{},
+        });
+  };
+
+  {
+    const BytecodeProgram inclusive = build_reverse(IndexRangeEndMode::kReverseInclusive);
+    Vm vm = CreateCoreVm(inclusive);
+    constexpr std::array<std::int64_t, 12> kExpectedRowIds{
+        148, 135, 122, 109, 96, 83, 70, 57, 44, 31, 18, 5,
+    };
+    for (const std::int64_t expected_rowid : kExpectedRowIds) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ASSERT_EQ(2U, vm.row().size());
+      ExpectText(vm.row()[0], "bin-05");
+      ExpectInteger(vm.row()[1], expected_rowid);
+    }
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+
+  {
+    const BytecodeProgram exclusive = build_reverse(IndexRangeEndMode::kReverseExclusive);
+    Vm vm = CreateCoreVm(exclusive);
     EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
   }
 }

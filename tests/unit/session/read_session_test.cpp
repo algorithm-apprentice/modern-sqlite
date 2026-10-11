@@ -512,6 +512,171 @@ TEST(ReadSession, RejectsPlannedAggregatesAtTheLoweringBoundary) {
             prepared.error().message().find("aggregate lowering is not implemented"));
 }
 
+TEST(ReadSession, ExecutesAndResetsGlobalCount) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement = PrepareStatement(session, "SELECT count() FROM items");
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(1U, statement.row().size());
+  EXPECT_EQ(3, IntegerValue(statement.row().front()));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(3, IntegerValue(statement.row().front()));
+}
+
+TEST(ReadSession, ExecutesGlobalAggregateFunctionsEmptyHavingAndSkipping) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement functions = PrepareStatement(
+      session, "SELECT count(),sum(id),total(id),avg(id),min(name),max(name) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(functions.Step()));
+  ASSERT_EQ(6U, functions.row().size());
+  EXPECT_EQ(3, IntegerValue(functions.row()[0]));
+  EXPECT_EQ(6, IntegerValue(functions.row()[1]));
+  EXPECT_EQ(6.0, functions.row()[2].real_value());
+  EXPECT_EQ(2.0, functions.row()[3].real_value());
+  EXPECT_EQ("alpha", TextValue(functions.row()[4]));
+  EXPECT_EQ("gamma", TextValue(functions.row()[5]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(functions.Step()));
+
+  ReadStatement empty = PrepareStatement(
+      session, "SELECT count(),sum(id),total(id),avg(id),min(name) FROM items WHERE 0");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(empty.Step()));
+  ASSERT_EQ(5U, empty.row().size());
+  EXPECT_EQ(0, IntegerValue(empty.row()[0]));
+  EXPECT_EQ(SqlValueType::kNull, empty.row()[1].type());
+  EXPECT_EQ(0.0, empty.row()[2].real_value());
+  EXPECT_EQ(SqlValueType::kNull, empty.row()[3].type());
+  EXPECT_EQ(SqlValueType::kNull, empty.row()[4].type());
+
+  ReadStatement source_free = PrepareStatement(session, "SELECT count(),sum(2)");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(source_free.Step()));
+  EXPECT_EQ(1, IntegerValue(source_free.row()[0]));
+  EXPECT_EQ(2, IntegerValue(source_free.row()[1]));
+
+  ReadStatement having = PrepareStatement(session, "SELECT count() FROM items HAVING count()>2");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(having.Step()));
+  EXPECT_EQ(3, IntegerValue(having.row().front()));
+  ReadStatement rejected = PrepareStatement(session, "SELECT count() FROM items HAVING count()>3");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(rejected.Step()));
+
+  ReadStatement zero = PrepareStatement(session, "SELECT count() FROM items LIMIT 0 OFFSET ?1");
+  RequireStatus(zero.Bind(1, SqlValue::Text("not evaluated")));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(zero.Step()));
+
+  ReadStatement ignored_order =
+      PrepareStatement(session, "SELECT count() FROM items ORDER BY abs(-9223372036854775808)");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(ignored_order.Step()));
+  EXPECT_EQ(3, IntegerValue(ignored_order.row().front()));
+
+  ReadStatement order_only_leaf =
+      PrepareStatement(session, "SELECT count() FROM items ORDER BY name");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(order_only_leaf.Step()));
+  EXPECT_EQ(3, IntegerValue(order_only_leaf.row().front()));
+
+  ReadStatement rowid = PrepareStatement(session, "SELECT count() FROM items WHERE rowid=?1");
+  RequireStatus(rowid.Bind(1, SqlValue::Integer(2)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rowid.Step()));
+  EXPECT_EQ(1, IntegerValue(rowid.row().front()));
+
+  ReadStatement covering = PrepareStatement(session, "SELECT sum(id) FROM items WHERE name=?1");
+  RequireStatus(covering.Bind(1, SqlValue::Text("beta")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(covering.Step()));
+  EXPECT_EQ(2, IntegerValue(covering.row().front()));
+
+  ReadStatement noncovering =
+      PrepareStatement(session, "SELECT sum(score) FROM items WHERE name=?1");
+  RequireStatus(noncovering.Bind(1, SqlValue::Text("beta")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(noncovering.Step()));
+  EXPECT_EQ(3.0, noncovering.row().front().real_value().value_or(-1.0));
+
+  ReadStatement rowid_min = PrepareStatement(session, "SELECT min(id) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rowid_min.Step()));
+  EXPECT_EQ(1, IntegerValue(rowid_min.row().front()));
+  ReadStatement rowid_max = PrepareStatement(session, "SELECT max(_rowid_) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rowid_max.Step()));
+  EXPECT_EQ(3, IntegerValue(rowid_max.row().front()));
+
+  ReadStatement name_min = PrepareStatement(session, "SELECT min(name) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(name_min.Step()));
+  EXPECT_EQ("alpha", TextValue(name_min.row().front()));
+  ReadStatement name_max = PrepareStatement(session, "SELECT max(name) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(name_max.Step()));
+  EXPECT_EQ("gamma", TextValue(name_max.row().front()));
+
+  ReadStatement category_min = PrepareStatement(session, "SELECT min(category) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(category_min.Step()));
+  EXPECT_EQ("one", TextValue(category_min.row().front()));
+  ReadStatement category_max = PrepareStatement(session, "SELECT max(category) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(category_max.Step()));
+  EXPECT_EQ("two", TextValue(category_max.row().front()));
+  ReadStatement null_category =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE category IS NULL");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(null_category.Step()));
+  EXPECT_EQ(SqlValueType::kNull, null_category.row().front().type());
+}
+
+TEST(ReadSession, ExecutesIndexedMinMaxRangesResidualsAndNullFallback) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+
+  ReadStatement rowid_min = PrepareStatement(session, "SELECT min(id) FROM items WHERE score>?1");
+  RequireStatus(rowid_min.Bind(1, SqlValue::Integer(2)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rowid_min.Step()));
+  EXPECT_EQ(2, IntegerValue(rowid_min.row().front()));
+
+  ReadStatement rowid_max = PrepareStatement(session, "SELECT max(id) FROM items WHERE score<?1");
+  RequireStatus(rowid_max.Bind(1, SqlValue::Integer(2)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rowid_max.Step()));
+  EXPECT_EQ(1, IntegerValue(rowid_max.row().front()));
+
+  ReadStatement noncovering =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE score>?1");
+  RequireStatus(noncovering.Bind(1, SqlValue::Integer(2)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(noncovering.Step()));
+  EXPECT_EQ("two", TextValue(noncovering.row().front()));
+
+  ReadStatement residual_null =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE score IS NULL");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(residual_null.Step()));
+  EXPECT_EQ(SqlValueType::kNull, residual_null.row().front().type());
+
+  ReadStatement ranged = PrepareStatement(
+      session, "SELECT min(category) FROM items WHERE category>=?1 AND category<?2");
+  RequireStatus(ranged.Bind(1, SqlValue::Text("one")));
+  RequireStatus(ranged.Bind(2, SqlValue::Text("zzz")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(ranged.Step()));
+  EXPECT_EQ("one", TextValue(ranged.row().front()));
+
+  ReadStatement reverse_range =
+      PrepareStatement(session, "SELECT max(category) FROM items WHERE category>?1");
+  RequireStatus(reverse_range.Bind(1, SqlValue::Text("one")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(reverse_range.Step()));
+  EXPECT_EQ("two", TextValue(reverse_range.row().front()));
+
+  ReadStatement fixed =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE category=?1");
+  RequireStatus(fixed.Bind(1, SqlValue::Text("two")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(fixed.Step()));
+  EXPECT_EQ("two", TextValue(fixed.row().front()));
+
+  ReadStatement rejected_null =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE category=?1");
+  RequireStatus(rejected_null.Bind(1, SqlValue{}));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(rejected_null.Step()));
+  EXPECT_EQ(SqlValueType::kNull, rejected_null.row().front().type());
+
+  ReadStatement runtime_is =
+      PrepareStatement(session, "SELECT min(category) FROM items WHERE category IS ?1");
+  RequireStatus(runtime_is.Bind(1, SqlValue::Text("two")));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(runtime_is.Step()));
+  EXPECT_EQ("two", TextValue(runtime_is.row().front()));
+  RequireStatus(runtime_is.Reset());
+  RequireStatus(runtime_is.Bind(1, SqlValue{}));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(runtime_is.Step()));
+  EXPECT_EQ(SqlValueType::kNull, runtime_is.row().front().type());
+}
+
 TEST(ReadSession, ExecutesConstantsAfterThePublicSessionHandleIsDestroyed) {
   ReadStatement statement = [] {
     ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
