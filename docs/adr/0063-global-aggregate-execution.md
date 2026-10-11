@@ -145,6 +145,10 @@ normalization, and nullable fallback into focused helpers. Access emitters
 compose those operations; they do not duplicate one monolithic global
 aggregate algorithm.
 
+ADR-0067 isolates the access-shape dispatch, cursor control flow, and indexed
+MIN/MAX helpers in an internal lowering module without changing this
+execution contract.
+
 ### 4. Allocate one descriptor, state slot, argument block, and result register per invocation
 
 For every invocation in `BoundAggregateProgram::invocations`, lowering:
