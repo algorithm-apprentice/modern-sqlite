@@ -229,6 +229,12 @@ struct ResolvedCall {
   const Collation* collation = nullptr;
 };
 
+struct RuntimeAggregate {
+  const AggregateFunction* function = nullptr;
+  const Collation* collation = nullptr;
+  std::optional<AggregateState> state{};
+};
+
 struct RuntimeCursor {
   using Storage =
       std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor, TableBtreeMutationCursor>;
@@ -269,6 +275,7 @@ struct Vm::Impl {
         sorters_(program.sorters().size()),
         top_ns_(program.top_ns().size()),
         relations_(program.relations().size()),
+        aggregates_(program.aggregates().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   [[nodiscard]] Status Initialize() {
@@ -334,6 +341,20 @@ struct Vm::Impl {
     if (auto resolved = resolve_ordering_collations(program_->record_comparisons());
         !resolved.has_value()) {
       return resolved;
+    }
+    for (std::size_t index = 0; index < program_->aggregates().size(); ++index) {
+      const AggregateDescriptor& descriptor = program_->aggregates()[index];
+      auto function = functions_->ResolveAggregate(program_->symbol(descriptor.function),
+                                                   descriptor.argument_count);
+      if (!function.has_value()) {
+        return std::unexpected(std::move(function.error()));
+      }
+      auto collation = ResolveCollation(descriptor.collation);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      aggregates_[index].function = *function;
+      aggregates_[index].collation = *collation;
     }
 
     const std::span<const Instruction> instructions = program_->instructions();
@@ -1013,6 +1034,82 @@ struct Vm::Impl {
       return std::unexpected(std::move(value.error()));
     }
     return SetRegister(operation.output, std::move(*value));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenAggregateInstruction& operation) {
+    RuntimeAggregate& runtime = aggregates_[operation.aggregate.value()];
+    if (runtime.function == nullptr || runtime.collation == nullptr || runtime.state.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime cannot be opened"));
+    }
+    runtime.state.emplace(runtime.function->CreateState());
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const StepAggregateInstruction& operation) {
+    RuntimeAggregate& runtime = aggregates_[operation.aggregate.value()];
+    if (runtime.function == nullptr || runtime.collation == nullptr || !runtime.state.has_value() ||
+        runtime.state->finalized()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
+    }
+    const AggregateDescriptor& descriptor = program_->aggregate(operation.aggregate);
+    const std::span<const SqlValue> arguments =
+        descriptor.argument_count == 0U
+            ? std::span<const SqlValue>{}
+            : std::span<const SqlValue>{registers_}.subspan(operation.first_argument.value(),
+                                                            descriptor.argument_count);
+    const AggregateFunctionContext context(*runtime.collation,
+                                           ByteCount{limits_.maximum_value_bytes});
+    auto effect = runtime.function->Step(*runtime.state, context, arguments);
+    if (!effect.has_value()) {
+      return std::unexpected(std::move(effect.error()));
+    }
+    if (!operation.effect_output.has_value()) {
+      return std::nullopt;
+    }
+    BytecodeAggregateStepEffect output = BytecodeAggregateStepEffect::kNoRepresentativePreference;
+    switch (*effect) {
+      case AggregateStepEffect::kNoRepresentativePreference:
+        break;
+      case AggregateStepEffect::kKeepRepresentative:
+        output = BytecodeAggregateStepEffect::kKeepRepresentative;
+        break;
+      case AggregateStepEffect::kReplaceRepresentative:
+        output = BytecodeAggregateStepEffect::kReplaceRepresentative;
+        break;
+    }
+    return SetRegister(*operation.effect_output,
+                       SqlValue::Integer(static_cast<std::int64_t>(output)));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const FinalizeAggregateInstruction& operation) {
+    RuntimeAggregate& runtime = aggregates_[operation.aggregate.value()];
+    if (runtime.function == nullptr || !runtime.state.has_value() || runtime.state->finalized()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
+    }
+    auto result = runtime.function->Finalize(*runtime.state);
+    if (!result.has_value()) {
+      return std::unexpected(std::move(result.error()));
+    }
+    return SetRegister(operation.output, std::move(*result));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResetAggregateInstruction& operation) {
+    RuntimeAggregate& runtime = aggregates_[operation.aggregate.value()];
+    if (!runtime.state.has_value() || !runtime.state->finalized()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
+    }
+    runtime.state->Reset();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseAggregateInstruction& operation) {
+    RuntimeAggregate& runtime = aggregates_[operation.aggregate.value()];
+    if (!runtime.state.has_value() || !runtime.state->finalized()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
+    }
+    runtime.state.reset();
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const JumpInstruction& operation) {
@@ -2725,6 +2822,9 @@ struct Vm::Impl {
     for (std::optional<EphemeralRelation>& relation : relations_) {
       relation.reset();
     }
+    for (RuntimeAggregate& aggregate : aggregates_) {
+      aggregate.state.reset();
+    }
     statement_temporary_storage_.reset();
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
@@ -2746,6 +2846,7 @@ struct Vm::Impl {
   std::vector<std::optional<RecordSorter>> sorters_;
   std::vector<std::optional<BoundedTopN>> top_ns_;
   std::vector<std::optional<EphemeralRelation>> relations_;
+  std::vector<RuntimeAggregate> aggregates_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;

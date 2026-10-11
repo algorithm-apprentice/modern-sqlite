@@ -24,6 +24,7 @@ namespace {
 [[nodiscard]] constexpr SorterId Sorter(std::uint32_t value) { return SorterId(value); }
 [[nodiscard]] constexpr TopNId TopN(std::uint32_t value) { return TopNId(value); }
 [[nodiscard]] constexpr RelationId Relation(std::uint32_t value) { return RelationId(value); }
+[[nodiscard]] constexpr AggregateId Aggregate(std::uint32_t value) { return AggregateId(value); }
 [[nodiscard]] constexpr RecordComparisonId RecordComparison(std::uint32_t value) {
   return RecordComparisonId(value);
 }
@@ -168,6 +169,7 @@ namespace {
 TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   static_assert(!std::is_convertible_v<std::uint32_t, RegisterId>);
   static_assert(!std::is_convertible_v<RegisterId, CursorId>);
+  static_assert(!std::is_convertible_v<AggregateId, RelationId>);
   static_assert(sizeof(Instruction) <= 32);
 
   const std::array<Instruction, 23> instructions = {
@@ -881,6 +883,205 @@ TEST(BytecodeProgramTest, VerifiesTypedSorterLifecycleAndDataflow) {
   for (std::size_t index = 0; index < names.size(); ++index) {
     EXPECT_EQ(names[index], InstructionKindName(InstructionKindOf(input.instructions[index + 2U])));
   }
+}
+
+TEST(BytecodeProgramTest, VerifiesTypedAggregateLifecycleAndDataflow) {
+  ProgramInput input;
+  input.register_count = 3;
+  input.symbols.emplace_back("sum");
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(2));
+  input.aggregates.push_back(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(1),
+      .argument_count = 1,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      StepAggregateInstruction{
+          .aggregate = Aggregate(0),
+          .first_argument = Reg(0),
+          .effect_output = Reg(0),
+      },
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(2)},
+      ResetAggregateInstruction{.aggregate = Aggregate(0)},
+      StepAggregateInstruction{
+          .aggregate = Aggregate(0),
+          .first_argument = Reg(0),
+          .effect_output = std::nullopt,
+      },
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(2)},
+      CloseAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  const std::array<std::string_view, 5> names{
+      "open_aggregate",  "step_aggregate",  "finalize_aggregate",
+      "reset_aggregate", "close_aggregate",
+  };
+  EXPECT_EQ(names[0], InstructionKindName(InstructionKindOf(input.instructions[1])));
+  EXPECT_EQ(names[1], InstructionKindName(InstructionKindOf(input.instructions[2])));
+  EXPECT_EQ(names[2], InstructionKindName(InstructionKindOf(input.instructions[3])));
+  EXPECT_EQ(names[3], InstructionKindName(InstructionKindOf(input.instructions[4])));
+  EXPECT_EQ(names[1], InstructionKindName(InstructionKindOf(input.instructions[5])));
+  EXPECT_EQ(names[2], InstructionKindName(InstructionKindOf(input.instructions[6])));
+  EXPECT_EQ(names[4], InstructionKindName(InstructionKindOf(input.instructions[7])));
+
+  auto created = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  ASSERT_TRUE(builder.AddSymbol("count").has_value());
+  ASSERT_TRUE(builder.AddSymbol("BINARY").has_value());
+  const auto aggregate = builder.AddAggregate(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(1),
+      .argument_count = 0,
+  });
+  ASSERT_TRUE(aggregate.has_value());
+  ASSERT_TRUE(builder.Append(OpenAggregateInstruction{.aggregate = *aggregate}).has_value());
+  ASSERT_TRUE(builder
+                  .Append(FinalizeAggregateInstruction{
+                      .aggregate = *aggregate,
+                      .output = Reg(0),
+                  })
+                  .has_value());
+  ASSERT_TRUE(builder.Append(CloseAggregateInstruction{.aggregate = *aggregate}).has_value());
+  ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());
+  auto built = std::move(builder).Build({});
+  ASSERT_TRUE(built.has_value());
+  EXPECT_EQ(0U, built->aggregate(*aggregate).argument_count);
+}
+
+TEST(BytecodeProgramTest, RejectsInvalidAggregateDescriptorsRangesAndLifecycle) {
+  ProgramInput invalid_descriptor;
+  invalid_descriptor.symbols.emplace_back("count");
+  invalid_descriptor.aggregates.push_back(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(1),
+      .argument_count = 0,
+  });
+  invalid_descriptor.instructions = {HaltInstruction{}};
+  EXPECT_EQ(ProgramErrorCode::kInvalidAggregateDescriptor, VerifyError(invalid_descriptor));
+
+  ProgramInput invalid_id;
+  invalid_id.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kInvalidAggregate, VerifyError(invalid_id));
+
+  ProgramInput uninitialized;
+  uninitialized.register_count = 1;
+  uninitialized.symbols = {"sum", "BINARY"};
+  uninitialized.aggregates.push_back(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(1),
+      .argument_count = 1,
+  });
+  uninitialized.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      StepAggregateInstruction{
+          .aggregate = Aggregate(0),
+          .first_argument = Reg(0),
+      },
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, VerifyError(uninitialized));
+
+  ProgramInput zero_argument;
+  zero_argument.register_count = 1;
+  zero_argument.symbols = {"count", "BINARY"};
+  zero_argument.aggregates.push_back(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(1),
+      .argument_count = 0,
+  });
+  zero_argument.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      StepAggregateInstruction{
+          .aggregate = Aggregate(0),
+          .first_argument = Reg(1),
+      },
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+      CloseAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(zero_argument).has_value());
+
+  const auto lifecycle_input = [] {
+    ProgramInput input;
+    input.register_count = 1;
+    input.symbols = {"count", "BINARY"};
+    input.aggregates.push_back(AggregateDescriptor{
+        .function = Symbol(0),
+        .collation = Symbol(1),
+        .argument_count = 0,
+    });
+    return input;
+  };
+
+  ProgramInput reset_accumulating = lifecycle_input();
+  reset_accumulating.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      ResetAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(reset_accumulating));
+
+  ProgramInput close_accumulating = lifecycle_input();
+  close_accumulating.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      CloseAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(close_accumulating));
+
+  ProgramInput halt_accumulating = lifecycle_input();
+  halt_accumulating.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(halt_accumulating));
+
+  ProgramInput step_finalized = lifecycle_input();
+  step_finalized.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+      StepAggregateInstruction{
+          .aggregate = Aggregate(0),
+          .first_argument = Reg(1),
+      },
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(step_finalized));
+
+  ProgramInput branch_conflict = lifecycle_input();
+  branch_conflict.constants.push_back(SqlValue::Integer(1));
+  branch_conflict.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      JumpIfInstruction{
+          .condition = JumpCondition::kIfTrue,
+          .input = Reg(0),
+          .target = Address(5),
+      },
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+      JumpInstruction{.target = Address(6)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, VerifyError(branch_conflict));
+
+  ProgramInput finalized_halt = lifecycle_input();
+  finalized_halt.instructions = {
+      OpenAggregateInstruction{.aggregate = Aggregate(0)},
+      FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(finalized_halt).has_value());
 }
 
 TEST(BytecodeProgramTest, VerifiesTypedTopNLifecyclePendingCandidateAndBranches) {
@@ -2101,6 +2302,7 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   ordering_limits.maximum_top_ns = 0;
   ordering_limits.maximum_relations = 0;
   ordering_limits.maximum_record_comparisons = 0;
+  ordering_limits.maximum_aggregates = 0;
   auto ordering_created = ProgramBuilder::Create({}, Resources(0), ordering_limits);
   ASSERT_TRUE(ordering_created.has_value());
   ProgramBuilder ordering_builder = std::move(*ordering_created);
@@ -2108,12 +2310,18 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   const auto top_n_limit = ordering_builder.AddTopN(OrderingDescriptor());
   const auto relation_limit = ordering_builder.AddRelation(OrderingDescriptor());
   const auto comparison_limit = ordering_builder.AddRecordComparison(RecordComparisonDescriptor());
+  const auto aggregate_limit = ordering_builder.AddAggregate(AggregateDescriptor{
+      .function = Symbol(0),
+      .collation = Symbol(0),
+      .argument_count = 0,
+  });
   ASSERT_FALSE(sorter_limit.has_value());
   ASSERT_FALSE(top_n_limit.has_value());
   EXPECT_EQ(sorter_limit.error().code, ProgramErrorCode::kSorterLimitExceeded);
   EXPECT_EQ(top_n_limit.error().code, ProgramErrorCode::kTopNLimitExceeded);
   EXPECT_EQ(relation_limit.error().code, ProgramErrorCode::kRelationLimitExceeded);
   EXPECT_EQ(comparison_limit.error().code, ProgramErrorCode::kRecordComparisonLimitExceeded);
+  EXPECT_EQ(aggregate_limit.error().code, ProgramErrorCode::kAggregateLimitExceeded);
 }
 
 TEST(BytecodeProgramTest, EnforcesOwnedAndAnalysisMemoryForDirectInput) {
@@ -2149,9 +2357,13 @@ TEST(BytecodeProgramTest, EnforcesOwnedAndAnalysisMemoryForDirectInput) {
 TEST(BytecodeProgramTest, MapsResourceAndValidationFailuresToBaseErrors) {
   EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded}.base_error_code(),
             ErrorCode::kTooLarge);
+  EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kAggregateLimitExceeded}.base_error_code(),
+            ErrorCode::kTooLarge);
   EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kUninitializedRegister}.base_error_code(),
             ErrorCode::kMisuse);
   EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kInvalidExecutionMetadata}.base_error_code(),
+            ErrorCode::kMisuse);
+  EXPECT_EQ(ProgramError{.code = ProgramErrorCode::kInvalidAggregate}.base_error_code(),
             ErrorCode::kMisuse);
 }
 

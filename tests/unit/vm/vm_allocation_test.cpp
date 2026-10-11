@@ -159,10 +159,55 @@ int main() try {
   }
   const std::size_t after_rowid_list = allocation_count.load(std::memory_order_relaxed);
 
+  ProgramInput aggregate_input;
+  aggregate_input.schema_version = input.schema_version;
+  aggregate_input.register_count = 1;
+  aggregate_input.symbols = {"sum", "BINARY"};
+  aggregate_input.constants.push_back(SqlValue::Integer(1));
+  aggregate_input.aggregates.push_back(AggregateDescriptor{
+      .function = SymbolId(0),
+      .collation = SymbolId(1),
+      .argument_count = 1,
+  });
+  aggregate_input.instructions = {
+      OpenAggregateInstruction{.aggregate = AggregateId(0)},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      StepAggregateInstruction{
+          .aggregate = AggregateId(0),
+          .first_argument = RegisterId(0),
+      },
+      FinalizeAggregateInstruction{.aggregate = AggregateId(0), .output = RegisterId(0)},
+      CloseAggregateInstruction{.aggregate = AggregateId(0)},
+      HaltInstruction{},
+  };
+  auto aggregate_program = BytecodeProgram::Create(aggregate_input);
+  if (!aggregate_program.has_value()) {
+    return 1;
+  }
+  auto aggregate_vm = Vm::Create(*aggregate_program, VmEnvironment::Core());
+  if (!aggregate_vm.has_value()) {
+    return 1;
+  }
+  const std::size_t before_aggregate = allocation_count.load(std::memory_order_relaxed);
+  constexpr std::size_t kAggregateRuns = 8U;
+  for (std::size_t iteration = 0; iteration < kAggregateRuns; ++iteration) {
+    if (!aggregate_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+      return 1;
+    }
+    const auto done = aggregate_vm->Step();
+    if (!done.has_value() || *done != VmStep::kDone || !aggregate_vm->Reset().has_value()) {
+      return 1;
+    }
+  }
+  const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
+
   if (!(*opened)->EndRead().has_value()) {
     return 1;
   }
-  return after_rowid_list == before_rowid_list + 1U ? 0 : 1;
+  return after_rowid_list == before_rowid_list + 1U &&
+                 after_aggregate == before_aggregate + kAggregateRuns
+             ? 0
+             : 1;
 } catch (...) {
   return 1;
 }

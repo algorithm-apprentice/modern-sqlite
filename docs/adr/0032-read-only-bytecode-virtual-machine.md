@@ -554,6 +554,11 @@ registrations, inactive snapshots, or callback errors into assertions.
   cancellation policy.
 - Streaming a single record field directly from overflow pages.
 
+Later accepted ADRs implement index seeks, sorting, ephemeral relations, and
+typed aggregate state. ADR-0062 resolves aggregate descriptors and
+collations during VM creation and owns aggregate lifecycle slots, while
+aggregate SQL lowering remains deferred to ADR-0057 package 11.
+
 ## Validation plan
 
 Red-first tests cover:
