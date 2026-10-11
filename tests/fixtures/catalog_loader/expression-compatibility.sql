@@ -11,6 +11,7 @@ CREATE INDEX application_index ON compatibility(a);
 CREATE INDEX parenthesized_index
 ON compatibility((a COLLATE RTRIM))
 WHERE rowid > 0;
+CREATE INDEX scalar_min_index ON compatibility(min(a, b));
 PRAGMA writable_schema=ON;
 UPDATE sqlite_schema
 SET sql = 'CREATE TABLE compatibility(

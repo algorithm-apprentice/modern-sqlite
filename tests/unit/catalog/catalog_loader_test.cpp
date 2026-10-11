@@ -376,6 +376,15 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
   EXPECT_EQ(ColumnId{0}, std::get<ColumnId>(parenthesized_index.terms.front().target));
   EXPECT_EQ("RTRIM", parenthesized_index.terms.front().collation_name);
   EXPECT_TRUE(parenthesized_index.partial_predicate.has_value());
+
+  const CatalogIndex& scalar_min_index = catalog->index(
+      TakeOptional(catalog->FindIndex("scalar_min_index"), "missing scalar_min_index"));
+  const SchemaExpression scalar_min_expression =
+      std::get<SchemaExpression>(scalar_min_index.terms.front().target);
+  const auto* scalar_min =
+      std::get_if<FunctionCallExpression>(&catalog->expression(scalar_min_expression).payload);
+  ASSERT_NE(nullptr, scalar_min);
+  EXPECT_EQ(2U, scalar_min->arguments.size());
 }
 
 TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {

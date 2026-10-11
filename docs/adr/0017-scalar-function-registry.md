@@ -68,9 +68,11 @@ ordinary callbacks would silently change SQL semantics.
   Invalid textual or BLOB numeric input produces REAL `0.0`, as in SQLite.
 - Lazy special forms (`coalesce`, `ifnull`, `iif`, `if`, `likely`,
   `likelihood`, and `unlikely`) are deferred to binder and bytecode lowering.
-  Aggregate/window functions, connection-local replacement, stateful
-  application callbacks, security flags, subtypes, and session-dependent
-  non-deterministic functions remain in their later DAG nodes.
+  ADR-0059 subsequently extends `FunctionRegistry` with immutable core
+  aggregate descriptors and move-only state. Window callbacks,
+  connection-local replacement, stateful application callbacks, security
+  flags, subtypes, and session-dependent non-deterministic functions remain in
+  their later DAG nodes.
 
 ## Consequences
 

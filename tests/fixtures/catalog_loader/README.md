@@ -23,9 +23,9 @@ The fixture covers:
 mode to retain a legacy DEFAULT variable and an application-defined function
 in an expression index. It also covers parenthesized automatic and explicit
 index columns, nested COLLATE, rowid references in CHECK and partial-index
-expressions, and a known function with deferred DEFAULT arity checking. The
-loader normalizes the variable to NULL and preserves the unknown function for
-later connection-owned resolution.
+expressions, scalar MIN arity beside aggregate MIN, and a known function with
+deferred DEFAULT arity checking. The loader normalizes the variable to NULL
+and preserves the unknown function for later connection-owned resolution.
 
 `sqlite-3.54.0-invalid-expression.db` was generated from
 `invalid-expression.sql`. Its index definition names a nonexistent column and
@@ -48,7 +48,7 @@ SHA-256:
 
 ```text
 f996c70be3c2b1377e16987a4a34ac19735fc83bc73a9951f9f362d72cbf3608  sqlite-3.54.0-catalog.db
-222f7b58a4ca11fca2b4b02dae0e7ea5e322131549187dc027307867bad0ad41  sqlite-3.54.0-expression-compatibility.db
+0990f35ff547a342e7c3880219dcdbee97a607098305aac4207ab3d67ca7fb21  sqlite-3.54.0-expression-compatibility.db
 ff92bcccf4c4b7684bb8825ee70f6dffc279073bf72fa74c69bb1bf87614898d  sqlite-3.54.0-invalid-expression.db
 0a5e49f2d1bca32f1e5b3f75c940f727853d8fec39f1f75425df56b80dcefe5e  sqlite-3.54.0-invalid-function.db
 71aba1f4bd4a189c60a544082f3831cc5aeaa19672e5c5f5b3171d9a5185aa4d  sqlite-3.54.0-duplicate-automatic-root.db

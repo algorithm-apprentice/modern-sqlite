@@ -108,6 +108,27 @@ set_tests_properties(
 )
 
 add_executable(
+  modern_sqlite_aggregate_function_oom_test
+  unit/runtime/aggregate_function_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_aggregate_function_oom_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_aggregate_function_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_aggregate_function_oom_test)
+add_test(
+  NAME runtime.aggregate_function_oom
+  COMMAND modern_sqlite_aggregate_function_oom_test
+)
+set_tests_properties(
+  runtime.aggregate_function_oom
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
   modern_sqlite_record_sorter_oom_test
   unit/temporary_storage/record_sorter_oom_test.cpp
 )

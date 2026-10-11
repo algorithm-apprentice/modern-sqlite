@@ -934,6 +934,32 @@ class CatalogLoader final {
     return {};
   }
 
+  [[nodiscard]] Status RejectAggregateFunction(const SyntaxTree& tree,
+                                               const FunctionCallExpression& function) const {
+    if (function.name.parts.size() != 1U) {
+      return {};
+    }
+    auto name = DequoteSpan(tree, function.name.parts.front());
+    if (!name.has_value()) {
+      return std::unexpected(std::move(name.error()));
+    }
+    const std::size_t argument_count = function.arguments.size();
+    const bool scalar =
+        std::ranges::any_of(CoreFunctionRegistry().functions(),
+                            [&name, argument_count](const ScalarFunction& candidate) {
+                              return CatalogNamesEqual(candidate.name(), *name) &&
+                                     candidate.arity().Accepts(argument_count);
+                            });
+    const bool aggregate = std::ranges::any_of(CoreFunctionRegistry().aggregate_functions(),
+                                               [&name](const AggregateFunction& candidate) {
+                                                 return CatalogNamesEqual(candidate.name(), *name);
+                                               });
+    if (aggregate && !scalar) {
+      return std::unexpected(Corruption("schema expression calls an aggregate function"));
+    }
+    return {};
+  }
+
   [[nodiscard]] Status ValidateExpression(const SyntaxTree& tree, ExpressionId root,
                                           SchemaExpressionContext context,
                                           const std::unordered_map<std::string, ColumnId>& columns,
@@ -1001,6 +1027,10 @@ class CatalogLoader final {
         if (!function->order_by.empty() || function->filter.has_value()) {
           return std::unexpected(
               Corruption("schema expression contains aggregate function modifiers"));
+        }
+        auto nonaggregate = RejectAggregateFunction(tree, *function);
+        if (!nonaggregate.has_value()) {
+          return nonaggregate;
         }
         if (context != SchemaExpressionContext::kDefault) {
           auto valid = ValidateKnownFunction(tree, *function, context);

@@ -62,3 +62,4 @@ their corresponding implementation begins.
 56. [ADR-0056: SQLite-Aligned DISTINCT, VALUES, and Compound SELECT](0056-sqlite-aligned-distinct-values-and-compound-select.md)
 57. [ADR-0057: SQLite-Aligned Aggregate Roadmap](0057-sqlite-aligned-aggregates-and-grouping.md)
 58. [ADR-0058: Statement-Owned Temporary Storage Budgets](0058-statement-temporary-storage-budgets.md)
+59. [ADR-0059: SQLite-Aligned Aggregate Function State](0059-sqlite-aligned-aggregate-function-state.md)
