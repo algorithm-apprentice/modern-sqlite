@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -116,15 +117,17 @@ template <typename Runner>
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
   const RecordSorterDescriptor descriptor = Descriptor();
   allocation_index.store(0, std::memory_order_relaxed);
   if (failure.has_value()) {
     failing_allocation = *failure;
     inject_failure = true;
   }
-  Result<BoundedTopN> created = factory.CreateTopN(descriptor, 4);
+  Result<BoundedTopN> created = storage->CreateTopN(descriptor, 4);
   inject_failure = false;
   const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
   const bool succeeded = created.has_value();
@@ -132,6 +135,7 @@ template <typename Runner>
   if (created.has_value()) {
     created->Close();
   }
+  storage.reset();
   return FileOutcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -154,9 +158,11 @@ template <typename Runner>
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
-  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 1));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  BoundedTopN top_n = TakeValue(storage->CreateTopN(Descriptor(), 1));
   if (TakeValue(top_n.CheckCandidate(Key(1))) != TopNCheckResult::kAccepted) {
     return {};
   }
@@ -175,6 +181,7 @@ template <typename Runner>
   if (top_n.valid()) {
     top_n.Close();
   }
+  storage.reset();
   return FileOutcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -197,9 +204,11 @@ template <typename Runner>
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
-  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 4));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  BoundedTopN top_n = TakeValue(storage->CreateTopN(Descriptor(), 4));
   for (std::int64_t key = 4; key >= 1; --key) {
     if (TakeValue(top_n.CheckCandidate(Key(key))) != TopNCheckResult::kAccepted ||
         !top_n.Insert(Row(key)).has_value()) {
@@ -220,6 +229,7 @@ template <typename Runner>
   if (top_n.valid()) {
     top_n.Close();
   }
+  storage.reset();
   return FileOutcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -242,9 +252,11 @@ template <typename Runner>
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
-  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 1));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  BoundedTopN top_n = TakeValue(storage->CreateTopN(Descriptor(), 1));
   if (TakeValue(top_n.CheckCandidate(Key(2))) != TopNCheckResult::kAccepted ||
       !top_n.Insert(Row(2)).has_value()) {
     return {};
@@ -264,6 +276,7 @@ template <typename Runner>
   if (top_n.valid()) {
     top_n.Close();
   }
+  storage.reset();
   return FileOutcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -286,9 +299,11 @@ template <typename Runner>
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{1},
+                                                    .sorter_memory_threshold = ByteCount{256},
                                                 }));
-  BoundedTopN top_n = TakeValue(factory.CreateTopN(Descriptor(), 4));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  BoundedTopN top_n = TakeValue(storage->CreateTopN(Descriptor(), 4));
   for (std::int64_t key = 4; key >= 1; --key) {
     if (TakeValue(top_n.CheckCandidate(Key(key))) != TopNCheckResult::kAccepted ||
         !top_n.Insert(Row(key)).has_value()) {
@@ -312,6 +327,7 @@ template <typename Runner>
   if (top_n.valid()) {
     top_n.Close();
   }
+  storage.reset();
   return FileOutcome{
       .allocations = allocations,
       .succeeded = succeeded,
@@ -350,10 +366,11 @@ int main() try {
                                                     .mode = TemporaryStoreMode::kMemory,
                                                     .sorter_memory_threshold = ByteCount{1U << 20U},
                                                 }));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
   const RecordSorterDescriptor descriptor = Descriptor();
 
   allocation_index.store(0, std::memory_order_relaxed);
-  const Result<BoundedTopN> baseline = factory.CreateTopN(descriptor, 32);
+  const Result<BoundedTopN> baseline = storage.CreateTopN(descriptor, 32);
   if (!baseline.has_value()) {
     return 1;
   }
@@ -365,14 +382,14 @@ int main() try {
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = failure;
     inject_failure = true;
-    const Result<BoundedTopN> rejected = factory.CreateTopN(descriptor, 32);
+    const Result<BoundedTopN> rejected = storage.CreateTopN(descriptor, 32);
     inject_failure = false;
     if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory) {
       return 1;
     }
   }
 
-  BoundedTopN insertion = TakeValue(factory.CreateTopN(descriptor, 1));
+  BoundedTopN insertion = TakeValue(storage.CreateTopN(descriptor, 1));
   ByteBuffer key = Key(1);
   fail_all_allocations = true;
   const auto checked = insertion.CheckCandidate(std::move(key));
@@ -392,7 +409,7 @@ int main() try {
     return 1;
   }
 
-  BoundedTopN iteration = TakeValue(factory.CreateTopN(descriptor, 32));
+  BoundedTopN iteration = TakeValue(storage.CreateTopN(descriptor, 32));
   for (std::int64_t key_value = 32; key_value >= 1; --key_value) {
     if (TakeValue(iteration.CheckCandidate(Key(key_value))) != TopNCheckResult::kAccepted ||
         !iteration.Insert(Row(key_value)).has_value()) {

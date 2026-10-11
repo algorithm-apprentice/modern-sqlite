@@ -18,6 +18,7 @@
 namespace modern_sqlite {
 
 class Pager;
+class BoundedTopN;
 class EphemeralRelation;
 class RecordSorter;
 class TemporaryStorageFactory;
@@ -127,6 +128,9 @@ class StatementTemporaryStorage final {
   [[nodiscard]] Result<TemporaryFileLease> AcquireFileLease();
   // The returned sorter borrows the underlying state, which must outlive it.
   [[nodiscard]] Result<RecordSorter> CreateRecordSorter(const RecordSorterDescriptor& descriptor);
+  // The returned top-N relation borrows the underlying state, which must outlive it.
+  [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
+                                               std::size_t bound);
   // The returned relation borrows the underlying state, which must outlive it.
   [[nodiscard]] Result<EphemeralRelation> CreateEphemeralRelation(
       const EphemeralRelationDescriptor& descriptor);
@@ -300,14 +304,14 @@ class BoundedTopN final {
   void Close() noexcept;
 
  private:
-  friend class TemporaryStorageFactory;
+  friend class StatementTemporaryStorage;
 
   struct Impl;
 
   explicit BoundedTopN(std::unique_ptr<Impl> impl) noexcept;
   [[nodiscard]] static Result<BoundedTopN> Create(const RecordSorterDescriptor& descriptor,
-                                                  std::size_t bound, ByteCount memory_threshold,
-                                                  const TemporaryStorageFactory& factory);
+                                                  std::size_t bound,
+                                                  StatementTemporaryStorage& storage);
 
   std::unique_ptr<Impl> impl_;
 };
@@ -330,12 +334,8 @@ class TemporaryStorageFactory final {
   [[nodiscard]] bool file_spill_enabled() const noexcept;
   [[nodiscard]] ByteCount sorter_memory_threshold() const noexcept;
   [[nodiscard]] Result<StatementTemporaryStorage> CreateStatementStorage() const;
-  [[nodiscard]] Result<BoundedTopN> CreateTopN(const RecordSorterDescriptor& descriptor,
-                                               std::size_t bound) const;
-  [[nodiscard]] Result<std::unique_ptr<File>> CreateTemporaryFile() const;
 
  private:
-  friend class BoundedTopN;
   friend struct temporary_storage_detail::StatementState;
 
   TemporaryStorageFactory(Vfs& vfs, const Pager& pager, TemporaryStorageOptions options) noexcept

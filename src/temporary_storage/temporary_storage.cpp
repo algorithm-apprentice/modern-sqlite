@@ -671,6 +671,26 @@ struct StatementState {
     return next_sorter_ordinal++;
   }
 
+  [[nodiscard]] Result<std::unique_ptr<File>> OpenSorterFile() const {
+    try {
+      auto opened = factory->vfs_->Open(std::nullopt, FileOpenOptions{
+                                                          .kind = FileKind::kTemporaryJournal,
+                                                          .access = FileAccessMode::kReadWrite,
+                                                          .create = true,
+                                                          .exclusive_create = true,
+                                                          .delete_on_close = true,
+                                                      });
+      if (!opened.has_value()) {
+        return std::unexpected(std::move(opened.error()));
+      }
+      return std::move(opened->file);
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+  }
+
   [[nodiscard]] Result<SorterArena*> EnsureSorterArena() {
     if (failed) {
       return std::unexpected(Misuse("statement temporary storage is failed"));
@@ -683,7 +703,7 @@ struct StatementState {
       failed = true;
       return std::unexpected(std::move(file_lease.error()));
     }
-    auto file = factory->CreateTemporaryFile();
+    auto file = OpenSorterFile();
     if (!file.has_value()) {
       failed = true;
       return std::unexpected(std::move(file.error()));
@@ -2143,37 +2163,83 @@ struct BoundedTopN::Impl {
   };
 
   struct FileBackend {
-    FileBackend(std::unique_ptr<Pager> owned_pager, std::vector<IndexColumnOrder> key_columns,
-                IndexBtreeWriter index_writer) noexcept
-        : pager(std::move(owned_pager)),
-          columns(std::move(key_columns)),
-          index(std::move(index_writer)),
-          root(index.root_page()) {}
+    FileBackend(temporary_storage_detail::RelationRootLease owned_root,
+                std::vector<IndexColumnOrder> key_columns) noexcept
+        : root(std::move(owned_root)), columns(std::move(key_columns)) {}
 
-    std::unique_ptr<Pager> pager;
+    temporary_storage_detail::RelationRootLease root;
     std::vector<IndexColumnOrder> columns;
-    IndexBtreeWriter index;
-    PageNumber root;
     std::optional<IndexBtreeCursor> cursor;
     ByteBuffer current_wrapper;
     std::optional<RecordView> current_record;
+    std::size_t current_bytes = 0;
     std::uint64_t next_sequence = 0;
   };
 
   Impl(RecordSorterDescriptor owned_descriptor, std::size_t retained_limit,
-       ByteCount threshold) noexcept
+       temporary_storage_detail::StatementState& owning_state) noexcept
       : descriptor(std::move(owned_descriptor)),
         maximum_records(retained_limit),
-        memory_threshold(threshold) {}
-
-  Impl(RecordSorterDescriptor owned_descriptor, std::size_t retained_limit, ByteCount threshold,
-       FileBackend file_backend) noexcept
-      : descriptor(std::move(owned_descriptor)),
-        maximum_records(retained_limit),
-        memory_threshold(threshold),
-        file(std::move(file_backend)) {}
+        statement_state(&owning_state) {}
 
   ~Impl() { Clear(); }
+
+  [[nodiscard]] TemporaryMemoryAccount& Account() noexcept {
+    if (!memory_account.has_value()) {
+      std::terminate();
+    }
+    return *memory_account;
+  }
+
+  [[nodiscard]] const TemporaryMemoryAccount& Account() const noexcept {
+    if (!memory_account.has_value()) {
+      std::terminate();
+    }
+    return *memory_account;
+  }
+
+  [[nodiscard]] Result<void> CheckStorage() const {
+    if (temporary_storage_detail::StatementStorageAccess::Failed(*statement_state)) {
+      return std::unexpected(Misuse("statement temporary storage is failed"));
+    }
+    return {};
+  }
+
+  void MarkFileFailure() noexcept {
+    if (file.has_value()) {
+      file->root.MarkStatementFailed();
+    }
+  }
+
+  void ClearPending() noexcept {
+    pending_view.reset();
+    pending_record.reset();
+    const std::size_t released_bytes = pending_bytes;
+    pending_bytes = 0;
+    if (released_bytes != 0U) {
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
+  }
+
+  void ClearFileCurrent() noexcept {
+    if (!file.has_value()) {
+      return;
+    }
+    FileBackend& backend = File();
+    backend.current_record.reset();
+    backend.current_wrapper = ByteBuffer{};
+    const std::size_t released_bytes = backend.current_bytes;
+    backend.current_bytes = 0;
+    if (released_bytes != 0U) {
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
+  }
 
   void Clear() noexcept {
     while (head != nullptr) {
@@ -2182,31 +2248,43 @@ struct BoundedTopN::Impl {
       head = std::move(next);
     }
     current = nullptr;
-    pending_record.reset();
     pending_view.reset();
+    pending_record.reset();
     pending_bytes = 0;
     count = 0;
-    memory_bytes = 0;
     if (file.has_value()) {
       file->cursor.reset();
       file->current_record.reset();
       file->current_wrapper = ByteBuffer{};
+      file->current_bytes = 0;
+    }
+    if (memory_account.has_value()) {
+      const ByteCount retained = memory_account->retained_bytes();
+      if (retained.value() != 0U) {
+        const auto released = memory_account->Release(retained);
+        if (!released.has_value()) {
+          std::terminate();
+        }
+      }
     }
   }
 
   [[nodiscard]] bool file_backed() const noexcept { return file.has_value(); }
+
   [[nodiscard]] FileBackend& File() noexcept {
     if (!file.has_value()) {
       std::terminate();
     }
     return *file;
   }
+
   [[nodiscard]] const FileBackend& File() const noexcept {
     if (!file.has_value()) {
       std::terminate();
     }
     return *file;
   }
+
   [[nodiscard]] RecordView PendingView() const noexcept {
     if (!pending_view.has_value()) {
       std::terminate();
@@ -2241,7 +2319,6 @@ struct BoundedTopN::Impl {
     }
     std::unique_ptr<Entry> removed = std::move(*link);
     const std::size_t removed_bytes = removed->memory_bytes;
-    memory_bytes -= removed_bytes;
     --count;
     return removed_bytes;
   }
@@ -2263,9 +2340,19 @@ struct BoundedTopN::Impl {
     if (!copied.has_value()) {
       return std::unexpected(std::move(copied.error()));
     }
-    file->current_record.reset();
-    file->current_wrapper = std::move(*copied);
-    auto wrapper = RecordView::Parse(file->current_wrapper.view(), descriptor.record_options);
+    const std::size_t copied_bytes = copied->capacity().value();
+    auto reserved = Account().Reserve(ByteCount{copied_bytes});
+    if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge &&
+        !temporary_storage_detail::StatementStorageAccess::Failed(*statement_state)) {
+      reserved = Account().ReserveWorkingSet(ByteCount{copied_bytes});
+    }
+    if (!reserved.has_value()) {
+      return std::unexpected(std::move(reserved.error()));
+    }
+    FileBackend& backend = File();
+    backend.current_wrapper = std::move(*copied);
+    backend.current_bytes = copied_bytes;
+    auto wrapper = RecordView::Parse(backend.current_wrapper.view(), descriptor.record_options);
     if (!wrapper.has_value()) {
       return std::unexpected(std::move(wrapper.error()));
     }
@@ -2302,7 +2389,7 @@ struct BoundedTopN::Impl {
     if (*key_comparison != std::weak_ordering::equivalent) {
       return std::unexpected(Corruption("top-N queue key does not match its packed record"));
     }
-    file->current_record = *record;
+    backend.current_record = *record;
     return {};
   }
 
@@ -2310,7 +2397,9 @@ struct BoundedTopN::Impl {
     if (!file.has_value()) {
       return std::unexpected(Internal("file-backed top-N relation is unavailable"));
     }
-    auto cursor = IndexBtreeCursor::Open(*file->pager, file->root, file->columns);
+    FileBackend& backend = File();
+    auto cursor =
+        IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(), backend.columns);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -2326,14 +2415,14 @@ struct BoundedTopN::Impl {
 
   RecordSorterDescriptor descriptor;
   std::size_t maximum_records;
-  ByteCount memory_threshold;
+  temporary_storage_detail::StatementState* statement_state;
+  std::optional<TemporaryMemoryAccount> memory_account;
   std::unique_ptr<Entry> head;
   Entry* current = nullptr;
   std::optional<ByteBuffer> pending_record;
   std::optional<RecordView> pending_view;
   std::size_t pending_bytes = 0;
   std::size_t count = 0;
-  std::size_t memory_bytes = 0;
   BoundedTopNState state = BoundedTopNState::kWriting;
   std::optional<FileBackend> file;
 };
@@ -2363,61 +2452,30 @@ BoundedTopN& BoundedTopN::operator=(BoundedTopN&&) noexcept = default;
 BoundedTopN::~BoundedTopN() = default;
 
 Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor, std::size_t bound,
-                                        ByteCount memory_threshold,
-                                        const TemporaryStorageFactory& factory) {
+                                        StatementTemporaryStorage& storage) {
   auto validated = ValidateRecordSorterDescriptor(descriptor);
   if (!validated.has_value()) {
     return std::unexpected(std::move(validated.error()));
   }
   try {
-    if (factory.file_spill_enabled()) {
+    temporary_storage_detail::StatementState& state =
+        temporary_storage_detail::StatementStorageAccess::State(storage);
+    auto impl = std::make_unique<Impl>(descriptor, bound, state);
+    auto account = storage.RegisterMemoryOwner();
+    if (!account.has_value()) {
+      return std::unexpected(std::move(account.error()));
+    }
+    impl->memory_account.emplace(std::move(*account));
+    if (storage.file_spill_enabled()) {
       std::vector<IndexColumnOrder> columns = descriptor.key_columns;
       columns.emplace_back(BinaryCollation(), IndexSortDirection::kAscending,
                            IndexNullPlacement::kFirst);
-
-      const std::size_t page_size = factory.pager_->page_size().value();
-      const std::size_t threshold_pages = 1U + (memory_threshold.value() - 1U) / page_size;
-      const std::size_t main_cache_pages =
-          std::max<std::size_t>(1U, factory.pager_->cache_capacity_pages());
-      const std::size_t cache_pages =
-          std::max<std::size_t>(1U, std::min(main_cache_pages, threshold_pages));
-      auto pager =
-          Pager::OpenEphemeral(*factory.vfs_, PagerOptions{
-                                                  .empty_database_page_size = ByteCount{page_size},
-                                                  .cache_capacity_pages = cache_pages,
-                                              });
-      if (!pager.has_value()) {
-        return std::unexpected(std::move(pager.error()));
+      auto root = temporary_storage_detail::RelationArenaAccess::Acquire(state, columns);
+      if (!root.has_value()) {
+        return std::unexpected(std::move(root.error()));
       }
-      auto begun_read = (*pager)->BeginRead();
-      if (!begun_read.has_value()) {
-        return std::unexpected(std::move(begun_read.error()));
-      }
-      auto begun_write = (*pager)->BeginWrite();
-      if (!begun_write.has_value()) {
-        return std::unexpected(std::move(begun_write.error()));
-      }
-      auto session = BtreeWriteSession::Open(**pager);
-      if (!session.has_value()) {
-        return std::unexpected(std::move(session.error()));
-      }
-      auto initialized = session->InitializeDatabase();
-      if (!initialized.has_value()) {
-        return std::unexpected(std::move(initialized.error()));
-      }
-      auto index = session->CreateIndexBtree(columns);
-      if (!index.has_value()) {
-        return std::unexpected(std::move(index.error()));
-      }
-      if (index->root_page() != PageNumber{2}) {
-        return std::unexpected(Internal("top-N ephemeral index root is not page two"));
-      }
-      auto impl = std::make_unique<Impl>(
-          descriptor, bound, memory_threshold,
-          Impl::FileBackend{std::move(*pager), std::move(columns), std::move(*index)});
-      return BoundedTopN{std::move(impl)};
+      impl->file.emplace(std::move(*root), std::move(columns));
     }
-    auto impl = std::make_unique<Impl>(descriptor, bound, memory_threshold);
     return BoundedTopN{std::move(impl)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
@@ -2441,7 +2499,7 @@ std::size_t BoundedTopN::record_count() const noexcept {
 }
 
 ByteCount BoundedTopN::memory_usage() const noexcept {
-  return ByteCount{impl_ == nullptr ? 0U : impl_->memory_bytes};
+  return impl_ == nullptr ? ByteCount{0} : impl_->Account().retained_bytes();
 }
 
 bool BoundedTopN::has_pending_candidate() const noexcept {
@@ -2451,6 +2509,12 @@ bool BoundedTopN::has_pending_candidate() const noexcept {
 Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kWriting) {
     return std::unexpected(Misuse("top-N admission requires the writing state"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
   }
   auto view = RecordView::Parse(key.view(), impl_->descriptor.record_options);
   if (!view.has_value()) {
@@ -2468,22 +2532,26 @@ Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
   if (impl_->file_backed()) {
     Impl::FileBackend& file = impl_->File();
     try {
+      std::optional<ByteBuffer> largest_record;
       if (full) {
         auto copied = impl_->CopyLargestFileRecord();
         if (!copied.has_value()) {
+          impl_->MarkFileFailure();
           Error error = std::move(copied.error());
           Close();
           return std::unexpected(std::move(error));
         }
-        const ByteBuffer largest_record = std::move(*copied);
-        auto largest = RecordView::Parse(largest_record.view(), impl_->descriptor.record_options);
+        largest_record.emplace(std::move(*copied));
+        auto largest = RecordView::Parse(largest_record->view(), impl_->descriptor.record_options);
         if (!largest.has_value()) {
+          impl_->MarkFileFailure();
           Error error = std::move(largest.error());
           Close();
           return std::unexpected(std::move(error));
         }
         auto comparison = CompareRecordPrefixes(*view, *largest, impl_->descriptor.key_columns);
         if (!comparison.has_value()) {
+          impl_->MarkFileFailure();
           Error error = std::move(comparison.error());
           Close();
           return std::unexpected(std::move(error));
@@ -2491,20 +2559,34 @@ Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
         if (*comparison != std::weak_ordering::less) {
           return TopNCheckResult::kRejected;
         }
-        auto deleted = file.index.DeleteEncoded(largest_record.view());
+      }
+      auto reserved = impl_->Account().Reserve(ByteCount{key_bytes});
+      if (!reserved.has_value()) {
+        Error error = std::move(reserved.error());
+        if (temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
+          Close();
+        }
+        return std::unexpected(std::move(error));
+      }
+      if (full) {
+        if (!largest_record.has_value()) {
+          std::terminate();
+        }
+        auto deleted = file.root.writer().DeleteEncoded(largest_record->view());
         if (!deleted.has_value()) {
+          impl_->MarkFileFailure();
           Error error = std::move(deleted.error());
           Close();
           return std::unexpected(std::move(error));
         }
         if (!*deleted) {
+          impl_->MarkFileFailure();
           Error error = Internal("largest file-backed top-N record disappeared");
           Close();
           return std::unexpected(std::move(error));
         }
         --impl_->count;
       }
-      impl_->memory_bytes = key_bytes;
     } catch (const std::bad_alloc&) {
       Error error = Error::OutOfMemory();
       Close();
@@ -2526,19 +2608,27 @@ Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
       }
       removed_bytes = largest->memory_bytes;
     }
-    if (impl_->memory_bytes < removed_bytes ||
-        key_bytes >
-            std::numeric_limits<std::size_t>::max() - (impl_->memory_bytes - removed_bytes)) {
-      return std::unexpected(TooLarge("top-N candidate memory accounting overflowed"));
-    }
-    const std::size_t projected = impl_->memory_bytes - removed_bytes + key_bytes;
-    if (projected > impl_->memory_threshold.value()) {
-      return std::unexpected(TooLarge("top-N memory threshold exceeded before spill support"));
+    const std::size_t additional_bytes = key_bytes > removed_bytes ? key_bytes - removed_bytes : 0U;
+    auto reserved = impl_->Account().Reserve(ByteCount{additional_bytes});
+    if (!reserved.has_value()) {
+      Error error = std::move(reserved.error());
+      if (temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
+        Close();
+      }
+      return std::unexpected(std::move(error));
     }
     if (full) {
-      static_cast<void>(impl_->RemoveLargest());
+      const std::size_t actual_removed = impl_->RemoveLargest();
+      if (actual_removed != removed_bytes) {
+        std::terminate();
+      }
     }
-    impl_->memory_bytes += key_bytes;
+    if (removed_bytes > key_bytes) {
+      const auto released = impl_->Account().Release(ByteCount{removed_bytes - key_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
   }
   impl_->pending_record.emplace(std::move(key));
   impl_->pending_view = *view;
@@ -2551,6 +2641,12 @@ Status BoundedTopN::Insert(ByteBuffer record) {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kCandidatePending ||
       !impl_->pending_view.has_value()) {
     return std::unexpected(Misuse("top-N insertion requires a pending candidate"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
   }
   auto view = RecordView::Parse(record.view(), impl_->descriptor.record_options);
   if (!view.has_value()) {
@@ -2596,18 +2692,16 @@ Status BoundedTopN::Insert(ByteBuffer record) {
         Close();
         return std::unexpected(std::move(error));
       }
-      auto inserted = file.index.InsertEncoded(queue_record->view());
+      auto inserted = file.root.writer().InsertEncoded(queue_record->view());
       if (!inserted.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(inserted.error());
         Close();
         return std::unexpected(std::move(error));
       }
       ++file.next_sequence;
       ++impl_->count;
-      impl_->pending_record.reset();
-      impl_->pending_view.reset();
-      impl_->pending_bytes = 0;
-      impl_->memory_bytes = 0;
+      impl_->ClearPending();
       impl_->state = BoundedTopNState::kWriting;
       return {};
     } catch (const std::bad_alloc&) {
@@ -2628,10 +2722,11 @@ Status BoundedTopN::Insert(ByteBuffer record) {
     return std::unexpected(std::move(error));
   }
   const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
-  const std::size_t retained_bytes = impl_->memory_bytes - impl_->pending_bytes;
-  if (entry_bytes > std::numeric_limits<std::size_t>::max() - retained_bytes ||
-      retained_bytes + entry_bytes > impl_->memory_threshold.value()) {
-    Error error = TooLarge("top-N memory threshold exceeded before spill support");
+  const std::size_t additional_bytes =
+      entry_bytes > impl_->pending_bytes ? entry_bytes - impl_->pending_bytes : 0U;
+  auto reserved = impl_->Account().Reserve(ByteCount{additional_bytes});
+  if (!reserved.has_value()) {
+    Error error = std::move(reserved.error());
     Close();
     return std::unexpected(std::move(error));
   }
@@ -2639,10 +2734,15 @@ Status BoundedTopN::Insert(ByteBuffer record) {
   try {
     auto entry = std::make_unique<Impl::Entry>(std::move(record), *view, entry_bytes);
     impl_->InsertSorted(std::move(entry));
-    impl_->memory_bytes = retained_bytes + entry_bytes;
+    if (impl_->pending_bytes > entry_bytes) {
+      const auto released = impl_->Account().Release(ByteCount{impl_->pending_bytes - entry_bytes});
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
     ++impl_->count;
-    impl_->pending_record.reset();
     impl_->pending_view.reset();
+    impl_->pending_record.reset();
     impl_->pending_bytes = 0;
     impl_->state = BoundedTopNState::kWriting;
     return {};
@@ -2661,11 +2761,18 @@ Status BoundedTopN::Rewind() {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kWriting) {
     return std::unexpected(Misuse("top-N rewind requires the writing state"));
   }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
   if (impl_->file_backed()) {
     Impl::FileBackend& file = impl_->File();
     try {
-      auto cursor = IndexBtreeCursor::Open(*file.pager, file.root, file.columns);
+      auto cursor = IndexBtreeCursor::Open(file.root.pager(), file.root.root_page(), file.columns);
       if (!cursor.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(cursor.error());
         Close();
         return std::unexpected(std::move(error));
@@ -2673,12 +2780,14 @@ Status BoundedTopN::Rewind() {
       file.cursor.emplace(std::move(*cursor));
       auto positioned = file.cursor->First();
       if (!positioned.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(positioned.error());
         Close();
         return std::unexpected(std::move(error));
       }
       if (!*positioned) {
         if (impl_->count != 0U) {
+          impl_->MarkFileFailure();
           Error error = Corruption("nonempty file-backed top-N relation has no first record");
           Close();
           return std::unexpected(std::move(error));
@@ -2689,6 +2798,7 @@ Status BoundedTopN::Rewind() {
       }
       auto loaded = impl_->LoadFileCurrent();
       if (!loaded.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(loaded.error());
         Close();
         return std::unexpected(std::move(error));
@@ -2696,10 +2806,12 @@ Status BoundedTopN::Rewind() {
       impl_->state = BoundedTopNState::kPositioned;
       return {};
     } catch (const std::bad_alloc&) {
+      impl_->MarkFileFailure();
       Error error = Error::OutOfMemory();
       Close();
       return std::unexpected(std::move(error));
     } catch (const std::length_error&) {
+      impl_->MarkFileFailure();
       Error error = Error::OutOfMemory();
       Close();
       return std::unexpected(std::move(error));
@@ -2714,6 +2826,10 @@ Status BoundedTopN::Rewind() {
 Result<RecordView> BoundedTopN::current_record() const {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kPositioned) {
     return std::unexpected(Misuse("top-N has no current record"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    return std::unexpected(std::move(usable.error()));
   }
   if (impl_->file_backed()) {
     const Impl::FileBackend& file = impl_->File();
@@ -2732,38 +2848,49 @@ Result<bool> BoundedTopN::Next() {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kPositioned) {
     return std::unexpected(Misuse("top-N next requires a current record"));
   }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
   if (impl_->file_backed()) {
     Impl::FileBackend& file = impl_->File();
     try {
       if (!file.cursor.has_value()) {
         Error error = Internal("file-backed top-N cursor is unavailable");
+        impl_->MarkFileFailure();
         Close();
         return std::unexpected(std::move(error));
       }
+      impl_->ClearFileCurrent();
       auto advanced = file.cursor->Next();
       if (!advanced.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(advanced.error());
         Close();
         return std::unexpected(std::move(error));
       }
       if (!*advanced) {
-        file.current_record.reset();
-        file.current_wrapper = ByteBuffer{};
+        file.cursor.reset();
         impl_->state = BoundedTopNState::kExhausted;
         return false;
       }
       auto loaded = impl_->LoadFileCurrent();
       if (!loaded.has_value()) {
+        impl_->MarkFileFailure();
         Error error = std::move(loaded.error());
         Close();
         return std::unexpected(std::move(error));
       }
       return true;
     } catch (const std::bad_alloc&) {
+      impl_->MarkFileFailure();
       Error error = Error::OutOfMemory();
       Close();
       return std::unexpected(std::move(error));
     } catch (const std::length_error&) {
+      impl_->MarkFileFailure();
       Error error = Error::OutOfMemory();
       Close();
       return std::unexpected(std::move(error));
@@ -2784,13 +2911,19 @@ Status BoundedTopN::Reset() {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed top-N relation"));
   }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
   if (impl_->file_backed()) {
     Impl::FileBackend& file = impl_->File();
     file.cursor.reset();
-    file.current_record.reset();
-    file.current_wrapper = ByteBuffer{};
-    auto cleared = file.index.Clear();
+    impl_->ClearFileCurrent();
+    auto cleared = file.root.writer().Clear();
     if (!cleared.has_value()) {
+      impl_->MarkFileFailure();
       Error error = std::move(cleared.error());
       Close();
       return std::unexpected(std::move(error));
@@ -2803,6 +2936,14 @@ Status BoundedTopN::Reset() {
 }
 
 void BoundedTopN::Close() noexcept { impl_.reset(); }
+
+Result<BoundedTopN> StatementTemporaryStorage::CreateTopN(const RecordSorterDescriptor& descriptor,
+                                                          std::size_t bound) {
+  if (!valid()) {
+    return std::unexpected(Misuse("statement temporary storage is invalid"));
+  }
+  return BoundedTopN::Create(descriptor, bound, *this);
+}
 
 Result<void> ValidateTemporaryStorageOptions(TemporaryStorageOptions options) {
   if (!IsValid(options.mode)) {
@@ -2849,34 +2990,6 @@ Result<StatementTemporaryStorage> TemporaryStorageFactory::CreateStatementStorag
   try {
     return StatementTemporaryStorage{std::make_unique<temporary_storage_detail::StatementState>(
         *this, sorter_memory_threshold())};
-  } catch (const std::bad_alloc&) {
-    return std::unexpected(Error::OutOfMemory());
-  } catch (const std::length_error&) {
-    return std::unexpected(Error::OutOfMemory());
-  }
-}
-
-Result<BoundedTopN> TemporaryStorageFactory::CreateTopN(const RecordSorterDescriptor& descriptor,
-                                                        std::size_t bound) const {
-  return BoundedTopN::Create(descriptor, bound, sorter_memory_threshold(), *this);
-}
-
-Result<std::unique_ptr<File>> TemporaryStorageFactory::CreateTemporaryFile() const {
-  if (!file_spill_enabled()) {
-    return std::unexpected(Misuse("temporary file spill is disabled in memory mode"));
-  }
-  try {
-    auto opened = vfs_->Open(std::nullopt, FileOpenOptions{
-                                               .kind = FileKind::kTemporaryJournal,
-                                               .access = FileAccessMode::kReadWrite,
-                                               .create = true,
-                                               .exclusive_create = true,
-                                               .delete_on_close = true,
-                                           });
-    if (!opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-    return std::move(opened->file);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
