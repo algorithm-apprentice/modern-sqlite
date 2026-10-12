@@ -119,7 +119,7 @@
       "sql": "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 8,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 1,
@@ -154,13 +154,13 @@
           "digest": "4faaa8e066a13c6e"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 1,
-          "bytes": 48,
-          "result_hits": 1,
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 384,
+          "result_hits": 8,
           "result_misses": 0,
-          "digest": "4faaa8e066a13c6e"
+          "digest": "92ddae023fd3037d"
         },
         "diagnostic": {
           "operations": 1,
@@ -427,7 +427,7 @@
       "sql": "SELECT score,count(id) FROM items GROUP BY score ORDER BY score",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 16,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 4096,
@@ -462,13 +462,13 @@
           "digest": "c8343924ddebd3ee"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 4096,
-          "bytes": 65536,
-          "result_hits": 1,
+          "operations": 16,
+          "items": 1048576,
+          "rows": 65536,
+          "bytes": 1048576,
+          "result_hits": 16,
           "result_misses": 0,
-          "digest": "c8343924ddebd3ee"
+          "digest": "135eb317488e5ca5"
         },
         "diagnostic": {
           "operations": 1,
@@ -506,7 +506,7 @@
       "sql": "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 4,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 4096,
@@ -541,13 +541,13 @@
           "digest": "c8343924ddebd3ee"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 4096,
-          "bytes": 65536,
-          "result_hits": 1,
+          "operations": 4,
+          "items": 262144,
+          "rows": 16384,
+          "bytes": 262144,
+          "result_hits": 4,
           "result_misses": 0,
-          "digest": "c8343924ddebd3ee"
+          "digest": "ddb07cac1b8f3485"
         },
         "diagnostic": {
           "operations": 1,
@@ -585,7 +585,7 @@
       "sql": "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 8,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 4096,
@@ -620,13 +620,13 @@
           "digest": "c8343924ddebd3ee"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 4096,
-          "bytes": 65536,
-          "result_hits": 1,
+          "operations": 8,
+          "items": 524288,
+          "rows": 32768,
+          "bytes": 524288,
+          "result_hits": 8,
           "result_misses": 0,
-          "digest": "c8343924ddebd3ee"
+          "digest": "7b09094f028c0ce5"
         },
         "diagnostic": {
           "operations": 1,
@@ -664,7 +664,7 @@
       "sql": "SELECT category,count(id) FROM items GROUP BY category ORDER BY category",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 2,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 65536,
@@ -699,13 +699,13 @@
           "digest": "4bcfdb1cb4de1e15"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 65536,
-          "bytes": 1638400,
-          "result_hits": 1,
+          "operations": 2,
+          "items": 131072,
+          "rows": 131072,
+          "bytes": 3276800,
+          "result_hits": 2,
           "result_misses": 0,
-          "digest": "4bcfdb1cb4de1e15"
+          "digest": "957da2d4a8db7f45"
         },
         "diagnostic": {
           "operations": 1,
@@ -743,7 +743,7 @@
       "sql": "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 4,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 64,
@@ -778,13 +778,13 @@
           "digest": "0e03c4d112c9b3dc"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 64,
-          "bytes": 1536,
-          "result_hits": 1,
+          "operations": 4,
+          "items": 262144,
+          "rows": 256,
+          "bytes": 6144,
+          "result_hits": 4,
           "result_misses": 0,
-          "digest": "0e03c4d112c9b3dc"
+          "digest": "5a77b6fb3107ee95"
         },
         "diagnostic": {
           "operations": 1,
@@ -822,7 +822,7 @@
       "sql": "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 4,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 1,
@@ -857,13 +857,13 @@
           "digest": "9831a884d4b5c935"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 1,
-          "bytes": 16,
-          "result_hits": 1,
+          "operations": 4,
+          "items": 262144,
+          "rows": 4,
+          "bytes": 64,
+          "result_hits": 4,
           "result_misses": 0,
-          "digest": "9831a884d4b5c935"
+          "digest": "e9671c75b1ed1c25"
         },
         "diagnostic": {
           "operations": 1,
@@ -901,7 +901,7 @@
       "sql": "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 8,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 1,
@@ -936,13 +936,13 @@
           "digest": "69b488f754f8f77e"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 1,
-          "bytes": 16,
-          "result_hits": 1,
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 128,
+          "result_hits": 8,
           "result_misses": 0,
-          "digest": "69b488f754f8f77e"
+          "digest": "d781388b7c8cf59d"
         },
         "diagnostic": {
           "operations": 1,
@@ -980,7 +980,7 @@
       "sql": "SELECT group_concat(score ORDER BY score DESC,id) FROM items",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 4,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 1,
@@ -1011,13 +1011,13 @@
           "digest": "5d8975a11dedb5b6"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 1,
-          "bytes": 309919,
-          "result_hits": 1,
+          "operations": 4,
+          "items": 262144,
+          "rows": 4,
+          "bytes": 1239676,
+          "result_hits": 4,
           "result_misses": 0,
-          "digest": "5d8975a11dedb5b6"
+          "digest": "3d2df2add6d5ca81"
         },
         "diagnostic": {
           "operations": 1,
@@ -1055,7 +1055,7 @@
       "sql": "SELECT group_concat(DISTINCT score ORDER BY score) FROM items",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 8,
       "diagnostic_iterations": 1,
       "items_per_iteration": 65536,
       "result_rows_per_iteration": 1,
@@ -1086,13 +1086,13 @@
           "digest": "09579402da892a6b"
         },
         "measured": {
-          "operations": 1,
-          "items": 65536,
-          "rows": 1,
-          "bytes": 19369,
-          "result_hits": 1,
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 154952,
+          "result_hits": 8,
           "result_misses": 0,
-          "digest": "09579402da892a6b"
+          "digest": "00cd5e2543ad11d5"
         },
         "diagnostic": {
           "operations": 1,
@@ -1217,7 +1217,7 @@
       "sql": "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64",
       "primary_unit": "source-row",
       "warmup_iterations": 1,
-      "measured_iterations": 1,
+      "measured_iterations": 4,
       "diagnostic_iterations": 1,
       "items_per_iteration": 131072,
       "result_rows_per_iteration": 64,
@@ -1252,13 +1252,13 @@
           "digest": "ddf54a75aaf0af2e"
         },
         "measured": {
-          "operations": 1,
-          "items": 131072,
-          "rows": 64,
-          "bytes": 1024,
-          "result_hits": 1,
+          "operations": 4,
+          "items": 524288,
+          "rows": 256,
+          "bytes": 4096,
+          "result_hits": 4,
           "result_misses": 0,
-          "digest": "ddf54a75aaf0af2e"
+          "digest": "0431523d9bf32905"
         },
         "diagnostic": {
           "operations": 1,

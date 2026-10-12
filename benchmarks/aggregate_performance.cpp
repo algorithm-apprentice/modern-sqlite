@@ -110,7 +110,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
             "global-functions-memory",
             "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM "
             "items",
-            65'536, 1, 1, 48, 0x4FAAA8E066A13C6EULL, 0x4FAAA8E066A13C6EULL),
+            65'536, 8, 1, 48, 0x4FAAA8E066A13C6EULL, 0x92DDAE023FD3037DULL),
         "SELECT modern_sqlite_probe(2,count(modern_sqlite_probe(1,id+0))),"
         "sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items",
         {65'536, 1},
@@ -144,7 +144,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     {
         AggregateWorkload("ordered-group-memory",
                           "SELECT score,count(id) FROM items GROUP BY score ORDER BY score", 65'536,
-                          1, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0xC8343924DDEBD3EEULL),
+                          16, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0x135EB317488E5CA5ULL),
         "SELECT modern_sqlite_probe(2,score),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score ORDER BY score",
         {65'536, 4'096},
@@ -153,7 +153,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     {
         AggregateWorkload("sorted-group-memory",
                           "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
-                          1, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0xC8343924DDEBD3EEULL),
+                          4, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0xDDB07CAC1B8F3485ULL),
         "SELECT modern_sqlite_probe(2,score+0),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score+0 ORDER BY score+0",
         {65'536, 4'096},
@@ -162,7 +162,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     {
         AggregateWorkload("sorted-group-file",
                           "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
-                          1, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0xC8343924DDEBD3EEULL, true),
+                          8, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0x7B09094F028C0CE5ULL, true),
         "SELECT modern_sqlite_probe(2,score+0),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score+0 ORDER BY score+0",
         {65'536, 4'096},
@@ -171,8 +171,8 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     {
         AggregateWorkload(
             "high-card-group-memory",
-            "SELECT category,count(id) FROM items GROUP BY category ORDER BY category", 65'536, 1,
-            65'536, 1'638'400, 0x4BCFDB1CB4DE1E15ULL, 0x4BCFDB1CB4DE1E15ULL),
+            "SELECT category,count(id) FROM items GROUP BY category ORDER BY category", 65'536, 2,
+            65'536, 1'638'400, 0x4BCFDB1CB4DE1E15ULL, 0x957DA2D4A8DB7F45ULL),
         "SELECT modern_sqlite_probe(2,category),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY category ORDER BY category",
         {65'536, 65'536},
@@ -183,7 +183,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
             "grouped-having-topn-memory",
             "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 "
             "HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
-            65'536, 1, 64, 1'536, 0x0E03C4D112C9B3DCULL, 0x0E03C4D112C9B3DCULL),
+            65'536, 4, 64, 1'536, 0x0E03C4D112C9B3DCULL, 0x5A77B6FB3107EE95ULL),
         "SELECT score+0 AS g,count(modern_sqlite_probe(1,id)) AS n,"
         "sum(modern_sqlite_probe(2,id)) AS s FROM items GROUP BY score+0 "
         "HAVING n>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
@@ -192,8 +192,8 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     },
     {
         AggregateWorkload("distinct-state-memory",
-                          "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65'536, 1,
-                          1, 16, 0x9831A884D4B5C935ULL, 0x9831A884D4B5C935ULL),
+                          "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65'536, 4,
+                          1, 16, 0x9831A884D4B5C935ULL, 0xE9671C75B1ED1C25ULL),
         "SELECT count(DISTINCT modern_sqlite_probe(1,score)),"
         "sum(DISTINCT modern_sqlite_probe(2,score)) FROM items",
         {65'536, 65'536},
@@ -203,7 +203,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
         AggregateWorkload(
             "filtered-state-memory",
             "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items",
-            65'536, 1, 1, 16, 0x69B488F754F8F77EULL, 0x69B488F754F8F77EULL),
+            65'536, 8, 1, 16, 0x69B488F754F8F77EULL, 0xD781388B7C8CF59DULL),
         "SELECT count(modern_sqlite_probe(1,id)) FILTER (WHERE flag=1),"
         "sum(modern_sqlite_probe(2,score)) FILTER (WHERE flag=0) FROM items",
         {32'768, 32'768},
@@ -211,8 +211,8 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     },
     {
         AggregateWorkload("local-order-memory",
-                          "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65'536, 1,
-                          1, 309'919, 0x5D8975A11DEDB5B6ULL, 0x5D8975A11DEDB5B6ULL),
+                          "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65'536, 4,
+                          1, 309'919, 0x5D8975A11DEDB5B6ULL, 0x3D2DF2ADD6D5CA81ULL),
         "SELECT group_concat(modern_sqlite_probe(1,score) ORDER BY score DESC,id) FROM items",
         {65'536},
         {1, 65'536, 1, 0, 1},
@@ -220,7 +220,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
     {
         AggregateWorkload("unique-local-order-memory",
                           "SELECT group_concat(DISTINCT score ORDER BY score) FROM items", 65'536,
-                          1, 1, 19'369, 0x09579402DA892A6BULL, 0x09579402DA892A6BULL),
+                          8, 1, 19'369, 0x09579402DA892A6BULL, 0x00CD5E2543AD11D5ULL),
         "SELECT group_concat(DISTINCT modern_sqlite_probe(1,score) "
         "ORDER BY modern_sqlite_probe(1,score)) FROM items",
         {65'536},
@@ -244,7 +244,7 @@ const std::array<AggregateCase, 15> kAggregateCases{{
         AggregateWorkload("aggregate-compound-memory",
                           "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 "
                           "UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64",
-                          131'072, 1, 64, 1'024, 0xDDF54A75AAF0AF2EULL, 0xDDF54A75AAF0AF2EULL),
+                          131'072, 4, 64, 1'024, 0xDDF54A75AAF0AF2EULL, 0x0431523D9BF32905ULL),
         "SELECT score+0 AS g,count(modern_sqlite_probe(1,id)) FROM items GROUP BY score+0 "
         "UNION ALL SELECT -1,count(modern_sqlite_probe(2,id)) FROM items "
         "ORDER BY 1 LIMIT 64 OFFSET 64",

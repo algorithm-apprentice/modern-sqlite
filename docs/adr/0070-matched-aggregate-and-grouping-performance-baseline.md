@@ -164,8 +164,16 @@ ORDER BY 1 LIMIT 64 OFFSET 64;
 Memory cases retain a 64 MiB threshold; the two file cases retain 2 MiB.
 Empty and indexed MIN/MAX measurement phases execute 65,536 independent
 reset/reuse iterations, with one iteration for warmup, diagnostic, and smoke.
-Other measurement phases execute one complete fixture workload. Their fixed
-floor is verified rather than assumed from Modern's slower execution.
+The first source-bootstrap recording failed the native five-millisecond floor
+for a one-iteration global stream. That complete failed child and scratch
+database are preserved. Before publishing the contract, native smoke evidence
+therefore fixes these repeated complete-work counts: global functions and
+filtered/unique ordering 8; ordered grouping 16; sorted memory, HAVING/top-N,
+ordinary DISTINCT/local ordering, and compound 4; sorted file 8;
+high-cardinality grouping 2; wide file modifiers 1. SQL, configuration, source,
+diagnostic work, and the guard are unchanged. Every revised measured typed
+digest is independently repinned by the native oracle and fixture model.
+There is no runtime adaptive iteration count or substitution of a noisy round.
 
 ### 4. Preserve the physical mechanisms during diagnostics
 

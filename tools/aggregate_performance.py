@@ -25,21 +25,21 @@ MINIMUM_WALL_NS = 5_000_000
 GUARD_RATIO = 40
 
 CASE_DATA = (
-    ("global-functions-memory", "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items", 65536, 1, 1, 48, "4faaa8e066a13c6e", "4faaa8e066a13c6e", (65536, 1), (6, 393216, 6, 0, 6)),
+    ("global-functions-memory", "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items", 65536, 8, 1, 48, "4faaa8e066a13c6e", "92ddae023fd3037d", (65536, 1), (6, 393216, 6, 0, 6)),
     ("global-empty-memory", "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items WHERE 0", 0, 65536, 1, 16, "7d7eeab76b309583", "e2f49f8851122325", (0, 1), (6, 0, 6, 0, 6)),
     ("indexed-min-memory", "SELECT min(score) FROM items", 1, 65536, 1, 8, "156194db51eeea60", "946bff8b56ec2325", (1,), (1, 1, 1, 0, 1)),
     ("indexed-max-memory", "SELECT max(score) FROM items", 1, 65536, 1, 8, "e9a131d7326b603a", "e9268781575a2325", (1,), (1, 1, 1, 0, 1)),
-    ("ordered-group-memory", "SELECT score,count(id) FROM items GROUP BY score ORDER BY score", 65536, 1, 4096, 65536, "c8343924ddebd3ee", "c8343924ddebd3ee", (65536, 4096), (1, 65536, 4096, 4095, 1)),
-    ("sorted-group-memory", "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65536, 1, 4096, 65536, "c8343924ddebd3ee", "c8343924ddebd3ee", (65536, 4096), (1, 65536, 4096, 4095, 1)),
-    ("sorted-group-file", "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65536, 1, 4096, 65536, "c8343924ddebd3ee", "c8343924ddebd3ee", (65536, 4096), (1, 65536, 4096, 4095, 1)),
-    ("high-card-group-memory", "SELECT category,count(id) FROM items GROUP BY category ORDER BY category", 65536, 1, 65536, 1638400, "4bcfdb1cb4de1e15", "4bcfdb1cb4de1e15", (65536, 65536), (1, 65536, 65536, 65535, 1)),
-    ("grouped-having-topn-memory", "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64", 65536, 1, 64, 1536, "0e03c4d112c9b3dc", "0e03c4d112c9b3dc", (65536, 65536), (2, 131072, 8192, 8190, 2)),
-    ("distinct-state-memory", "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65536, 1, 1, 16, "9831a884d4b5c935", "9831a884d4b5c935", (65536, 65536), (2, 8192, 2, 0, 2)),
-    ("filtered-state-memory", "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items", 65536, 1, 1, 16, "69b488f754f8f77e", "69b488f754f8f77e", (32768, 32768), (2, 65536, 2, 0, 2)),
-    ("local-order-memory", "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65536, 1, 1, 309919, "5d8975a11dedb5b6", "5d8975a11dedb5b6", (65536,), (1, 65536, 1, 0, 1)),
-    ("unique-local-order-memory", "SELECT group_concat(DISTINCT score ORDER BY score) FROM items", 65536, 1, 1, 19369, "09579402da892a6b", "09579402da892a6b", (65536,), (1, 4096, 1, 0, 1)),
+    ("ordered-group-memory", "SELECT score,count(id) FROM items GROUP BY score ORDER BY score", 65536, 16, 4096, 65536, "c8343924ddebd3ee", "135eb317488e5ca5", (65536, 4096), (1, 65536, 4096, 4095, 1)),
+    ("sorted-group-memory", "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65536, 4, 4096, 65536, "c8343924ddebd3ee", "ddb07cac1b8f3485", (65536, 4096), (1, 65536, 4096, 4095, 1)),
+    ("sorted-group-file", "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65536, 8, 4096, 65536, "c8343924ddebd3ee", "7b09094f028c0ce5", (65536, 4096), (1, 65536, 4096, 4095, 1)),
+    ("high-card-group-memory", "SELECT category,count(id) FROM items GROUP BY category ORDER BY category", 65536, 2, 65536, 1638400, "4bcfdb1cb4de1e15", "957da2d4a8db7f45", (65536, 65536), (1, 65536, 65536, 65535, 1)),
+    ("grouped-having-topn-memory", "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64", 65536, 4, 64, 1536, "0e03c4d112c9b3dc", "5a77b6fb3107ee95", (65536, 65536), (2, 131072, 8192, 8190, 2)),
+    ("distinct-state-memory", "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65536, 4, 1, 16, "9831a884d4b5c935", "e9671c75b1ed1c25", (65536, 65536), (2, 8192, 2, 0, 2)),
+    ("filtered-state-memory", "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items", 65536, 8, 1, 16, "69b488f754f8f77e", "d781388b7c8cf59d", (32768, 32768), (2, 65536, 2, 0, 2)),
+    ("local-order-memory", "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65536, 4, 1, 309919, "5d8975a11dedb5b6", "3d2df2add6d5ca81", (65536,), (1, 65536, 1, 0, 1)),
+    ("unique-local-order-memory", "SELECT group_concat(DISTINCT score ORDER BY score) FROM items", 65536, 8, 1, 19369, "09579402da892a6b", "00cd5e2543ad11d5", (65536,), (1, 4096, 1, 0, 1)),
     ("wide-modifier-file", "SELECT group_concat(score ORDER BY id),group_concat(score ORDER BY id DESC),count(DISTINCT category),group_concat(DISTINCT score ORDER BY score) FROM items", 65536, 1, 1, 639215, "c9abc9b4135a16a2", "c9abc9b4135a16a2", (65536, 65536, 65536, 65536), (4, 200704, 4, 0, 4)),
-    ("aggregate-compound-memory", "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64", 131072, 1, 64, 1024, "ddf54a75aaf0af2e", "ddf54a75aaf0af2e", (65536, 65536), (2, 131072, 4097, 4095, 2)),
+    ("aggregate-compound-memory", "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64", 131072, 4, 64, 1024, "ddf54a75aaf0af2e", "0431523d9bf32905", (65536, 65536), (2, 131072, 4097, 4095, 2)),
 )
 CASE_IDS = tuple(case[0] for case in CASE_DATA)
 CASE_BY_ID = {case[0]: case for case in CASE_DATA}
