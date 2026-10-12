@@ -108,6 +108,11 @@ class GlobalAggregateAccessEmitter final {
     return services_.StepGlobalAggregates();
   }
 
+  [[nodiscard]] LoweringResult<void> StepIndexedMinMaxAggregate(
+      BoundAggregateInvocationId invocation, RegisterId argument) {
+    return services_.StepIndexedMinMaxAggregate(invocation, argument);
+  }
+
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateCompletion() {
     return services_.EmitGlobalAggregateCompletion();
   }
@@ -901,7 +906,7 @@ class GlobalAggregateAccessEmitter final {
   };
 
   struct IndexedMinMaxRuntime {
-    AggregateId aggregate;
+    BoundAggregateInvocationId invocation;
     BoundExpressionId argument;
     RegisterId argument_register;
     BoundAggregateExtremumKind extremum = BoundAggregateExtremumKind::kNone;
@@ -979,7 +984,7 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(InternalFailure("indexed MIN/MAX extremum is invalid"));
     }
     return IndexedMinMaxRuntime{
-        .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
+        .invocation = invocation_id,
         .argument = invocation.arguments.front(),
         .argument_register = AssumeValue(aggregate_argument_blocks_[invocation_id.value()]),
         .extremum = extremum,
@@ -1318,11 +1323,7 @@ class GlobalAggregateAccessEmitter final {
         return filters;
       }
     }
-    return Append(StepAggregateInstruction{
-        .aggregate = runtime.aggregate,
-        .first_argument = runtime.argument_register,
-        .effect_output = std::nullopt,
-    });
+    return StepIndexedMinMaxAggregate(runtime.invocation, runtime.argument_register);
   }
 
   [[nodiscard]] LoweringResult<IndexedMinMaxPassExits> EmitIndexedMinMaxIndexPass(

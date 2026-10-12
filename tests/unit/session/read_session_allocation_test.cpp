@@ -92,6 +92,8 @@ int main() try {
       Prepare(session, "SELECT id FROM items UNION SELECT id FROM items ORDER BY 1");
   ReadStatement aggregate =
       Prepare(session, "SELECT count(),min(category),group_concat(name) FROM items");
+  ReadStatement grouped = Prepare(
+      session, "SELECT score IS NULL,count(),min(id) FROM items GROUP BY score IS NULL ORDER BY 1");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -220,6 +222,31 @@ int main() try {
   }
   ResetCount();
   if (!aggregate.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto grouped_first = grouped.Step();
+  if (!grouped_first.has_value() || *grouped_first != ReadStep::kRow ||
+      grouped.row().size() != 3U ||
+      grouped.row()[0].integer_value() != std::optional<std::int64_t>{0} ||
+      !AtMostAllocations(256U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto grouped_second = grouped.Step();
+  if (!grouped_second.has_value() || *grouped_second != ReadStep::kRow ||
+      grouped.row()[0].integer_value() != std::optional<std::int64_t>{1} ||
+      !AtMostAllocations(2U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto grouped_done = grouped.Step();
+  if (!grouped_done.has_value() || *grouped_done != ReadStep::kDone || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!grouped.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 

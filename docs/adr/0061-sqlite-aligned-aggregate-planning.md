@@ -393,6 +393,10 @@ global and indexed-MIN/MAX subset. Grouped aggregates, modifiers,
 representative rows, and compound aggregate execution remain outside that
 later boundary.
 
+ADR-0068 subsequently supersedes the grouped and representative-row
+deferrals. Aggregate modifiers and compound aggregate execution remain
+outside the package-12 boundary.
+
 ### 10. Verify plan shape, ownership, limits, and allocation
 
 Development follows red-green-refactor. Tests cover:

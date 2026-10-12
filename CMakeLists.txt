@@ -100,6 +100,7 @@ set(
     src/diagnostics/storage_inspector.cpp
     src/format/record_codec.cpp
     src/lowering/global_aggregate_access.cpp
+    src/lowering/grouped_aggregate_lowering.cpp
     src/lowering/plan_lowering.cpp
     src/optimizer/physical_plan.cpp
     src/pager/pager.cpp
@@ -775,6 +776,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/instrumentation/counters.cpp"
   "${PROJECT_SOURCE_DIR}/src/lowering/global_aggregate_access.cpp"
   "${PROJECT_SOURCE_DIR}/src/lowering/global_aggregate_access.hpp"
+  "${PROJECT_SOURCE_DIR}/src/lowering/grouped_aggregate_lowering.cpp"
+  "${PROJECT_SOURCE_DIR}/src/lowering/grouped_aggregate_lowering.hpp"
   "${PROJECT_SOURCE_DIR}/src/lowering/plan_lowering.cpp"
   "${PROJECT_SOURCE_DIR}/src/lowering/plan_lowering_internal.hpp"
   "${PROJECT_SOURCE_DIR}/src/optimizer/physical_plan.cpp"

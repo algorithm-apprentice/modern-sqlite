@@ -99,6 +99,10 @@ an ownership, execution, or performance contract. Packages 2 through 5 share
 one accepted temporary-storage child ADR but remain separate implementation
 PRs.
 
+Delivery update: ADR-0068 defines package 12's grouped execution boundary,
+ordered and sorted schedules, representative snapshots, selected grouping-key
+reuse, and completed-group ORDER/LIMIT behavior.
+
 ### 2. Pin the accepted SQL surface
 
 Ordinary SELECT cores gain:

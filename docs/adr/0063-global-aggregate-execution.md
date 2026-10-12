@@ -325,6 +325,9 @@ Development follows red-green-refactor. Tests cover:
 No GROUP BY execution, representative snapshots, aggregate DISTINCT, FILTER,
 local ordering, or aggregate temporary relation opens in this package.
 
+Delivery update: ADR-0068 supersedes the grouped-execution and representative
+snapshot deferrals while retaining this ADR's global schedules unchanged.
+
 ## Consequences
 
 ### Positive

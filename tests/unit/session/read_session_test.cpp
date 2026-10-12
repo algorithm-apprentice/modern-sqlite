@@ -502,14 +502,26 @@ TEST(ReadSession, RejectsNonSelectStatementsAtTheReadOnlyBoundary) {
   }
 }
 
-TEST(ReadSession, RejectsPlannedAggregatesAtTheLoweringBoundary) {
+TEST(ReadSession, ExecutesAndResetsGroupedAggregates) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT score IS NULL,count(),min(id) FROM items "
+                                             "GROUP BY score IS NULL ORDER BY 1");
 
-  const auto prepared = session.Prepare(Utf8View{"SELECT count(),name FROM items GROUP BY name"});
-  ASSERT_FALSE(prepared.has_value());
-  EXPECT_EQ(ErrorCode::kGeneric, prepared.error().code());
-  EXPECT_NE(std::string_view::npos,
-            prepared.error().message().find("aggregate lowering is not implemented"));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(3U, statement.row().size());
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(3, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
 }
 
 TEST(ReadSession, ExecutesAndResetsGlobalCount) {
@@ -549,6 +561,13 @@ TEST(ReadSession, ExecutesGlobalAggregateFunctionsEmptyHavingAndSkipping) {
   EXPECT_EQ(0.0, empty.row()[2].real_value());
   EXPECT_EQ(SqlValueType::kNull, empty.row()[3].type());
   EXPECT_EQ(SqlValueType::kNull, empty.row()[4].type());
+
+  ReadStatement representative =
+      PrepareStatement(session, "SELECT id,min(score),max(score) FROM items");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(representative.Step()));
+  EXPECT_EQ(2, IntegerValue(representative.row()[0]));
+  EXPECT_EQ(1.5, representative.row()[1].real_value());
+  EXPECT_EQ(3.0, representative.row()[2].real_value());
 
   ReadStatement source_free = PrepareStatement(session, "SELECT count(),sum(2)");
   EXPECT_EQ(ReadStep::kRow, TakeValue(source_free.Step()));

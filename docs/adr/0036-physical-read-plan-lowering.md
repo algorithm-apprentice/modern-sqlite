@@ -107,6 +107,12 @@ lowering result and error helpers in
 `src/lowering/plan_lowering_internal.hpp`. The public lowering boundary and
 dependency direction remain unchanged.
 
+ADR-0068 similarly isolates grouped aggregate state transitions, group-sorter
+drain, representative snapshots, and completed-group output in
+`src/lowering/grouped_aggregate_lowering.hpp` and
+`src/lowering/grouped_aggregate_lowering.cpp`. Existing physical access
+traversal remains in `PlanLowerer`; the public lowering boundary is unchanged.
+
 Extend the typed bytecode and VM with:
 
 - `MustBeIntegerInstruction`; and

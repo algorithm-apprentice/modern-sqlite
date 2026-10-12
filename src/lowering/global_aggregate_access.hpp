@@ -24,6 +24,8 @@ class GlobalAggregateAccessServices {
   [[nodiscard]] virtual LoweringResult<void> EmitFilters(Label rejected) = 0;
   [[nodiscard]] virtual LoweringResult<void> OpenGlobalAggregates() = 0;
   [[nodiscard]] virtual LoweringResult<void> StepGlobalAggregates() = 0;
+  [[nodiscard]] virtual LoweringResult<void> StepIndexedMinMaxAggregate(
+      BoundAggregateInvocationId invocation, RegisterId argument) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateCompletion() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitIndexKeyExpressions(
       const PhysicalIndexScanNode& index, std::optional<Label> null_target) = 0;

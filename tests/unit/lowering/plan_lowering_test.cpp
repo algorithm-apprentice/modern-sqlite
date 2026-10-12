@@ -859,6 +859,22 @@ TEST(PlanLowering, SeeksPastNullableMinMaxNullRegions) {
   EXPECT_EQ(IndexRangeEndMode::kExclusive, descending_max_ends.front());
 }
 
+TEST(PlanLowering, RejectsDeferredGroupedAggregateModifiers) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT name,count(DISTINCT id) FROM items GROUP BY name",
+           "SELECT name,count() FILTER (WHERE id>1) FROM items GROUP BY name",
+           "SELECT name,group_concat(id ORDER BY id) FROM items GROUP BY name",
+       }) {
+    SCOPED_TRACE(sql);
+    const LowerPlanResult lowered = LowerPlan(OptimizeOrThrow(sql, catalog));
+    ASSERT_FALSE(lowered.has_value());
+    EXPECT_EQ(PlanLoweringErrorCode::kUnsupportedPlan, lowered.error().code);
+    EXPECT_NE(std::string_view::npos,
+              lowered.error().detail.find("aggregate modifiers are not implemented"));
+  }
+}
+
 TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
   PosixVfs vfs;
   std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
@@ -892,6 +908,418 @@ TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
   const auto delayed_error = delayed_vm.Step();
   ASSERT_FALSE(delayed_error.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, delayed_error.error().code());
+}
+
+TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto add_row = [&](std::int64_t id, std::string name, SqlValue score) {
+    const std::array parameters{
+        SqlValue::Integer(id),
+        SqlValue::Text(std::move(name)),
+        std::move(score),
+    };
+    ASSERT_TRUE(ExecuteMutationProgram(insert, vfs, parameters).has_value());
+  };
+  add_row(1, "alpha", SqlValue::Real(1.5));
+  add_row(2, "beta", SqlValue::Real(3.0));
+  add_row(3, "gamma", SqlValue{});
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+
+  const BytecodeProgram ordinary = LowerOrThrow("SELECT id,count() FROM Items", catalog);
+  const auto ordinary_rows = ExecuteRows(ordinary, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, ordinary_rows.size());
+  EXPECT_EQ(1, ordinary_rows[0][0].integer_value());
+  EXPECT_EQ(3, ordinary_rows[0][1].integer_value());
+
+  const BytecodeProgram minimum_then_maximum =
+      LowerOrThrow("SELECT id,min(Score),max(Score) FROM Items", catalog);
+  const auto minimum_then_maximum_rows =
+      ExecuteRows(minimum_then_maximum, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, minimum_then_maximum_rows.size());
+  EXPECT_EQ(2, minimum_then_maximum_rows[0][0].integer_value());
+  EXPECT_EQ(1.5, minimum_then_maximum_rows[0][1].real_value());
+  EXPECT_EQ(3.0, minimum_then_maximum_rows[0][2].real_value());
+
+  const BytecodeProgram maximum_then_minimum =
+      LowerOrThrow("SELECT id,max(Score),min(Score) FROM Items", catalog);
+  const auto maximum_then_minimum_rows =
+      ExecuteRows(maximum_then_minimum, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, maximum_then_minimum_rows.size());
+  EXPECT_EQ(1, maximum_then_minimum_rows[0][0].integer_value());
+  EXPECT_EQ(3.0, maximum_then_minimum_rows[0][1].real_value());
+  EXPECT_EQ(1.5, maximum_then_minimum_rows[0][2].real_value());
+
+  const BytecodeProgram all_null =
+      LowerOrThrow("SELECT id,min(Score) FROM Items WHERE Score IS NULL", catalog);
+  const auto all_null_rows = ExecuteRows(all_null, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, all_null_rows.size());
+  EXPECT_EQ(3, all_null_rows[0][0].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, all_null_rows[0][1].type());
+
+  const BytecodeProgram empty = LowerOrThrow("SELECT id,count() FROM Items WHERE 0", catalog);
+  const auto empty_rows = ExecuteRows(empty, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, empty_rows.size());
+  EXPECT_EQ(SqlValueType::kNull, empty_rows[0][0].type());
+  EXPECT_EQ(0, empty_rows[0][1].integer_value());
+
+  const BytecodeProgram representative_having =
+      LowerOrThrow("SELECT count() FROM Items HAVING id=1", catalog);
+  EXPECT_EQ(1U, ExecuteRows(representative_having, *pager, catalog->version().generation).size());
+
+  RequireStatus(pager->EndRead());
+  PosixVfs indexed_vfs;
+  pager = TakeValue(Pager::Open(indexed_vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr indexed =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+  const BytecodeProgram indexed_covering = LowerOrThrow("SELECT id,min(score) FROM items", indexed);
+  EXPECT_TRUE(
+      std::ranges::any_of(indexed_covering.instructions(), [](const Instruction& instruction) {
+        const auto* step = std::get_if<StepAggregateInstruction>(&instruction);
+        return step != nullptr && step->effect_output.has_value();
+      }));
+  const auto indexed_covering_rows =
+      ExecuteRows(indexed_covering, *pager, indexed->version().generation);
+  ASSERT_EQ(1U, indexed_covering_rows.size());
+  EXPECT_EQ(4096, indexed_covering_rows[0][0].integer_value());
+  EXPECT_EQ(0, indexed_covering_rows[0][1].integer_value());
+
+  const BytecodeProgram indexed_noncovering =
+      LowerOrThrow("SELECT payload,min(score) FROM items", indexed);
+  const auto indexed_noncovering_rows =
+      ExecuteRows(indexed_noncovering, *pager, indexed->version().generation);
+  ASSERT_EQ(1U, indexed_noncovering_rows.size());
+  EXPECT_FALSE(BlobBytes(indexed_noncovering_rows[0][0]).empty());
+  EXPECT_EQ(0, indexed_noncovering_rows[0][1].integer_value());
+}
+
+TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT score IS NULL,count(),min(id) FROM items "
+      "GROUP BY score IS NULL ORDER BY 1",
+      catalog);
+  const std::vector<std::vector<SqlValue>> rows =
+      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+
+  ASSERT_EQ(2U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[0][1].integer_value());
+  EXPECT_EQ(1, rows[0][2].integer_value());
+  ASSERT_EQ(3U, rows[1].size());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  EXPECT_EQ(1, rows[1][1].integer_value());
+  EXPECT_EQ(3, rows[1][2].integer_value());
+
+  const BytecodeProgram keys_only =
+      LowerOrThrow("SELECT score IS NULL FROM items GROUP BY score IS NULL ORDER BY 1", catalog);
+  const auto key_rows =
+      ExecuteRows(keys_only, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(2U, key_rows.size());
+  EXPECT_EQ(0, key_rows[0][0].integer_value());
+  EXPECT_EQ(1, key_rows[1][0].integer_value());
+}
+
+TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+  const CustomEnvironment custom;
+
+  callback_count = 0;
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT flag,count(volatile_counter()) FROM items "
+      "GROUP BY flag ORDER BY flag LIMIT 1",
+      catalog, custom.Binder());
+  const std::vector<std::vector<SqlValue>> rows =
+      ExecuteRows(program, *pager, catalog->version().generation, custom.Vm());
+
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(2048, rows[0][1].integer_value());
+  EXPECT_EQ(2048U, callback_count);
+}
+
+TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  const auto add_row = [&](std::int64_t id, std::string name, SqlValue score) {
+    const std::array parameters{
+        SqlValue::Integer(id),
+        SqlValue::Text(std::move(name)),
+        std::move(score),
+    };
+    const MutationOutcome outcome = TakeValue(ExecuteMutationProgram(insert, vfs, parameters));
+    EXPECT_EQ(1U, outcome.changes);
+  };
+  add_row(1, "g", SqlValue::Integer(1));
+  add_row(2, "g", SqlValue::Integer(0));
+  add_row(3, "n", SqlValue{});
+  add_row(4, "n", SqlValue{});
+  add_row(5, "t", SqlValue::Integer(5));
+  add_row(6, "t", SqlValue::Integer(5));
+  add_row(7, "A", SqlValue::Integer(2));
+  add_row(8, "a", SqlValue::Integer(1));
+
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+
+  const BytecodeProgram ordinary = LowerOrThrow(
+      "SELECT Name,id,count() FROM Items WHERE id<=6 GROUP BY Name ORDER BY Name", catalog);
+  const auto ordinary_rows =
+      ExecuteRows(ordinary, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(3U, ordinary_rows.size());
+  EXPECT_EQ("g", TextBytes(ordinary_rows[0][0]));
+  EXPECT_EQ(1, ordinary_rows[0][1].integer_value());
+  EXPECT_EQ("n", TextBytes(ordinary_rows[1][0]));
+  EXPECT_EQ(3, ordinary_rows[1][1].integer_value());
+  EXPECT_EQ("t", TextBytes(ordinary_rows[2][0]));
+  EXPECT_EQ(5, ordinary_rows[2][1].integer_value());
+
+  const BytecodeProgram minimum_then_maximum = LowerOrThrow(
+      "SELECT Name,id,min(Score),max(Score) FROM Items "
+      "WHERE id<=6 GROUP BY Name ORDER BY Name",
+      catalog);
+  const auto minimum_then_maximum_rows = ExecuteRows(
+      minimum_then_maximum, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(3U, minimum_then_maximum_rows.size());
+  EXPECT_EQ(1, minimum_then_maximum_rows[0][1].integer_value());
+  EXPECT_EQ(4, minimum_then_maximum_rows[1][1].integer_value());
+  EXPECT_EQ(5, minimum_then_maximum_rows[2][1].integer_value());
+
+  const BytecodeProgram maximum_then_minimum = LowerOrThrow(
+      "SELECT Name,id,max(Score),min(Score) FROM Items "
+      "WHERE id<=6 GROUP BY Name ORDER BY Name",
+      catalog);
+  const auto maximum_then_minimum_rows = ExecuteRows(
+      maximum_then_minimum, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(3U, maximum_then_minimum_rows.size());
+  EXPECT_EQ(2, maximum_then_minimum_rows[0][1].integer_value());
+  EXPECT_EQ(4, maximum_then_minimum_rows[1][1].integer_value());
+  EXPECT_EQ(5, maximum_then_minimum_rows[2][1].integer_value());
+
+  const BytecodeProgram selected_key = LowerOrThrow(
+      "SELECT Name,(Name||'') COLLATE NOCASE,id,min(Score) FROM Items "
+      "WHERE id>=7 GROUP BY (Name||'') COLLATE NOCASE",
+      catalog);
+  const auto selected_key_rows = ExecuteRows(selected_key, *pager, catalog->version().generation,
+                                             VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, selected_key_rows.size());
+  ASSERT_EQ(4U, selected_key_rows[0].size());
+  EXPECT_EQ("a", TextBytes(selected_key_rows[0][0]));
+  EXPECT_EQ("A", TextBytes(selected_key_rows[0][1]));
+  EXPECT_EQ(8, selected_key_rows[0][2].integer_value());
+  EXPECT_EQ(1.0, selected_key_rows[0][3].real_value());
+
+  const BytecodeProgram ordinary_having =
+      LowerOrThrow("SELECT Name,count() FROM Items WHERE id<=2 GROUP BY Name HAVING id=2", catalog);
+  EXPECT_TRUE(ExecuteRows(ordinary_having, *pager, catalog->version().generation,
+                          VmEnvironment::Core(), &memory)
+                  .empty());
+
+  const BytecodeProgram minimum_having = LowerOrThrow(
+      "SELECT Name,min(Score) FROM Items WHERE id<=2 GROUP BY Name HAVING id=2", catalog);
+  const auto minimum_having_rows = ExecuteRows(
+      minimum_having, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(1U, minimum_having_rows.size());
+  EXPECT_EQ("g", TextBytes(minimum_having_rows[0][0]));
+  EXPECT_EQ(0.0, minimum_having_rows[0][1].real_value());
+}
+
+TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 113}));
+  const TemporaryStorageFactory memory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                }));
+  const CustomEnvironment custom;
+
+  callback_count = 0;
+  const BytecodeProgram zero = LowerOrThrow(
+      "SELECT volatile_counter(),count(volatile_counter()) FROM items "
+      "GROUP BY score IS NULL LIMIT 0",
+      catalog, custom.Binder());
+  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram numeric = LowerOrThrow(
+      "SELECT count() FROM items GROUP BY numeric_representative()", catalog, custom.Binder());
+  const auto numeric_rows =
+      ExecuteRows(numeric, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, numeric_rows.size());
+  EXPECT_EQ(3, numeric_rows[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram offset = LowerOrThrow(
+      "SELECT volatile_counter(),score IS NULL,count() FROM items "
+      "GROUP BY score IS NULL ORDER BY 2 LIMIT 1 OFFSET 1",
+      catalog, custom.Binder());
+  const auto offset_rows =
+      ExecuteRows(offset, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, offset_rows.size());
+  EXPECT_EQ(1, offset_rows[0][0].integer_value());
+  EXPECT_EQ(1, offset_rows[0][1].integer_value());
+  EXPECT_EQ(1, offset_rows[0][2].integer_value());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram having = LowerOrThrow(
+      "SELECT volatile_counter(),score IS NULL,count() FROM items "
+      "GROUP BY score IS NULL HAVING count()>1 ORDER BY 2",
+      catalog, custom.Binder());
+  const auto having_rows =
+      ExecuteRows(having, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, having_rows.size());
+  EXPECT_EQ(1, having_rows[0][0].integer_value());
+  EXPECT_EQ(0, having_rows[0][1].integer_value());
+  EXPECT_EQ(2, having_rows[0][2].integer_value());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram sorted_limit =
+      LowerOrThrow("SELECT count(fail_after_one(name)) FROM items GROUP BY id+0 LIMIT 1", catalog,
+                   custom.Binder());
+  const auto sorted_limit_rows =
+      ExecuteRows(sorted_limit, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, sorted_limit_rows.size());
+  EXPECT_EQ(1, sorted_limit_rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram top_n = LowerOrThrow(
+      "SELECT volatile_counter(),score IS NULL,count() FROM items "
+      "GROUP BY score IS NULL ORDER BY count() DESC LIMIT 1",
+      catalog, custom.Binder());
+  const auto top_n_rows =
+      ExecuteRows(top_n, *pager, catalog->version().generation, custom.Vm(), &memory);
+  ASSERT_EQ(1U, top_n_rows.size());
+  EXPECT_EQ(1, top_n_rows[0][0].integer_value());
+  EXPECT_EQ(0, top_n_rows[0][1].integer_value());
+  EXPECT_EQ(2, top_n_rows[0][2].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 127}));
+
+  const BytecodeProgram empty =
+      LowerOrThrow("SELECT count() FROM items WHERE 0 GROUP BY score IS NULL", catalog);
+  EXPECT_TRUE(ExecuteRows(empty, *pager, catalog->version().generation).empty());
+
+  const BytecodeProgram single = LowerOrThrow("SELECT 1,count() GROUP BY 1", catalog);
+  const auto single_rows = ExecuteRows(single, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, single_rows.size());
+  EXPECT_EQ(1, single_rows[0][0].integer_value());
+  EXPECT_EQ(1, single_rows[0][1].integer_value());
+
+  const BytecodeProgram lookup =
+      LowerOrThrow("SELECT name,count() FROM items WHERE id=2 GROUP BY name", catalog);
+  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, lookup_rows.size());
+  EXPECT_EQ("beta", TextBytes(lookup_rows[0][0]));
+  EXPECT_EQ(1, lookup_rows[0][1].integer_value());
+
+  RequireStatus(pager->EndRead());
+  pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr indexed =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 131}));
+
+  const BytecodeProgram reverse = LowerOrThrow(
+      "SELECT flag,count() FROM items GROUP BY flag ORDER BY flag DESC LIMIT 1", indexed);
+  const auto reverse_rows = ExecuteRows(reverse, *pager, indexed->version().generation);
+  ASSERT_EQ(1U, reverse_rows.size());
+  EXPECT_EQ(1, reverse_rows[0][0].integer_value());
+  EXPECT_EQ(2048, reverse_rows[0][1].integer_value());
+
+  const BytecodeProgram ranged = LowerOrThrow(
+      "SELECT score,count() FROM items WHERE score>=10 AND score<13 "
+      "GROUP BY score ORDER BY score DESC",
+      indexed);
+  const auto ranged_rows = ExecuteRows(ranged, *pager, indexed->version().generation);
+  ASSERT_EQ(3U, ranged_rows.size());
+  EXPECT_EQ(12, ranged_rows[0][0].integer_value());
+  EXPECT_EQ(11, ranged_rows[1][0].integer_value());
+  EXPECT_EQ(10, ranged_rows[2][0].integer_value());
+
+  const BytecodeProgram noncovering = LowerOrThrow(
+      "SELECT category,payload,count() FROM items "
+      "GROUP BY category ORDER BY category LIMIT 1",
+      indexed);
+  const auto noncovering_rows = ExecuteRows(noncovering, *pager, indexed->version().generation);
+  ASSERT_EQ(1U, noncovering_rows.size());
+  EXPECT_EQ("category-0001", TextBytes(noncovering_rows[0][0]));
+  EXPECT_FALSE(BlobBytes(noncovering_rows[0][1]).empty());
+  EXPECT_EQ(1, noncovering_rows[0][2].integer_value());
+}
+
+TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
+  constexpr ByteCount kGroupedSpillThreshold{64U * 1024U};
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const CatalogSnapshotPtr catalog =
+      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 137}));
+  const TemporaryStorageFactory temporary_storage = TakeValue(
+      TemporaryStorageFactory::Create(vfs, *pager,
+                                      TemporaryStorageOptions{
+                                          .mode = TemporaryStoreMode::kFile,
+                                          .sorter_memory_threshold = kGroupedSpillThreshold,
+                                      }));
+
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT flag+0,count() FROM items "
+      "GROUP BY flag+0 ORDER BY count() DESC,1",
+      catalog);
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary_storage);
+
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(2048, rows[0][1].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  EXPECT_EQ(2048, rows[1][1].integer_value());
 }
 
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
