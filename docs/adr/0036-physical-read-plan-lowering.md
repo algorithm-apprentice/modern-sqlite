@@ -100,6 +100,13 @@ Add read lowering under the canonical plan-lowering module:
 - `include/modern_sqlite/lowering/plan_lowering.hpp`; and
 - `src/lowering/plan_lowering.cpp`.
 
+Per ADR-0067, the later global aggregate access implementation is isolated
+behind the internal `src/lowering/global_aggregate_access.hpp` contract and
+implemented in `src/lowering/global_aggregate_access.cpp`, with shared
+lowering result and error helpers in
+`src/lowering/plan_lowering_internal.hpp`. The public lowering boundary and
+dependency direction remain unchanged.
+
 Extend the typed bytecode and VM with:
 
 - `MustBeIntegerInstruction`; and
