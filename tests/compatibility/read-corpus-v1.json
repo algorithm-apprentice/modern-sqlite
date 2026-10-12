@@ -1272,14 +1272,18 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
+      "expectation": "compare",
       "feature": "group-by",
-      "id": "unsupported-group-by",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
+      "id": "group-by-category-count",
       "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
         {"op": "finalize"}
       ],
-      "sql_hex": "53454c4543542063617465676f72792c20636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f7279"
+      "sql_hex": "53454c4543542063617465676f72792c20636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f7279204f524445522042592063617465676f7279"
     }
   ],
   "databases": [
@@ -1314,6 +1318,7 @@
     "execution-errors",
     "expressions",
     "global-aggregate",
+    "group-by",
     "limit-offset",
     "lifecycle",
     "metadata",

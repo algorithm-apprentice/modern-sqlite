@@ -83,7 +83,7 @@ class ReadCompatibilityTest(unittest.TestCase):
             corpus = json.loads(self.arguments.corpus.read_text())
             oracle = json.loads(self.arguments.oracle.read_text())
             scenarios = [
-                ("unsupported-group-by", "unsupported boundary regression"),
+                ("unsupported-join", "unsupported boundary regression"),
                 ("syntax-error", "compatibility mismatch"),
             ]
             for case_id, classification in scenarios:
