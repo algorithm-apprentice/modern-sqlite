@@ -577,6 +577,67 @@ int main() try {
     }
   }
 
+  constexpr std::string_view kModifierSql =
+      "SELECT group_concat(?1 ORDER BY ?2),count(DISTINCT ?3)";
+  std::size_t modifier_step_allocations = 0;
+  {
+    auto session = ReadSession::Open(prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, kModifierSql);
+    if (!statement.Bind(1, SqlValue::Text("modifier")).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(1)).has_value() ||
+        !statement.Bind(3, SqlValue::Text("distinct")).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto stepped = statement.Step();
+    if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 2U) {
+      return 1;
+    }
+    modifier_step_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (modifier_step_allocations == 0U || modifier_step_allocations > 512U) {
+    return 1;
+  }
+
+  for (std::size_t failure = 0; failure < modifier_step_allocations; ++failure) {
+    auto session = ReadSession::Open(prepare_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, kModifierSql);
+    if (!statement.Bind(1, SqlValue::Text("modifier")).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(1)).has_value() ||
+        !statement.Bind(3, SqlValue::Text("distinct")).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto stepped = statement.Step();
+      returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom) {
+      return 1;
+    }
+    const Status reset = statement.Reset();
+    if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+      return 1;
+    }
+    const auto recovered = statement.Step();
+    if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 2U) {
+      return 1;
+    }
+  }
+
   {
     auto session = ReadSession::Open(prepare_path);
     if (!session.has_value()) {

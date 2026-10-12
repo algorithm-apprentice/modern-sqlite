@@ -103,6 +103,9 @@ Delivery update: ADR-0068 defines package 12's grouped execution boundary,
 ordered and sorted schedules, representative snapshots, selected grouping-key
 reuse, and completed-group ORDER/LIMIT behavior.
 
+ADR-0069 defines package 13's FILTER, DISTINCT, local ordering, combined
+unique-ordering, capability lifecycle, and representative-gate schedules.
+
 ### 2. Pin the accepted SQL surface
 
 Ordinary SELECT cores gain:

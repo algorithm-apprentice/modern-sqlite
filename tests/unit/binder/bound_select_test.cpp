@@ -1148,6 +1148,29 @@ TEST(Binder, BindsAggregateModifiersAndPreservesScalarModifierErrors) {
                   BindErrorCode::kAggregateMisuse, "misuse of aggregate function count()");
 }
 
+TEST(Binder, PublishesAggregateArgumentOrderKeyReuse) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect reused =
+      BindOrThrow("SELECT group_concat(Name ORDER BY Name) FROM Items", catalog);
+  ASSERT_EQ(1U, reused.aggregate_invocations().size());
+  EXPECT_TRUE(reused.aggregate_invocations().front().argument_reuses_single_order_key);
+
+  const BoundSelect rowid =
+      BindOrThrow("SELECT group_concat(id ORDER BY _rowid_) FROM Items", catalog);
+  ASSERT_EQ(1U, rowid.aggregate_invocations().size());
+  EXPECT_TRUE(rowid.aggregate_invocations().front().argument_reuses_single_order_key);
+
+  const BoundSelect different =
+      BindOrThrow("SELECT group_concat(Name ORDER BY Score) FROM Items", catalog);
+  ASSERT_EQ(1U, different.aggregate_invocations().size());
+  EXPECT_FALSE(different.aggregate_invocations().front().argument_reuses_single_order_key);
+
+  const BoundSelect multiple =
+      BindOrThrow("SELECT group_concat(Name ORDER BY Name,Score) FROM Items", catalog);
+  ASSERT_EQ(1U, multiple.aggregate_invocations().size());
+  EXPECT_FALSE(multiple.aggregate_invocations().front().argument_reuses_single_order_key);
+}
+
 TEST(Binder, LetsArgumentErrorsReplaceProvisionalFunctionLookupErrors) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   for (const std::string_view sql : {

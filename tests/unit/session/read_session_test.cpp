@@ -524,6 +524,35 @@ TEST(ReadSession, ExecutesAndResetsGroupedAggregates) {
   EXPECT_EQ(0, IntegerValue(statement.row()[0]));
 }
 
+TEST(ReadSession, ExecutesAndResetsAggregateModifiers) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT score IS NULL,"
+                       "group_concat(name ORDER BY id DESC) FILTER (WHERE id>1),"
+                       "count(DISTINCT category) "
+                       "FROM items GROUP BY score IS NULL ORDER BY 1");
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(3U, statement.row().size());
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("beta", TextValue(statement.row()[1]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("gamma", TextValue(statement.row()[1]));
+  EXPECT_EQ(0, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("beta", TextValue(statement.row()[1]));
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+}
+
 TEST(ReadSession, ExecutesAndResetsGlobalCount) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   ReadStatement statement = PrepareStatement(session, "SELECT count() FROM items");

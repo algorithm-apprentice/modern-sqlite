@@ -7038,6 +7038,245 @@
       }
     },
     {
+      "expectation": "compare",
+      "id": "aggregate-modifiers-global",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742844495354494e43542073636f7265292046494c544552202857484552452069643e3129"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e636174286e616d65204f52444552204259206964204445534329"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e6361742844495354494e43542063617465676f7279204f524445522042592063617465676f727929"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "hex": "44656c74612c67616d6d612c626574612c616c706861",
+                "type": "text"
+              },
+              {
+                "hex": "666f75722c6f6e652c74776f",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "reset",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742844495354494e43542073636f7265292046494c544552202857484552452069643e3129"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e636174286e616d65204f52444552204259206964204445534329"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e6361742844495354494e43542063617465676f7279204f524445522042592063617465676f727929"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "hex": "44656c74612c67616d6d612c626574612c616c706861",
+                "type": "text"
+              },
+              {
+                "hex": "666f75722c6f6e652c74776f",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 4,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 5,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742844495354494e43542073636f7265292046494c544552202857484552452069643e3129"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "67726f75705f636f6e636174286e616d65204f52444552204259206964204445534329"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "67726f75705f636f6e6361742844495354494e43542063617465676f7279204f524445522042592063617465676f727929"
+            }
+          ],
+          "next_offset": 145,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "aggregate-modifiers-grouped",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "73636f7265204953204e554c4c"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292046494c544552202857484552452069643e3129"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742844495354494e43542063617465676f727929"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              },
+              {
+                "hex": "44656c74612c62657461",
+                "type": "text"
+              },
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "73636f7265204953204e554c4c"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292046494c544552202857484552452069643e3129"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742844495354494e43542063617465676f727929"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "hex": "67616d6d61",
+                "type": "text"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 2,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 3,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "73636f7265204953204e554c4c"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292046494c544552202857484552452069643e3129"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742844495354494e43542063617465676f727929"
+            }
+          ],
+          "next_offset": 146,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
       "boundary": {
         "first_step": "row",
         "prepare": "statement"
@@ -7968,7 +8207,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "9cda27e5d3fcc3677dc696febd5712141bcc5c045db7518f261c76d9be979c65",
+  "corpus_sha256": "53c9fa0a64b54ac175b494354e552282476f3690c01ae17db7514018135a1eff",
   "databases": [
     {
       "id": "core",

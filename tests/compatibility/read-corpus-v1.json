@@ -1116,6 +1116,34 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-modifiers",
+      "id": "aggregate-modifiers-global",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e742844495354494e43542073636f7265292046494c544552202857484552452069643e31292c67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292c67726f75705f636f6e6361742844495354494e43542063617465676f7279204f524445522042592063617465676f7279292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-modifiers",
+      "id": "aggregate-modifiers-grouped",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542073636f7265204953204e554c4c2c67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292046494c544552202857484552452069643e31292c636f756e742844495354494e43542063617465676f7279292046524f4d206974656d732047524f55502042592073636f7265204953204e554c4c204f524445522042592031"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "pattern-operator",
       "id": "unsupported-pattern",
@@ -1310,6 +1338,7 @@
   "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
   "schema_version": 1,
   "supported_matrix": [
+    "aggregate-modifiers",
     "alter-defaults",
     "constant-select",
     "core-functions",

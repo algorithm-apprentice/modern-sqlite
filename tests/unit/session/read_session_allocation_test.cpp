@@ -94,6 +94,10 @@ int main() try {
       Prepare(session, "SELECT count(),min(category),group_concat(name) FROM items");
   ReadStatement grouped = Prepare(
       session, "SELECT score IS NULL,count(),min(id) FROM items GROUP BY score IS NULL ORDER BY 1");
+  ReadStatement modifiers =
+      Prepare(session,
+              "SELECT score IS NULL,group_concat(name ORDER BY id DESC),count(DISTINCT category) "
+              "FROM items GROUP BY score IS NULL ORDER BY 1");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -247,6 +251,28 @@ int main() try {
   }
   ResetCount();
   if (!grouped.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto modifier_first = modifiers.Step();
+  if (!modifier_first.has_value() || *modifier_first != ReadStep::kRow ||
+      modifiers.row().size() != 3U || !AtMostAllocations(256U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto modifier_second = modifiers.Step();
+  if (!modifier_second.has_value() || *modifier_second != ReadStep::kRow ||
+      !AtMostAllocations(64U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto modifier_done = modifiers.Step();
+  if (!modifier_done.has_value() || *modifier_done != ReadStep::kDone || !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!modifiers.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 

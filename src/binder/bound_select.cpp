@@ -4305,6 +4305,9 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kWrongFunctionArity, span,
                                          "DISTINCT aggregates must have exactly one argument"));
     }
+    const bool argument_reuses_single_order_key =
+        arguments.size() == 1U && order_by.size() == 1U &&
+        BoundSemanticallyEquivalent(arguments.front(), order_by.front().expression);
 
     BindExpected<BoundAggregateFunctionId> bound_function = InternAggregateFunction(function, span);
     if (!bound_function.has_value()) {
@@ -4349,6 +4352,7 @@ class StatementBinder final {
                 .distinct = call.distinct,
                 .order_by = std::move(order_by),
                 .filter = filter,
+                .argument_reuses_single_order_key = argument_reuses_single_order_key,
             },
         .phase = active_aggregate_phase_,
     });

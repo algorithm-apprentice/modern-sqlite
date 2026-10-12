@@ -113,6 +113,11 @@ drain, representative snapshots, and completed-group output in
 `src/lowering/grouped_aggregate_lowering.cpp`. Existing physical access
 traversal remains in `PlanLowerer`; the public lowering boundary is unchanged.
 
+ADR-0069 adds `src/lowering/aggregate_modifier_lowering.hpp` and
+`src/lowering/aggregate_modifier_lowering.cpp` for the shared per-invocation
+FILTER, DISTINCT, local-order, drain, reset, and close lifecycle used by both
+global and grouped execution. It adds no public lowering or bytecode type.
+
 Extend the typed bytecode and VM with:
 
 - `MustBeIntegerInstruction`; and

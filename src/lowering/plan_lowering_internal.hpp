@@ -2,6 +2,7 @@
 #define MODERN_SQLITE_SRC_LOWERING_PLAN_LOWERING_INTERNAL_HPP_
 
 #include <cassert>
+#include <cstdint>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -15,6 +16,12 @@ namespace modern_sqlite::lowering_internal {
 inline constexpr std::string_view kEmitJumpFailureDetail = "unable to emit a bytecode jump";
 inline constexpr std::string_view kEmitConditionalJumpFailureDetail =
     "unable to emit a conditional bytecode jump";
+
+enum class AggregateExpressionSource : std::uint8_t {
+  AccessRow,
+  SortedRow,
+  Representative,
+};
 
 template <typename T>
 using LoweringResult = std::expected<T, PlanLoweringError>;

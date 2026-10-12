@@ -283,6 +283,7 @@ struct BoundAggregateInvocation {
   bool distinct = false;
   std::vector<BoundOrderingTerm> order_by{};
   std::optional<BoundExpressionId> filter{};
+  bool argument_reuses_single_order_key = false;
 };
 
 struct BoundGroupingTerm {
