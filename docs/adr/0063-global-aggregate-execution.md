@@ -327,6 +327,8 @@ local ordering, or aggregate temporary relation opens in this package.
 
 Delivery update: ADR-0068 supersedes the grouped-execution and representative
 snapshot deferrals while retaining this ADR's global schedules unchanged.
+ADR-0069 subsequently supersedes the aggregate-modifier deferral for the same
+accepted single-core global statement boundary.
 
 ## Consequences
 

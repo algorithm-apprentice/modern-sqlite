@@ -1,10 +1,10 @@
 #ifndef MODERN_SQLITE_SRC_LOWERING_GROUPED_AGGREGATE_LOWERING_HPP_
 #define MODERN_SQLITE_SRC_LOWERING_GROUPED_AGGREGATE_LOWERING_HPP_
 
-#include <cstdint>
 #include <optional>
 #include <span>
 
+#include "aggregate_modifier_lowering.hpp"
 #include "modern_sqlite/binder/bound_select.hpp"
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/optimizer/physical_plan.hpp"
@@ -12,23 +12,21 @@
 
 namespace modern_sqlite::lowering_internal {
 
-enum class GroupedExpressionSource : std::uint8_t {
-  AccessRow,
-  SortedRow,
-  Representative,
-};
-
 struct GroupedCompletionTargets {
   Label skipped;
   Label stopped;
 };
 
-class GroupedAggregateServices {
+class GroupedAggregateServices : public AggregateModifierServices {
  public:
   virtual ~GroupedAggregateServices() = default;
 
-  [[nodiscard]] virtual LoweringResult<void> EmitGroupedExpression(
-      BoundExpressionId id, RegisterId destination, GroupedExpressionSource source) = 0;
+  [[nodiscard]] virtual LoweringResult<void> OpenGroupedAggregateInvocations() = 0;
+  [[nodiscard]] virtual LoweringResult<void> StepGroupedAggregateInvocations(
+      AggregateExpressionSource source, bool first_row) = 0;
+  [[nodiscard]] virtual LoweringResult<void> FinalizeGroupedAggregateInvocations() = 0;
+  [[nodiscard]] virtual LoweringResult<void> ResetGroupedAggregateInvocations() = 0;
+  [[nodiscard]] virtual LoweringResult<void> CloseGroupedAggregateInvocations() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitCompletedGroupedAggregate(
       GroupedCompletionTargets targets) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGroupedOutputCompletion() = 0;
@@ -38,11 +36,6 @@ struct GroupedAggregateInput {
   ProgramBuilder* builder = nullptr;
   const BoundAggregateProgram* program = nullptr;
   const PhysicalAggregateNode* aggregate = nullptr;
-  std::span<const BoundAggregateFunction> aggregate_functions{};
-  std::span<const BoundAggregateInvocation> aggregate_invocations{};
-  std::span<const std::optional<AggregateId>> aggregate_descriptors{};
-  std::span<const std::optional<RegisterId>> aggregate_argument_blocks{};
-  std::span<const std::optional<RegisterId>> aggregate_result_registers{};
   std::span<const SymbolId> collation_symbols{};
   std::span<const BoundExpressionId> retained_leaves{};
   std::span<const RegisterId> retained_leaf_registers{};
@@ -59,11 +52,12 @@ struct GroupedAggregateInput {
   SymbolId binary_collation{0};
   ConstantId zero_constant{0};
   ConstantId one_constant{0};
+  bool has_representative_controller = false;
   bool may_stop_early = false;
 };
 
 [[nodiscard]] LoweringResult<void> EmitGroupedAggregateInitialization(
-    const GroupedAggregateInput& input);
+    const GroupedAggregateInput& input, GroupedAggregateServices& services);
 [[nodiscard]] LoweringResult<void> EmitGroupedAggregateRow(const GroupedAggregateInput& input,
                                                            GroupedAggregateServices& services);
 [[nodiscard]] LoweringResult<void> EmitGroupedAggregateCompletion(

@@ -390,6 +390,10 @@ Development follows red-green-refactor. Package-local tests cover:
 No aggregate SQL execution, grouping, state stepping, DISTINCT membership,
 FILTER schedule, local sorting, or result row is accepted by this package.
 
+Delivery update: ADR-0069 consumes the bound DISTINCT, FILTER, local-order,
+collation, and derived single-key argument-reuse metadata while preserving
+this binder-owned semantic boundary.
+
 ## Consequences
 
 ### Positive

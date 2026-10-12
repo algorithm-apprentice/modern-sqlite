@@ -336,7 +336,7 @@ int main() try {
       PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
       PhysicalFixture(indexed_catalog, "SELECT Payload,min(Name) FROM Items"),
   };
-  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{41U, 37U, 46U, 51U, 57U};
+  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{42U, 38U, 47U, 52U, 58U};
   std::unique_ptr<BytecodeProgram> aggregate_published;
   for (std::size_t plan_index = 0; plan_index < aggregate_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -365,7 +365,7 @@ int main() try {
                       "SELECT Name||'',count(),min(id) FROM Items "
                       "GROUP BY Name||'' ORDER BY count() DESC LIMIT ?1"),
   };
-  constexpr std::array<std::size_t, 2> kExpectedGroupedAllocations{56U, 71U};
+  constexpr std::array<std::size_t, 2> kExpectedGroupedAllocations{57U, 73U};
   std::unique_ptr<BytecodeProgram> grouped_published;
   for (std::size_t plan_index = 0; plan_index < grouped_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -382,6 +382,39 @@ int main() try {
       }
       if (plan_index + 1U == grouped_plans.size() && grouped_published == nullptr) {
         grouped_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
+  const std::array<PhysicalPlan, 3> modifier_plans{
+      PhysicalFixture(catalog,
+                      "SELECT count(DISTINCT Name) FILTER (WHERE id>?1),"
+                      "group_concat(Name ORDER BY id DESC) FROM Items"),
+      PhysicalFixture(catalog,
+                      "SELECT Name||'',group_concat(DISTINCT Name ORDER BY Name) "
+                      "FROM Items GROUP BY Name||''"),
+      PhysicalFixture(catalog,
+                      "SELECT Name||'',group_concat(DISTINCT Name ORDER BY id),"
+                      "count(DISTINCT id) FILTER (WHERE id>?1) "
+                      "FROM Items GROUP BY Name||'' ORDER BY 1"),
+  };
+  constexpr std::array<std::size_t, 3> kExpectedModifierAllocations{56U, 65U, 77U};
+  std::unique_ptr<BytecodeProgram> modifier_published;
+  for (std::size_t plan_index = 0; plan_index < modifier_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(modifier_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations != kExpectedModifierAllocations[plan_index]) {
+        return 1;
+      }
+      if (plan_index + 1U == modifier_plans.size() && modifier_published == nullptr) {
+        modifier_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
       }
     }
   }
@@ -662,7 +695,8 @@ int main() try {
     }
   }
   if (published == nullptr || aggregate_published == nullptr || grouped_published == nullptr ||
-      distinct_published == nullptr || streaming_published == nullptr) {
+      modifier_published == nullptr || distinct_published == nullptr ||
+      streaming_published == nullptr) {
     return 1;
   }
 
@@ -696,6 +730,10 @@ int main() try {
   checksum += grouped_published->sorters().size();
   checksum += grouped_published->top_ns().size();
   checksum += grouped_published->instructions().size();
+  checksum += modifier_published->aggregates().size();
+  checksum += modifier_published->relations().size();
+  checksum += modifier_published->sorters().size();
+  checksum += modifier_published->instructions().size();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

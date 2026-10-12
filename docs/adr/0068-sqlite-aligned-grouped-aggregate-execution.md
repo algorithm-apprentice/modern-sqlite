@@ -203,7 +203,7 @@ group comparison without adding record-comparison bytecode or a hash table.
 Grouped expression emission distinguishes three compile-time source views:
 
 ```cpp
-enum class GroupedExpressionSource : std::uint8_t {
+enum class AggregateExpressionSource : std::uint8_t {
   AccessRow,
   SortedRow,
   Representative,
@@ -370,6 +370,10 @@ for the row. A step failure stops immediately and exposes no partial result.
 
 Package 13 may refine how FILTER and DISTINCT skip or preserve the shared
 effect register. Package 12 does not pre-implement those modifiers.
+
+Delivery update: ADR-0069 supersedes that deferral with the exact filtered,
+DISTINCT-skipped, stale-gate, and ordered-invocation schedules while retaining
+this package's group-boundary ownership.
 
 ### 10. Reuse only the selected GROUP BY result target
 

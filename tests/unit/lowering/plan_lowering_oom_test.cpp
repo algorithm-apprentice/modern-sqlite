@@ -389,7 +389,7 @@ int main() try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 7> aggregate_plans{
+  const std::array<PhysicalPlan, 10> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       AggregateFixture(catalog, "SELECT max(id) FROM Items"),
       AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
@@ -401,6 +401,16 @@ int main() try {
       AggregateFixture(catalog,
                        "SELECT Name||'',count(),min(id) FROM Items "
                        "GROUP BY Name||'' ORDER BY count() DESC LIMIT ?1"),
+      AggregateFixture(catalog,
+                       "SELECT count(DISTINCT Name) FILTER (WHERE id>?1),"
+                       "group_concat(Name ORDER BY id DESC) FROM Items"),
+      AggregateFixture(catalog,
+                       "SELECT Name||'',group_concat(DISTINCT Name ORDER BY Name) "
+                       "FROM Items GROUP BY Name||''"),
+      AggregateFixture(catalog,
+                       "SELECT Name||'',group_concat(DISTINCT Name ORDER BY id),"
+                       "count(DISTINCT id) FILTER (WHERE id>?1) "
+                       "FROM Items GROUP BY Name||'' ORDER BY 1"),
   };
   const PhysicalPlan distinct =
       DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");

@@ -134,6 +134,11 @@ framework or move grouped behavior into the module speculatively.
 ADR-0068 therefore adds a separate grouped-lowering module. It leaves this
 global access boundary and its service contract unchanged.
 
+ADR-0069 routes ordinary global invocation lifecycle through the shared
+aggregate-modifier module and extends the strict indexed MIN/MAX step service
+only far enough to preserve representative effects. Cursor and access-shape
+ownership remains unchanged.
+
 ## Rejected alternatives
 
 ### Split the complete `PlanLowerer` class

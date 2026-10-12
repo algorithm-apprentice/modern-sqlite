@@ -253,6 +253,9 @@ int main() try {
   }
   checksum += aggregate_select.aggregate_functions().size();
   checksum += aggregate_select.aggregate_invocations().size();
+  for (const BoundAggregateInvocation& invocation : aggregate_select.aggregate_invocations()) {
+    checksum += static_cast<std::size_t>(invocation.argument_reuses_single_order_key);
+  }
   for (const BoundQueryCore& core : aggregate_select.query_cores()) {
     if (const auto* selected = std::get_if<BoundSelectCore>(&core);
         selected != nullptr && selected->aggregate.has_value()) {

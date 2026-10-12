@@ -15,6 +15,9 @@ class GroupedAggregateEmitter final {
       : input_(input), services_(services) {}
 
   [[nodiscard]] LoweringResult<void> Initialize() {
+    if (services_ == nullptr) {
+      return std::unexpected(InternalFailure("grouped aggregate services are unavailable"));
+    }
     if (auto loaded = Append(LoadConstantInstruction{
             .constant = input_.zero_constant,
             .output = input_.has_group_register,
@@ -62,7 +65,7 @@ class GroupedAggregateEmitter final {
         return opened;
       }
     }
-    return OpenAggregates();
+    return services_->OpenGroupedAggregateInvocations();
   }
 
   [[nodiscard]] LoweringResult<void> EmitRow() {
@@ -70,11 +73,12 @@ class GroupedAggregateEmitter final {
       return std::unexpected(InternalFailure("grouped aggregate services are unavailable"));
     }
     if (input_.aggregate->strategy == PhysicalAggregateStrategy::kOrderedGroup) {
-      if (auto keys = EmitGroupKeys(GroupedExpressionSource::AccessRow, input_.current_group_first);
+      if (auto keys =
+              EmitGroupKeys(AggregateExpressionSource::AccessRow, input_.current_group_first);
           !keys.has_value()) {
         return keys;
       }
-      return ConsumeCurrentRow(GroupedExpressionSource::AccessRow);
+      return ConsumeCurrentRow(AggregateExpressionSource::AccessRow);
     }
     if (input_.aggregate->strategy != PhysicalAggregateStrategy::kSortedGroup) {
       return std::unexpected(InternalFailure("grouped aggregate strategy is invalid"));
@@ -145,10 +149,10 @@ class GroupedAggregateEmitter final {
     return RegisterId{input_.previous_group_first.value() + static_cast<std::uint32_t>(index)};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitGroupKeys(GroupedExpressionSource source,
+  [[nodiscard]] LoweringResult<void> EmitGroupKeys(AggregateExpressionSource source,
                                                    RegisterId first) {
     for (std::size_t index = 0; index < input_.program->group_by.size(); ++index) {
-      if (auto emitted = services_->EmitGroupedExpression(
+      if (auto emitted = services_->EmitAggregateExpression(
               input_.program->group_by[index].expression,
               RegisterId{first.value() + static_cast<std::uint32_t>(index)}, source);
           !emitted.has_value()) {
@@ -196,81 +200,11 @@ class GroupedAggregateEmitter final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> OpenAggregates() {
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      if (invocation_id.value() >= input_.aggregate_descriptors.size() ||
-          !input_.aggregate_descriptors[invocation_id.value()].has_value()) {
-        return std::unexpected(InternalFailure("grouped aggregate descriptor is unavailable"));
-      }
-      if (auto opened = Append(OpenAggregateInstruction{
-              .aggregate = AssumeValue(input_.aggregate_descriptors[invocation_id.value()]),
-          });
-          !opened.has_value()) {
-        return opened;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> ResetAggregates() {
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      if (auto reset = Append(ResetAggregateInstruction{
-              .aggregate = AssumeValue(input_.aggregate_descriptors[invocation_id.value()]),
-          });
-          !reset.has_value()) {
-        return reset;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> FinalizeAggregates() {
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      if (invocation_id.value() >= input_.aggregate_result_registers.size() ||
-          !input_.aggregate_result_registers[invocation_id.value()].has_value()) {
-        return std::unexpected(
-            InternalFailure("grouped aggregate final result register is unavailable"));
-      }
-      if (auto finalized = Append(FinalizeAggregateInstruction{
-              .aggregate = AssumeValue(input_.aggregate_descriptors[invocation_id.value()]),
-              .output = AssumeValue(input_.aggregate_result_registers[invocation_id.value()]),
-          });
-          !finalized.has_value()) {
-        return finalized;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> CloseAggregates() {
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      if (auto closed = Append(CloseAggregateInstruction{
-              .aggregate = AssumeValue(input_.aggregate_descriptors[invocation_id.value()]),
-          });
-          !closed.has_value()) {
-        return closed;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] bool HasRepresentativeController() const {
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      const BoundAggregateInvocation& invocation =
-          input_.aggregate_invocations[invocation_id.value()];
-      if (input_.aggregate_functions[invocation.function.value()].extremum !=
-          BoundAggregateExtremumKind::kNone) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  [[nodiscard]] LoweringResult<void> CaptureRepresentative(GroupedExpressionSource source) {
+  [[nodiscard]] LoweringResult<void> CaptureRepresentative(AggregateExpressionSource source) {
     for (std::size_t index = 0; index < input_.program->representative_leaves.size(); ++index) {
       if (auto emitted =
-              services_->EmitGroupedExpression(input_.program->representative_leaves[index],
-                                               input_.representative_registers[index], source);
+              services_->EmitAggregateExpression(input_.program->representative_leaves[index],
+                                                 input_.representative_registers[index], source);
           !emitted.has_value()) {
         return emitted;
       }
@@ -278,44 +212,19 @@ class GroupedAggregateEmitter final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> StepAggregates(GroupedExpressionSource source,
+  [[nodiscard]] LoweringResult<void> StepAggregates(AggregateExpressionSource source,
                                                     bool first_row) {
     const bool has_representative = !input_.program->representative_leaves.empty();
-    const bool has_controller = has_representative && HasRepresentativeController();
+    const bool has_controller = has_representative && input_.has_representative_controller;
     if (has_controller && (!input_.representative_effect_register.has_value() ||
                            !input_.representative_replace_register.has_value())) {
       return std::unexpected(
           InternalFailure("grouped representative effect registers are unavailable"));
     }
 
-    for (const BoundAggregateInvocationId invocation_id : input_.program->invocations) {
-      const BoundAggregateInvocation& invocation =
-          input_.aggregate_invocations[invocation_id.value()];
-      if (invocation_id.value() >= input_.aggregate_argument_blocks.size() ||
-          !input_.aggregate_argument_blocks[invocation_id.value()].has_value()) {
-        return std::unexpected(InternalFailure("grouped aggregate argument block is unavailable"));
-      }
-      const RegisterId first = AssumeValue(input_.aggregate_argument_blocks[invocation_id.value()]);
-      for (std::size_t index = 0; index < invocation.arguments.size(); ++index) {
-        if (auto emitted = services_->EmitGroupedExpression(
-                invocation.arguments[index],
-                RegisterId{first.value() + static_cast<std::uint32_t>(index)}, source);
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      const bool controls_representative =
-          has_controller && input_.aggregate_functions[invocation.function.value()].extremum !=
-                                BoundAggregateExtremumKind::kNone;
-      if (auto stepped = Append(StepAggregateInstruction{
-              .aggregate = AssumeValue(input_.aggregate_descriptors[invocation_id.value()]),
-              .first_argument = first,
-              .effect_output =
-                  controls_representative ? input_.representative_effect_register : std::nullopt,
-          });
-          !stepped.has_value()) {
-        return stepped;
-      }
+    if (auto stepped = services_->StepGroupedAggregateInvocations(source, first_row);
+        !stepped.has_value()) {
+      return stepped;
     }
 
     if (!has_representative) {
@@ -350,7 +259,7 @@ class GroupedAggregateEmitter final {
     return BindLabel(*keep);
   }
 
-  [[nodiscard]] LoweringResult<void> StartFirstGroup(GroupedExpressionSource source) {
+  [[nodiscard]] LoweringResult<void> StartFirstGroup(AggregateExpressionSource source) {
     if (auto copied = CopyCurrentGroup(); !copied.has_value()) {
       return copied;
     }
@@ -364,7 +273,7 @@ class GroupedAggregateEmitter final {
   }
 
   [[nodiscard]] LoweringResult<void> StopAtCompletedGroup() {
-    if (auto closed = CloseAggregates(); !closed.has_value()) {
+    if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
       return closed;
     }
     if (input_.group_sorter.has_value()) {
@@ -376,7 +285,7 @@ class GroupedAggregateEmitter final {
     return services_->EmitGroupedOutputCompletion();
   }
 
-  [[nodiscard]] LoweringResult<void> ConsumeCurrentRow(GroupedExpressionSource source) {
+  [[nodiscard]] LoweringResult<void> ConsumeCurrentRow(AggregateExpressionSource source) {
     auto first = CreateLabel();
     auto changed = CreateLabel();
     auto continue_group = CreateLabel();
@@ -419,7 +328,7 @@ class GroupedAggregateEmitter final {
     if (auto bound = BindLabel(*changed); !bound.has_value()) {
       return bound;
     }
-    if (auto finalized = FinalizeAggregates(); !finalized.has_value()) {
+    if (auto finalized = services_->FinalizeGroupedAggregateInvocations(); !finalized.has_value()) {
       return finalized;
     }
     if (auto output = services_->EmitCompletedGroupedAggregate(GroupedCompletionTargets{
@@ -432,7 +341,7 @@ class GroupedAggregateEmitter final {
     if (auto bound = BindLabel(*continue_group); !bound.has_value()) {
       return bound;
     }
-    if (auto reset = ResetAggregates(); !reset.has_value()) {
+    if (auto reset = services_->ResetGroupedAggregateInvocations(); !reset.has_value()) {
       return reset;
     }
     if (auto copied = CopyCurrentGroup(); !copied.has_value()) {
@@ -468,16 +377,16 @@ class GroupedAggregateEmitter final {
       return std::unexpected(InternalFailure("sorted grouping record metadata is unavailable"));
     }
     const RegisterId record_first = AssumeValue(input_.group_sorter_record_first);
-    if (auto keys = EmitGroupKeys(GroupedExpressionSource::AccessRow, record_first);
+    if (auto keys = EmitGroupKeys(AggregateExpressionSource::AccessRow, record_first);
         !keys.has_value()) {
       return keys;
     }
     const auto key_count = static_cast<std::uint32_t>(input_.program->group_by.size());
     for (std::size_t index = 0; index < input_.retained_leaves.size(); ++index) {
-      if (auto emitted = services_->EmitGroupedExpression(
+      if (auto emitted = services_->EmitAggregateExpression(
               input_.retained_leaves[index],
               RegisterId{record_first.value() + key_count + static_cast<std::uint32_t>(index)},
-              GroupedExpressionSource::AccessRow);
+              AggregateExpressionSource::AccessRow);
           !emitted.has_value()) {
         return emitted;
       }
@@ -533,7 +442,7 @@ class GroupedAggregateEmitter final {
         !jumped.has_value()) {
       return jumped;
     }
-    if (auto finalized = FinalizeAggregates(); !finalized.has_value()) {
+    if (auto finalized = services_->FinalizeGroupedAggregateInvocations(); !finalized.has_value()) {
       return finalized;
     }
     if (auto output = services_->EmitCompletedGroupedAggregate(GroupedCompletionTargets{
@@ -546,7 +455,7 @@ class GroupedAggregateEmitter final {
     if (auto bound = BindLabel(*close_active); !bound.has_value()) {
       return bound;
     }
-    if (auto closed = CloseAggregates(); !closed.has_value()) {
+    if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
       return closed;
     }
     if (auto jumped = EmitJump(*finish); !jumped.has_value()) {
@@ -555,10 +464,10 @@ class GroupedAggregateEmitter final {
     if (auto bound = BindLabel(*no_group); !bound.has_value()) {
       return bound;
     }
-    if (auto finalized = FinalizeAggregates(); !finalized.has_value()) {
+    if (auto finalized = services_->FinalizeGroupedAggregateInvocations(); !finalized.has_value()) {
       return finalized;
     }
-    if (auto closed = CloseAggregates(); !closed.has_value()) {
+    if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
       return closed;
     }
     if (auto bound = BindLabel(*finish); !bound.has_value()) {
@@ -597,7 +506,7 @@ class GroupedAggregateEmitter final {
     if (auto read = ReadSortedRow(); !read.has_value()) {
       return read;
     }
-    if (auto consumed = ConsumeCurrentRow(GroupedExpressionSource::SortedRow);
+    if (auto consumed = ConsumeCurrentRow(AggregateExpressionSource::SortedRow);
         !consumed.has_value()) {
       return consumed;
     }
@@ -627,21 +536,10 @@ class GroupedAggregateEmitter final {
       input.retained_leaves.size() != input.retained_leaf_registers.size()) {
     return std::unexpected(InternalFailure("grouped aggregate input is incomplete"));
   }
-  for (const BoundAggregateInvocationId invocation_id : input.program->invocations) {
-    if (invocation_id.value() >= input.aggregate_invocations.size() ||
-        invocation_id.value() >= input.aggregate_descriptors.size() ||
-        invocation_id.value() >= input.aggregate_argument_blocks.size() ||
-        invocation_id.value() >= input.aggregate_result_registers.size() ||
-        !input.aggregate_descriptors[invocation_id.value()].has_value() ||
-        !input.aggregate_argument_blocks[invocation_id.value()].has_value() ||
-        !input.aggregate_result_registers[invocation_id.value()].has_value()) {
-      return std::unexpected(
-          InternalFailure("grouped aggregate invocation metadata is incomplete"));
-    }
-    const BoundAggregateInvocation& invocation = input.aggregate_invocations[invocation_id.value()];
-    if (invocation.function.value() >= input.aggregate_functions.size()) {
-      return std::unexpected(InternalFailure("grouped aggregate function is unavailable"));
-    }
+  if (input.has_representative_controller && (!input.representative_effect_register.has_value() ||
+                                              !input.representative_replace_register.has_value())) {
+    return std::unexpected(
+        InternalFailure("grouped aggregate representative metadata is incomplete"));
   }
   if (input.aggregate->strategy == PhysicalAggregateStrategy::kSortedGroup &&
       (!input.group_sorter.has_value() || !input.group_sorter_record_first.has_value())) {
@@ -656,11 +554,12 @@ class GroupedAggregateEmitter final {
 
 }  // namespace
 
-LoweringResult<void> EmitGroupedAggregateInitialization(const GroupedAggregateInput& input) {
+LoweringResult<void> EmitGroupedAggregateInitialization(const GroupedAggregateInput& input,
+                                                        GroupedAggregateServices& services) {
   if (auto valid = ValidateInput(input); !valid.has_value()) {
     return valid;
   }
-  return GroupedAggregateEmitter(input, nullptr).Initialize();
+  return GroupedAggregateEmitter(input, &services).Initialize();
 }
 
 LoweringResult<void> EmitGroupedAggregateRow(const GroupedAggregateInput& input,

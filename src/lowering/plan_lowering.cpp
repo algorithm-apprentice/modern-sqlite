@@ -17,6 +17,7 @@
 #include <variant>
 #include <vector>
 
+#include "aggregate_modifier_lowering.hpp"
 #include "global_aggregate_access.hpp"
 #include "grouped_aggregate_lowering.hpp"
 #include "plan_lowering_internal.hpp"
@@ -153,6 +154,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (global_aggregate_query_ || grouped_aggregate_query_) {
       if (auto descriptors = AddGlobalAggregateDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
+      }
+      if (auto modifiers = AddAggregateModifierDescriptors(); !modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
       }
       if (grouped_aggregate_query_) {
         if (auto grouped = AddGroupedAggregateDescriptors(); !grouped.has_value()) {
@@ -1040,10 +1044,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (invocation_id.value() >= aggregate_invocations_.size()) {
         return std::unexpected(InternalFailure("aggregate invocation ID is out of range"));
       }
-      const BoundAggregateInvocation& invocation = aggregate_invocations_[invocation_id.value()];
-      if (invocation.distinct || invocation.filter.has_value() || !invocation.order_by.empty()) {
-        return std::unexpected(UnsupportedFailure("aggregate modifiers are not implemented"));
-      }
     }
 
     leaf_ = &nodes.front();
@@ -1112,7 +1112,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       const BoundAggregateInvocation& invocation =
           aggregate_invocations_[aggregate_->min_max->invocation.value()];
-      if (invocation.arguments.size() != 1U) {
+      if (invocation.arguments.size() != 1U || invocation.distinct ||
+          invocation.filter.has_value() || !invocation.order_by.empty()) {
         return std::unexpected(InternalFailure("indexed MIN/MAX invocation is invalid"));
       }
       const BoundAggregateFunction& function = aggregate_functions_[invocation.function.value()];
@@ -1146,10 +1147,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
       if (invocation_id.value() >= aggregate_invocations_.size()) {
         return std::unexpected(InternalFailure("aggregate invocation ID is out of range"));
-      }
-      const BoundAggregateInvocation& invocation = aggregate_invocations_[invocation_id.value()];
-      if (invocation.distinct || invocation.filter.has_value() || !invocation.order_by.empty()) {
-        return std::unexpected(UnsupportedFailure("aggregate modifiers are not implemented"));
       }
     }
 
@@ -1537,6 +1534,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !representative.has_value()) {
       return representative;
     }
+    if (auto modifiers = BuildAggregateModifierRegisterLayout(); !modifiers.has_value()) {
+      return modifiers;
+    }
     if (auto result = AllocateAggregateResultRegisters(); !result.has_value()) {
       return result;
     }
@@ -1648,6 +1648,102 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return aggregate_functions_[invocation.function.value()].extremum !=
                  BoundAggregateExtremumKind::kNone;
         });
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildAggregateModifierRegisterLayout() {
+    if (aggregate_program_ == nullptr) {
+      return std::unexpected(InternalFailure("aggregate modifier program is unavailable"));
+    }
+    aggregate_modifier_runtimes_.resize(aggregate_invocations_.size());
+    bool has_filtered_controller = false;
+    bool has_unfiltered_controller = false;
+    const bool uses_representatives =
+        global_representative_query_ ||
+        (grouped_aggregate_query_ && !aggregate_program_->representative_leaves.empty());
+
+    for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
+      const BoundAggregateInvocation& invocation = aggregate_invocations_[invocation_id.value()];
+      if (invocation.function.value() >= aggregate_functions_.size()) {
+        return std::unexpected(InternalFailure("aggregate modifier function is unavailable"));
+      }
+      const BoundAggregateFunction& function = aggregate_functions_[invocation.function.value()];
+      const bool controller =
+          uses_representatives && function.extremum != BoundAggregateExtremumKind::kNone;
+      const bool has_effective_order =
+          function.extremum == BoundAggregateExtremumKind::kNone && !invocation.order_by.empty();
+      if (invocation.argument_reuses_single_order_key &&
+          (invocation.arguments.size() != 1U || invocation.order_by.size() != 1U)) {
+        return std::unexpected(
+            InternalFailure("aggregate argument/order reuse metadata is invalid"));
+      }
+
+      lowering_internal::AggregateModifierStrategy strategy =
+          lowering_internal::AggregateModifierStrategy::Direct;
+      if (invocation.distinct && has_effective_order &&
+          invocation.argument_reuses_single_order_key) {
+        strategy = lowering_internal::AggregateModifierStrategy::UniqueOrdered;
+      } else if (invocation.distinct && has_effective_order) {
+        strategy = lowering_internal::AggregateModifierStrategy::DistinctOrdered;
+      } else if (has_effective_order) {
+        strategy = lowering_internal::AggregateModifierStrategy::Ordered;
+      } else if (invocation.distinct) {
+        strategy = lowering_internal::AggregateModifierStrategy::Distinct;
+      }
+
+      std::optional<RegisterId> record_first;
+      std::uint32_t order_key_count = 0;
+      std::uint32_t record_field_count = 0;
+      if (strategy == lowering_internal::AggregateModifierStrategy::Ordered ||
+          strategy == lowering_internal::AggregateModifierStrategy::DistinctOrdered ||
+          strategy == lowering_internal::AggregateModifierStrategy::UniqueOrdered) {
+        const std::size_t field_count =
+            invocation.argument_reuses_single_order_key
+                ? 1U
+                : invocation.order_by.size() + invocation.arguments.size();
+        if (invocation.order_by.size() > std::numeric_limits<std::uint32_t>::max() ||
+            field_count > std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(
+              ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                             "aggregate modifier record exceeds bytecode field identities"));
+        }
+        auto record = AllocateRegisters(field_count);
+        if (!record.has_value()) {
+          return std::unexpected(std::move(record.error()));
+        }
+        record_first = *record;
+        order_key_count = static_cast<std::uint32_t>(invocation.order_by.size());
+        record_field_count = static_cast<std::uint32_t>(field_count);
+      }
+
+      aggregate_modifier_runtimes_[invocation_id.value()] =
+          lowering_internal::AggregateModifierRuntime{
+              .strategy = strategy,
+              .relation = std::nullopt,
+              .sorter = std::nullopt,
+              .record_first = record_first,
+              .order_key_count = order_key_count,
+              .record_field_count = record_field_count,
+              .argument_reuses_single_order_key =
+                  has_effective_order && invocation.argument_reuses_single_order_key,
+              .representative_controller = controller,
+      };
+      if (controller && invocation.filter.has_value()) {
+        has_filtered_controller = true;
+      } else if (controller) {
+        has_unfiltered_controller = true;
+      }
+    }
+
+    global_filtered_controller_defaults_ =
+        global_aggregate_query_ && has_filtered_controller && !has_unfiltered_controller;
+    if (global_filtered_controller_defaults_) {
+      auto seen = AllocateRegisters(1);
+      if (!seen.has_value()) {
+        return std::unexpected(std::move(seen.error()));
+      }
+      global_modifier_seen_row_register_ = *seen;
+    }
+    return {};
   }
 
   [[nodiscard]] bool HasGroupedOuterOrder() const noexcept {
@@ -1862,6 +1958,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto representative = AllocateGroupedRepresentativeRegisters();
         !representative.has_value()) {
       return representative;
+    }
+    if (auto modifiers = BuildAggregateModifierRegisterLayout(); !modifiers.has_value()) {
+      return modifiers;
     }
     if (auto sorted = AllocateGroupedSortedRegisters(); !sorted.has_value()) {
       return sorted;
@@ -2464,6 +2563,111 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(descriptor.error()));
       }
       aggregate_descriptors_[invocation_id.value()] = *descriptor;
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildAggregateDistinctDescriptor(
+      const BoundAggregateInvocation& invocation) {
+    if (invocation.arguments.size() != 1U ||
+        invocation.collation.value() >= collation_symbols_.size()) {
+      return std::unexpected(InternalFailure("aggregate DISTINCT descriptor is invalid"));
+    }
+    OrderingRecordDescriptor descriptor{
+        .field_count = 1,
+        .key_field_count = 1,
+        .key_columns = {},
+    };
+    descriptor.key_columns.push_back(OrderingColumnMetadata{
+        .collation = collation_symbols_[invocation.collation.value()],
+        .order = BytecodeSortOrder::kAscending,
+        .null_placement = BytecodeNullPlacement::kFirst,
+    });
+    return descriptor;
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildAggregateOrderDescriptor(
+      const BoundAggregateInvocation& invocation,
+      const lowering_internal::AggregateModifierRuntime& runtime) {
+    if (runtime.record_field_count == 0U || runtime.order_key_count != invocation.order_by.size()) {
+      return std::unexpected(InternalFailure("aggregate ordering descriptor is invalid"));
+    }
+    OrderingRecordDescriptor descriptor{
+        .field_count = runtime.record_field_count,
+        .key_field_count = runtime.order_key_count,
+        .key_columns = {},
+    };
+    descriptor.key_columns.reserve(invocation.order_by.size());
+    for (const BoundOrderingTerm& term : invocation.order_by) {
+      if (term.collation.value() >= collation_symbols_.size()) {
+        return std::unexpected(InternalFailure("aggregate order collation is unavailable"));
+      }
+      descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = collation_symbols_[term.collation.value()],
+          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                        : BytecodeSortOrder::kAscending,
+          .null_placement = term.null_placement == BoundNullPlacement::kLast
+                                ? BytecodeNullPlacement::kLast
+                                : BytecodeNullPlacement::kFirst,
+      });
+    }
+    return descriptor;
+  }
+
+  [[nodiscard]] LoweringResult<void> AddAggregateModifierDescriptors() {
+    if (aggregate_program_ == nullptr ||
+        aggregate_modifier_runtimes_.size() != aggregate_invocations_.size()) {
+      return std::unexpected(InternalFailure("aggregate modifier descriptors are unavailable"));
+    }
+    for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
+      const BoundAggregateInvocation& invocation = aggregate_invocations_[invocation_id.value()];
+      lowering_internal::AggregateModifierRuntime& runtime =
+          AssumeValue(aggregate_modifier_runtimes_[invocation_id.value()]);
+      if (runtime.strategy == lowering_internal::AggregateModifierStrategy::Distinct ||
+          runtime.strategy == lowering_internal::AggregateModifierStrategy::DistinctOrdered) {
+        auto descriptor = BuildAggregateDistinctDescriptor(invocation);
+        if (!descriptor.has_value()) {
+          return std::unexpected(std::move(descriptor.error()));
+        }
+        auto relation =
+            ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(*descriptor)),
+                                 "unable to add aggregate DISTINCT relation descriptor");
+        if (!relation.has_value()) {
+          return std::unexpected(std::move(relation.error()));
+        }
+        runtime.relation = *relation;
+      } else if (runtime.strategy == lowering_internal::AggregateModifierStrategy::UniqueOrdered) {
+        if (invocation.order_by.size() != 1U ||
+            invocation.order_by.front().collation != invocation.collation) {
+          return std::unexpected(
+              InternalFailure("unique ordered aggregate collation is inconsistent"));
+        }
+        auto descriptor = BuildAggregateOrderDescriptor(invocation, runtime);
+        if (!descriptor.has_value()) {
+          return std::unexpected(std::move(descriptor.error()));
+        }
+        auto relation =
+            ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(*descriptor)),
+                                 "unable to add unique ordered aggregate relation descriptor");
+        if (!relation.has_value()) {
+          return std::unexpected(std::move(relation.error()));
+        }
+        runtime.relation = *relation;
+      }
+
+      if (runtime.strategy == lowering_internal::AggregateModifierStrategy::Ordered ||
+          runtime.strategy == lowering_internal::AggregateModifierStrategy::DistinctOrdered) {
+        auto descriptor = BuildAggregateOrderDescriptor(invocation, runtime);
+        if (!descriptor.has_value()) {
+          return std::unexpected(std::move(descriptor.error()));
+        }
+        auto sorter = ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*descriptor)),
+                                           "unable to add aggregate ordering sorter descriptor");
+        if (!sorter.has_value()) {
+          return std::unexpected(std::move(sorter.error()));
+        }
+        runtime.sorter = *sorter;
+      }
     }
     return {};
   }
@@ -4064,12 +4268,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return global_representative_column_registers_[column.value()];
     }
     if (IsAggregateRowIdAlias(column)) {
-      return grouped_expression_source_ == lowering_internal::GroupedExpressionSource::SortedRow
+      return aggregate_expression_source_ == lowering_internal::AggregateExpressionSource::SortedRow
                  ? grouped_sorted_rowid_register_
                  : grouped_representative_rowid_register_;
     }
     const auto& registers =
-        grouped_expression_source_ == lowering_internal::GroupedExpressionSource::SortedRow
+        aggregate_expression_source_ == lowering_internal::AggregateExpressionSource::SortedRow
             ? grouped_sorted_column_registers_
             : grouped_representative_column_registers_;
     if (column.value() >= registers.size()) {
@@ -4082,7 +4286,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (global_aggregate_query_ && global_representative_query_) {
       return global_representative_rowid_register_;
     }
-    return grouped_expression_source_ == lowering_internal::GroupedExpressionSource::SortedRow
+    return aggregate_expression_source_ == lowering_internal::AggregateExpressionSource::SortedRow
                ? grouped_sorted_rowid_register_
                : grouped_representative_rowid_register_;
   }
@@ -4093,7 +4297,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("bound expression ID is out of range"));
     }
     if (grouped_aggregate_query_ &&
-        grouped_expression_source_ == lowering_internal::GroupedExpressionSource::Representative &&
+        aggregate_expression_source_ ==
+            lowering_internal::AggregateExpressionSource::Representative &&
         id.value() < grouped_key_expression_registers_.size() &&
         grouped_key_expression_registers_[id.value()].has_value()) {
       return Append(CopyInstruction{
@@ -4123,7 +4328,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
         column != nullptr) {
       if ((grouped_aggregate_query_ || global_representative_query_) &&
-          grouped_expression_source_ != lowering_internal::GroupedExpressionSource::AccessRow) {
+          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
         const std::optional<RegisterId> source = GroupedColumnRegister(column->column);
         if (!source.has_value()) {
           return std::unexpected(InternalFailure("grouped column has no retained source register"));
@@ -4176,7 +4381,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
       if ((grouped_aggregate_query_ || global_representative_query_) &&
-          grouped_expression_source_ != lowering_internal::GroupedExpressionSource::AccessRow) {
+          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
         const std::optional<RegisterId> source = GroupedRowIdRegister();
         if (!source.has_value()) {
           return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
@@ -4343,14 +4548,58 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::unexpected(InternalFailure("bound expression kind is unsupported"));
   }
 
-  [[nodiscard]] LoweringResult<void> EmitGroupedExpression(
+  [[nodiscard]] LoweringResult<void> EmitAggregateExpression(
       BoundExpressionId id, RegisterId destination,
-      lowering_internal::GroupedExpressionSource source) override {
-    const lowering_internal::GroupedExpressionSource previous =
-        std::exchange(grouped_expression_source_, source);
+      lowering_internal::AggregateExpressionSource source) override {
+    const lowering_internal::AggregateExpressionSource previous =
+        std::exchange(aggregate_expression_source_, source);
     LoweringResult<void> emitted = EmitExpression(id, destination);
-    grouped_expression_source_ = previous;
+    aggregate_expression_source_ = previous;
     return emitted;
+  }
+
+  [[nodiscard]] LoweringResult<void> OpenGroupedAggregateInvocations() override {
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
+    }
+    return lowering_internal::EmitAggregateModifierOpen(*input);
+  }
+
+  [[nodiscard]] LoweringResult<void> StepGroupedAggregateInvocations(
+      lowering_internal::AggregateExpressionSource source, bool first_row) override {
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
+    }
+    return lowering_internal::EmitAggregateModifierSteps(
+        *input, *this, source,
+        first_row ? lowering_internal::AggregateRowKind::FirstGroupRow
+                  : lowering_internal::AggregateRowKind::SubsequentGroupRow);
+  }
+
+  [[nodiscard]] LoweringResult<void> FinalizeGroupedAggregateInvocations() override {
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
+    }
+    return lowering_internal::EmitAggregateModifierFinalization(*input);
+  }
+
+  [[nodiscard]] LoweringResult<void> ResetGroupedAggregateInvocations() override {
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
+    }
+    return lowering_internal::EmitAggregateModifierReset(*input);
+  }
+
+  [[nodiscard]] LoweringResult<void> CloseGroupedAggregateInvocations() override {
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
+    }
+    return lowering_internal::EmitAggregateModifierClose(*input);
   }
 
   [[nodiscard]] LoweringResult<void> EmitPredicate(BoundExpressionId predicate,
@@ -4575,6 +4824,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         global_representative_replace_constant_ = *replacement;
       }
+      if (global_filtered_controller_defaults_) {
+        auto zero = EnsureZeroConstant();
+        auto one = EnsureOneConstant();
+        if (!zero.has_value()) {
+          return std::unexpected(std::move(zero.error()));
+        }
+        if (!one.has_value()) {
+          return std::unexpected(std::move(one.error()));
+        }
+      }
       return Append(LoadConstantInstruction{
           .constant = AssumeValue(global_representative_replace_constant_),
           .output = AssumeValue(global_representative_replace_register_),
@@ -4595,9 +4854,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> CaptureGlobalRepresentatives() {
     for (std::size_t index = 0; index < global_representative_leaves_.size(); ++index) {
-      if (auto emitted = EmitGroupedExpression(
+      if (auto emitted = EmitAggregateExpression(
               global_representative_leaves_[index], global_representative_registers_[index],
-              lowering_internal::GroupedExpressionSource::AccessRow);
+              lowering_internal::AggregateExpressionSource::AccessRow);
           !emitted.has_value()) {
         return emitted;
       }
@@ -4612,54 +4871,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto initialized = InitializeGlobalRepresentatives(); !initialized.has_value()) {
       return initialized;
     }
-    for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
-      if (invocation_id.value() >= aggregate_descriptors_.size() ||
-          !aggregate_descriptors_[invocation_id.value()].has_value()) {
-        return std::unexpected(InternalFailure("global aggregate descriptor is unavailable"));
-      }
-      if (auto opened = Append(OpenAggregateInstruction{
-              .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
-          });
-          !opened.has_value()) {
-        return opened;
-      }
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
     }
-    return {};
+    return lowering_internal::EmitAggregateModifierOpen(*input);
   }
 
   [[nodiscard]] LoweringResult<void> StepGlobalAggregates() override {
-    if (aggregate_program_ == nullptr) {
-      return std::unexpected(InternalFailure("global aggregate program is unavailable"));
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
     }
-    for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
-      const BoundAggregateInvocation& invocation = aggregate_invocations_[invocation_id.value()];
-      if (invocation_id.value() >= aggregate_argument_blocks_.size() ||
-          invocation_id.value() >= aggregate_descriptors_.size() ||
-          !aggregate_argument_blocks_[invocation_id.value()].has_value() ||
-          !aggregate_descriptors_[invocation_id.value()].has_value()) {
-        return std::unexpected(InternalFailure("global aggregate step metadata is incomplete"));
-      }
-      const RegisterId first = AssumeValue(aggregate_argument_blocks_[invocation_id.value()]);
-      for (std::size_t argument = 0; argument < invocation.arguments.size(); ++argument) {
-        if (auto emitted =
-                EmitExpression(invocation.arguments[argument],
-                               RegisterId{first.value() + static_cast<std::uint32_t>(argument)});
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      if (auto stepped = Append(StepAggregateInstruction{
-              .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
-              .first_argument = first,
-              .effect_output = global_representative_query_ &&
-                                       aggregate_functions_[invocation.function.value()].extremum !=
-                                           BoundAggregateExtremumKind::kNone
-                                   ? global_representative_effect_register_
-                                   : std::nullopt,
-          });
-          !stepped.has_value()) {
-        return stepped;
-      }
+    if (auto stepped = lowering_internal::EmitAggregateModifierSteps(
+            *input, *this, lowering_internal::AggregateExpressionSource::AccessRow,
+            lowering_internal::AggregateRowKind::Global);
+        !stepped.has_value()) {
+      return stepped;
     }
     return UpdateGlobalRepresentative();
   }
@@ -4760,32 +4988,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> FinalizeAndCloseGlobalAggregates() {
-    if (aggregate_program_ == nullptr) {
-      return std::unexpected(InternalFailure("global aggregate program is unavailable"));
+    auto input = MakeAggregateModifierInput();
+    if (!input.has_value()) {
+      return std::unexpected(std::move(input.error()));
     }
-    for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
-      if (invocation_id.value() >= aggregate_descriptors_.size() ||
-          invocation_id.value() >= aggregate_result_registers_.size() ||
-          !aggregate_descriptors_[invocation_id.value()].has_value() ||
-          !aggregate_result_registers_[invocation_id.value()].has_value()) {
-        return std::unexpected(
-            InternalFailure("global aggregate finalization metadata is incomplete"));
-      }
-      if (auto finalized = Append(FinalizeAggregateInstruction{
-              .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
-              .output = AssumeValue(aggregate_result_registers_[invocation_id.value()]),
-          });
-          !finalized.has_value()) {
-        return finalized;
-      }
-      if (auto closed = Append(CloseAggregateInstruction{
-              .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
-          });
-          !closed.has_value()) {
-        return closed;
-      }
+    if (auto finalized = lowering_internal::EmitAggregateModifierFinalization(*input);
+        !finalized.has_value()) {
+      return finalized;
     }
-    return {};
+    return lowering_internal::EmitAggregateModifierClose(*input);
   }
 
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateOffset(Label rejected) {
@@ -4837,10 +5048,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto finalized = FinalizeAndCloseGlobalAggregates(); !finalized.has_value()) {
       return finalized;
     }
-    const lowering_internal::GroupedExpressionSource previous = std::exchange(
-        grouped_expression_source_, lowering_internal::GroupedExpressionSource::Representative);
+    const lowering_internal::AggregateExpressionSource previous = std::exchange(
+        aggregate_expression_source_, lowering_internal::AggregateExpressionSource::Representative);
     const auto restore = [this, previous](LoweringResult<void> result) {
-      grouped_expression_source_ = previous;
+      aggregate_expression_source_ = previous;
       return result;
     };
     const bool has_rejection =
@@ -4876,7 +5087,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return restore(Append(HaltInstruction{}));
     }
-    grouped_expression_source_ = previous;
+    aggregate_expression_source_ = previous;
     return {};
   }
 
@@ -4897,11 +5108,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitCompletedGroupedAggregate(
       lowering_internal::GroupedCompletionTargets targets) override {
-    const lowering_internal::GroupedExpressionSource previous = std::exchange(
-        grouped_expression_source_, lowering_internal::GroupedExpressionSource::Representative);
+    const lowering_internal::AggregateExpressionSource previous = std::exchange(
+        aggregate_expression_source_, lowering_internal::AggregateExpressionSource::Representative);
     const bool previous_output_phase = std::exchange(grouped_output_phase_, true);
     const auto restore = [this, previous, previous_output_phase](LoweringResult<void> result) {
-      grouped_expression_source_ = previous;
+      aggregate_expression_source_ = previous;
       grouped_output_phase_ = previous_output_phase;
       return result;
     };
@@ -4955,7 +5166,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return restore(std::move(bound));
       }
     }
-    grouped_expression_source_ = previous;
+    aggregate_expression_source_ = previous;
     grouped_output_phase_ = previous_output_phase;
     return {};
   }
@@ -11541,7 +11752,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!input.has_value()) {
         return std::unexpected(std::move(input.error()));
       }
-      if (auto initialized = lowering_internal::EmitGroupedAggregateInitialization(*input);
+      if (auto initialized = lowering_internal::EmitGroupedAggregateInitialization(*input, *this);
           !initialized.has_value()) {
         return initialized;
       }
@@ -11711,6 +11922,37 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         *this);
   }
 
+  [[nodiscard]] LoweringResult<lowering_internal::AggregateModifierInput>
+  MakeAggregateModifierInput() {
+    if (!builder_.has_value() || aggregate_program_ == nullptr ||
+        aggregate_modifier_runtimes_.size() != aggregate_invocations_.size()) {
+      return std::unexpected(InternalFailure("aggregate modifier runtime input is incomplete"));
+    }
+    const std::optional<RegisterId> representative_effect =
+        grouped_aggregate_query_ ? grouped_representative_effect_register_
+                                 : global_representative_effect_register_;
+    const std::optional<ConstantId> representative_replace =
+        grouped_aggregate_query_ ? grouped_representative_replace_constant_
+                                 : global_representative_replace_constant_;
+    return lowering_internal::AggregateModifierInput{
+        .builder = &*builder_,
+        .program = aggregate_program_,
+        .invocations = aggregate_invocations_,
+        .aggregates = std::span<const std::optional<AggregateId>>{aggregate_descriptors_},
+        .argument_blocks = std::span<const std::optional<RegisterId>>{aggregate_argument_blocks_},
+        .result_registers = std::span<const std::optional<RegisterId>>{aggregate_result_registers_},
+        .runtimes =
+            std::span<const std::optional<lowering_internal::AggregateModifierRuntime>>{
+                aggregate_modifier_runtimes_},
+        .representative_effect_register = representative_effect,
+        .representative_replace_constant = representative_replace,
+        .representative_keep_constant = one_constant_,
+        .global_seen_row_register = global_modifier_seen_row_register_,
+        .zero_constant = zero_constant_,
+        .global_filtered_controller_defaults = global_filtered_controller_defaults_,
+    };
+  }
+
   [[nodiscard]] LoweringResult<void> PrepareGroupedAggregateConstants() {
     auto zero = EnsureZeroConstant();
     auto one = EnsureOneConstant();
@@ -11748,14 +11990,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .builder = &*builder_,
         .program = aggregate_program_,
         .aggregate = aggregate_,
-        .aggregate_functions = aggregate_functions_,
-        .aggregate_invocations = aggregate_invocations_,
-        .aggregate_descriptors =
-            std::span<const std::optional<AggregateId>>{aggregate_descriptors_},
-        .aggregate_argument_blocks =
-            std::span<const std::optional<RegisterId>>{aggregate_argument_blocks_},
-        .aggregate_result_registers =
-            std::span<const std::optional<RegisterId>>{aggregate_result_registers_},
         .collation_symbols = collation_symbols_,
         .retained_leaves = grouped_retained_leaves_,
         .retained_leaf_registers = grouped_retained_leaf_registers_,
@@ -11772,6 +12006,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .binary_collation = *binary_symbol_,
         .zero_constant = *zero_constant_,
         .one_constant = *one_constant_,
+        .has_representative_controller = !aggregate_program_->representative_leaves.empty() &&
+                                         HasAggregateRepresentativeController(),
         .may_stop_early = limit_ != nullptr && !HasGroupedOuterOrder(),
     };
   }
@@ -11916,6 +12152,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::vector<std::optional<RegisterId>> aggregate_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_result_registers_;
   std::vector<std::optional<AggregateId>> aggregate_descriptors_;
+  std::vector<std::optional<lowering_internal::AggregateModifierRuntime>>
+      aggregate_modifier_runtimes_;
   std::optional<RegisterId> limit_register_;
   std::optional<RegisterId> offset_register_;
   std::optional<RegisterId> zero_register_;
@@ -11953,6 +12191,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<RegisterId> global_representative_effect_register_;
   std::optional<RegisterId> global_representative_replace_register_;
   std::optional<RegisterId> global_representative_comparison_register_;
+  std::optional<RegisterId> global_modifier_seen_row_register_;
   std::vector<BoundExpressionId> global_representative_leaves_;
   std::vector<RegisterId> global_representative_registers_;
   std::vector<std::optional<RegisterId>> global_representative_column_registers_;
@@ -12001,9 +12240,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::vector<CursorId> analyze_index_cursors_;
   std::vector<CursorId> analyze_table_cursors_;
   OrderingRuntime ordering_runtime_ = OrderingRuntime::kNone;
-  lowering_internal::GroupedExpressionSource grouped_expression_source_ =
-      lowering_internal::GroupedExpressionSource::AccessRow;
+  lowering_internal::AggregateExpressionSource aggregate_expression_source_ =
+      lowering_internal::AggregateExpressionSource::AccessRow;
   bool grouped_output_phase_ = false;
+  bool global_filtered_controller_defaults_ = false;
   bool limit_initialized_ = false;
 };
 
