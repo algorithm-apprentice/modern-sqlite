@@ -70,6 +70,39 @@ TEST(Instrumentation, RecordsProbeCallsOnlyInsideActiveScope) {
   EXPECT_EQ(0U, probes.Value(2));
 }
 
+TEST(Instrumentation, RecordsAggregateWorkOnlyInsideOptedInScope) {
+  ProbeCounterCollection ordinary;
+  ProbeCounterCollection aggregate{ProbeCollectionKind::AggregateWork};
+
+  MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+  {
+    const ScopedProbeCounterCollection scope{ordinary};
+    MODERN_SQLITE_RECORD_PROBE_CALL(1);
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(AggregateWorkMetric::RetainedBytesPeak, 100);
+  }
+  {
+    const ScopedProbeCounterCollection scope{aggregate};
+    MODERN_SQLITE_RECORD_PROBE_CALL(1);
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(AggregateWorkMetric::RetainedBytesPeak, 100);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(AggregateWorkMetric::RetainedBytesPeak, 40);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(AggregateWorkMetric::RetainedBytesPeak, 160);
+  }
+  MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+
+  EXPECT_EQ(1U, ordinary.Value(1));
+  EXPECT_EQ(0U, ordinary.Value(AggregateWorkMetric::Step));
+  EXPECT_EQ(0U, ordinary.Value(AggregateWorkMetric::RetainedBytesPeak));
+  EXPECT_EQ(1U, aggregate.Value(1));
+  EXPECT_EQ(2U, aggregate.Value(AggregateWorkMetric::Step));
+  EXPECT_EQ(160U, aggregate.Value(AggregateWorkMetric::RetainedBytesPeak));
+  aggregate.Reset();
+  EXPECT_EQ(0U, aggregate.Value(AggregateWorkMetric::Step));
+  EXPECT_EQ(0U, aggregate.Value(AggregateWorkMetric::RetainedBytesPeak));
+}
+
 TEST(Instrumentation, RestoresNestedCollection) {
   CounterCollection outer;
   CounterCollection inner;
@@ -86,6 +119,24 @@ TEST(Instrumentation, RestoresNestedCollection) {
 
   EXPECT_EQ(4U, outer.Value(Counter::kPlannerWork));
   EXPECT_EQ(2U, inner.Value(Counter::kPlannerWork));
+}
+
+TEST(Instrumentation, RestoresAggregateCollectionAcrossNestedModes) {
+  ProbeCounterCollection aggregate{ProbeCollectionKind::AggregateWork};
+  ProbeCounterCollection ordinary;
+  {
+    const ScopedProbeCounterCollection outer{aggregate};
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Open);
+    {
+      const ScopedProbeCounterCollection inner{ordinary};
+      MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Open);
+      MODERN_SQLITE_RECORD_PROBE_CALL(1);
+    }
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Open);
+  }
+  EXPECT_EQ(2U, aggregate.Value(AggregateWorkMetric::Open));
+  EXPECT_EQ(0U, ordinary.Value(AggregateWorkMetric::Open));
+  EXPECT_EQ(1U, ordinary.Value(1));
 }
 
 TEST(Instrumentation, DoesNotLeakAcrossSequentialOperations) {

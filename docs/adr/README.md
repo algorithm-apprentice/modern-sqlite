@@ -73,3 +73,4 @@ their corresponding implementation begins.
 67. [ADR-0067: Global Aggregate Access Lowering Module](0067-global-aggregate-access-lowering-module.md)
 68. [ADR-0068: SQLite-Aligned Grouped Aggregate Execution](0068-sqlite-aligned-grouped-aggregate-execution.md)
 69. [ADR-0069: SQLite-Aligned Aggregate Modifier Execution](0069-sqlite-aligned-aggregate-modifier-execution.md)
+70. [ADR-0070: Matched Aggregate and Grouping Performance Baseline](0070-matched-aggregate-and-grouping-performance-baseline.md)

@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -476,6 +477,8 @@ struct StatementState {
     registration.retained_bytes += amount;
     retained += amount;
     peak_retained = std::max(peak_retained, retained);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(instrumentation::AggregateWorkMetric::RetainedBytesPeak,
+                                           retained);
     return {};
   }
 
@@ -508,6 +511,8 @@ struct StatementState {
     registration.retained_bytes += amount;
     retained += amount;
     peak_retained = std::max(peak_retained, retained);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(
+        instrumentation::AggregateWorkMetric::WorkingSetBytesPeak, retained);
     return {};
   }
 
@@ -523,6 +528,10 @@ struct StatementState {
     }
     ++live_files;
     peak_live_files = std::max(peak_live_files, live_files);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(instrumentation::AggregateWorkMetric::LiveFilesPeak,
+                                           live_files);
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(
+        instrumentation::AggregateWorkMetric::FileAcquisitions);
     return TemporaryFileLease{*this};
   }
 
@@ -1562,6 +1571,8 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (!record_write.has_value()) {
       return std::unexpected(std::move(record_write.error()));
     }
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(
+        instrumentation::AggregateWorkMetric::SorterSpillWrites);
     return offset + *storage_size;
   }
 
