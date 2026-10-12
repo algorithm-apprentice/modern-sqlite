@@ -95,8 +95,12 @@ Reject explicitly:
 
 Package 13 remains the sole owner of modifier scheduling. The later aggregate
 integration package remains responsible for compounds, SELECT DISTINCT,
-complete model/fuzz matrices, and the standalone aggregate performance
-contract.
+and complete model/fuzz matrices. Package 15 owns the standalone aggregate
+performance contract.
+
+Delivery update: ADR-0057 package 14 completes aggregate compounds and SELECT
+DISTINCT through the existing advanced-core DISTINCT, set, and ordering
+relations while retaining this package's grouped lifecycle.
 
 ### 2. Complete global representative snapshots
 

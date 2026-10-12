@@ -98,6 +98,10 @@ int main() try {
       Prepare(session,
               "SELECT score IS NULL,group_concat(name ORDER BY id DESC),count(DISTINCT category) "
               "FROM items GROUP BY score IS NULL ORDER BY 1");
+  ReadStatement aggregate_distinct =
+      Prepare(session, "SELECT DISTINCT count() FROM items GROUP BY score IS NULL ORDER BY 1");
+  ReadStatement aggregate_compound =
+      Prepare(session, "SELECT count() FROM items UNION ALL SELECT sum(id) FROM items ORDER BY 1");
 
   ResetCount();
   const auto constant_row = constant.Step();
@@ -273,6 +277,52 @@ int main() try {
   }
   ResetCount();
   if (!modifiers.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto aggregate_distinct_first = aggregate_distinct.Step();
+  if (!aggregate_distinct_first.has_value() || *aggregate_distinct_first != ReadStep::kRow ||
+      aggregate_distinct.row().size() != 1U || !AtMostAllocations(256U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto aggregate_distinct_second = aggregate_distinct.Step();
+  if (!aggregate_distinct_second.has_value() || *aggregate_distinct_second != ReadStep::kRow ||
+      !AtMostAllocations(2U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto aggregate_distinct_done = aggregate_distinct.Step();
+  if (!aggregate_distinct_done.has_value() || *aggregate_distinct_done != ReadStep::kDone ||
+      !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!aggregate_distinct.Reset().has_value() || !NoAllocations()) {
+    return 1;
+  }
+
+  ResetCount();
+  const auto aggregate_compound_first = aggregate_compound.Step();
+  if (!aggregate_compound_first.has_value() || *aggregate_compound_first != ReadStep::kRow ||
+      aggregate_compound.row().size() != 1U || !AtMostAllocations(256U)) {
+    return 1;
+  }
+  ResetCount();
+  const auto aggregate_compound_second = aggregate_compound.Step();
+  if (!aggregate_compound_second.has_value() || *aggregate_compound_second != ReadStep::kRow ||
+      !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  const auto aggregate_compound_done = aggregate_compound.Step();
+  if (!aggregate_compound_done.has_value() || *aggregate_compound_done != ReadStep::kDone ||
+      !NoAllocations()) {
+    return 1;
+  }
+  ResetCount();
+  if (!aggregate_compound.Reset().has_value() || !NoAllocations()) {
     return 1;
   }
 

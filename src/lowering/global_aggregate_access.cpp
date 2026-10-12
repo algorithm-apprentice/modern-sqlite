@@ -89,6 +89,9 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitLimitInitialization(std::optional<Label> completion) {
+    if (limit_ == nullptr) {
+      return {};
+    }
     return services_.EmitLimitInitialization(completion);
   }
 
@@ -115,6 +118,10 @@ class GlobalAggregateAccessEmitter final {
 
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateCompletion() {
     return services_.EmitGlobalAggregateCompletion();
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitGlobalAggregateEarlyStopCompletion() {
+    return services_.EmitGlobalAggregateEarlyStopCompletion();
   }
 
   [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(const PhysicalIndexScanNode& index,
@@ -168,7 +175,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -220,7 +227,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -314,7 +321,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -501,7 +508,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -610,7 +617,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -893,7 +900,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -1673,7 +1680,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }
@@ -1790,7 +1797,7 @@ class GlobalAggregateAccessEmitter final {
       if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
         return bound;
       }
-      return Append(HaltInstruction{});
+      return EmitGlobalAggregateEarlyStopCompletion();
     }
     return {};
   }

@@ -770,6 +770,36 @@ TEST(PhysicalPlan, PlansAggregateDistinctAndCompoundCores) {
             std::get<PhysicalAggregateNode>(second_aggregate->payload).strategy);
 }
 
+TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());
+  const auto empty = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalEmptyNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), empty);
+  EXPECT_EQ(1U, std::get<PhysicalEmptyNode>(empty->payload).core_index);
+}
+
+TEST(PhysicalPlan, PreservesRowIdAggregateAccessCoreIndex) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT count() UNION ALL SELECT count() FROM Items WHERE rowid=?1", TestCatalog());
+  const auto lookup = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalRowIdLookupNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), lookup);
+  EXPECT_EQ(1U, std::get<PhysicalRowIdLookupNode>(lookup->payload).core_index);
+}
+
+TEST(PhysicalPlan, PreservesIndexedAggregateAccessCoreIndex) {
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT count() UNION ALL SELECT min(Score) FROM Items", IndexedCatalog());
+  const auto scan = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), scan);
+  EXPECT_EQ(1U, std::get<PhysicalIndexScanNode>(scan->payload).core_index);
+}
+
 TEST(PhysicalPlan, SelectsIndexedMinMaxDirectionsAndFallbacks) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
 

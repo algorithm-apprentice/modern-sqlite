@@ -785,6 +785,35 @@ struct CustomEnvironment {
   [[nodiscard]] VmEnvironment Vm() const noexcept { return VmEnvironment{registry, collations}; }
 };
 
+class ReadLoweringAggregateIntegration : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    pager_ = TakeValue(Pager::Open(vfs_, FixturePath().string()));
+    RequireStatus(pager_->BeginRead());
+    catalog_ = TakeValue(LoadCatalog(*pager_, CatalogLoadOptions{.generation = 141}));
+    memory_.emplace(TakeValue(TemporaryStorageFactory::Create(
+        vfs_, *pager_, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory})));
+    callback_count = 0;
+  }
+
+  [[nodiscard]] std::vector<std::vector<SqlValue>> Execute(
+      std::string_view sql, BindEnvironment binding = BindEnvironment::Core(),
+      VmEnvironment environment = VmEnvironment::Core(),
+      std::span<const SqlValue> parameters = {}) {
+    const BytecodeProgram program = LowerOrThrow(sql, catalog_, binding);
+    return ExecuteRows(program, *pager_, catalog_->version().generation, environment, &*memory_,
+                       parameters);
+  }
+
+  [[nodiscard]] const CatalogSnapshotPtr& catalog() const noexcept { return catalog_; }
+
+ private:
+  PosixVfs vfs_;
+  std::unique_ptr<Pager> pager_;
+  CatalogSnapshotPtr catalog_;
+  std::optional<TemporaryStorageFactory> memory_;
+};
+
 TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
   EXPECT_EQ("invalid_input", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInvalidInput));
   EXPECT_EQ("unsupported_plan", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kUnsupportedPlan));
@@ -1338,6 +1367,428 @@ TEST(ReadLowering, SharesTemporaryStorageAcrossAggregateModifiers) {
     EXPECT_EQ(TextBytes(memory_rows[row][2]), TextBytes(file_rows[row][2]));
     EXPECT_EQ(TextBytes(memory_rows[row][3]), TextBytes(file_rows[row][3]));
   }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, DeduplicatesCompletedGroups) {
+  const auto rows = Execute("SELECT DISTINCT count() FROM items GROUP BY id");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StreamsGlobalCompoundArms) {
+  const auto rows = Execute("SELECT count() FROM items UNION ALL SELECT sum(id) FROM items");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ(6, rows[1][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, DeduplicatesGlobalUnionRows) {
+  const auto rows = Execute("SELECT count() FROM items UNION SELECT count() FROM items");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, OrdersMixedCompoundArms) {
+  const auto rows = Execute(
+      "SELECT count() FROM items UNION ALL SELECT id FROM items ORDER BY 1 LIMIT 3 OFFSET 1");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(2, rows[0][0].integer_value());
+  EXPECT_EQ(3, rows[1][0].integer_value());
+  EXPECT_EQ(3, rows[2][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, OrdersDistinctGroupedRows) {
+  const auto rows = Execute("SELECT DISTINCT count() FROM items GROUP BY score IS NULL ORDER BY 1");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ExecutesIndexedMinMaxCompoundArms) {
+  const auto rows = Execute("SELECT min(name) FROM items UNION ALL SELECT max(name) FROM items");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ("alpha", TextBytes(rows[0][0]));
+  EXPECT_EQ("gamma", TextBytes(rows[1][0]));
+}
+
+TEST_F(ReadLoweringAggregateIntegration, CompletesNoncoveringGroupedIndexArms) {
+  constexpr std::string_view kSql =
+      "SELECT name,count(score) FROM items WHERE name='alpha' GROUP BY name "
+      "UNION ALL SELECT 'fallback',0";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ("alpha", TextBytes(rows[0][0]));
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ("fallback", TextBytes(rows[1][0]));
+  EXPECT_EQ(0, rows[1][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ClosesGroupedIndexOnMissingSeekWithoutOpeningTable) {
+  constexpr std::string_view kSql =
+      "SELECT name,count(score) FROM items WHERE name='missing' GROUP BY name "
+      "UNION ALL SELECT 'fallback',0";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("fallback", TextBytes(rows[0][0]));
+  EXPECT_EQ(0, rows[0][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ClosesGroupedIndexOnRangeEndWithoutOpeningTable) {
+  constexpr std::string_view kSql =
+      "SELECT name,count(score) FROM items WHERE name<'a' GROUP BY name "
+      "UNION ALL SELECT 'fallback',0";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("fallback", TextBytes(rows[0][0]));
+  EXPECT_EQ(0, rows[0][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, CompletesNullGroupedIndexKeysBeforeOpeningCursors) {
+  constexpr std::string_view kSql =
+      "SELECT name,count(score) FROM items WHERE name=?1 GROUP BY name "
+      "UNION ALL SELECT 'fallback',0";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const std::array parameters{SqlValue{}};
+  const auto rows = Execute(kSql, BindEnvironment::Core(), VmEnvironment::Core(), parameters);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("fallback", TextBytes(rows[0][0]));
+  EXPECT_EQ(0, rows[0][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsCoveringGroupedIndexUnionAfterOneRow) {
+  constexpr std::string_view kSql =
+      "SELECT count() FROM items GROUP BY name UNION SELECT 0 LIMIT 1";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_TRUE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsCoveringGroupedIndexUnionAllAfterOneRow) {
+  constexpr std::string_view kSql =
+      "SELECT count() FROM items GROUP BY name UNION ALL SELECT 0 LIMIT 1";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  ASSERT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(plan.nodes().front().payload));
+  EXPECT_TRUE(std::get<PhysicalIndexScanNode>(plan.nodes().front().payload).covering);
+
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsSatisfiedGlobalDistinctOrderOnlyExpressions) {
+  constexpr std::string_view kSql =
+      "SELECT DISTINCT count() FROM items ORDER BY abs(-9223372036854775808)";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  const auto order = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), order);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+
+  const BytecodeProgram program = LowerOrThrow(kSql, catalog());
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kOpenSorter));
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kOpenTopN));
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, CoalescesSatisfiedGroupedDistinctOrdering) {
+  constexpr std::string_view kSql =
+      "SELECT DISTINCT name,count() FROM items GROUP BY name ORDER BY name LIMIT 1";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog());
+  const auto order = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), order);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+
+  const BytecodeProgram program = LowerOrThrow(kSql, catalog());
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kOpenSorter));
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kOpenTopN));
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("alpha", TextBytes(rows[0][0]));
+  EXPECT_EQ(1, rows[0][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsSatisfiedSortedDistinctOrderBeforeLaterArguments) {
+  const CustomEnvironment custom;
+  constexpr std::string_view kSql =
+      "SELECT DISTINCT score IS NULL,count(fail_after_one(name)) FROM items "
+      "GROUP BY score IS NULL ORDER BY score IS NULL DESC LIMIT 1";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog(), custom.Binder());
+  const auto order = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), order);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+
+  const BytecodeProgram program = LowerOrThrow(kSql, catalog(), custom.Binder());
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kOpenSorter));
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kOpenTopN));
+  const auto rows = Execute(kSql, custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, OrdersSingletonDistinctAggregatePayloadColumns) {
+  constexpr std::string_view kSql =
+      "SELECT DISTINCT name,count() FROM items GROUP BY name ORDER BY count()";
+  const auto rows = Execute(kSql);
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ("alpha", TextBytes(rows[0][0]));
+  EXPECT_EQ("beta", TextBytes(rows[1][0]));
+  EXPECT_EQ("gamma", TextBytes(rows[2][0]));
+  for (const auto& row : rows) {
+    EXPECT_EQ(1, row[1].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ExecutesGroupedModifierCompoundArms) {
+  const auto rows = Execute(
+      "SELECT score IS NULL,count(DISTINCT category) FROM items GROUP BY score IS NULL "
+      "UNION ALL SELECT 2,count() FROM items ORDER BY 1");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[0][1].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  EXPECT_EQ(0, rows[1][1].integer_value());
+  EXPECT_EQ(2, rows[2][0].integer_value());
+  EXPECT_EQ(3, rows[2][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesMixedSetBarriers) {
+  const auto rows = Execute(
+      "SELECT count() FROM items EXCEPT SELECT sum(id) FROM items "
+      "UNION SELECT count() FROM items INTERSECT SELECT 3");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ContinuesAfterSuppressedAggregateArm) {
+  const auto rows =
+      Execute("SELECT count() FROM items HAVING 0 UNION ALL SELECT id FROM items WHERE rowid=2");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(2, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, AcceptsEmptyGroupedCompoundArms) {
+  const auto rows =
+      Execute("SELECT count() FROM items WHERE 0 GROUP BY id UNION ALL SELECT count() FROM items");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, AcceptsSourceFreeGroupedCompoundArms) {
+  const auto rows = Execute("SELECT 1,count() GROUP BY 1 UNION ALL SELECT 2,count() FROM items");
+  ASSERT_EQ(2U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  ASSERT_EQ(2U, rows[1].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+  EXPECT_EQ(3, rows[1][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, AcceptsRowIdGroupedCompoundArms) {
+  const auto rows = Execute(
+      "SELECT count() FROM items WHERE rowid=2 GROUP BY id "
+      "UNION ALL SELECT count() FROM items WHERE rowid=3 GROUP BY id");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, DeduplicatesSourceFreeGroupedRows) {
+  const auto rows = Execute("SELECT DISTINCT 1,count() GROUP BY 1");
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, EmitsEmptyGlobalAndSourceFreeAggregateRows) {
+  const auto rows = Execute("SELECT count() FROM items WHERE 0 UNION ALL SELECT count()");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsGlobalProjectionBeforeOffset) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT failing()+count() FROM items "
+      "UNION ALL SELECT sum(id) FROM items LIMIT 1 OFFSET 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(6, rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsGroupedProjectionBeforeOffset) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT failing()+count() FROM items GROUP BY id "
+      "UNION ALL SELECT sum(id) FROM items LIMIT 1 OFFSET 3",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(6, rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsGlobalUnionAfterOneRow) {
+  const CustomEnvironment custom;
+  const auto rows = Execute("SELECT count() FROM items UNION SELECT failing() LIMIT 1",
+                            custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsGroupedUnionAfterOneRow) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count(fail_after_one(name)) FROM items GROUP BY id "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsSortedGroupedUnionAfterOneRow) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count(fail_after_one(name)) FROM items GROUP BY id+0 "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsHavingRejectedGroupsBeforeDemandOneOutput) {
+  const CustomEnvironment custom;
+  constexpr std::string_view kSql =
+      "SELECT volatile_counter()+count() FROM items GROUP BY id HAVING count()+id>2 "
+      "UNION SELECT failing() LIMIT 1";
+  const PhysicalPlan plan = OptimizeOrThrow(kSql, catalog(), custom.Binder());
+  ASSERT_TRUE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalHavingNode>(node.payload);
+  }));
+  const auto rows = Execute(kSql, custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(2, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsGroupedUnionAllAfterOneRow) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count(fail_after_one(name)) FROM items GROUP BY id "
+      "UNION ALL SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsAfterFinalGroupedUnionRow) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count(fail_after_one(name)) FROM items WHERE rowid=2 GROUP BY id "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, StopsAfterFinalGroupedUnionAllRow) {
+  const CustomEnvironment custom;
+  const auto rows =
+      Execute("SELECT count() FROM items GROUP BY id UNION ALL SELECT failing() LIMIT 3",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  for (const auto& row : rows) {
+    EXPECT_EQ(1, row[0].integer_value());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SharesOffsetAcrossAggregateArms) {
+  const auto rows = Execute(
+      "SELECT count() FROM items UNION ALL SELECT sum(id) FROM items "
+      "UNION ALL SELECT max(id)+100 FROM items LIMIT 1 OFFSET 2");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(103, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, EvaluatesCompoundLimitOnce) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count() FROM items UNION ALL SELECT sum(id) FROM items LIMIT volatile_counter()",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, BypassesEveryAggregateArmAndOffsetForLimitZero) {
+  const CustomEnvironment custom;
+  EXPECT_TRUE(Execute("SELECT count(failing()) FROM items GROUP BY id "
+                      "UNION ALL SELECT count(failing()) FROM items LIMIT 0 OFFSET failing()",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ContinuesDemandOneAfterSuppressedAggregateArm) {
+  const auto rows =
+      Execute("SELECT count() FROM items HAVING 0 UNION SELECT count() FROM items LIMIT 1");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsAggregateRightArmOfEmptyExcept) {
+  const CustomEnvironment custom;
+  EXPECT_TRUE(Execute("SELECT 1 WHERE 0 EXCEPT SELECT count(failing()) FROM items", custom.Binder(),
+                      custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SkipsAggregateRightArmOfEmptyIntersect) {
+  const CustomEnvironment custom;
+  EXPECT_TRUE(Execute("SELECT 1 WHERE 0 INTERSECT SELECT count(failing()) FROM items",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
 }
 
 TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {

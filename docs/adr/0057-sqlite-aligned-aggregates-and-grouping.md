@@ -106,6 +106,116 @@ reuse, and completed-group ORDER/LIMIT behavior.
 ADR-0069 defines package 13's FILTER, DISTINCT, local ordering, combined
 unique-ordering, capability lifecycle, and representative-gate schedules.
 
+Package 14 completes aggregate SELECT DISTINCT and compound-arm execution, then
+closes correctness integration with deterministic global and grouped aggregate
+models, grammar-aware generated and seeded fuzz inputs, public metadata and
+reset/rebind checks, memory/file execution parity, statement-wide
+temporary-file ceiling and injected-failure cleanup checks, integrated
+grouped-modifier and compound session OOM sweeps, exact lowering allocation
+budgets, and pinned SQLite differential metadata/rebind cases.
+
+#### Package-14 lowering contract
+
+An aggregate SELECT core is a complete row producer for the existing advanced
+SELECT destinations. It does not acquire a second compound planner, executor,
+sorter, membership implementation, or aggregate lifecycle.
+
+Each physical access leaf publishes its query-core index, including Empty,
+SingleRow, table-scan, rowid-lookup, and index-scan leaves. Lowering uses that
+index and the bound core's statement-global source-column range to select the
+correct cursor, aggregate program, HAVING predicate, projection, and arm-local
+DISTINCT relation. `at_most_one_row` is a cardinality upper bound, not a test
+for ungrouped execution: Empty, SingleRow, and exact-lookup inputs may also
+produce at most one group.
+
+Simple non-DISTINCT singleton aggregates retain their existing direct path.
+An advanced singleton order marked satisfied by the physical plan uses the
+streaming/coalesced destination: it opens no outer sorter or top-N capability
+and does not reevaluate ORDER-only expressions. Global order-only aggregate
+invocations still accumulate and finalize through the core's invocation list.
+An unsatisfied singleton order uses ordinary ordering keys and arm-local
+DISTINCT. Only a real compound requests full-row comparison descriptors from
+the statement's compound collations; singleton plans publish no such collation
+vector.
+Aggregate DISTINCT and compound arms reuse the advanced-core destinations:
+
+- **Streaming:** finalize, evaluate HAVING, and apply shared OFFSET before
+  visible projection unless arm-local DISTINCT requires projection and
+  membership first. Emit an accepted row and decrement the statement LIMIT
+  once.
+- **Ordered:** produce completed aggregate rows for the existing arm sorter or
+  top-N consumer, retaining its key/admission/payload schedule. Arm-local
+  DISTINCT precedes ordering. Apply statement OFFSET/LIMIT only during the
+  established compound drain.
+- **Materialized:** project completed rows into the existing compound set
+  relation, retaining arm-local DISTINCT and the operator's comparison and
+  representative rules. Apply statement OFFSET/LIMIT during final drainage.
+- **Demand one:** request the first HAVING-accepted completed row, close its
+  aggregate and modifier capabilities, and stop before stepping another group
+  or evaluating a later arm. Empty or HAVING-suppressed arms continue through
+  the existing integer-one UNION consumer.
+
+These destinations preserve the semantic order of source filtering,
+accumulation, finalization, HAVING, projection, arm-local DISTINCT, compound
+set/order processing, and final output. Streaming OFFSET may skip projection
+but never the aggregate work required to complete the skipped row. LIMIT zero
+bypasses every source and temporary capability at the statement boundary.
+
+Invocation argument/result registers and descriptors remain indexed by
+statement-global invocation IDs. Sequential arms share register workspaces
+sized to the maximum grouping-key, retained-leaf, representative, and
+access-key requirements of any arm. Cursor-field mappings remain
+statement-global and are not cleared when ordinary-arm descriptors are added.
+Per-core expression and access context is cleared after workspace preparation
+and after each emitted arm; no later arm inherits aggregate interpretation.
+
+Natural core completion and consumer-requested early stop have separate
+bytecode labels. Both retain the existing aggregate/modifier cleanup;
+arm-local DISTINCT closes before control leaves the core. Natural completion
+must jump past alternative access and grouped-drain blocks rather than fall
+through code that previously terminated with Halt. Early-stop blocks are
+emitted only when a consumer can reach them, and grouped demand-one consumers
+explicitly enable that lifecycle.
+
+Grouped source-completion paths publish their still-open cursor IDs and close
+those cursors before joining or draining the group sorter. An early stop while
+consuming an access row closes that live access; a stop during sorted drainage
+or final-group output does not close it twice. Final-group output retains a
+distinct stopped edge, and an always-stopping consumer emits no unreachable
+group reset or normal-output continuation.
+Covering access aliases the primary and index cursor IDs; closure normalizes
+those aliases and emits one close per distinct live cursor.
+
+All temporary consumers retain ADR-0058's statement-wide arenas and budgets.
+Errors propagate through existing typed results and VM cleanup. Package 14
+adds independent execution, metadata, reset/rebind, allocation, OOM, model,
+fuzz, and pinned differential evidence; package 15 alone records the standalone
+aggregate/grouping performance baseline.
+
+The integration evidence includes independently named
+`ReadLoweringAggregateIntegration` cases for every destination, Empty,
+SingleRow, exact lookup, indexed input, HAVING rejection, shared OFFSET,
+LIMIT-zero bypass, and both boundary and final-group early stop. Noncovering
+index cases assert the selected physical access before exercising found,
+missing-seek, range-end-before-table-open, and NULL-key completion.
+
+The pinned read corpus contains 114 admitted comparisons and six explicit
+unsupported boundaries, including aggregate metadata/reset/rebind, DISTINCT,
+compounds, OFFSET projection skipping, demand-one suppression, and
+explicit-collation set ordering, satisfied-order elision/coalescing, and
+singleton ordering with payload columns. Generated fuzz statements execute through
+Done; deterministic aggregate seeds include grouped LIMIT/OFFSET and combined
+DISTINCT/modifier compounds. The vector model independently distinguishes
+MIN/MAX representative replacement and duplicate DISTINCT values.
+
+Exact lowering budgets are 78 allocations for grouped aggregate DISTINCT
+and 84 for ordered aggregate UNION ALL. Singleton ordering allocates no unused
+full-key compound descriptors. Lowering OOM sweeps include both
+streaming OFFSET and grouped demand-one plans; session OOM sweeps include
+ordered and grouped demand-one compounds with post-reset recovery. Public
+session tests additionally force compound spill, require the two-file ceiling,
+and prove cleanup on early stop, reset, and injected write failure.
+
 ### 2. Pin the accepted SQL surface
 
 Ordinary SELECT cores gain:

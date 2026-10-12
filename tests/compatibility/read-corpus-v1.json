@@ -1144,6 +1144,250 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-integration-metadata-rebind",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "0"}},
+        {"index": 3, "op": "bind", "value": {"type": "integer", "value": "-1"}},
+        {"index": 4, "op": "bind", "value": {"type": "integer", "value": "0"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "3"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542073636f7265204953204e554c4c204153206d697373696e675f73636f72652c636f756e74282920415320726f775f636f756e742c6d696e286e616d65292041532066697273745f6e616d652c67726f75705f636f6e636174286e616d65204f524445522042592069642044455343292046494c544552202857484552452069643e3d3f3129204153206e616d65732c636f756e742844495354494e43542063617465676f7279292041532063617465676f726965732046524f4d206974656d732047524f55502042592073636f7265204953204e554c4c20484156494e4720636f756e7428293e3f32204f524445522042592031204c494d4954203f33204f4646534554203f34"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-select-distinct-reset",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e435420636f756e74282920415320726f775f636f756e742046524f4d206974656d732047524f55502042592073636f7265204953204e554c4c204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-compound-rebind",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "3"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "3"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292041532076616c75652046524f4d206974656d732057484552452069643e3d3f3120554e494f4e20414c4c2053454c4543542073756d286964292046524f4d206974656d732057484552452069643e3d3f32204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-streaming-offset-rebind",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "0"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292041532076616c75652046524f4d206974656d7320554e494f4e20414c4c2053454c4543542073756d286964292046524f4d206974656d73204c494d4954203f31204f4646534554203f32"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-grouped-offset-skipping",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420616273282d39323233333732303336383534373735383038292b636f756e7428292047524f555020425920302b3020554e494f4e20414c4c2053454c4543542073756d286964292046524f4d206974656d73204c494d49542031204f46465345542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-empty-grouped-compound",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d7320574845524520302047524f555020425920696420554e494f4e20414c4c2053454c4543542037"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-source-free-grouped-compound",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420312c636f756e7428292047524f5550204259203120554e494f4e20414c4c2053454c45435420322c636f756e7428292046524f4d206974656d73204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-rowid-grouped-compound",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 2, "op": "bind", "value": {"type": "integer", "value": "999999"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d7320574845524520726f7769643d3f312047524f555020425920696420554e494f4e20414c4c2053454c45435420636f756e7428292046524f4d206974656d7320574845524520726f7769643d3f322047524f5550204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-demand-one-grouped",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e74286964292046524f4d206974656d732047524f555020425920696420554e494f4e2053454c45435420616273282d3932323333373230333638353437373538303829204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-demand-one-final-group",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d7320574845524520726f7769643d312047524f555020425920696420554e494f4e2053454c45435420616273282d3932323333373230333638353437373538303829204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-grouped-final-limit-rebind",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "0"}},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d7320574845524520726f7769643d3f312047524f555020425920696420554e494f4e20414c4c2053454c45435420616273282d3932323333373230333638353437373538303829204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-set-explicit-collation",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c454354206d696e286e616d652920434f4c4c415445204e4f434153452041532076616c75652046524f4d206974656d7320554e494f4e2053454c454354206d6178286e616d65292046524f4d206974656d73204f524445522042592076616c756520434f4c4c4154452042494e415259"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-distinct-compound",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e435420636f756e7428292046524f4d206974656d732047524f555020425920696420554e494f4e20414c4c2053454c45435420636f756e7428292046524f4d206974656d732057484552452030204f524445522042592031204c494d49542032"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-distinct-global-order-elision",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "reset"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e435420636f756e7428292046524f4d206974656d73204f5244455220425920616273282d3932323333373230333638353437373538303829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-distinct-group-order-coalescing",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e43542069642c636f756e7428292046524f4d206974656d732047524f5550204259206964204f524445522042592069642044455343204c494d49542031204f46465345542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "aggregate-integration",
+      "id": "aggregate-distinct-singleton-payload-ordering",
+      "operations": [
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "step"},
+        {"op": "finalize"}
+      ],
+      "sql_hex": "53454c4543542044495354494e4354206e616d652c636f756e7428292046524f4d206974656d732047524f5550204259206e616d65204f5244455220425920636f756e742829"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "pattern-operator",
       "id": "unsupported-pattern",
@@ -1338,6 +1582,7 @@
   "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
   "schema_version": 1,
   "supported_matrix": [
+    "aggregate-integration",
     "aggregate-modifiers",
     "alter-defaults",
     "constant-select",

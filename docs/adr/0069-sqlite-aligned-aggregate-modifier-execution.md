@@ -96,6 +96,10 @@ Retain explicit rejection of:
 Package 14 remains responsible for aggregate compounds/SELECT DISTINCT,
 model/fuzz integration, and the final compatibility matrix.
 
+Delivery update: ADR-0057 package 14 embeds this invocation lifecycle in
+advanced SELECT cores, so SELECT DISTINCT and every supported compound operator
+can consume global or grouped aggregate rows without a private aggregate path.
+
 ### 2. Add one shared aggregate-invocation lowering module
 
 Create:

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -51,6 +52,11 @@ void RequireStatus(Status status) {
 [[nodiscard]] std::filesystem::path FixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "catalog_loader" / "sqlite-3.54.0-catalog.db";
+}
+
+[[nodiscard]] std::filesystem::path ReadCompatibilityFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "read_compatibility" / "sqlite-3.54.0-read-compatibility.db";
 }
 
 [[nodiscard]] std::filesystem::path SessionFixturePath(std::string_view name) {
@@ -256,6 +262,153 @@ class UnlockFailingVfs final : public Vfs {
   std::shared_ptr<UnlockFailureState> state_;
 };
 
+struct TemporaryFileState {
+  std::optional<std::size_t> writes_until_failure{};
+  std::size_t open_count = 0;
+  std::size_t live_count = 0;
+  std::size_t peak_live_count = 0;
+};
+
+class TemporaryTrackingFile final : public File {
+ public:
+  TemporaryTrackingFile(std::unique_ptr<File> delegate, std::shared_ptr<TemporaryFileState> state,
+                        bool temporary)
+      : delegate_(std::move(delegate)), state_(std::move(state)), temporary_(temporary) {
+    if (temporary_) {
+      ++state_->open_count;
+      ++state_->live_count;
+      if (state_->live_count > state_->peak_live_count) {
+        state_->peak_live_count = state_->live_count;
+      }
+    }
+  }
+
+  ~TemporaryTrackingFile() override {
+    if (temporary_) {
+      --state_->live_count;
+    }
+  }
+
+ private:
+  Result<ByteCount> DoReadAt(MutableByteView destination, FileOffset offset) override {
+    auto read = delegate_->ReadAt(destination, offset);
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    return read->bytes_read();
+  }
+
+  Status DoWriteAt(ByteView source, FileOffset offset) override {
+    if (temporary_ && state_->writes_until_failure.has_value()) {
+      if (*state_->writes_until_failure == 0U) {
+        state_->writes_until_failure.reset();
+        return std::unexpected(Error::Create(ErrorCode::kIo, "injected temporary write failure"));
+      }
+      --*state_->writes_until_failure;
+    }
+    return delegate_->WriteAt(source, offset);
+  }
+
+  Status DoTruncate(FileSize size) override { return delegate_->Truncate(size); }
+
+  Status DoSync(SyncOptions options) override { return delegate_->Sync(options); }
+
+  Result<FileSize> DoSize() override { return delegate_->Size(); }
+
+  Status DoLock(DatabaseLock lock) override { return delegate_->Lock(lock); }
+
+  Status DoUnlock(DatabaseLock lock) override { return delegate_->Unlock(lock); }
+
+  Result<bool> DoHasReservedLock() override { return delegate_->HasReservedLock(); }
+
+  [[nodiscard]] FileProperties DoProperties() const noexcept override {
+    auto properties = delegate_->Properties();
+    if (properties.has_value()) {
+      return *properties;
+    }
+    return FileProperties{
+        .sector_size = ByteCount{1},
+        .device_characteristics = {},
+    };
+  }
+
+  Result<std::optional<MutableByteView>> DoMapSharedMemory(SharedMemoryRegionIndex region,
+                                                           ByteCount region_size,
+                                                           SharedMemoryMapMode mode) override {
+    return delegate_->MapSharedMemory(region, region_size, mode);
+  }
+
+  Status DoLockSharedMemory(SharedMemoryLockRange range, SharedMemoryLockOperation operation,
+                            SharedMemoryLockMode mode) override {
+    return delegate_->LockSharedMemory(range, operation, mode);
+  }
+
+  void DoSharedMemoryBarrier() noexcept override { delegate_->SharedMemoryBarrier(); }
+
+  Status DoUnmapSharedMemory(SharedMemoryUnmapMode mode) override {
+    return delegate_->UnmapSharedMemory(mode);
+  }
+
+  std::unique_ptr<File> delegate_;
+  std::shared_ptr<TemporaryFileState> state_;
+  bool temporary_;
+};
+
+class TemporaryTrackingVfs final : public Vfs {
+ public:
+  explicit TemporaryTrackingVfs(std::shared_ptr<TemporaryFileState> state)
+      : state_(std::move(state)) {}
+
+ private:
+  Result<OpenedFile> DoOpen(std::optional<std::string_view> path,
+                            FileOpenOptions options) override {
+    auto opened = delegate_.Open(path, options);
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    const FileAccessMode access = opened->access;
+    auto file =
+        std::make_unique<TemporaryTrackingFile>(std::move(opened->file), state_, !path.has_value());
+    return OpenedFile{
+        .file = std::move(file),
+        .access = access,
+    };
+  }
+
+  Status DoDelete(std::string_view path, DirectorySync directory_sync) override {
+    return delegate_.Delete(path, directory_sync);
+  }
+
+  Result<bool> DoAccess(std::string_view path, FileAccessQuery query) override {
+    return delegate_.Access(path, query);
+  }
+
+  Result<std::string> DoFullPath(std::string_view path) override {
+    return delegate_.FullPath(path);
+  }
+
+  Result<ByteCount> DoRandomBytes(MutableByteView output) override {
+    auto random = delegate_.RandomBytes(output);
+    if (!random.has_value()) {
+      return std::unexpected(std::move(random.error()));
+    }
+    return ByteCount{output.size()};
+  }
+
+  Result<std::chrono::microseconds> DoSleepFor(std::chrono::microseconds duration) override {
+    return delegate_.SleepFor(duration);
+  }
+
+  Result<WallClockTime> DoCurrentTime() override { return delegate_.CurrentTime(); }
+
+  [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override {
+    return delegate_.MaximumPathLength();
+  }
+
+  PosixVfs delegate_;
+  std::shared_ptr<TemporaryFileState> state_;
+};
+
 [[nodiscard]] ReadStatement PrepareStatement(ReadSession& session, std::string_view sql) {
   ReadPrepareOutput output = TakeValue(session.Prepare(Utf8View{sql}));
   if (!output.statement.has_value()) {
@@ -278,6 +431,80 @@ class UnlockFailingVfs final : public Vfs {
     throw std::runtime_error{"expected text session result"};
   }
   return text->bytes();
+}
+
+constexpr std::string_view kIntegratedAggregateSql =
+    "SELECT nullable IS NULL AS missing_value,"
+    "count() AS row_count,"
+    "min(label) AS first_label,"
+    "group_concat(label ORDER BY id DESC) FILTER (WHERE value>=?1) AS labels,"
+    "count(DISTINCT value<0) AS signs "
+    "FROM model_rows "
+    "GROUP BY nullable IS NULL "
+    "HAVING count()>?2 "
+    "ORDER BY 1";
+
+constexpr std::string_view kSpillingAggregateCompoundSql =
+    "SELECT count(),group_concat(label ORDER BY id DESC) "
+    "FROM model_rows GROUP BY nullable IS NULL "
+    "UNION SELECT 99,'unused' LIMIT 1";
+
+void ExpectIntegratedAggregateMetadata(const ReadStatement& statement) {
+  constexpr std::array<std::string_view, 5> kNames{
+      "missing_value", "row_count", "first_label", "labels", "signs",
+  };
+  ASSERT_EQ(kNames.size(), statement.result_columns().size());
+  for (std::size_t index = 0; index < kNames.size(); ++index) {
+    EXPECT_EQ(kNames[index], statement.result_columns()[index].name);
+    EXPECT_EQ(std::nullopt, statement.result_columns()[index].declared_type);
+    EXPECT_EQ(TypeAffinity::kNone, statement.result_columns()[index].affinity);
+  }
+}
+
+void ExpectIntegratedAggregateFirstExecution(ReadStatement& statement) {
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(0)));
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(5U, statement.row().size());
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(21, IntegerValue(statement.row()[1]));
+  EXPECT_EQ("row-02", TextValue(statement.row()[2]));
+  EXPECT_EQ(
+      "row-32,row-30,row-29,row-27,row-26,row-24,row-23,row-21,row-20,row-18,"
+      "row-17,row-15,row-14",
+      TextValue(statement.row()[3]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[4]));
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(11, IntegerValue(statement.row()[1]));
+  EXPECT_EQ("row-01", TextValue(statement.row()[2]));
+  EXPECT_EQ("row-31,row-28,row-25,row-22,row-19,row-16,row-13", TextValue(statement.row()[3]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[4]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+void ExpectIntegratedAggregateReboundExecution(ReadStatement& statement) {
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(40)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(15)));
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(5U, statement.row().size());
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(21, IntegerValue(statement.row()[1]));
+  EXPECT_EQ("row-02", TextValue(statement.row()[2]));
+  EXPECT_EQ("row-32,row-30,row-29,row-27", TextValue(statement.row()[3]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[4]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+void ExerciseIntegratedAggregate(ReadStatement& statement) {
+  ExpectIntegratedAggregateMetadata(statement);
+  ExpectIntegratedAggregateFirstExecution(statement);
+  ExpectIntegratedAggregateReboundExecution(statement);
+  RequireStatus(statement.Finalize());
 }
 
 TEST(ReadSession, OpensLazilyAndReportsMissingCorruptAndEmptyDatabases) {
@@ -551,6 +778,171 @@ TEST(ReadSession, ExecutesAndResetsAggregateModifiers) {
   RequireStatus(statement.Reset());
   EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
   EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+}
+
+TEST(ReadSession, ExecutesAndResetsAggregateDistinctAndCompoundCores) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement distinct = PrepareStatement(
+      session, "SELECT DISTINCT count() AS row_count FROM items GROUP BY score IS NULL ORDER BY 1");
+  ASSERT_EQ(1U, distinct.result_columns().size());
+  EXPECT_EQ("row_count", distinct.result_columns()[0].name);
+  EXPECT_EQ(ReadStep::kRow, TakeValue(distinct.Step()));
+  EXPECT_EQ(1, IntegerValue(distinct.row()[0]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(distinct.Step()));
+  EXPECT_EQ(2, IntegerValue(distinct.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(distinct.Step()));
+  RequireStatus(distinct.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(distinct.Step()));
+  EXPECT_EQ(1, IntegerValue(distinct.row()[0]));
+
+  ReadStatement compound =
+      PrepareStatement(session,
+                       "SELECT count() AS value FROM items WHERE id>=?1 "
+                       "UNION ALL SELECT sum(id) FROM items WHERE id>=?2 ORDER BY 1");
+  const auto execute = [&](std::int64_t first, std::int64_t second, std::int64_t expected_first,
+                           std::int64_t expected_second) {
+    RequireStatus(compound.Bind(1, SqlValue::Integer(first)));
+    RequireStatus(compound.Bind(2, SqlValue::Integer(second)));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(compound.Step()));
+    EXPECT_EQ(expected_first, IntegerValue(compound.row()[0]));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(compound.Step()));
+    EXPECT_EQ(expected_second, IntegerValue(compound.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(compound.Step()));
+  };
+  execute(2, 2, 2, 5);
+  RequireStatus(compound.Reset());
+  execute(3, 3, 1, 3);
+}
+
+TEST(ReadSession, IntegratesAggregateMetadataRebindingAndTemporaryModes) {
+  constexpr ByteCount kMemoryBudget{64U * 1024U};
+  constexpr ByteCount kFileBudget{4096};
+  const ReadSessionOptions memory_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = kMemoryBudget,
+          },
+  };
+  ReadSession memory =
+      TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string(), memory_options));
+  ReadStatement memory_statement = PrepareStatement(memory, kIntegratedAggregateSql);
+  ExerciseIntegratedAggregate(memory_statement);
+
+  const auto file_state = std::make_shared<TemporaryFileState>();
+  const ReadSessionOptions file_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = kFileBudget,
+          },
+  };
+  ReadSession file =
+      TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(file_state),
+                                  ReadCompatibilityFixturePath().string(), file_options));
+  ReadStatement file_statement = PrepareStatement(file, kIntegratedAggregateSql);
+  ExerciseIntegratedAggregate(file_statement);
+  EXPECT_GT(file_state->open_count, 0U);
+  EXPECT_LE(file_state->peak_live_count, 2U);
+  EXPECT_EQ(0U, file_state->live_count);
+}
+
+TEST(ReadSession, CleansAggregateTemporaryFilesAfterInjectedFailure) {
+  constexpr ByteCount kFileBudget{4096};
+  const auto state = std::make_shared<TemporaryFileState>();
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = kFileBudget,
+          },
+  };
+  ReadSession session =
+      TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                  ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(session, kIntegratedAggregateSql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(0)));
+  state->writes_until_failure = 0U;
+
+  const Result<ReadStep> failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_GT(state->open_count, 0U);
+  EXPECT_LE(state->peak_live_count, 2U);
+  EXPECT_EQ(0U, state->live_count);
+
+  const Status reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  while (TakeValue(statement.Step()) == ReadStep::kRow) {
+  }
+  EXPECT_EQ(0U, state->live_count);
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, CleansSpilledAggregateCompoundFilesOnEarlyStop) {
+  constexpr ByteCount kFileBudget{4096};
+  const auto state = std::make_shared<TemporaryFileState>();
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = kFileBudget,
+          },
+  };
+  ReadSession session =
+      TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                  ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(session, kSpillingAggregateCompoundSql);
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(21, IntegerValue(statement.row()[0]));
+  EXPECT_GT(state->open_count, 0U);
+  EXPECT_LE(state->peak_live_count, 2U);
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(0U, state->live_count);
+
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(21, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_EQ(0U, state->live_count);
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, RecoversAggregateCompoundAfterInjectedSpillFailure) {
+  constexpr ByteCount kFileBudget{4096};
+  const auto state = std::make_shared<TemporaryFileState>();
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = kFileBudget,
+          },
+  };
+  ReadSession session =
+      TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                  ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(session, kSpillingAggregateCompoundSql);
+  state->writes_until_failure = 0U;
+
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_GT(state->open_count, 0U);
+  EXPECT_LE(state->peak_live_count, 2U);
+  EXPECT_EQ(0U, state->live_count);
+
+  const Status reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(21, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_EQ(0U, state->live_count);
+  RequireStatus(statement.Finalize());
 }
 
 TEST(ReadSession, ExecutesAndResetsGlobalCount) {

@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -51,6 +52,11 @@ bool inject_failure = false;
 [[nodiscard]] std::filesystem::path FixturePath(std::string_view name) {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "session" / std::string{name};
+}
+
+[[nodiscard]] std::filesystem::path ReadCompatibilityFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "read_compatibility" / "sqlite-3.54.0-read-compatibility.db";
 }
 
 [[nodiscard]] std::vector<char> ReadBytes(const std::filesystem::path& path) {
@@ -635,6 +641,145 @@ int main() try {
     const auto recovered = statement.Step();
     if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 2U) {
       return 1;
+    }
+  }
+
+  constexpr std::string_view kIntegratedAggregateSql =
+      "SELECT nullable IS NULL,"
+      "count(),"
+      "min(label),"
+      "group_concat(label ORDER BY id DESC) FILTER (WHERE value>=?1),"
+      "count(DISTINCT value<0) "
+      "FROM model_rows "
+      "GROUP BY nullable IS NULL "
+      "HAVING count()>?2 "
+      "ORDER BY 1";
+  const ReadSessionOptions aggregate_options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = ByteCount{1U << 20U},
+          },
+  };
+  std::size_t integrated_aggregate_allocations = 0;
+  {
+    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, kIntegratedAggregateSql);
+    if (!statement.Bind(1, SqlValue::Integer(0)).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(0)).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto stepped = statement.Step();
+    if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 5U) {
+      return 1;
+    }
+    integrated_aggregate_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (integrated_aggregate_allocations == 0U || integrated_aggregate_allocations > 1024U) {
+    return 1;
+  }
+
+  for (std::size_t failure = 0; failure < integrated_aggregate_allocations; ++failure) {
+    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+    if (!session.has_value()) {
+      return 1;
+    }
+    ReadStatement statement = Prepare(*session, kIntegratedAggregateSql);
+    if (!statement.Bind(1, SqlValue::Integer(0)).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(0)).has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto stepped = statement.Step();
+      returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom) {
+      return 1;
+    }
+    const Status reset = statement.Reset();
+    if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+      return 1;
+    }
+    const auto recovered = statement.Step();
+    if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 5U) {
+      return 1;
+    }
+  }
+
+  constexpr std::array<std::string_view, 2> kAggregateCompoundSqls{
+      "SELECT count() FROM model_rows WHERE id<=?1 "
+      "UNION ALL SELECT sum(id) FROM model_rows WHERE id<=?2 ORDER BY 1",
+      "SELECT count(value) FROM model_rows WHERE id<=?1 GROUP BY id "
+      "UNION SELECT sum(id) FROM model_rows WHERE id<=?2 LIMIT 1",
+  };
+  for (const std::string_view sql : kAggregateCompoundSqls) {
+    std::size_t aggregate_compound_allocations = 0;
+    {
+      auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+      if (!session.has_value()) {
+        return 1;
+      }
+      ReadStatement statement = Prepare(*session, sql);
+      if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
+          !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
+        return 1;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      const auto stepped = statement.Step();
+      if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 1U) {
+        return 1;
+      }
+      aggregate_compound_allocations = allocation_index.load(std::memory_order_relaxed);
+    }
+    if (aggregate_compound_allocations == 0U || aggregate_compound_allocations > 1024U) {
+      return 1;
+    }
+
+    for (std::size_t failure = 0; failure < aggregate_compound_allocations; ++failure) {
+      auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+      if (!session.has_value()) {
+        return 1;
+      }
+      ReadStatement statement = Prepare(*session, sql);
+      if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
+          !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
+        return 1;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool returned_oom = false;
+      try {
+        const auto stepped = statement.Step();
+        returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+      } catch (...) {
+        inject_failure = false;
+        return 1;
+      }
+      inject_failure = false;
+      if (!returned_oom) {
+        return 1;
+      }
+      const Status reset = statement.Reset();
+      if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+        return 1;
+      }
+      const auto recovered = statement.Step();
+      if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 1U) {
+        return 1;
+      }
     }
   }
 
