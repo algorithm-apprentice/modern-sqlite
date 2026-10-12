@@ -14,6 +14,8 @@ namespace {
 
 constexpr std::size_t kMaximumSqlBytes = std::size_t{64} * 1024U;
 constexpr std::size_t kMaximumRows = 256;
+constexpr std::size_t kModelRowCount = 32;
+constexpr std::uint8_t kAggregateSelectionDivisor = 4;
 
 class ByteReader final {
  public:
@@ -108,6 +110,43 @@ class ByteReader final {
   return sql;
 }
 
+[[nodiscard]] std::string_view GeneratedDirection(ByteReader& input) noexcept {
+  return input.Next() % 2U == 0U ? "ASC" : "DESC";
+}
+
+[[nodiscard]] std::string GenerateAggregateSql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  const bool grouped = input.Next() % 2U != 0U;
+  const std::size_t source_limit = 1U + input.Next() % kModelRowCount;
+  const auto filter_floor = static_cast<std::int16_t>(input.Next()) - 128;
+  const std::string direction{GeneratedDirection(input)};
+
+  if (!grouped) {
+    return "SELECT count(),sum(value),total(value),avg(value),min(label),max(label),"
+           "group_concat(label ORDER BY id " +
+           direction + ") FILTER (WHERE value>=" + std::to_string(filter_floor) +
+           "),group_concat(DISTINCT nullable ORDER BY nullable " + direction +
+           ") FROM model_rows WHERE id<=" + std::to_string(source_limit);
+  }
+
+  const std::size_t having_limit = input.Next() % 8U;
+  std::string sql =
+      "SELECT nullable IS NULL,count(),min(value),max(value),"
+      "group_concat(label ORDER BY id " +
+      direction + ") FILTER (WHERE value>=" + std::to_string(filter_floor) +
+      "),group_concat(DISTINCT value<0 ORDER BY id " + direction +
+      ") FROM model_rows WHERE id<=" + std::to_string(source_limit) +
+      " GROUP BY nullable IS NULL HAVING count()>" + std::to_string(having_limit) + " ORDER BY 1";
+  if (input.Next() % 2U != 0U) {
+    sql += " LIMIT " + std::to_string(1U + input.Next() % 3U);
+    if (input.Next() % 2U != 0U) {
+      sql += " OFFSET " + std::to_string(input.Next() % 3U);
+    }
+  }
+  return sql;
+}
+
 void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
   if (!prepared.has_value() || !prepared->statement.has_value()) {
     return;
@@ -125,6 +164,10 @@ void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
 }  // namespace
 
 std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
+  ByteReader selector{input};
+  if (selector.Next() % kAggregateSelectionDivisor == 0U) {
+    return GenerateAggregateSql(input);
+  }
   return GenerateCompoundSql(input);
 }
 

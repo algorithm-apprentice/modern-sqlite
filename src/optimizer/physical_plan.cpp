@@ -3136,7 +3136,7 @@ class PhysicalPlanBuilder final {
             if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
               if (aggregate_plans[node.core_index].has_value() &&
                   aggregate_plans[node.core_index]->predicates.empty) {
-                return PhysicalEmptyNode{};
+                return PhysicalEmptyNode{.core_index = node.core_index};
               }
               return PhysicalSingleRowNode{.core_index = node.core_index};
             } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
@@ -3144,7 +3144,7 @@ class PhysicalPlanBuilder final {
                 const AggregateCorePlan& aggregate =
                     AssumePresent(aggregate_plans[node.core_index]);
                 if (aggregate.predicates.empty) {
-                  return PhysicalEmptyNode{};
+                  return PhysicalEmptyNode{.core_index = node.core_index};
                 }
                 if (aggregate.selected_access.has_value()) {
                   const ReadAccessCandidate& selected =
@@ -3152,6 +3152,7 @@ class PhysicalPlanBuilder final {
                   if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload);
                       rowid != nullptr) {
                     return PhysicalRowIdLookupNode{
+                        .core_index = node.core_index,
                         .source_kind = aggregate.source.source_kind,
                         .table = aggregate.source.table,
                         .root_page = aggregate.source.root_page,
@@ -3161,6 +3162,7 @@ class PhysicalPlanBuilder final {
                   if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
                       index != nullptr) {
                     PhysicalIndexScanNode scan = index->node;
+                    scan.core_index = node.core_index;
                     scan.direction = aggregate.direction;
                     return scan;
                   }

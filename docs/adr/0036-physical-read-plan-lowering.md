@@ -868,8 +868,8 @@ Tests cover:
 
 This list records the scope boundary of package 36, not the current repository
 capability. Later accepted ADRs implement several entries, including ordinary
-index access, sorting, DISTINCT/compounds, and the ungrouped aggregate subset
-defined by ADR-0063.
+index access, sorting, DISTINCT/compounds, and the aggregate/grouping surface
+completed through ADR-0057 package 14.
 
 - Ordinary-index, covering-index, and WITHOUT ROWID key seeks.
 - Rowid ranges, IN, OR unions, joins, sorting, DISTINCT, aggregation,

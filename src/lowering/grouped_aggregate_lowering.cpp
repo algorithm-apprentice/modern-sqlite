@@ -272,7 +272,11 @@ class GroupedAggregateEmitter final {
     });
   }
 
-  [[nodiscard]] LoweringResult<void> StopAtCompletedGroup() {
+  [[nodiscard]] bool OutputMayContinue() const noexcept {
+    return !input_.stops_after_output || input_.program->having.has_value();
+  }
+
+  [[nodiscard]] LoweringResult<void> StopAtCompletedGroup(bool source_row_active) {
     if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
       return closed;
     }
@@ -282,7 +286,7 @@ class GroupedAggregateEmitter final {
         return closed;
       }
     }
-    return services_->EmitGroupedOutputCompletion();
+    return services_->EmitGroupedEarlyStopCompletion(source_row_active);
   }
 
   [[nodiscard]] LoweringResult<void> ConsumeCurrentRow(AggregateExpressionSource source) {
@@ -341,24 +345,28 @@ class GroupedAggregateEmitter final {
     if (auto bound = BindLabel(*continue_group); !bound.has_value()) {
       return bound;
     }
-    if (auto reset = services_->ResetGroupedAggregateInvocations(); !reset.has_value()) {
-      return reset;
-    }
-    if (auto copied = CopyCurrentGroup(); !copied.has_value()) {
-      return copied;
-    }
-    if (auto stepped = StepAggregates(source, true); !stepped.has_value()) {
-      return stepped;
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return jumped;
+    if (OutputMayContinue()) {
+      if (auto reset = services_->ResetGroupedAggregateInvocations(); !reset.has_value()) {
+        return reset;
+      }
+      if (auto copied = CopyCurrentGroup(); !copied.has_value()) {
+        return copied;
+      }
+      if (auto stepped = StepAggregates(source, true); !stepped.has_value()) {
+        return stepped;
+      }
+      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+        return jumped;
+      }
     }
 
     if (stopped.has_value()) {
       if (auto bound = BindLabel(*stopped); !bound.has_value()) {
         return bound;
       }
-      if (auto stopped_result = StopAtCompletedGroup(); !stopped_result.has_value()) {
+      if (auto stopped_result =
+              StopAtCompletedGroup(source == AggregateExpressionSource::AccessRow);
+          !stopped_result.has_value()) {
         return stopped_result;
       }
     }
@@ -437,6 +445,14 @@ class GroupedAggregateEmitter final {
     if (!finish.has_value()) {
       return std::unexpected(std::move(finish.error()));
     }
+    std::optional<Label> stopped;
+    if (input_.may_stop_early) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      stopped = *label;
+    }
 
     if (auto jumped = EmitJumpIf(input_.has_group_register, JumpCondition::kIfFalse, *no_group);
         !jumped.has_value()) {
@@ -447,19 +463,21 @@ class GroupedAggregateEmitter final {
     }
     if (auto output = services_->EmitCompletedGroupedAggregate(GroupedCompletionTargets{
             .skipped = *close_active,
-            .stopped = *close_active,
+            .stopped = stopped.value_or(*close_active),
         });
         !output.has_value()) {
       return output;
     }
-    if (auto bound = BindLabel(*close_active); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
-      return closed;
-    }
-    if (auto jumped = EmitJump(*finish); !jumped.has_value()) {
-      return jumped;
+    if (OutputMayContinue()) {
+      if (auto bound = BindLabel(*close_active); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = services_->CloseGroupedAggregateInvocations(); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(*finish); !jumped.has_value()) {
+        return jumped;
+      }
     }
     if (auto bound = BindLabel(*no_group); !bound.has_value()) {
       return bound;
@@ -482,7 +500,21 @@ class GroupedAggregateEmitter final {
         return closed;
       }
     }
-    return services_->EmitGroupedOutputCompletion();
+    if (auto completed = services_->EmitGroupedOutputCompletion(); !completed.has_value()) {
+      return completed;
+    }
+    if (stopped.has_value()) {
+      if (!OutputMayContinue()) {
+        if (auto bound = BindLabel(*close_active); !bound.has_value()) {
+          return bound;
+        }
+      }
+      if (auto bound = BindLabel(*stopped); !bound.has_value()) {
+        return bound;
+      }
+      return StopAtCompletedGroup(false);
+    }
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> DrainSortedRows() {
@@ -530,11 +562,21 @@ class GroupedAggregateEmitter final {
 };
 
 [[nodiscard]] LoweringResult<void> ValidateInput(const GroupedAggregateInput& input) {
-  if (input.builder == nullptr || input.program == nullptr || input.aggregate == nullptr ||
-      input.program->group_by.empty() ||
-      input.representative_registers.size() != input.program->representative_leaves.size() ||
-      input.retained_leaves.size() != input.retained_leaf_registers.size()) {
-    return std::unexpected(InternalFailure("grouped aggregate input is incomplete"));
+  if (input.builder == nullptr || input.program == nullptr || input.aggregate == nullptr) {
+    return std::unexpected(InternalFailure("grouped aggregate services are incomplete"));
+  }
+  if (input.program->group_by.empty()) {
+    return std::unexpected(InternalFailure("grouped aggregate program has no grouping terms"));
+  }
+  if (input.stops_after_output && !input.may_stop_early) {
+    return std::unexpected(InternalFailure("grouped output stop has no early-stop lifecycle"));
+  }
+  if (input.representative_registers.size() != input.program->representative_leaves.size()) {
+    return std::unexpected(
+        InternalFailure("grouped aggregate representative register count is invalid"));
+  }
+  if (input.retained_leaves.size() != input.retained_leaf_registers.size()) {
+    return std::unexpected(InternalFailure("grouped aggregate retained register count is invalid"));
   }
   if (input.has_representative_controller && (!input.representative_effect_register.has_value() ||
                                               !input.representative_replace_register.has_value())) {

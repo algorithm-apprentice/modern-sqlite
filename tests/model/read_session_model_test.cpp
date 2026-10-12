@@ -116,6 +116,12 @@ void ExpectText(const SqlValue& value, std::string_view expected) {
   EXPECT_EQ(expected, value.text_value()->bytes());
 }
 
+void ExpectReal(const SqlValue& value, double expected) {
+  ASSERT_EQ(SqlValueType::kReal, value.type());
+  ASSERT_TRUE(value.real_value().has_value());
+  EXPECT_DOUBLE_EQ(expected, *value.real_value());
+}
+
 void ExpectNullable(const SqlValue& value, std::optional<std::int64_t> expected) {
   if (!expected.has_value()) {
     EXPECT_EQ(SqlValueType::kNull, value.type());
@@ -288,6 +294,14 @@ struct GeneratedValueInput {
     case 9:
       output << "limit=" << (words[1] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[1] % 9U))
              << ",offset=" << words[2] % 6U;
+      break;
+    case 10:
+      output << "cutoff=" << words[1] % (kRows.size() + 1U);
+      break;
+    case 11:
+      output << "cutoff=" << words[1] % (kRows.size() + 1U)
+             << ",filter_floor=" << static_cast<std::int64_t>(words[2] % 73U) - 36
+             << ",having_limit=" << words[3] % 8U;
       break;
     default:
       output << "unreachable";
@@ -691,12 +705,127 @@ void RunDistinctNullable(ReadSession& session, const std::array<std::uint64_t, 4
   RequireStatus(statement.Finalize());
 }
 
+void RunGlobalAggregate(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto cutoff = static_cast<std::int64_t>(words[1] % (kRows.size() + 1U));
+  ReadStatement statement = Prepare(
+      session,
+      "SELECT count(),count(nullable),sum(value),total(value),avg(value),min(value),max(value) "
+      "FROM model_rows WHERE id<=?1");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(cutoff)));
+
+  std::size_t count = 0;
+  std::size_t nullable_count = 0;
+  std::int64_t sum = 0;
+  std::optional<std::int64_t> minimum;
+  std::optional<std::int64_t> maximum;
+  for (const ModelRow& row : kRows) {
+    if (row.id > cutoff) {
+      continue;
+    }
+    ++count;
+    nullable_count += row.nullable.has_value() ? 1U : 0U;
+    sum += row.value;
+    minimum = minimum.has_value() ? std::min(*minimum, row.value) : row.value;
+    maximum = maximum.has_value() ? std::max(*maximum, row.value) : row.value;
+  }
+
+  ExpectRowStep(statement);
+  ASSERT_EQ(7U, statement.row().size());
+  ExpectInteger(statement.row()[0], static_cast<std::int64_t>(count));
+  ExpectInteger(statement.row()[1], static_cast<std::int64_t>(nullable_count));
+  if (count == 0U) {
+    EXPECT_EQ(SqlValueType::kNull, statement.row()[2].type());
+    ExpectReal(statement.row()[3], 0.0);
+    EXPECT_EQ(SqlValueType::kNull, statement.row()[4].type());
+  } else {
+    ExpectInteger(statement.row()[2], sum);
+    ExpectReal(statement.row()[3], static_cast<double>(sum));
+    ExpectReal(statement.row()[4], static_cast<double>(sum) / static_cast<double>(count));
+  }
+  ExpectNullable(statement.row()[5], minimum);
+  ExpectNullable(statement.row()[6], maximum);
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
+[[nodiscard]] std::optional<std::string> GroupConcatModel(const std::vector<const ModelRow*>& group,
+                                                          std::int64_t filter_floor) {
+  std::string output;
+  for (auto iterator = group.rbegin(); iterator != group.rend(); ++iterator) {
+    if ((*iterator)->value < filter_floor) {
+      continue;
+    }
+    if (!output.empty()) {
+      output += ',';
+    }
+    output += (*iterator)->label;
+  }
+  return output.empty() ? std::nullopt : std::optional<std::string>{std::move(output)};
+}
+
+[[nodiscard]] std::size_t DistinctSignCount(const std::vector<const ModelRow*>& group) {
+  std::vector<bool> signs;
+  for (const ModelRow* row : group) {
+    const bool negative = row->value < 0;
+    if (std::ranges::find(signs, negative) == signs.end()) {
+      signs.push_back(negative);
+    }
+  }
+  return signs.size();
+}
+
+void RunGroupedAggregate(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto cutoff = static_cast<std::int64_t>(words[1] % (kRows.size() + 1U));
+  const auto filter_floor = static_cast<std::int64_t>(words[2] % 73U) - 36;
+  const auto having_limit = static_cast<std::size_t>(words[3] % 8U);
+  ReadStatement statement =
+      Prepare(session,
+              "SELECT nullable IS NULL,label,min(-value),count(),count(DISTINCT value<0),"
+              "group_concat(label ORDER BY id DESC) FILTER (WHERE value>=?2) "
+              "FROM model_rows WHERE id<=?1 "
+              "GROUP BY nullable IS NULL HAVING count()>?3 ORDER BY 1");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(cutoff)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(filter_floor)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(static_cast<std::int64_t>(having_limit))));
+
+  std::array<std::vector<const ModelRow*>, 2> groups;
+  for (const ModelRow& row : kRows) {
+    if (row.id <= cutoff) {
+      groups[row.nullable.has_value() ? 0U : 1U].push_back(&row);
+    }
+  }
+
+  for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
+    const std::vector<const ModelRow*>& group = groups[group_index];
+    if (group.size() <= having_limit) {
+      continue;
+    }
+    const ModelRow& representative = *group.back();
+    const std::optional<std::string> concatenated = GroupConcatModel(group, filter_floor);
+    ExpectRowStep(statement);
+    ASSERT_EQ(6U, statement.row().size());
+    ExpectInteger(statement.row()[0], static_cast<std::int64_t>(group_index));
+    ExpectText(statement.row()[1], representative.label);
+    ExpectInteger(statement.row()[2], -representative.value);
+    ExpectInteger(statement.row()[3], static_cast<std::int64_t>(group.size()));
+    ExpectInteger(statement.row()[4], static_cast<std::int64_t>(DistinctSignCount(group)));
+    if (concatenated.has_value()) {
+      ExpectText(statement.row()[5], *concatenated);
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[5].type());
+    }
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 10> templates{
-      "predicate-scan", "rowid-lookup",  "typed-rebinding", "limit-offset",   "repeated-execution",
-      "ordered-scan",   "ordered-limit", "values-compound", "mixed-compound", "distinct-nullable",
+  constexpr std::array<std::string_view, 12> templates{
+      "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
+      "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
+      "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -734,10 +863,31 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
       case 9:
         RunDistinctNullable(session, words);
         break;
+      case 10:
+        RunGlobalAggregate(session, words);
+        break;
+      case 11:
+        RunGroupedAggregate(session, words);
+        break;
       default:
         FAIL() << "unreachable model template";
     }
   }
+
+  const std::array<std::uint64_t, 4> empty_aggregate_words{
+      UINT64_C(0x01),
+      UINT64_C(0x00),
+      UINT64_C(0x24),
+      UINT64_C(0x00),
+  };
+  RunGlobalAggregate(session, empty_aggregate_words);
+  const std::array<std::uint64_t, 4> complete_grouped_words{
+      UINT64_C(0x02),
+      UINT64_C(0x20),
+      UINT64_C(0x24),
+      UINT64_C(0x00),
+  };
+  RunGroupedAggregate(session, complete_grouped_words);
 
   constexpr std::array<ModelCompoundOperator, 4> operations{
       ModelCompoundOperator::kUnion,

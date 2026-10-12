@@ -27,6 +27,7 @@ class GlobalAggregateAccessServices {
   [[nodiscard]] virtual LoweringResult<void> StepIndexedMinMaxAggregate(
       BoundAggregateInvocationId invocation, RegisterId argument) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateCompletion() = 0;
+  [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateEarlyStopCompletion() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitIndexKeyExpressions(
       const PhysicalIndexScanNode& index, std::optional<Label> null_target) = 0;
   [[nodiscard]] virtual LoweringResult<std::uint32_t> EmitIndexKeyBlock(

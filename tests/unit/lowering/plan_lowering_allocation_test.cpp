@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <new>
@@ -415,6 +416,30 @@ int main() try {
       }
       if (plan_index + 1U == modifier_plans.size() && modifier_published == nullptr) {
         modifier_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
+  const std::array<PhysicalPlan, 2> aggregate_integration_plans{
+      PhysicalFixture(catalog, "SELECT DISTINCT count() FROM Items GROUP BY Name ORDER BY 1"),
+      PhysicalFixture(catalog,
+                      "SELECT count() FROM Items UNION ALL SELECT sum(id) FROM Items ORDER BY 1"),
+  };
+  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{78U, 84U};
+  for (std::size_t plan_index = 0; plan_index < aggregate_integration_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(aggregate_integration_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations != kExpectedAggregateIntegrationAllocations[plan_index]) {
+        std::fprintf(stderr, "aggregate integration plan %zu expected %zu allocations, got %zu\n",
+                     plan_index, kExpectedAggregateIntegrationAllocations[plan_index], allocations);
+        return 1;
       }
     }
   }

@@ -30,6 +30,8 @@ class GroupedAggregateServices : public AggregateModifierServices {
   [[nodiscard]] virtual LoweringResult<void> EmitCompletedGroupedAggregate(
       GroupedCompletionTargets targets) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGroupedOutputCompletion() = 0;
+  [[nodiscard]] virtual LoweringResult<void> EmitGroupedEarlyStopCompletion(
+      bool source_row_active) = 0;
 };
 
 struct GroupedAggregateInput {
@@ -54,6 +56,7 @@ struct GroupedAggregateInput {
   ConstantId one_constant{0};
   bool has_representative_controller = false;
   bool may_stop_early = false;
+  bool stops_after_output = false;
 };
 
 [[nodiscard]] LoweringResult<void> EmitGroupedAggregateInitialization(
