@@ -88,7 +88,8 @@ is valid only for one synchronous emission call.
 - LIMIT/OFFSET initialization;
 - source-independent aggregate guards;
 - residual filters;
-- aggregate open and ordinary step;
+- aggregate open, ordinary step, and representative-aware indexed MIN/MAX
+  step;
 - common aggregate completion;
 - index-key expression evaluation; and
 - index-key block materialization.
@@ -129,6 +130,9 @@ The new module is specifically the accepted global aggregate access emitter.
 Package 12 may reuse a proven operation only when its grouped schedule has the
 same invariant. It must not turn this extraction into a generic aggregate
 framework or move grouped behavior into the module speculatively.
+
+ADR-0068 therefore adds a separate grouped-lowering module. It leaves this
+global access boundary and its service contract unchanged.
 
 ## Rejected alternatives
 

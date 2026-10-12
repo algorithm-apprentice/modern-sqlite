@@ -71,3 +71,4 @@ their corresponding implementation begins.
 65. [ADR-0065: Production-Only Sanitizer Instrumentation](0065-production-only-sanitizer-instrumentation.md)
 66. [ADR-0066: Markdown-Only Workflow Skipping](0066-markdown-only-workflow-skipping.md)
 67. [ADR-0067: Global Aggregate Access Lowering Module](0067-global-aggregate-access-lowering-module.md)
+68. [ADR-0068: SQLite-Aligned Grouped Aggregate Execution](0068-sqlite-aligned-grouped-aggregate-execution.md)

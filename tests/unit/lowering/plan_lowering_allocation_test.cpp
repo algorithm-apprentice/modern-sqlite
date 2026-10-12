@@ -329,13 +329,14 @@ int main() try {
     }
   }
 
-  const std::array<PhysicalPlan, 4> aggregate_plans{
+  const std::array<PhysicalPlan, 5> aggregate_plans{
       PhysicalFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       PhysicalFixture(catalog, "SELECT max(id) FROM Items"),
       PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
       PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
+      PhysicalFixture(indexed_catalog, "SELECT Payload,min(Name) FROM Items"),
   };
-  constexpr std::array<std::size_t, 4> kExpectedAggregateAllocations{41U, 37U, 46U, 51U};
+  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{41U, 37U, 46U, 51U, 57U};
   std::unique_ptr<BytecodeProgram> aggregate_published;
   for (std::size_t plan_index = 0; plan_index < aggregate_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -352,6 +353,35 @@ int main() try {
       }
       if (plan_index + 1U == aggregate_plans.size() && aggregate_published == nullptr) {
         aggregate_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
+      }
+    }
+  }
+
+  const std::array<PhysicalPlan, 2> grouped_plans{
+      PhysicalFixture(indexed_catalog,
+                      "SELECT Name,count(),min(id) FROM Items "
+                      "GROUP BY Name ORDER BY Name LIMIT ?1 OFFSET ?2"),
+      PhysicalFixture(catalog,
+                      "SELECT Name||'',count(),min(id) FROM Items "
+                      "GROUP BY Name||'' ORDER BY count() DESC LIMIT ?1"),
+  };
+  constexpr std::array<std::size_t, 2> kExpectedGroupedAllocations{56U, 71U};
+  std::unique_ptr<BytecodeProgram> grouped_published;
+  for (std::size_t plan_index = 0; plan_index < grouped_plans.size(); ++plan_index) {
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      allocation_count.store(0, std::memory_order_relaxed);
+      count_allocations = true;
+      LowerPlanResult lowered = LowerPlan(grouped_plans[plan_index]);
+      count_allocations = false;
+      if (!lowered.has_value()) {
+        return 1;
+      }
+      const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+      if (allocations != kExpectedGroupedAllocations[plan_index]) {
+        return 1;
+      }
+      if (plan_index + 1U == grouped_plans.size() && grouped_published == nullptr) {
+        grouped_published = std::make_unique<BytecodeProgram>(std::move(*lowered));
       }
     }
   }
@@ -631,8 +661,8 @@ int main() try {
       return 1;
     }
   }
-  if (published == nullptr || aggregate_published == nullptr || distinct_published == nullptr ||
-      streaming_published == nullptr) {
+  if (published == nullptr || aggregate_published == nullptr || grouped_published == nullptr ||
+      distinct_published == nullptr || streaming_published == nullptr) {
     return 1;
   }
 
@@ -662,6 +692,10 @@ int main() try {
   checksum += streaming_published->instructions().size();
   checksum += aggregate_published->aggregates().size();
   checksum += aggregate_published->instructions().size();
+  checksum += grouped_published->aggregates().size();
+  checksum += grouped_published->sorters().size();
+  checksum += grouped_published->top_ns().size();
+  checksum += grouped_published->instructions().size();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

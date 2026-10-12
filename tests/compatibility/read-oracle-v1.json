@@ -7824,16 +7824,151 @@
       "id": "unsupported-current-time"
     },
     {
-      "boundary": {
-        "first_step": "row",
-        "prepare": "statement"
-      },
-      "expectation": "unsupported",
-      "id": "unsupported-group-by"
+      "expectation": "compare",
+      "id": "group-by-category-count",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "63617465676f7279"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e74282a29"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "63617465676f7279"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e74282a29"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "hex": "666f7572",
+                "type": "text"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "63617465676f7279"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e74282a29"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "hex": "6f6e65",
+                "type": "text"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "54455854",
+                "name_hex": "63617465676f7279"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e74282a29"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "hex": "74776f",
+                "type": "text"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 4,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 5,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "54455854",
+              "name_hex": "63617465676f7279"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e74282a29"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "933c9a02a8b1e5117a02223f996aac9491ff26b0c19ef141d62c00531ce6303e",
+  "corpus_sha256": "9cda27e5d3fcc3677dc696febd5712141bcc5c045db7518f261c76d9be979c65",
   "databases": [
     {
       "id": "core",
