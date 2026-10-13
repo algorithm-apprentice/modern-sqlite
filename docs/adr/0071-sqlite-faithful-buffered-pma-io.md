@@ -125,6 +125,13 @@ compiler, sanitizer, and quality checks plus existing non-target performance
 contracts. Merge no package whose final evidence still fails the admitted
 guard.
 
+The complete post-change recording from clean reviewed source `52a9e84` is
+`benchmarks/aggregate-baseline-v1/`. The sorted file case passes all three
+paired rounds, with aggregate wall 6.908375x and CPU 6.887353x. Its diagnostic
+records 385 VFS calls and 185 actual successful PMA flushes for the unchanged
+65,536-row query. All fifteen cases pass the original 40x aggregate and
+every-round guards. No additional tuning is admitted by these results.
+
 ## Rejected alternatives
 
 - Raising the file-mode budget or performance guard hides the measured gap.

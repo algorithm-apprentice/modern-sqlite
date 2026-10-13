@@ -259,6 +259,9 @@ Keep baseline binaries, compiler/flags, SQLite hashes, source state, host,
 command schedule, raw child output, configuration, and work provenance.
 Committed baseline validation is mandatory in CTest and CI. A missing baseline
 fails explicitly, as with the current DISTINCT/compound contract.
+The existing benchmark-contract CI job validates the aggregate manifest and
+baseline, builds both aggregate binaries, and executes their complete
+timing-smoke and diagnostic matrix alongside the unchanged benchmark families.
 
 The existing provenance runner requires a clean source tree. Review and validate
 the source/bootstrap contract before committing it, then configure the timing
@@ -282,6 +285,27 @@ Before merging:
 
 The advanced-SQL node remains in progress. Multi-source binding and joined
 output follow only after this aggregate package is reviewed and merged.
+
+### Recorded closure
+
+The version-1 baseline in `benchmarks/aggregate-baseline-v1/` records all fifteen
+cases and three paired rounds from clean reviewed source `52a9e84`, including
+uninstrumented timing, independent fixed-work diagnostics, immutable raw child
+output, and complete provenance. Every aggregate and paired-round wall/CPU
+guard passes without changing the SQL, fixture, measured work, thresholds,
+result digests, or 40x bound.
+
+The admitted ADR-0071 buffering remediation reduces `sorted-group-file` from
+45.737347x to 6.908375x wall and from 45.609993x to 6.887353x CPU. Its final
+paired wall range is 6.643822x through 6.996013x; paired CPU is 6.615867x through
+6.978597x. Fixed-work VFS calls fall from 262,159 to 385. Wide modifier VFS
+calls fall from 528,998 to 5,274. Neither diagnostic timing nor the VFS-call
+ratio is substituted for the recorded uninstrumented comparison.
+
+All existing workload, fixture, shared harness/runner, and archived baseline
+inputs remain unchanged. Their current-engine CLI work and diagnostic
+contracts remain green. The complete failed pre-optimization evidence remains
+preserved rather than being replaced by the passing recording.
 
 ## Consequences
 
