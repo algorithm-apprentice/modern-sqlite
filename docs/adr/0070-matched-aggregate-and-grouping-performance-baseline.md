@@ -53,7 +53,8 @@ aggregation, and exact-ratio machinery.
 
 The read, write, index, ORDER BY, and DISTINCT/compound workload manifests,
 fixture SQL, expected work, and committed baseline artifacts remain unchanged.
-There is no aggregate optimization in this package.
+The baseline contract itself introduces no aggregate optimization. A measured
+remediation admitted under a separate ADR may accompany package closure.
 
 Existing baseline input hashes also pin the legacy harness and runner source
 files. Their anonymous-namespace probe registration and fixed target lookup
@@ -205,11 +206,13 @@ Native `SQLITE_DBSTATUS_TEMPBUF_SPILL` is zero for these admitted cases,
 including file mode. This is pinned evidence about SQLite's temporary-buffer
 counter, not a claim that it measures all sorter-file writes. Modern's two file
 pressure cases independently require live file acquisition and positive spill
-PMA-record writes. Pager page-write counters do not count PMA journal writes
-and are not substituted for that evidence. Ordered/plain/empty/indexed cases retain no temporary relation or
-sorter memory; sorted/modifier/compound cases must report a positive retained
-peak. Validators reject mechanism drift rather than accepting matching result
-rows alone.
+PMA writes. Under ADR-0071, these events count successful actual buffer flushes,
+not records appended in memory. Pager page-write counters do not count PMA
+journal writes and are not substituted for that evidence.
+Ordered/plain/empty/indexed cases retain no temporary relation or sorter
+memory; sorted/modifier/compound cases must report a positive retained peak.
+Validators reject mechanism drift rather than accepting matching result rows
+alone.
 
 ### 5. Extend the existing probe collector, not the production API
 

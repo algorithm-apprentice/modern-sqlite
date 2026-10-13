@@ -36,6 +36,7 @@ struct WritePagerFileState {
   std::size_t size = 0;
   std::size_t durable_size = 0;
   std::size_t write_count = 0;
+  std::size_t read_count = 0;
   std::size_t sync_count = 0;
   bool present = false;
   bool durable_present = false;
@@ -45,6 +46,8 @@ struct WritePagerFileState {
   std::optional<std::pair<DatabaseLock, ErrorCode>> lock_failure;
   std::optional<std::pair<DatabaseLock, ErrorCode>> unlock_failure;
   std::optional<std::pair<std::size_t, ErrorCode>> read_failure;
+  std::optional<std::pair<std::size_t, ByteCount>> short_read;
+  std::optional<std::pair<FileOffset, ByteCount>> last_read;
   std::optional<std::pair<std::size_t, ErrorCode>> write_failure;
 };
 
@@ -111,6 +114,8 @@ class WritePagerMemoryFile final : public File {
  private:
   [[nodiscard]] Result<ByteCount> DoReadAt(MutableByteView destination,
                                            FileOffset offset) override {
+    ++state_->read_count;
+    state_->last_read = std::pair{offset, ByteCount{destination.size()}};
     if (state_->read_failure.has_value()) {
       if (state_->read_failure->first == 0U) {
         const ErrorCode code = state_->read_failure->second;
@@ -126,7 +131,15 @@ class WritePagerMemoryFile final : public File {
     if (start >= state_->size) {
       return ByteCount{0};
     }
-    const std::size_t count = std::min(destination.size(), state_->size - start);
+    std::size_t count = std::min(destination.size(), state_->size - start);
+    if (state_->short_read.has_value()) {
+      if (state_->short_read->first == 0U) {
+        count = std::min(count, state_->short_read->second.value());
+        state_->short_read.reset();
+      } else {
+        --state_->short_read->first;
+      }
+    }
     std::ranges::copy_n(state_->bytes.begin() + static_cast<std::ptrdiff_t>(start),
                         static_cast<std::ptrdiff_t>(count), destination.begin());
     return ByteCount{count};
@@ -289,6 +302,13 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] ByteView pathless_file_bytes() const noexcept {
     return ByteView{subjournal_.bytes}.first(subjournal_.size);
   }
+  [[nodiscard]] MutableByteView mutable_pathless_file_bytes() noexcept {
+    return MutableByteView{subjournal_.bytes}.first(subjournal_.size);
+  }
+  [[nodiscard]] std::optional<std::pair<FileOffset, ByteCount>> last_pathless_read()
+      const noexcept {
+    return subjournal_.last_read;
+  }
 
   [[nodiscard]] std::size_t mutation_count() const noexcept { return crash_.mutation_count; }
 
@@ -303,6 +323,7 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] std::size_t total_subjournal_writes() const noexcept {
     return subjournal_.write_count;
   }
+  [[nodiscard]] std::size_t total_pathless_reads() const noexcept { return subjournal_.read_count; }
   [[nodiscard]] bool pathless_file_present() const noexcept { return subjournal_.present; }
   [[nodiscard]] std::size_t pathless_open_count() const noexcept { return pathless_open_count_; }
   [[nodiscard]] std::optional<FileOpenOptions> last_pathless_open_options() const noexcept {
@@ -329,6 +350,9 @@ class WritePagerMemoryVfs final : public Vfs {
   void FailNextPathlessOpen(ErrorCode code) noexcept { pathless_open_failure_ = code; }
   void FailPathlessReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
     subjournal_.read_failure = std::pair{successful_reads, code};
+  }
+  void ShortPathlessReadAfter(std::size_t successful_reads, ByteCount maximum_bytes) noexcept {
+    subjournal_.short_read = std::pair{successful_reads, maximum_bytes};
   }
   void FailPathlessWriteAfter(std::size_t successful_writes, ErrorCode code) noexcept {
     subjournal_.write_failure = std::pair{successful_writes, code};
