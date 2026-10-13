@@ -277,42 +277,78 @@ template <typename Bound>
   return std::nullopt;
 }
 
-template <typename Bound>
-[[nodiscard]] bool ExpressionDependsOnSource(const Bound& bound_select, BoundExpressionId id) {
+template <typename Bound, typename Visitor>
+[[nodiscard]] bool VisitExpressionSources(const Bound& bound_select, BoundExpressionId id,
+                                          Visitor& visitor) {
   if (!IsValidExpressionId(bound_select, id)) {
-    return true;
+    return false;
   }
   const BoundExpression& expression = bound_select.expression(id);
+  if (const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
+      identity.has_value()) {
+    visitor(identity->source);
+    return true;
+  }
   return std::visit(
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
                       std::is_same_v<Payload, BoundParameterExpression>) {
-          return false;
-        } else if constexpr (std::is_same_v<Payload, BoundColumnExpression> ||
-                             std::is_same_v<Payload, BoundRowIdExpression>) {
           return true;
         } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                              std::is_same_v<Payload, BoundTruthTestExpression> ||
                              std::is_same_v<Payload, BoundLikelihoodExpression> ||
                              std::is_same_v<Payload, BoundCollateExpression>) {
-          return ExpressionDependsOnSource(bound_select, payload.operand);
+          return VisitExpressionSources(bound_select, payload.operand, visitor);
         } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
                              std::is_same_v<Payload, BoundComparisonExpression>) {
-          return ExpressionDependsOnSource(bound_select, payload.left) ||
-                 ExpressionDependsOnSource(bound_select, payload.right);
+          return VisitExpressionSources(bound_select, payload.left, visitor) &&
+                 VisitExpressionSources(bound_select, payload.right, visitor);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return ExpressionDependsOnSource(bound_select, payload.target);
+          return VisitExpressionSources(bound_select, payload.target, visitor);
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
-          return std::ranges::any_of(payload.arguments, [&](BoundExpressionId argument) {
-            return ExpressionDependsOnSource(bound_select, argument);
+          return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
+            return VisitExpressionSources(bound_select, argument, visitor);
           });
         }
-        return true;
+        return false;
       },
       expression.payload);
+}
+
+template <typename Bound>
+[[nodiscard]] bool ExpressionDependsOnSource(const Bound& bound_select, BoundExpressionId id) {
+  bool depends = false;
+  auto visitor = [&](BoundSourceId) { depends = true; };
+  return !VisitExpressionSources(bound_select, id, visitor) || depends;
+}
+
+[[nodiscard]] std::expected<std::vector<BoundSourceId>, OptimizerError> JoinPredicateSources(
+    const BoundSelect& bound_select, const BoundSelectCore& core,
+    std::span<const BoundExpressionId> predicates) {
+  std::vector<BoundSourceId> sources;
+  if (core.table_sources.size() < 2U) {
+    return sources;
+  }
+  sources.reserve(predicates.size());
+  for (const BoundExpressionId predicate : predicates) {
+    BoundSourceId ready = core.table_sources.front().id;
+    bool valid = true;
+    auto visitor = [&](BoundSourceId source) {
+      if (std::ranges::find(core.table_sources, source, &BoundTableSource::id) ==
+          core.table_sources.end()) {
+        valid = false;
+      }
+      ready = std::max(ready, source);
+    };
+    if (!VisitExpressionSources(bound_select, predicate, visitor) || !valid) {
+      return std::unexpected(InvariantFailure("join predicate has invalid source dependencies"));
+    }
+    sources.push_back(ready);
+  }
+  return sources;
 }
 
 template <typename Bound>
@@ -471,7 +507,7 @@ template <typename Bound>
 [[nodiscard]] SourceInfo ResolveCoreSource(const BoundSelect& bound_select,
                                            std::size_t core_index) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
-  if (!core.table_source.has_value()) {
+  if (core.table_sources.empty()) {
     return SourceInfo{
         .single_row = true,
         .source_kind = BoundSourceKind::kCatalogTable,
@@ -482,10 +518,11 @@ template <typename Bound>
         .rowid_eligible = false,
     };
   }
-  if (core.table_source->kind == BoundSourceKind::kSchemaTable) {
+  const BoundTableSource& source = core.table_sources.front();
+  if (source.kind == BoundSourceKind::kSchemaTable) {
     return SourceInfo{
         .single_row = false,
-        .id = core.table_source->id,
+        .id = source.id,
         .source_kind = BoundSourceKind::kSchemaTable,
         .table = std::nullopt,
         .root_page = RootPageId{1},
@@ -494,11 +531,11 @@ template <typename Bound>
         .rowid_eligible = true,
     };
   }
-  const TableId table_id = core.table_source->table.value_or(TableId{});
+  const TableId table_id = source.table.value_or(TableId{});
   const CatalogTable& table = bound_select.catalog()->table(table_id);
   return SourceInfo{
       .single_row = false,
-      .id = core.table_source->id,
+      .id = source.id,
       .source_kind = BoundSourceKind::kCatalogTable,
       .table = table_id,
       .root_page = table.root_page,
@@ -515,7 +552,8 @@ template <typename Bound>
            std::holds_alternative<LogicalCompoundNode>(node.payload) ||
            std::holds_alternative<LogicalAdvancedOrderNode>(node.payload) ||
            std::holds_alternative<LogicalAggregateNode>(node.payload) ||
-           std::holds_alternative<LogicalHavingNode>(node.payload);
+           std::holds_alternative<LogicalHavingNode>(node.payload) ||
+           std::holds_alternative<LogicalJoinNode>(node.payload);
   });
 }
 
@@ -2100,6 +2138,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
     case PhysicalNodeKind::kAdvancedOrder:
     case PhysicalNodeKind::kAggregate:
     case PhysicalNodeKind::kHaving:
+    case PhysicalNodeKind::kNestedLoopJoin:
       break;
   }
   return PhysicalAccessKind::kEmpty;
@@ -2431,6 +2470,11 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
                     : RootPageId{1};
             return value->root_page == expected_root &&
                    value->direction == PhysicalScanDirection::kForward;
+          } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
+            const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
+            return value != nullptr && value->core_index == node.core_index &&
+                   value->left.value() == node.left.value() &&
+                   value->right.value() == node.right.value() && value->join == node.join;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
             if (value == nullptr || value->input.value() != node.input.value()) {
@@ -2443,15 +2487,30 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
             } else if (const auto* single = std::get_if<LogicalSingleRowNode>(&source);
                        single != nullptr) {
               core_index = single->core_index;
+            } else if (const auto* join = std::get_if<LogicalJoinNode>(&source); join != nullptr) {
+              core_index = join->core_index;
             }
             if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
               const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
               return value->predicates == aggregate.residuals &&
-                     value->guards == aggregate.predicates.guards;
+                     value->guards == aggregate.predicates.guards &&
+                     value->predicate_sources.empty();
             }
             const AdvancedPredicateParts expected =
                 SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
-            return value->predicates == expected.predicates && value->guards == expected.guards;
+            std::vector<BoundSourceId> placements;
+            if (core_index.has_value()) {
+              const auto& core =
+                  std::get<BoundSelectCore>(logical_plan.bound_select().query_cores()[*core_index]);
+              auto ready =
+                  JoinPredicateSources(logical_plan.bound_select(), core, expected.predicates);
+              if (!ready.has_value()) {
+                return false;
+              }
+              placements = std::move(*ready);
+            }
+            return value->predicates == expected.predicates && value->guards == expected.guards &&
+                   value->predicate_sources == placements;
           } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
             const auto* value = std::get_if<PhysicalLimitNode>(&physical);
             return value != nullptr && value->input.value() == node.input.value() &&
@@ -3133,6 +3192,26 @@ class PhysicalPlanBuilder final {
     std::size_t compound_index = 0;
     for (std::size_t logical_index = 0; logical_index < impl->logical_plan.nodes().size();
          ++logical_index) {
+      std::vector<BoundSourceId> predicate_sources;
+      if (const auto* filter =
+              std::get_if<LogicalFilterNode>(&impl->logical_plan.nodes()[logical_index].payload);
+          filter != nullptr) {
+        const auto* join =
+            std::get_if<LogicalJoinNode>(&impl->logical_plan.node(filter->input).payload);
+        if (join != nullptr) {
+          const auto predicates =
+              SplitAdvancedPredicate(impl->logical_plan.bound_select(), filter->predicate);
+          auto ready = JoinPredicateSources(
+              impl->logical_plan.bound_select(),
+              std::get<BoundSelectCore>(
+                  impl->logical_plan.bound_select().query_cores()[join->core_index]),
+              predicates.predicates);
+          if (!ready.has_value()) {
+            return std::unexpected(std::move(ready.error()));
+          }
+          predicate_sources = std::move(*ready);
+        }
+      }
       const LogicalNode& logical = impl->logical_plan.nodes()[logical_index];
       PhysicalNodePayload payload = std::visit(
           [&](const auto& node) -> PhysicalNodePayload {
@@ -3193,6 +3272,13 @@ class PhysicalPlanBuilder final {
                   .table = node.table,
                   .root_page = root_page,
               };
+            } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
+              return PhysicalNestedLoopJoinNode{
+                  .left = mapped[node.left.value()],
+                  .right = mapped[node.right.value()],
+                  .core_index = node.core_index,
+                  .join = node.join,
+              };
             } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
               const LogicalNodePayload& source =
                   impl->logical_plan.nodes()[node.input.value()].payload;
@@ -3202,6 +3288,9 @@ class PhysicalPlanBuilder final {
               } else if (const auto* single = std::get_if<LogicalSingleRowNode>(&source);
                          single != nullptr) {
                 core_index = single->core_index;
+              } else if (const auto* join = std::get_if<LogicalJoinNode>(&source);
+                         join != nullptr) {
+                core_index = join->core_index;
               }
               if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
                 const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
@@ -3217,6 +3306,7 @@ class PhysicalPlanBuilder final {
                   .input = mapped[node.input.value()],
                   .predicates = std::move(predicates.predicates),
                   .guards = std::move(predicates.guards),
+                  .predicate_sources = std::move(predicate_sources),
               };
             } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
               return PhysicalLimitNode{
@@ -3606,6 +3696,8 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "aggregate";
     case PhysicalNodeKind::kHaving:
       return "having";
+    case PhysicalNodeKind::kNestedLoopJoin:
+      return "nested_loop_join";
   }
   return "unknown";
 }
@@ -3726,10 +3818,19 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
                  scan != nullptr) {
         std::string line = "CORE " + std::to_string(scan->core_index) + " SCAN ";
         AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &line);
+        const auto& core = std::get<BoundSelectCore>(
+            plan.logical_plan().bound_select().query_cores()[scan->core_index]);
+        if (core.table_sources.size() > 1U) {
+          line.append(" SOURCE ").append(std::to_string(scan->source.value()));
+        }
         if (scan->direction == PhysicalScanDirection::kReverse) {
           line.append(" REVERSE");
         }
         append_line(line);
+      } else if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+                 join != nullptr) {
+        append_line("CORE " + std::to_string(join->core_index) + " NESTED LOOP " +
+                    (join->join == SourceJoinKind::kComma ? "COMMA" : "CROSS JOIN"));
       } else if (std::holds_alternative<PhysicalEmptyNode>(node.payload)) {
         append_line("EMPTY INPUT");
       } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);

@@ -118,6 +118,13 @@ ADR-0069 adds `src/lowering/aggregate_modifier_lowering.hpp` and
 FILTER, DISTINCT, local-order, drain, reset, and close lifecycle used by both
 global and grouped execution. It adds no public lowering or bytecode type.
 
+ADR-0073 reuses these established SELECT destinations for joined rows. One
+source-owned cursor map and the existing column/field map serve ordinary and
+joined reads. Streaming cursor descriptors use the canonical read descriptor
+construction rather than maintaining a second table/primary-index layout.
+Nested-loop products emit existing typed cursor operations; no joined plan or
+bound source identity enters the VM.
+
 Extend the typed bytecode and VM with:
 
 - `MustBeIntegerInstruction`; and

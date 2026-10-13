@@ -21,6 +21,7 @@
 
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/syntax/ast.hpp"
 #include "src/session/session_internal.hpp"
 
 namespace modern_sqlite {
@@ -267,6 +268,8 @@ struct TemporaryFileState {
   std::size_t open_count = 0;
   std::size_t live_count = 0;
   std::size_t peak_live_count = 0;
+  std::optional<FileOffset> main_read_failure_offset{};
+  std::size_t main_read_failures = 0;
 };
 
 class TemporaryTrackingFile final : public File {
@@ -291,6 +294,11 @@ class TemporaryTrackingFile final : public File {
 
  private:
   Result<ByteCount> DoReadAt(MutableByteView destination, FileOffset offset) override {
+    if (!temporary_ && state_->main_read_failure_offset == offset) {
+      state_->main_read_failure_offset.reset();
+      ++state_->main_read_failures;
+      return std::unexpected(Error::Create(ErrorCode::kIo, "injected source cursor read failure"));
+    }
     auto read = delegate_->ReadAt(destination, offset);
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
@@ -664,6 +672,160 @@ TEST(ReadSession, PreparesOneStatementAndPublishesTheTailOffset) {
   EXPECT_EQ(ReadStep::kRow, TakeValue(order_by.Step()));
   EXPECT_EQ("alpha", TextValue(order_by.row().front()));
   EXPECT_EQ(ReadStep::kDone, TakeValue(order_by.Step()));
+}
+
+TEST(ReadSession, ExecutesOwnedCommaAndCrossJoinRowsWithResetAndLimit) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  const std::array queries{
+      "SELECT a.id,b.id FROM Items a,Items b "
+      "WHERE a.id<=2 AND b.id<=2 ORDER BY a.id,b.id LIMIT ?1 OFFSET ?2",
+      "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+      "WHERE a.id<=2 AND b.id<=2 ORDER BY a.id,b.id LIMIT ?1 OFFSET ?2",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    RequireStatus(statement.Bind(1, SqlValue::Integer(2)));
+    RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+    for (const auto& expected : std::array{std::array{1, 2}, std::array{2, 1}}) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      ASSERT_EQ(2U, statement.row().size());
+      EXPECT_EQ(expected[0], IntegerValue(statement.row()[0]));
+      EXPECT_EQ(expected[1], IntegerValue(statement.row()[1]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+    RequireStatus(statement.Bind(2, SqlValue::Text("not evaluated")));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, RecoversJoinedCursorReadFailureAndCleansOwnedState) {
+  const auto state = std::make_shared<TemporaryFileState>();
+  auto vfs = std::make_unique<TemporaryTrackingVfs>(state);
+  ReadSession session =
+      TakeValue(ReadSession::Open(std::move(vfs), ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT a.id,b.id FROM Items a CROSS JOIN storage_values b LIMIT 1");
+  state->main_read_failure_offset = FileOffset{1024};
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(1U, state->main_read_failures);
+  EXPECT_EQ(0U, state->live_count);
+  const auto reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
+  struct JoinCase {
+    std::string_view sql;
+    std::size_t rows;
+    bool descending;
+    std::size_t copies = 1;
+  };
+  const std::array cases{
+      JoinCase{.sql = "SELECT b.id FROM model_rows a CROSS JOIN model_rows b "
+                      "ORDER BY b.id DESC,a.id",
+               .rows = 1024,
+               .descending = true,
+               .copies = 32},
+      JoinCase{.sql = "SELECT DISTINCT b.id FROM model_rows a CROSS JOIN model_rows b "
+                      "WHERE a.id<=2 ORDER BY 1 DESC",
+               .rows = 32,
+               .descending = true},
+      JoinCase{.sql = "SELECT b.id FROM model_rows a CROSS JOIN model_rows b WHERE a.id=1 "
+                      "UNION SELECT 99 ORDER BY 1",
+               .rows = 33,
+               .descending = false},
+  };
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    const auto state = std::make_shared<TemporaryFileState>();
+    auto vfs = std::make_unique<TemporaryTrackingVfs>(state);
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = mode,
+                .sorter_memory_threshold =
+                    ByteCount{mode == TemporaryStoreMode::kFile ? 32U << 10U : 1U << 20U},
+            },
+    };
+    ReadSession session = TakeValue(
+        ReadSession::Open(std::move(vfs), ReadCompatibilityFixturePath().string(), options));
+    for (const JoinCase& test_case : cases) {
+      SCOPED_TRACE(test_case.sql);
+      ReadStatement statement = PrepareStatement(session, test_case.sql);
+      std::size_t rows = 0;
+      while (true) {
+        const auto stepped = statement.Step();
+        ASSERT_TRUE(stepped.has_value()) << stepped.error().ToString();
+        if (*stepped == ReadStep::kDone) {
+          break;
+        }
+        ASSERT_TRUE(statement.row()[0].integer_value().has_value());
+        const auto expected =
+            static_cast<std::int64_t>(test_case.descending ? 32U - rows / test_case.copies
+                                      : rows == 32U        ? 99U
+                                                           : rows + 1U);
+        EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+        ++rows;
+      }
+      EXPECT_EQ(test_case.rows, rows);
+      EXPECT_EQ(0U, state->live_count);
+      EXPECT_LE(state->peak_live_count, 2U);
+      RequireStatus(statement.Reset());
+      EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      RequireStatus(statement.Finalize());
+      EXPECT_EQ(0U, state->live_count);
+    }
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, state->open_count > 0U);
+  }
+}
+
+TEST(ReadSession, ReportsInsufficientJoinedConsumerWorkingSetWithoutLeakingFiles) {
+  const auto state = std::make_shared<TemporaryFileState>();
+  auto vfs = std::make_unique<TemporaryTrackingVfs>(state);
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = ByteCount{2048},
+          },
+  };
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::move(vfs), ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT b.id FROM model_rows a CROSS JOIN model_rows b WHERE a.id=1 "
+                       "UNION SELECT 99 ORDER BY 1");
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+  EXPECT_EQ(0U, state->live_count);
+  const auto reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, reset.error().code());
+  RequireStatus(statement.Finalize());
+  EXPECT_EQ(0U, state->live_count);
+}
+
+TEST(ReadSession, BypassesAllSixtyFourSourcesForZeroLimit) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  std::string sql = "SELECT 1 FROM Items AS t0";
+  for (std::size_t index = 1; index < kMaximumSelectSources; ++index) {
+    sql += " CROSS JOIN Items AS t" + std::to_string(index);
+  }
+  sql += " LIMIT 0";
+  ReadStatement statement = PrepareStatement(session, sql);
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
 TEST(ReadSession, RebindsOrderedLimitBetweenTopNAndExternalSorterStrategies) {

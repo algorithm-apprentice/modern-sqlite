@@ -106,11 +106,12 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::BoundSelect BindCompoundFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
-  modern_sqlite::BindSelectResult bound = modern_sqlite::BindSelectStatement(
-      ParseTree("VALUES(1) UNION ALL SELECT DISTINCT id FROM Items "
-                "EXCEPT SELECT 3 ORDER BY 1 LIMIT 2"),
-      catalog);
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql =
+        "VALUES(1) UNION ALL SELECT DISTINCT id FROM Items "
+        "EXCEPT SELECT 3 ORDER BY 1 LIMIT 2") {
+  modern_sqlite::BindSelectResult bound =
+      modern_sqlite::BindSelectStatement(ParseTree(sql), catalog);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind compound logical-plan OOM fixture"};
   }
@@ -227,35 +228,43 @@ int main() try {
     return 1;
   }
 
-  BoundSelect compound_baseline_bound = BindCompoundFixture(catalog);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const BuildLogicalPlanResult compound_baseline =
-      BuildLogicalPlan(std::move(compound_baseline_bound));
-  if (!compound_baseline.has_value()) {
-    return 1;
-  }
-  const std::size_t compound_allocation_count = allocation_index.load(std::memory_order_relaxed);
-  if (compound_allocation_count == 0U || compound_allocation_count > 64U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
-    BoundSelect bound = BindCompoundFixture(catalog);
+  const std::array<std::string_view, 2> advanced_sqls{
+      "VALUES(1) UNION ALL SELECT DISTINCT id FROM Items EXCEPT SELECT 3 ORDER BY 1 LIMIT 2",
+      "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
+      "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
+  };
+  for (const std::string_view sql : advanced_sqls) {
+    BoundSelect compound_baseline_bound = BindCompoundFixture(catalog, sql);
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const BuildLogicalPlanResult unexpected = BuildLogicalPlan(std::move(bound));
-    } catch (const std::bad_alloc&) {
-      threw = true;
-    }
-    inject_failure = false;
-    if (!threw) {
+    const BuildLogicalPlanResult compound_baseline =
+        BuildLogicalPlan(std::move(compound_baseline_bound));
+    if (!compound_baseline.has_value()) {
       return 1;
     }
-  }
-  if (!BuildLogicalPlan(BindCompoundFixture(catalog)).has_value()) {
-    return 1;
+    const std::size_t compound_allocation_count = allocation_index.load(std::memory_order_relaxed);
+    if (compound_allocation_count == 0U || compound_allocation_count > 64U) {
+      return 1;
+    }
+    for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
+      BoundSelect bound = BindCompoundFixture(catalog, sql);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const BuildLogicalPlanResult unexpected =
+            BuildLogicalPlan(std::move(bound));
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return 1;
+      }
+    }
+    if (!BuildLogicalPlan(BindCompoundFixture(catalog, sql)).has_value()) {
+      return 1;
+    }
   }
 
   BoundSelect aggregate_baseline_bound = BindAggregateFixture(catalog);

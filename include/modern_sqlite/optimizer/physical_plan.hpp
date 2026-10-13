@@ -150,6 +150,7 @@ struct PhysicalFilterNode {
   PhysicalNodeId input;
   std::vector<BoundExpressionId> predicates{};
   std::vector<BoundExpressionId> guards{};
+  std::vector<BoundSourceId> predicate_sources{};
 };
 
 struct PhysicalLimitNode {
@@ -274,12 +275,20 @@ struct PhysicalHavingNode {
   BoundExpressionId predicate;
 };
 
+struct PhysicalNestedLoopJoinNode {
+  PhysicalNodeId left;
+  PhysicalNodeId right;
+  std::size_t core_index = 0;
+  SourceJoinKind join = SourceJoinKind::kCross;
+};
+
 using PhysicalNodePayload =
     std::variant<PhysicalSingleRowNode, PhysicalEmptyNode, PhysicalTableScanNode,
                  PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
                  PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
                  PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode, PhysicalCompoundNode,
-                 PhysicalAdvancedOrderNode, PhysicalAggregateNode, PhysicalHavingNode>;
+                 PhysicalAdvancedOrderNode, PhysicalAggregateNode, PhysicalHavingNode,
+                 PhysicalNestedLoopJoinNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -303,6 +312,7 @@ enum class PhysicalNodeKind : std::uint8_t {
   kAdvancedOrder,
   kAggregate,
   kHaving,
+  kNestedLoopJoin,
 };
 
 [[nodiscard]] PhysicalNodeKind PhysicalNodeKindOf(const PhysicalNode& node) noexcept;

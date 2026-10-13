@@ -814,6 +814,107 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
   std::optional<TemporaryStorageFactory> memory_;
 };
 
+class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
+
+TEST_F(ReadLoweringJoin, PreservesEarliestReadyPredicateCallSchedules) {
+  const CustomEnvironment custom;
+  struct Case {
+    std::string_view predicate;
+    std::size_t calls;
+  };
+  const std::array cases{
+      Case{.predicate = "volatile_counter()", .calls = 2U},
+      Case{.predicate = "trace_filter(a.id)", .calls = 2U},
+      Case{.predicate = "trace_filter(b.id)", .calls = 6U},
+      Case{.predicate = "trace_filter(a.id+b.id)", .calls = 6U},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.predicate);
+    callback_count = 0;
+    callback_trace.clear();
+    const std::string sql =
+        "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+        "WHERE a.id<=2 AND b.id<=3 AND " +
+        std::string{test_case.predicate};
+    const auto rows = Execute(sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(6U, rows.size());
+    EXPECT_EQ(test_case.calls, callback_count + callback_trace.size());
+  }
+}
+
+TEST_F(ReadLoweringJoin, SkipsProjectionAndLaterWorkForLimitOffsetAndRejectedPrefixes) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT volatile_counter(),a.id,b.id FROM items a CROSS JOIN items b LIMIT 1 OFFSET 2",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1U, callback_count);
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(3, rows[0][2].integer_value());
+  EXPECT_TRUE(
+      Execute("SELECT failing() FROM items a CROSS JOIN items b WHERE a.id>99 AND failing()",
+              custom.Binder(), custom.Vm())
+          .empty());
+  EXPECT_TRUE(Execute("SELECT failing() FROM items a CROSS JOIN items b LIMIT 0 OFFSET failing()",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, SendsJoinedRowsThroughExistingOrderMembershipAndSetDestinations) {
+  const auto distinct = Execute(
+      "SELECT DISTINCT b.id FROM items a CROSS JOIN items b ORDER BY 1 DESC LIMIT 2 OFFSET 1");
+  ASSERT_EQ(2U, distinct.size());
+  EXPECT_EQ(2, distinct[0][0].integer_value());
+  EXPECT_EQ(1, distinct[1][0].integer_value());
+  const auto united = Execute(
+      "SELECT a.id+b.id FROM items a CROSS JOIN items b WHERE a.id=1 "
+      "UNION SELECT 99 ORDER BY 1");
+  ASSERT_EQ(4U, united.size());
+  for (std::size_t index = 0; index < 3U; ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 2U), united[index][0].integer_value());
+  }
+  EXPECT_EQ(99, united[3][0].integer_value());
+  const auto except = Execute(
+      "SELECT b.id FROM items a CROSS JOIN items b "
+      "EXCEPT SELECT 2 ORDER BY 1");
+  ASSERT_EQ(2U, except.size());
+  EXPECT_EQ(1, except[0][0].integer_value());
+  EXPECT_EQ(3, except[1][0].integer_value());
+}
+
+TEST_F(ReadLoweringJoin, StopsDemandOneWithoutAnUnreachableInnerAdvance) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT a.id FROM items a CROSS JOIN items b "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+  const auto filtered = Execute(
+      "SELECT b.id FROM items a CROSS JOIN items b WHERE b.id>2 "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, filtered.size());
+  EXPECT_EQ(3, filtered[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, EmitsThreeOwnedSourcesWithoutRowIdOrFieldAliasing) {
+  const auto rows = Execute(
+      "SELECT a.oid,b._rowid_,c.id FROM items a CROSS JOIN items b,items c "
+      "WHERE a.id=1 AND b.id<=2 AND c.id<=3 ORDER BY 1,2,3");
+  ASSERT_EQ(6U, rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(1, rows[index][0].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index / 3U + 1U), rows[index][1].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index % 3U + 1U), rows[index][2].integer_value());
+  }
+}
+
 TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
   EXPECT_EQ("invalid_input", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInvalidInput));
   EXPECT_EQ("unsupported_plan", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kUnsupportedPlan));

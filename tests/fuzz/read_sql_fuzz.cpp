@@ -147,6 +147,25 @@ class ByteReader final {
   return sql;
 }
 
+[[nodiscard]] std::string GenerateJoinSql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  const bool cross = input.Next() % 2U == 0U;
+  const bool distinct = input.Next() % 2U != 0U;
+  const std::size_t left_count = 1U + input.Next() % 8U;
+  const std::size_t right_count = 1U + input.Next() % 8U;
+  std::string sql =
+      "SELECT " + std::string{distinct ? "DISTINCT " : ""} +
+      "a.id,b.id,a.nullable+b.nullable FROM model_rows a" + (cross ? " CROSS JOIN " : ",") +
+      "model_rows b WHERE a.id<=" + std::to_string(left_count) +
+      " AND b.id<=" + std::to_string(right_count) + " AND a.value<=b.value ORDER BY 1 DESC,2";
+  if (input.Next() % 2U != 0U) {
+    sql += " LIMIT " + std::to_string(input.Next() % 9U) + " OFFSET " +
+           std::to_string(input.Next() % 5U);
+  }
+  return sql;
+}
+
 void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
   if (!prepared.has_value() || !prepared->statement.has_value()) {
     return;
@@ -165,8 +184,12 @@ void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
 
 std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
   ByteReader selector{input};
-  if (selector.Next() % kAggregateSelectionDivisor == 0U) {
+  const std::uint8_t selected = selector.Next();
+  if (selected % kAggregateSelectionDivisor == 0U) {
     return GenerateAggregateSql(input);
+  }
+  if (selected % kAggregateSelectionDivisor == 1U) {
+    return GenerateJoinSql(input);
   }
   return GenerateCompoundSql(input);
 }

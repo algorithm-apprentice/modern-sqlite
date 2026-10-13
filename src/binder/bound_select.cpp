@@ -61,14 +61,22 @@ struct BindScope {
 };
 
 struct SourceState {
+  BoundSourceId id{0};
   std::string name;
   std::optional<std::string> alias;
   std::optional<TableId> table;
   bool schema_table = false;
+  std::size_t source_column_begin = 0;
+  std::size_t source_column_count = 0;
+};
+
+struct SourceQualification {
+  std::optional<std::string_view> schema{};
+  std::string_view name;
 };
 
 struct CoreBindingMetadata {
-  std::optional<SourceState> source_state{};
+  std::vector<SourceState> source_states{};
   std::size_t source_column_begin = 0;
   std::size_t source_column_count = 0;
   std::vector<std::optional<ExpressionId>> result_syntax{};
@@ -384,7 +392,7 @@ struct BoundExpressionState {
   std::string source;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
-  std::optional<BoundTableSource> table_source;
+  std::vector<BoundTableSource> table_sources;
   std::vector<BoundSourceColumn> source_columns;
   std::vector<BoundCollation> collations;
   std::vector<BoundScalarFunction> functions;
@@ -562,6 +570,7 @@ class StatementBinder final {
       return std::unexpected(std::move(limit.error()));
     }
     PublishResultColumns();
+    std::vector<BoundTableSource>{}.swap(impl_->table_sources);
     return BoundSelect(std::move(impl_));
   }
 
@@ -1391,21 +1400,23 @@ class StatementBinder final {
 
   void PublishMutationSource(const BoundMutationTarget& target) {
     const CatalogTable& table = catalog_->table(target.table);
-    source_state_ = SourceState{
+    source_states_.push_back(SourceState{
         .name = table.name,
         .alias = std::nullopt,
         .table = target.table,
         .schema_table = false,
-    };
-    impl_->table_source = BoundTableSource{
+        .source_column_count = target.columns.size(),
+    });
+    impl_->table_sources.push_back(BoundTableSource{
         .kind = BoundSourceKind::kCatalogTable,
         .table = target.table,
         .span = target.span,
-    };
+        .source_column_count = target.columns.size(),
+    });
     impl_->source_columns.reserve(target.columns.size());
     for (const BoundMutationColumn& column : target.columns) {
       impl_->source_columns.push_back(BoundSourceColumn{
-          .source = impl_->table_source->id,
+          .source = impl_->table_sources.front().id,
           .rowid_alias = target.rowid_alias == column.column,
           .name = column.name,
           .declared_type = column.declared_type,
@@ -1615,11 +1626,11 @@ class StatementBinder final {
   }
 
   void BeginQueryCore() {
-    impl_->table_source.reset();
+    impl_->table_sources.clear();
     impl_->result_columns.clear();
     impl_->result_syntax.clear();
     impl_->where.reset();
-    source_state_.reset();
+    source_states_.clear();
     aliases_.clear();
     active_source_begin_ = impl_->source_columns.size();
     active_source_count_ = 0;
@@ -1631,10 +1642,10 @@ class StatementBinder final {
   }
 
   void RegisterActiveSourceCollations() {
-    if (!impl_->registered_collations.empty() || !impl_->table_source.has_value() ||
-        impl_->table_source->kind != BoundSourceKind::kCatalogTable ||
-        !impl_->table_source->table.has_value() ||
-        catalog_->table_indexes(*impl_->table_source->table).empty()) {
+    if (!impl_->registered_collations.empty() ||
+        !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
+          return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
+        })) {
       return;
     }
     impl_->registered_collations.reserve(environment_.collations().size());
@@ -1645,12 +1656,11 @@ class StatementBinder final {
 
   [[nodiscard]] bool IsActiveRowIdAlias(BoundSourceColumnId column) const noexcept {
     const std::size_t index = column.value();
-    if (index < active_source_begin_ || index - active_source_begin_ >= active_source_count_ ||
-        !impl_->table_source.has_value()) {
+    if (index < active_source_begin_ || index - active_source_begin_ >= active_source_count_) {
       return false;
     }
     const BoundSourceColumn& source = impl_->source_columns[index];
-    return source.source == impl_->table_source->id && source.rowid_alias;
+    return source.rowid_alias;
   }
 
   [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
@@ -2006,20 +2016,25 @@ class StatementBinder final {
       return std::unexpected(std::move(aggregate.error()));
     }
     if (aggregate->has_value()) {
+      if (impl_->table_sources.size() > 1U) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature,
+                                           impl_->table_sources.front().span,
+                                           "aggregates over multiple sources are not supported"));
+      }
       BindExpected<void> analyzed = AnalyzeAggregateLeaves(**aggregate);
       if (!analyzed.has_value()) {
         return analyzed;
       }
     }
     core_metadata_.push_back(CoreBindingMetadata{
-        .source_state = std::move(source_state_),
+        .source_states = std::move(source_states_),
         .source_column_begin = active_source_begin_,
         .source_column_count = active_source_count_,
         .result_syntax = std::move(impl_->result_syntax),
     });
     impl_->query_cores.emplace_back(BoundSelectCore{
         .quantifier = quantifier,
-        .table_source = impl_->table_source,
+        .table_sources = std::move(impl_->table_sources),
         .source_column_begin = active_source_begin_,
         .source_column_count = active_source_count_,
         .result_columns = std::move(impl_->result_columns),
@@ -2168,7 +2183,7 @@ class StatementBinder final {
     }
 
     core_metadata_.push_back(CoreBindingMetadata{
-        .source_state = std::nullopt,
+        .source_states = {},
         .result_syntax = std::move(result_syntax),
     });
     impl_->query_cores.emplace_back(BoundValuesCore{
@@ -2393,14 +2408,14 @@ class StatementBinder final {
 
   void ActivateQueryCore(std::size_t core_index) {
     const CoreBindingMetadata& metadata = core_metadata_[core_index];
-    source_state_ = metadata.source_state;
+    source_states_ = metadata.source_states;
     active_source_begin_ = metadata.source_column_begin;
     active_source_count_ = metadata.source_column_count;
     aliases_.clear();
-    impl_->table_source.reset();
+    impl_->table_sources.clear();
     if (const auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores[core_index]);
         select != nullptr) {
-      impl_->table_source = select->table_source;
+      impl_->table_sources = select->table_sources;
     }
   }
 
@@ -2687,9 +2702,11 @@ class StatementBinder final {
         return false;
       }
     }
-    if (core.from.has_value() &&
-        (!SpanIsValid(core.from->span) || !QualifiedNameIsValid(core.from->name) ||
-         (core.from->alias.has_value() && !SpanIsValid(*core.from->alias)))) {
+    if (core.from.size() > kMaximumSelectSources ||
+        !std::ranges::all_of(core.from, [this](const TableSource& source) {
+          return SpanIsValid(source.span) && QualifiedNameIsValid(source.name) &&
+                 (!source.alias.has_value() || SpanIsValid(*source.alias));
+        })) {
       return false;
     }
     if (core.where.has_value() && !IdIsValid(*core.where)) {
@@ -2908,20 +2925,30 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select) {
-    if (!select.from.has_value()) {
-      return {};
+    impl_->table_sources.reserve(select.from.size());
+    source_states_.reserve(select.from.size());
+    for (const TableSource& source : select.from) {
+      auto bound = BindTableSource(source);
+      if (!bound.has_value()) {
+        return bound;
+      }
     }
-    BindExpected<DecodedNameParts> parts = NameParts(select.from->name);
+    active_source_count_ = impl_->source_columns.size() - active_source_begin_;
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source) {
+    BindExpected<DecodedNameParts> parts = NameParts(source.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
     }
     if (parts->empty() || parts->size() > 2U ||
         (parts->size() == 2U && !NamesEqual((*parts)[0], catalog_->schema_name()))) {
-      return NoSuchTable(select.from->name.span);
+      return NoSuchTable(source.name.span);
     }
     std::optional<std::string> alias;
-    if (select.from->alias.has_value()) {
-      BindExpected<std::string> bound_alias = Dequote(*select.from->alias);
+    if (source.alias.has_value()) {
+      BindExpected<std::string> bound_alias = Dequote(*source.alias);
       if (!bound_alias.has_value()) {
         return std::unexpected(std::move(bound_alias.error()));
       }
@@ -2930,22 +2957,29 @@ class StatementBinder final {
 
     const std::string_view requested_name = parts->back();
     if (IsSchemaTableName(requested_name)) {
-      auto source_id = AllocateSourceId(select.from->span);
+      auto source_id = AllocateSourceId(source.span);
       if (!source_id.has_value()) {
         return std::unexpected(std::move(source_id.error()));
       }
-      source_state_ = SourceState{
+      const std::size_t column_begin = impl_->source_columns.size();
+      source_states_.push_back(SourceState{
+          .id = *source_id,
           .name = "sqlite_schema",
           .alias = std::move(alias),
           .table = std::nullopt,
           .schema_table = true,
-      };
-      impl_->table_source = BoundTableSource{
+          .source_column_begin = column_begin,
+          .source_column_count = kSchemaColumns.size(),
+      });
+      impl_->table_sources.push_back(BoundTableSource{
           .id = *source_id,
           .kind = BoundSourceKind::kSchemaTable,
           .table = std::nullopt,
-          .span = select.from->span,
-      };
+          .span = source.span,
+          .join = source.join,
+          .source_column_begin = column_begin,
+          .source_column_count = kSchemaColumns.size(),
+      });
       impl_->source_columns.reserve(impl_->source_columns.size() + kSchemaColumns.size());
       for (const SchemaColumnDefinition& column : kSchemaColumns) {
         impl_->source_columns.push_back(BoundSourceColumn{
@@ -2957,31 +2991,37 @@ class StatementBinder final {
             .catalog_column = std::nullopt,
         });
       }
-      active_source_count_ = impl_->source_columns.size() - active_source_begin_;
       return {};
     }
 
     const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
     if (!table_id.has_value()) {
-      return NoSuchTable(select.from->name.span);
+      return NoSuchTable(source.name.span);
     }
-    auto source_id = AllocateSourceId(select.from->span);
+    auto source_id = AllocateSourceId(source.span);
     if (!source_id.has_value()) {
       return std::unexpected(std::move(source_id.error()));
     }
     const CatalogTable& table = catalog_->table(*table_id);
-    source_state_ = SourceState{
+    const std::size_t column_begin = impl_->source_columns.size();
+    source_states_.push_back(SourceState{
+        .id = *source_id,
         .name = table.name,
         .alias = std::move(alias),
         .table = *table_id,
         .schema_table = false,
-    };
-    impl_->table_source = BoundTableSource{
+        .source_column_begin = column_begin,
+        .source_column_count = table.columns.size(),
+    });
+    impl_->table_sources.push_back(BoundTableSource{
         .id = *source_id,
         .kind = BoundSourceKind::kCatalogTable,
         .table = *table_id,
-        .span = select.from->span,
-    };
+        .span = source.span,
+        .join = source.join,
+        .source_column_begin = column_begin,
+        .source_column_count = table.columns.size(),
+    });
     impl_->source_columns.reserve(impl_->source_columns.size() + table.columns.size());
     for (std::size_t index = 0; index < table.columns.size(); ++index) {
       const CatalogColumn& column = table.columns[index];
@@ -2997,7 +3037,6 @@ class StatementBinder final {
           .catalog_column = ColumnId{index},
       });
     }
-    active_source_count_ = impl_->source_columns.size() - active_source_begin_;
     return {};
   }
 
@@ -3534,17 +3573,22 @@ class StatementBinder final {
       }
       return;
     }
-    if (std::holds_alternative<BoundRowIdExpression>(bound.payload)) {
-      if (impl_->table_source.has_value() && impl_->table_source->table.has_value()) {
-        const CatalogTable& table = catalog_->table(*impl_->table_source->table);
-        if (table.rowid_alias.has_value() && table.rowid_alias->value < active_source_count_) {
-          const BoundSourceColumn& source =
-              impl_->source_columns[active_source_begin_ + table.rowid_alias->value];
-          result.name = std::string{source.name};
-          if (source.declared_type.has_value()) {
-            result.declared_type = std::string{*source.declared_type};
+    if (const auto* rowid = std::get_if<BoundRowIdExpression>(&bound.payload); rowid != nullptr) {
+      const auto owner = std::ranges::find(source_states_, rowid->source, &SourceState::id);
+      if (owner != source_states_.end()) {
+        const std::optional<TableId>& table_id = owner->table;
+        if (table_id.has_value()) {
+          const CatalogTable& table = catalog_->table(*table_id);
+          if (table.rowid_alias.has_value() &&
+              table.rowid_alias->value < owner->source_column_count) {
+            const BoundSourceColumn& source =
+                impl_->source_columns[owner->source_column_begin + table.rowid_alias->value];
+            result.name = std::string{source.name};
+            if (source.declared_type.has_value()) {
+              result.declared_type = std::string{*source.declared_type};
+            }
+            return;
           }
-          return;
         }
       }
       result.name = "rowid";
@@ -3556,79 +3600,99 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
                                                   SourceSpan span) {
-    if (!source_state_.has_value()) {
+    if (source_states_.empty()) {
       return std::unexpected(
           BinderError(BindErrorCode::kNoTablesSpecified, span, "no tables specified"));
     }
+    std::optional<DecodedNameParts> qualifier;
     if (wildcard.qualifier.has_value()) {
       BindExpected<DecodedNameParts> parts = NameParts(*wildcard.qualifier);
       if (!parts.has_value()) {
         return std::unexpected(std::move(parts.error()));
       }
-      if (!WildcardQualifierMatches(*parts)) {
+      if (!std::ranges::any_of(source_states_, [&](const SourceState& source) {
+            return WildcardQualifierMatches(source, *parts);
+          })) {
         const std::string detail = parts->empty() ? std::string{SpanText(wildcard.qualifier->span)}
                                                   : std::string{parts->back()};
         return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, wildcard.qualifier->span,
                                            "no such table: " + detail));
       }
+      qualifier = std::move(*parts);
+    }
+    std::size_t expanded_count = 0;
+    for (const SourceState& source : source_states_) {
+      if (!qualifier.has_value() || WildcardQualifierMatches(source, *qualifier)) {
+        expanded_count += source.source_column_count;
+      }
     }
     if (impl_->result_columns.size() > options_.maximum_result_columns ||
-        active_source_count_ > options_.maximum_result_columns - impl_->result_columns.size()) {
+        expanded_count > options_.maximum_result_columns - impl_->result_columns.size()) {
       return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, span,
                                          "too many columns in result set"));
     }
 
-    const std::size_t source_end = active_source_begin_ + active_source_count_;
-    for (std::size_t index = active_source_begin_; index < source_end; ++index) {
-      const BoundSourceColumn& column = impl_->source_columns[index];
-      const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
-      const std::string_view collation_name =
-          IsActiveRowIdAlias(column_id) ? std::string_view{"BINARY"} : column.collation_name;
-      BindExpected<std::optional<BoundCollationId>> collation =
-          InternOptionalCollation(collation_name, span);
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
+    for (const SourceState& owner : source_states_) {
+      if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
+        continue;
       }
-      BindExpected<BoundExpressionId> expression = AppendExpression(span,
-                                                                    BoundColumnExpression{
-                                                                        .column = column_id,
-                                                                    },
-                                                                    ExpressionProperties{
-                                                                        .affinity = column.affinity,
-                                                                        .collation = *collation,
-                                                                        .explicit_collation = false,
-                                                                    });
-      if (!expression.has_value()) {
-        return std::unexpected(std::move(expression.error()));
+      const std::size_t source_end = owner.source_column_begin + owner.source_column_count;
+      for (std::size_t index = owner.source_column_begin; index < source_end; ++index) {
+        const BoundSourceColumn& column = impl_->source_columns[index];
+        const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
+        std::string_view source_name =
+            owner.schema_table ? std::string_view{"sqlite_master"} : std::string_view{owner.name};
+        const std::optional<std::string>& alias = owner.alias;
+        if (alias.has_value()) {
+          source_name = *alias;
+        }
+        auto resolved = ResolveSourceName(
+            column.name, span,
+            SourceQualification{.schema = catalog_->schema_name(), .name = source_name});
+        if (!resolved.has_value()) {
+          return std::unexpected(std::move(resolved.error()));
+        }
+        if (!resolved->has_value()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                             "expanded wildcard column did not resolve"));
+        }
+        const BoundExpressionId expression = **resolved;
+        const auto* bound_column =
+            std::get_if<BoundColumnExpression>(&impl_->expressions[expression.value()].payload);
+        if (bound_column == nullptr || bound_column->column != column_id) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                             "expanded wildcard column has a different owner"));
+        }
+        impl_->result_columns.push_back(BoundResultColumn{
+            .expression = expression,
+            .name = std::string{column.name},
+            .declared_type = column.declared_type.has_value()
+                                 ? std::optional<std::string>{std::string{*column.declared_type}}
+                                 : std::nullopt,
+            .affinity = column.affinity,
+        });
+        impl_->result_syntax.emplace_back(std::nullopt);
       }
-      impl_->result_columns.push_back(BoundResultColumn{
-          .expression = *expression,
-          .name = std::string{column.name},
-          .declared_type = column.declared_type.has_value()
-                               ? std::optional<std::string>{std::string{*column.declared_type}}
-                               : std::nullopt,
-          .affinity = column.affinity,
-      });
-      impl_->result_syntax.emplace_back(std::nullopt);
     }
     return {};
   }
 
-  [[nodiscard]] bool WildcardQualifierMatches(const DecodedNameParts& parts) const noexcept {
-    if (!source_state_.has_value() || parts.empty() || parts.size() > 2U) {
+  [[nodiscard]] bool WildcardQualifierMatches(const SourceState& source,
+                                              const DecodedNameParts& parts) const noexcept {
+    if (parts.empty() || parts.size() > 2U) {
       return false;
     }
     if (parts.size() == 2U && !NamesEqual(parts.front(), catalog_->schema_name())) {
       return false;
     }
     const std::string_view qualifier = parts.back();
-    if (source_state_->alias.has_value()) {
-      return NamesEqual(qualifier, *source_state_->alias);
+    if (source.alias.has_value()) {
+      return NamesEqual(qualifier, *source.alias);
     }
-    if (source_state_->schema_table) {
+    if (source.schema_table) {
       return NamesEqual(qualifier, "sqlite_master");
     }
-    return NamesEqual(qualifier, source_state_->name);
+    return NamesEqual(qualifier, source.name);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope) {
@@ -3894,38 +3958,31 @@ class StatementBinder final {
       }
       return NoSuchColumn(identifier.name.span);
     }
-    if (parts->size() < 2U || parts->size() > 3U || !scope.source_columns ||
-        !source_state_.has_value() || !QualifiedSourceMatches(*parts)) {
+    if (parts->size() < 2U || parts->size() > 3U || !scope.source_columns) {
       return NoSuchColumn(identifier.name.span);
     }
-    const std::string_view name = parts->back();
-    if (const std::optional<BoundSourceColumnId> column = FindSourceColumn(name);
-        column.has_value()) {
-      return BindColumn(*column, identifier.name.span);
+    auto resolved = ResolveSourceName(
+        parts->back(), identifier.name.span,
+        SourceQualification{
+            .schema = parts->size() == 3U ? std::optional<std::string_view>{parts->front()}
+                                          : std::nullopt,
+            .name = (*parts)[parts->size() - 2U],
+        });
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
     }
-    if (RowIdAvailable() && IsRowIdName(name)) {
-      return BindRowId(identifier.name.span);
+    if (resolved->has_value()) {
+      return **resolved;
     }
     return NoSuchColumn(identifier.name.span);
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSingleName(
       std::string_view name, SourceSpan span, BindScope scope) {
-    if (scope.source_columns && source_state_.has_value()) {
-      if (const std::optional<BoundSourceColumnId> column = FindSourceColumn(name);
-          column.has_value()) {
-        BindExpected<BoundExpressionId> expression = BindColumn(*column, span);
-        if (!expression.has_value()) {
-          return std::unexpected(std::move(expression.error()));
-        }
-        return std::optional<BoundExpressionId>{*expression};
-      }
-      if (RowIdAvailable() && IsRowIdName(name)) {
-        BindExpected<BoundExpressionId> expression = BindRowId(span);
-        if (!expression.has_value()) {
-          return std::unexpected(std::move(expression.error()));
-        }
-        return std::optional<BoundExpressionId>{*expression};
+    if (scope.source_columns) {
+      auto resolved = ResolveSourceName(name, span, std::nullopt);
+      if (!resolved.has_value() || resolved->has_value()) {
+        return resolved;
       }
     }
     if (scope.result_aliases) {
@@ -3949,39 +4006,38 @@ class StatementBinder final {
     return std::optional<BoundExpressionId>{};
   }
 
-  [[nodiscard]] bool QualifiedSourceMatches(const DecodedNameParts& parts) const noexcept {
-    if (!source_state_.has_value() || parts.size() < 2U || parts.size() > 3U) {
+  [[nodiscard]] bool QualifiedSourceMatches(
+      const SourceState& source, const SourceQualification& qualification) const noexcept {
+    if (qualification.schema.has_value() &&
+        !NamesEqual(*qualification.schema, catalog_->schema_name())) {
       return false;
     }
-    if (parts.size() == 3U && !NamesEqual(parts.front(), catalog_->schema_name())) {
-      return false;
+    const std::string_view qualifier = qualification.name;
+    if (source.alias.has_value()) {
+      return NamesEqual(qualifier, *source.alias);
     }
-    const std::string_view qualifier = parts[parts.size() - 2U];
-    if (source_state_->alias.has_value()) {
-      return NamesEqual(qualifier, *source_state_->alias);
-    }
-    if (source_state_->schema_table) {
+    if (source.schema_table) {
       return IsSchemaTableName(qualifier);
     }
-    return NamesEqual(qualifier, source_state_->name);
+    return NamesEqual(qualifier, source.name);
   }
 
   [[nodiscard]] std::optional<BoundSourceColumnId> FindSourceColumn(
-      std::string_view name) const noexcept {
-    if (source_state_.has_value() && source_state_->table.has_value()) {
-      const std::optional<ColumnId> column = catalog_->FindColumn(*source_state_->table, name);
+      const SourceState& source, std::string_view name) const noexcept {
+    if (source.table.has_value()) {
+      const std::optional<ColumnId> column = catalog_->FindColumn(*source.table, name);
       if (!column.has_value() ||
-          column->value > std::numeric_limits<std::size_t>::max() - active_source_begin_) {
+          column->value > std::numeric_limits<std::size_t>::max() - source.source_column_begin) {
         return std::nullopt;
       }
-      const std::size_t index = active_source_begin_ + column->value;
+      const std::size_t index = source.source_column_begin + column->value;
       if (index > std::numeric_limits<std::uint32_t>::max()) {
         return std::nullopt;
       }
       return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
     }
-    const std::size_t source_end = active_source_begin_ + active_source_count_;
-    for (std::size_t index = active_source_begin_; index < source_end; ++index) {
+    const std::size_t source_end = source.source_column_begin + source.source_column_count;
+    for (std::size_t index = source.source_column_begin; index < source_end; ++index) {
       if (NamesEqual(impl_->source_columns[index].name, name)) {
         return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
       }
@@ -3989,18 +4045,66 @@ class StatementBinder final {
     return std::nullopt;
   }
 
-  [[nodiscard]] bool RowIdAvailable() const noexcept {
-    if (!impl_->table_source.has_value()) {
-      return false;
+  [[nodiscard]] bool RowIdAvailable(const SourceState& source) const noexcept {
+    return source.schema_table ||
+           (source.table.has_value() && !catalog_->table(*source.table).without_rowid);
+  }
+
+  [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSourceName(
+      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification) {
+    std::optional<BoundSourceColumnId> matched_column;
+    const auto matches = [&](const SourceState& source) {
+      return !qualification.has_value() || QualifiedSourceMatches(source, *qualification);
+    };
+    const auto ambiguous = [&]() {
+      std::string resolved_name;
+      if (qualification.has_value()) {
+        if (qualification->schema.has_value()) {
+          resolved_name.append(*qualification->schema).push_back('.');
+        }
+        resolved_name.append(qualification->name).push_back('.');
+      }
+      resolved_name.append(name);
+      return BinderError(BindErrorCode::kAmbiguousColumn, span,
+                         "ambiguous column name: " + resolved_name);
+    };
+    for (const SourceState& source : source_states_) {
+      if (!matches(source)) {
+        continue;
+      }
+      if (const auto column = FindSourceColumn(source, name); column.has_value()) {
+        if (matched_column.has_value()) {
+          return std::unexpected(ambiguous());
+        }
+        matched_column = *column;
+      }
     }
-    if (impl_->table_source->kind == BoundSourceKind::kSchemaTable) {
-      return true;
+    if (matched_column.has_value()) {
+      auto bound = BindColumn(*matched_column, span);
+      if (!bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      return std::optional{*bound};
     }
-    if (!impl_->table_source->table.has_value()) {
-      return false;
+    if (IsRowIdName(name)) {
+      std::optional<BoundSourceId> matched_rowid;
+      for (const SourceState& source : source_states_) {
+        if (matches(source) && RowIdAvailable(source)) {
+          if (matched_rowid.has_value()) {
+            return std::unexpected(ambiguous());
+          }
+          matched_rowid = source.id;
+        }
+      }
+      if (matched_rowid.has_value()) {
+        auto bound = BindRowId(*matched_rowid, span);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        return std::optional{*bound};
+      }
     }
-    const TableId table = impl_->table_source->table.value_or(TableId{});
-    return !catalog_->table(table).without_rowid;
+    return std::optional<BoundExpressionId>{};
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindColumn(BoundSourceColumnId id,
@@ -4021,12 +4125,8 @@ class StatementBinder final {
                             });
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindRowId(SourceSpan span) {
-    if (!impl_->table_source.has_value()) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInternalInvariant, span, "rowid has no bound source"));
-    }
-    return AppendExpression(span, BoundRowIdExpression{.source = impl_->table_source->id},
+  [[nodiscard]] BindExpected<BoundExpressionId> BindRowId(BoundSourceId source, SourceSpan span) {
+    return AppendExpression(span, BoundRowIdExpression{.source = source},
                             ExpressionProperties{
                                 .affinity = TypeAffinity::kInteger,
                                 .collation = std::nullopt,
@@ -4864,7 +4964,7 @@ class StatementBinder final {
   BindEnvironment environment_;
   BindOptions options_;
   std::unique_ptr<BoundSelect::Impl> impl_;
-  std::optional<SourceState> source_state_;
+  std::vector<SourceState> source_states_;
   std::vector<AliasEntry> aliases_;
   std::size_t active_source_begin_ = 0;
   std::size_t active_source_count_ = 0;
@@ -5077,12 +5177,13 @@ std::uint64_t BoundSelect::registration_generation() const noexcept {
   return impl_ != nullptr ? impl_->registration_generation : 0;
 }
 
-const BoundTableSource* BoundSelect::table_source() const noexcept {
+std::span<const BoundTableSource> BoundSelect::table_sources() const noexcept {
   if (impl_ == nullptr || impl_->query_cores.empty()) {
-    return nullptr;
+    return {};
   }
   const auto* core = std::get_if<BoundSelectCore>(&impl_->query_cores.front());
-  return core != nullptr && core->table_source.has_value() ? &*core->table_source : nullptr;
+  return core != nullptr ? std::span<const BoundTableSource>{core->table_sources}
+                         : std::span<const BoundTableSource>{};
 }
 
 std::span<const BoundSourceColumn> BoundSelect::source_columns() const noexcept {

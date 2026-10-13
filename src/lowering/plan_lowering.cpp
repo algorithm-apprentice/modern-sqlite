@@ -148,7 +148,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     builder_.emplace(std::move(*created));
 
     if (streaming_requires_snapshot_ ||
-        (!streaming_query_ && !set_query_ && bound_select_->table_source() != nullptr)) {
+        (!streaming_query_ && !set_query_ && !bound_select_->table_sources().empty())) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
                                            "unable to require a database snapshot");
       if (!required.has_value()) {
@@ -677,6 +677,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::move(*built);
   }
 
+  struct JoinedSourcePlan {
+    const PhysicalTableScanNode* scan = nullptr;
+    std::optional<CursorId> cursor{};
+  };
+
+  struct SourceCursorBinding {
+    CursorId cursor;
+    std::optional<CursorFieldId> rowid_field{};
+  };
+
   struct StreamingCorePlan {
     std::size_t core_index = 0;
     const BoundQueryCore* bound = nullptr;
@@ -686,6 +696,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalTableScanNode* table_scan = nullptr;
     const PhysicalRowIdLookupNode* rowid_lookup = nullptr;
     const PhysicalIndexScanNode* index_scan = nullptr;
+    const PhysicalNestedLoopJoinNode* join = nullptr;
+    std::vector<JoinedSourcePlan> joined_sources{};
     const PhysicalValuesNode* values = nullptr;
     const PhysicalFilterNode* filter = nullptr;
     const PhysicalAggregateNode* aggregate = nullptr;
@@ -694,7 +706,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalDistinctNode* distinct = nullptr;
     std::optional<CursorId> cursor{};
     std::optional<CursorId> index_cursor{};
-    std::optional<CursorFieldId> rowid_cursor_field{};
     std::optional<RelationId> relation{};
     std::optional<SorterId> group_sorter{};
     std::vector<BoundExpressionId> global_representative_leaves{};
@@ -702,15 +713,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     bool global_filtered_controller_defaults = false;
   };
 
-  enum class AggregateOutputMode : std::uint8_t {
+  enum class SelectOutputMode : std::uint8_t {
     Streaming,
     Ordered,
     Materialized,
     DemandOne,
   };
 
-  struct AggregateOutputContext {
-    AggregateOutputMode mode = AggregateOutputMode::Streaming;
+  struct SelectOutputContext {
+    SelectOutputMode mode = SelectOutputMode::Streaming;
     const StreamingCorePlan* core = nullptr;
     std::optional<Label> final_completion{};
     const LogicalCoreOrderLayout* ordered_layout = nullptr;
@@ -754,10 +765,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (std::size_t index = 0; index < cores.size(); ++index) {
       streaming_cores_[index].core_index = index;
       streaming_cores_[index].bound = &cores[index];
+      if (const auto* select = std::get_if<BoundSelectCore>(&cores[index]);
+          select != nullptr && select->table_sources.size() > 1U) {
+        streaming_cores_[index].joined_sources.reserve(select->table_sources.size());
+      }
     }
     const auto has_access = [](const StreamingCorePlan& core) {
       return core.empty != nullptr || core.single_row != nullptr || core.table_scan != nullptr ||
-             core.rowid_lookup != nullptr || core.index_scan != nullptr || core.values != nullptr;
+             core.rowid_lookup != nullptr || core.index_scan != nullptr || core.values != nullptr ||
+             core.join != nullptr || !core.joined_sources.empty();
     };
     std::vector<std::optional<std::size_t>> node_cores(nodes.size());
     std::vector<PhysicalCompoundStrategy> compound_strategies;
@@ -784,14 +800,40 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         node_cores[index] = single->core_index;
       } else if (const auto* scan = std::get_if<PhysicalTableScanNode>(&physical.payload);
                  scan != nullptr) {
-        if (scan->core_index >= streaming_cores_.size() ||
-            has_access(streaming_cores_[scan->core_index])) {
+        if (scan->core_index >= streaming_cores_.size()) {
           return std::unexpected(InternalFailure("streaming table core is invalid"));
         }
-        streaming_cores_[scan->core_index].leaf = &physical;
-        streaming_cores_[scan->core_index].table_scan = scan;
+        StreamingCorePlan& core = streaming_cores_[scan->core_index];
+        const auto* select = std::get_if<BoundSelectCore>(core.bound);
+        if (select != nullptr && select->table_sources.size() > 1U) {
+          const std::size_t source_index = core.joined_sources.size();
+          if (source_index >= select->table_sources.size() ||
+              scan->source != select->table_sources[source_index].id) {
+            return std::unexpected(InternalFailure("join scans do not match declared sources"));
+          }
+          core.joined_sources.push_back(JoinedSourcePlan{.scan = scan});
+        } else {
+          if (has_access(core)) {
+            return std::unexpected(InternalFailure("streaming core has duplicate access"));
+          }
+          core.leaf = &physical;
+          core.table_scan = scan;
+        }
         node_cores[index] = scan->core_index;
         streaming_requires_snapshot_ = true;
+      } else if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&physical.payload);
+                 join != nullptr) {
+        if (join->core_index >= streaming_cores_.size() || join->left.value() >= index ||
+            join->right.value() >= index || !node_cores[join->left.value()].has_value() ||
+            !node_cores[join->right.value()].has_value() ||
+            *node_cores[join->left.value()] != join->core_index ||
+            *node_cores[join->right.value()] != join->core_index) {
+          return std::unexpected(InternalFailure("join inputs do not share their core"));
+        }
+        StreamingCorePlan& core = streaming_cores_[join->core_index];
+        core.join = join;
+        core.leaf = &physical;
+        node_cores[index] = join->core_index;
       } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&physical.payload);
                  lookup != nullptr) {
         if (lookup->core_index >= streaming_cores_.size() ||
@@ -968,13 +1010,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (core.values != nullptr || core.projection == nullptr || !distinct_matches) {
         return std::unexpected(InternalFailure("streaming SELECT core shape is invalid"));
       }
-      const bool has_cursor_access =
-          core.table_scan != nullptr || core.rowid_lookup != nullptr || core.index_scan != nullptr;
-      const bool source_matches = select.table_source.has_value()
+      const bool has_cursor_access = core.table_scan != nullptr || core.rowid_lookup != nullptr ||
+                                     core.index_scan != nullptr || core.join != nullptr;
+      const bool source_matches = !select.table_sources.empty()
                                       ? has_cursor_access || core.empty != nullptr
                                       : core.single_row != nullptr || core.empty != nullptr;
       if (!source_matches) {
         return std::unexpected(InternalFailure("streaming SELECT access shape is invalid"));
+      }
+      if (select.table_sources.size() > 1U) {
+        if (core.join == nullptr || core.joined_sources.size() != select.table_sources.size() ||
+            core.aggregate != nullptr ||
+            (core.filter != nullptr &&
+             core.filter->predicate_sources.size() != core.filter->predicates.size())) {
+          return std::unexpected(
+              InternalFailure("joined core shape or predicate schedule is invalid"));
+        }
       }
       if (!select.aggregate.has_value()) {
         if (core.aggregate != nullptr || core.having != nullptr || core.empty != nullptr ||
@@ -1384,7 +1435,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
           return std::holds_alternative<PhysicalValuesNode>(node.payload) ||
                  std::holds_alternative<PhysicalCompoundNode>(node.payload) ||
-                 std::holds_alternative<PhysicalAggregateNode>(node.payload);
+                 std::holds_alternative<PhysicalAggregateNode>(node.payload) ||
+                 std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
         })) {
       return InspectStreamingPlan();
     }
@@ -1718,12 +1770,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool IsAggregateRowIdAlias(BoundSourceColumnId column) const noexcept {
-    if (aggregate_core_ == nullptr || !aggregate_core_->table_source.has_value() ||
+    if (aggregate_core_ == nullptr || aggregate_core_->table_sources.size() != 1U ||
         column.value() >= bound_select_->source_columns().size()) {
       return false;
     }
     const BoundSourceColumn& source = bound_select_->source_columns()[column.value()];
-    return source.source == aggregate_core_->table_source->id && source.rowid_alias;
+    return source.source == aggregate_core_->table_sources.front().id && source.rowid_alias;
   }
 
   [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
@@ -3244,144 +3296,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> AddStreamingCursorDescriptor(StreamingCorePlan& core,
                                                                   const BoundSelectCore& select) {
-    if (core.table_scan == nullptr || !select.table_source.has_value() ||
-        core.table_scan->source != select.table_source->id ||
-        select.source_column_begin > bound_select_->source_columns().size() ||
-        select.source_column_count >
-            bound_select_->source_columns().size() - select.source_column_begin) {
+    if (core.table_scan == nullptr || select.table_sources.size() != 1U ||
+        core.table_scan->source != select.table_sources.front().id) {
       return std::unexpected(InternalFailure("streaming cursor metadata is invalid"));
     }
-    const std::span<const BoundSourceColumn> columns = bound_select_->source_columns().subspan(
-        select.source_column_begin, select.source_column_count);
-    if (std::ranges::any_of(columns, [&](const BoundSourceColumn& column) {
-          return column.source != core.table_scan->source;
-        })) {
-      return std::unexpected(InternalFailure("streaming source column ownership is invalid"));
+    SetStreamingCoreContext(core);
+    if (auto added = AddCursorDescriptor(); !added.has_value()) {
+      return added;
     }
-    ReadCursorDescriptor descriptor{
-        .root_page = RootPageNumber(core.table_scan->root_page.value),
-        .storage = CursorStorageKind::kRowIdTable,
-        .record_field_count = 0,
-        .fields = {},
-        .index_columns = {},
-    };
-    if (core.table_scan->source_kind == BoundSourceKind::kSchemaTable) {
-      constexpr std::uint32_t kSchemaFieldCount = 5;
-      if (columns.size() != kSchemaFieldCount) {
-        return std::unexpected(InternalFailure("streaming schema core shape is invalid"));
-      }
-      descriptor.record_field_count = kSchemaFieldCount;
-      descriptor.fields.reserve(kSchemaFieldCount);
-      for (std::uint32_t index = 0; index < kSchemaFieldCount; ++index) {
-        descriptor.fields.push_back(CursorFieldSource{
-            .kind = CursorFieldSourceKind::kRecordField,
-            .record_field = index,
-        });
-        source_cursor_fields_[select.source_column_begin + index] = CursorFieldId{index};
-      }
-    } else {
-      if (!core.table_scan->table.has_value()) {
-        return std::unexpected(InternalFailure("streaming table core has no table ID"));
-      }
-      const CatalogSnapshot& catalog = *bound_select_->catalog();
-      const TableId table_id = *core.table_scan->table;
-      const CatalogTable& table = catalog.table(table_id);
-      if (!table.without_rowid) {
-        if (table.columns.size() > std::numeric_limits<std::uint32_t>::max()) {
-          return std::unexpected(InternalFailure("streaming table field count is too large"));
-        }
-        descriptor.record_field_count = static_cast<std::uint32_t>(table.columns.size());
-        descriptor.fields.reserve(columns.size());
-        for (std::size_t index = 0; index < columns.size(); ++index) {
-          const BoundSourceColumn& source_column = columns[index];
-          if (!source_column.catalog_column.has_value() ||
-              source_column.catalog_column->value >= table.columns.size()) {
-            return std::unexpected(InternalFailure("streaming bound source column is invalid"));
-          }
-          const ColumnId column_id = *source_column.catalog_column;
-          if (table.rowid_alias.has_value() && *table.rowid_alias == column_id) {
-            descriptor.fields.push_back(CursorFieldSource{
-                .kind = CursorFieldSourceKind::kRowId,
-                .record_field = 0,
-            });
-          } else {
-            auto field = CatalogFieldSource(table.columns[column_id.value],
-                                            static_cast<std::uint32_t>(column_id.value));
-            if (!field.has_value()) {
-              return std::unexpected(std::move(field.error()));
-            }
-            descriptor.fields.push_back(*field);
-            source_field_real_affinity_[select.source_column_begin + index] =
-                source_column.affinity == TypeAffinity::kReal;
-          }
-          source_cursor_fields_[select.source_column_begin + index] =
-              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
-        }
-      } else {
-        descriptor.storage = CursorStorageKind::kIndex;
-        const std::optional<IndexId> primary_id = catalog.primary_key_index(table_id);
-        if (!primary_id.has_value()) {
-          return std::unexpected(
-              InternalFailure("streaming WITHOUT ROWID core has no primary index"));
-        }
-        const CatalogIndex& primary = catalog.index(*primary_id);
-        if (primary.terms.empty() ||
-            primary.terms.size() > std::numeric_limits<std::uint32_t>::max()) {
-          return std::unexpected(
-              InternalFailure("streaming WITHOUT ROWID primary shape is invalid"));
-        }
-        descriptor.record_field_count = static_cast<std::uint32_t>(primary.terms.size());
-        descriptor.index_columns.reserve(primary.terms.size());
-        std::vector<std::optional<std::uint32_t>> field_by_column(table.columns.size());
-        for (std::size_t term_index = 0; term_index < primary.terms.size(); ++term_index) {
-          const CatalogIndexTerm& term = primary.terms[term_index];
-          const auto* column = std::get_if<ColumnId>(&term.target);
-          if (column == nullptr || column->value >= table.columns.size() ||
-              field_by_column[column->value].has_value()) {
-            return std::unexpected(InternalFailure("streaming primary index term is invalid"));
-          }
-          field_by_column[column->value] = static_cast<std::uint32_t>(term_index);
-          auto collation = SymbolForName(term.collation_name);
-          if (!collation.has_value()) {
-            return std::unexpected(std::move(collation.error()));
-          }
-          descriptor.index_columns.push_back(IndexColumnMetadata{
-              .collation = *collation,
-              .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
-                                                            : BytecodeSortOrder::kAscending,
-          });
-        }
-        descriptor.fields.reserve(columns.size());
-        for (std::size_t index = 0; index < columns.size(); ++index) {
-          const BoundSourceColumn& source_column = columns[index];
-          if (!source_column.catalog_column.has_value() ||
-              source_column.catalog_column->value >= table.columns.size()) {
-            return std::unexpected(
-                InternalFailure("streaming WITHOUT ROWID source column is invalid"));
-          }
-          const ColumnId column_id = *source_column.catalog_column;
-          if (!field_by_column[column_id.value].has_value()) {
-            return std::unexpected(InternalFailure("streaming primary record omits a column"));
-          }
-          auto field = CatalogFieldSource(table.columns[column_id.value],
-                                          AssumeValue(field_by_column[column_id.value]));
-          if (!field.has_value()) {
-            return std::unexpected(std::move(field.error()));
-          }
-          descriptor.fields.push_back(*field);
-          source_cursor_fields_[select.source_column_begin + index] =
-              CursorFieldId{static_cast<std::uint32_t>(descriptor.fields.size() - 1U)};
-          source_field_real_affinity_[select.source_column_begin + index] =
-              source_column.affinity == TypeAffinity::kReal;
-        }
-      }
-    }
-    auto cursor = ConvertProgramResult(AssumeValue(builder_).AddCursor(std::move(descriptor)),
-                                       "unable to add streaming core cursor");
-    if (!cursor.has_value()) {
-      return std::unexpected(std::move(cursor.error()));
-    }
-    core.cursor = *cursor;
+    core.cursor = cursor_;
     return {};
   }
 
@@ -3394,6 +3317,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     for (StreamingCorePlan& core : streaming_cores_) {
       if (const auto* select = std::get_if<BoundSelectCore>(core.bound); select != nullptr) {
+        if (core.join != nullptr) {
+          for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
+            JoinedSourcePlan& joined = core.joined_sources[index];
+            const BoundTableSource& source = select->table_sources[index];
+            table_scan_ = joined.scan;
+            rowid_lookup_ = nullptr;
+            index_scan_ = nullptr;
+            leaf_ = nullptr;
+            active_source_column_begin_ = source.source_column_begin;
+            active_source_column_count_ = source.source_column_count;
+            if (auto added = AddCursorDescriptor(); !added.has_value()) {
+              return added;
+            }
+            joined.cursor = cursor_;
+          }
+        }
         if (core.table_scan != nullptr && core.aggregate == nullptr) {
           if (auto cursor = AddStreamingCursorDescriptor(core, *select); !cursor.has_value()) {
             return cursor;
@@ -3455,7 +3394,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         core.cursor = cursor_;
         core.index_cursor = index_cursor_;
-        core.rowid_cursor_field = source_rowid_cursor_field_;
       }
       if (auto aggregates = AddGlobalAggregateDescriptors(); !aggregates.has_value()) {
         return aggregates;
@@ -3720,7 +3658,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (source_field_real_affinity_.size() != bound_select_->source_columns().size()) {
       source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
     }
-    source_rowid_cursor_field_.reset();
+    std::optional<CursorFieldId> rowid_field;
     const std::span<const BoundSourceColumn> active_columns =
         bound_select_->source_columns().subspan(active_source_column_begin_,
                                                 active_source_column_count_);
@@ -3792,7 +3730,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               !field_by_column[column->value].has_value()) {
             field_by_column[column->value] = field;
           } else if (std::holds_alternative<RowIdIndexTerm>(term.target)) {
-            source_rowid_cursor_field_ = CursorFieldId{field};
+            rowid_field = CursorFieldId{field};
           }
         }
         if (!index_scan_->covering) {
@@ -3803,9 +3741,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       if (index_scan_->covering) {
-        if (table.rowid_alias.has_value() && source_rowid_cursor_field_.has_value() &&
+        if (table.rowid_alias.has_value() && rowid_field.has_value() &&
             !field_by_column[table.rowid_alias->value].has_value()) {
-          field_by_column[table.rowid_alias->value] = source_rowid_cursor_field_->value();
+          field_by_column[table.rowid_alias->value] = rowid_field->value();
         }
         for (std::size_t local_index = 0; local_index < active_columns.size(); ++local_index) {
           const std::size_t source_index = active_source_column_begin_ + local_index;
@@ -3832,7 +3770,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       index_cursor_ = *cursor;
       if (index_scan_->covering) {
         cursor_ = *cursor;
-        return {};
+        return PublishSourceCursor(owner, *cursor, rowid_field);
       }
     }
 
@@ -3982,7 +3920,38 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(cursor.error()));
     }
     cursor_ = *cursor;
+    return PublishSourceCursor(owner, *cursor, std::nullopt);
+  }
+
+  [[nodiscard]] LoweringResult<void> PublishSourceCursor(BoundSourceId source, CursorId cursor,
+                                                         std::optional<CursorFieldId> rowid_field) {
+    if (source_cursor_bindings_.empty()) {
+      std::size_t source_count = 0;
+      for (const BoundQueryCore& core : bound_select_->query_cores()) {
+        if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
+          source_count += select->table_sources.size();
+        }
+      }
+      source_cursor_bindings_.resize(source_count);
+    }
+    if (source.value() >= source_cursor_bindings_.size() ||
+        source_cursor_bindings_[source.value()].has_value()) {
+      return std::unexpected(InternalFailure("source cursor ownership is duplicated or invalid"));
+    }
+    source_cursor_bindings_[source.value()] =
+        SourceCursorBinding{.cursor = cursor, .rowid_field = rowid_field};
     return {};
+  }
+
+  [[nodiscard]] LoweringResult<SourceCursorBinding> SourceCursor(BoundSourceId source) const {
+    if (source.value() >= source_cursor_bindings_.size()) {
+      return std::unexpected(InternalFailure("source expression has invalid ownership"));
+    }
+    const std::optional<SourceCursorBinding>& binding = source_cursor_bindings_[source.value()];
+    if (!binding.has_value()) {
+      return std::unexpected(InternalFailure("source expression has no owned cursor"));
+    }
+    return *binding;
   }
 
   [[nodiscard]] LoweringResult<void> AddMutationReadCursorDescriptor(
@@ -4825,13 +4794,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         return {};
       }
-      if (!cursor_.has_value() || column->column.value() >= source_field_real_affinity_.size() ||
+      if (column->column.value() >= source_field_real_affinity_.size() ||
           column->column.value() >= source_cursor_fields_.size() ||
           !source_cursor_fields_[column->column.value()].has_value()) {
         return std::unexpected(InternalFailure("bound column has no cursor field"));
       }
+      auto binding = SourceCursor(bound_select_->source_columns()[column->column.value()].source);
+      if (!binding.has_value()) {
+        return std::unexpected(std::move(binding.error()));
+      }
       if (auto read = Append(ReadFieldInstruction{
-              .cursor = AssumeValue(cursor_),
+              .cursor = binding->cursor,
               .field = AssumeValue(source_cursor_fields_[column->column.value()]),
               .output = destination,
           });
@@ -4846,7 +4819,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return {};
     }
-    if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
+    if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
+        rowid != nullptr) {
       if ((grouped_aggregate_query_ || global_representative_query_) &&
           aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
         const std::optional<RegisterId> source = GroupedRowIdRegister();
@@ -4864,18 +4838,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .output = destination,
         });
       }
-      if (!cursor_.has_value()) {
-        return std::unexpected(InternalFailure("rowid expression has no cursor"));
+      auto binding = SourceCursor(rowid->source);
+      if (!binding.has_value()) {
+        return std::unexpected(std::move(binding.error()));
       }
-      if (source_rowid_cursor_field_.has_value()) {
+      if (binding->rowid_field.has_value()) {
         return Append(ReadFieldInstruction{
-            .cursor = AssumeValue(cursor_),
-            .field = *source_rowid_cursor_field_,
+            .cursor = binding->cursor,
+            .field = *binding->rowid_field,
             .output = destination,
         });
       }
       return Append(ReadRowIdInstruction{
-          .cursor = AssumeValue(cursor_),
+          .cursor = binding->cursor,
           .output = destination,
       });
     }
@@ -5516,10 +5491,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!active_aggregate_output_.has_value() || active_aggregate_output_->core == nullptr) {
       return std::unexpected(InternalFailure("aggregate output context is unavailable"));
     }
-    const AggregateOutputContext& output = *active_aggregate_output_;
+    const SelectOutputContext& output = *active_aggregate_output_;
     const StreamingCorePlan& core = *output.core;
     switch (output.mode) {
-      case AggregateOutputMode::Streaming:
+      case SelectOutputMode::Streaming:
         if (!core.relation.has_value()) {
           if (auto offset = EmitOffset(rejected); !offset.has_value()) {
             return offset;
@@ -5532,7 +5507,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return membership;
         }
         return EmitStreamingResult(rejected, stopped, core.relation.has_value());
-      case AggregateOutputMode::Ordered:
+      case SelectOutputMode::Ordered:
         if (output.ordered_layout == nullptr || !output.ordered_record_first.has_value()) {
           return std::unexpected(InternalFailure("ordered aggregate output is incomplete"));
         }
@@ -5547,7 +5522,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
                                     output.ordered_top_n, output.ordered_full_key,
                                     *output.ordered_record_first, rejected);
-      case AggregateOutputMode::Materialized:
+      case SelectOutputMode::Materialized:
         if (!output.materialized_target.has_value()) {
           return std::unexpected(InternalFailure("materialized aggregate target is unavailable"));
         }
@@ -5556,7 +5531,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
                                          core.relation);
-      case AggregateOutputMode::DemandOne:
+      case SelectOutputMode::DemandOne:
         if (auto projected = EmitAggregateCoreProjection(); !projected.has_value()) {
           return projected;
         }
@@ -5600,7 +5575,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       const Label completed = *aggregate_core_completion_label_;
       const Label stopped = *aggregate_core_stopped_label_;
-      const AggregateOutputMode mode = active_aggregate_output_->mode;
+      const SelectOutputMode mode = active_aggregate_output_->mode;
       if (having_ != nullptr) {
         if (auto having = EmitPredicate(having_->predicate, completed); !having.has_value()) {
           return restore(std::move(having));
@@ -5609,7 +5584,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto output = EmitActiveAggregateOutput(completed, stopped); !output.has_value()) {
         return restore(std::move(output));
       }
-      if (mode == AggregateOutputMode::DemandOne) {
+      if (mode == SelectOutputMode::DemandOne) {
         return restore({});
       }
       return restore(EmitJump(completed));
@@ -8346,7 +8321,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     projection_ = core.projection;
     cursor_ = core.cursor;
     index_cursor_ = core.index_cursor;
-    source_rowid_cursor_field_ = core.rowid_cursor_field;
     leaf_ = core.leaf;
     table_scan_ = core.table_scan;
     rowid_lookup_ = core.rowid_lookup;
@@ -8577,6 +8551,219 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitJoinedRow(const StreamingCorePlan& core,
+                                                   const BoundSelectCore& select,
+                                                   const SelectOutputContext& output,
+                                                   Label rejected, std::optional<Label> stopped) {
+    switch (output.mode) {
+      case SelectOutputMode::Streaming:
+        if (!core.relation.has_value()) {
+          if (auto offset = EmitOffset(rejected); !offset.has_value()) {
+            return offset;
+          }
+        }
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+          return membership;
+        }
+        return EmitStreamingResult(rejected, stopped.value_or(rejected), core.relation.has_value());
+      case SelectOutputMode::Ordered:
+        if (output.ordered_layout == nullptr || !output.ordered_record_first.has_value()) {
+          return std::unexpected(InternalFailure("joined ordering destination is incomplete"));
+        }
+        if (OrderedLayoutUsesInputFields(*output.ordered_layout)) {
+          if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+            return projected;
+          }
+          if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+            return membership;
+          }
+        }
+        return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
+                                    output.ordered_top_n, output.ordered_full_key,
+                                    *output.ordered_record_first, rejected);
+      case SelectOutputMode::Materialized:
+        if (!output.materialized_target.has_value()) {
+          return std::unexpected(InternalFailure("joined set destination is incomplete"));
+        }
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
+                                         core.relation);
+      case SelectOutputMode::DemandOne:
+        if (!stopped.has_value()) {
+          return std::unexpected(InternalFailure("joined demand-one destination has no stop edge"));
+        }
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        if (auto result = Append(ResultRowInstruction{
+                .first = result_block_first_,
+                .count = static_cast<std::uint32_t>(select.result_columns.size()),
+            });
+            !result.has_value()) {
+          return result;
+        }
+        return EmitJump(*stopped);
+    }
+    return std::unexpected(InternalFailure("joined output destination is invalid"));
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(const StreamingCorePlan& core,
+                                                    const BoundSelectCore& select,
+                                                    const SelectOutputContext& output,
+                                                    std::size_t depth,
+                                                    std::optional<Label> stopped) {
+    const JoinedSourcePlan& source = core.joined_sources[depth];
+    if (source.scan == nullptr || !source.cursor.has_value()) {
+      return std::unexpected(InternalFailure("joined loop has no source cursor"));
+    }
+    const bool has_inner = depth + 1U < core.joined_sources.size();
+    const bool has_predicate =
+        core.filter != nullptr &&
+        std::ranges::contains(core.filter->predicate_sources, source.scan->source);
+    const bool can_advance =
+        has_inner || has_predicate || output.mode != SelectOutputMode::DemandOne;
+    auto row = CreateLabel();
+    auto done = CreateLabel();
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> advance;
+    if (can_advance) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      advance = *label;
+    }
+    const CursorId cursor = *source.cursor;
+    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                        "unable to position joined source");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (core.filter != nullptr) {
+      for (std::size_t index = 0; index < core.filter->predicates.size(); ++index) {
+        if (core.filter->predicate_sources[index] == source.scan->source) {
+          if (auto filtered =
+                  EmitPredicate(core.filter->predicates[index], advance.value_or(*done));
+              !filtered.has_value()) {
+            return filtered;
+          }
+        }
+      }
+    }
+    if (has_inner) {
+      if (auto inner = EmitJoinedLoop(core, select, output, depth + 1U, stopped);
+          !inner.has_value()) {
+        return inner;
+      }
+    } else if (auto emitted = EmitJoinedRow(core, select, output, advance.value_or(*done), stopped);
+               !emitted.has_value()) {
+      return emitted;
+    }
+    if (advance.has_value()) {
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                       "unable to advance joined source");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+    }
+    return BindLabel(*done);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitJoinedCore(const StreamingCorePlan& core,
+                                                    const BoundSelectCore& select,
+                                                    const SelectOutputContext& output) {
+    if (core.join == nullptr || core.joined_sources.size() < 2U ||
+        core.joined_sources.size() > kMaximumSelectSources) {
+      return std::unexpected(InternalFailure("joined core has invalid source shape"));
+    }
+    SetStreamingCoreContext(core);
+    auto after = CreateLabel();
+    if (!after.has_value()) {
+      return std::unexpected(std::move(after.error()));
+    }
+    if (auto guards = EmitStreamingGuards(core, *after); !guards.has_value()) {
+      return guards;
+    }
+    const bool use_membership =
+        core.relation.has_value() && output.mode != SelectOutputMode::DemandOne;
+    if (use_membership) {
+      if (auto opened = Append(OpenRelationInstruction{.relation = *core.relation});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    for (const JoinedSourcePlan& source : core.joined_sources) {
+      if (!source.cursor.has_value()) {
+        return std::unexpected(InternalFailure("joined source has no cursor descriptor"));
+      }
+      if (auto opened = Append(OpenReadCursorInstruction{.cursor = *source.cursor});
+          !opened.has_value()) {
+        return opened;
+      }
+    }
+    std::optional<Label> stopped;
+    if (output.mode == SelectOutputMode::DemandOne ||
+        (output.mode == SelectOutputMode::Streaming && limit_ != nullptr)) {
+      if (!output.final_completion.has_value()) {
+        return std::unexpected(InternalFailure("joined stop has no final completion"));
+      }
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      stopped = *label;
+    }
+    if (auto loop = EmitJoinedLoop(core, select, output, 0U, stopped); !loop.has_value()) {
+      return loop;
+    }
+    const auto close = [&]() -> LoweringResult<void> {
+      for (const JoinedSourcePlan& source : std::views::reverse(core.joined_sources)) {
+        if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(source.cursor)});
+            !closed.has_value()) {
+          return closed;
+        }
+      }
+      if (use_membership) {
+        return Append(CloseRelationInstruction{.relation = AssumeValue(core.relation)});
+      }
+      return {};
+    };
+    if (auto closed = close(); !closed.has_value()) {
+      return closed;
+    }
+    if (stopped.has_value()) {
+      if (auto jumped = EmitJump(*after); !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto bound = BindLabel(*stopped); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = close(); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(AssumeValue(output.final_completion)); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return BindLabel(*after);
+  }
+
   [[nodiscard]] LoweringResult<void> EmitStreamingTableCore(const StreamingCorePlan& core,
                                                             const BoundSelectCore& select,
                                                             Label final_completion) {
@@ -8685,6 +8872,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitStreamingSingleCore(const StreamingCorePlan& core,
                                                              const BoundSelectCore& select,
                                                              Label final_completion) {
+    if (core.join != nullptr) {
+      return EmitJoinedCore(core, select,
+                            SelectOutputContext{
+                                .mode = SelectOutputMode::Streaming,
+                                .core = &core,
+                                .final_completion = final_completion,
+                            });
+    }
     SetStreamingCoreContext(core);
     auto after_core = CreateLabel();
     auto opened_completion = CreateLabel();
@@ -8819,7 +9014,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitAggregateCore(const StreamingCorePlan& core,
-                                                       AggregateOutputContext output) {
+                                                       SelectOutputContext output) {
     if (core.aggregate == nullptr || output.core != &core) {
       return std::unexpected(InternalFailure("aggregate core output metadata is invalid"));
     }
@@ -8828,15 +9023,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(after.error()));
     }
     std::optional<Label> completed;
-    if (output.mode != AggregateOutputMode::DemandOne || !AggregateCoreAlwaysProducesRow(core)) {
+    if (output.mode != SelectOutputMode::DemandOne || !AggregateCoreAlwaysProducesRow(core)) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
       }
       completed = *label;
     }
-    const bool needs_stopped = output.mode == AggregateOutputMode::DemandOne ||
-                               (output.mode == AggregateOutputMode::Streaming && limit_ != nullptr);
+    const bool needs_stopped = output.mode == SelectOutputMode::DemandOne ||
+                               (output.mode == SelectOutputMode::Streaming && limit_ != nullptr);
     std::optional<Label> stopped;
     if (needs_stopped) {
       auto label = CreateLabel();
@@ -8929,8 +9124,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const auto& select = std::get<BoundSelectCore>(*core.bound);
       if (core.aggregate != nullptr) {
         if (auto emitted = EmitAggregateCore(core,
-                                             AggregateOutputContext{
-                                                 .mode = AggregateOutputMode::Streaming,
+                                             SelectOutputContext{
+                                                 .mode = SelectOutputMode::Streaming,
                                                  .core = &core,
                                                  .final_completion = *completion,
                                              });
@@ -9097,6 +9292,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                            std::optional<SorterId> sorter,
                                                            std::optional<TopNId> top_n,
                                                            bool full_key, RegisterId record_first) {
+    if (core.join != nullptr) {
+      return EmitJoinedCore(core, select,
+                            SelectOutputContext{
+                                .mode = SelectOutputMode::Ordered,
+                                .core = &core,
+                                .ordered_layout = &layout,
+                                .ordered_sorter = sorter,
+                                .ordered_top_n = top_n,
+                                .ordered_full_key = full_key,
+                                .ordered_record_first = record_first,
+                            });
+    }
     SetStreamingCoreContext(core);
     auto skipped = CreateLabel();
     if (!skipped.has_value()) {
@@ -9240,8 +9447,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[core.core_index].layout;
     if (core.aggregate != nullptr) {
-      return EmitAggregateCore(core, AggregateOutputContext{
-                                         .mode = AggregateOutputMode::Ordered,
+      return EmitAggregateCore(core, SelectOutputContext{
+                                         .mode = SelectOutputMode::Ordered,
                                          .core = &core,
                                          .ordered_layout = &layout,
                                          .ordered_sorter = sorter,
@@ -11465,9 +11672,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return EmitMaterializeValuesRows(*values, target, count);
     }
     const auto& select = std::get<BoundSelectCore>(*core.bound);
+    if (core.join != nullptr) {
+      return EmitJoinedCore(core, select,
+                            SelectOutputContext{
+                                .mode = SelectOutputMode::Materialized,
+                                .core = &core,
+                                .materialized_target = target,
+                                .materialized_count = count,
+                            });
+    }
     if (core.aggregate != nullptr) {
-      return EmitAggregateCore(core, AggregateOutputContext{
-                                         .mode = AggregateOutputMode::Materialized,
+      return EmitAggregateCore(core, SelectOutputContext{
+                                         .mode = SelectOutputMode::Materialized,
                                          .core = &core,
                                          .materialized_target = target,
                                          .materialized_count = count,
@@ -11919,9 +12135,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const auto& select = std::get<BoundSelectCore>(*core.bound);
+    if (core.join != nullptr) {
+      auto emitted = EmitJoinedCore(core, select,
+                                    SelectOutputContext{
+                                        .mode = SelectOutputMode::DemandOne,
+                                        .core = &core,
+                                        .final_completion = final_completion,
+                                    });
+      if (!emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+      return false;
+    }
     if (core.aggregate != nullptr) {
-      auto emitted = EmitAggregateCore(core, AggregateOutputContext{
-                                                 .mode = AggregateOutputMode::DemandOne,
+      auto emitted = EmitAggregateCore(core, SelectOutputContext{
+                                                 .mode = SelectOutputMode::DemandOne,
                                                  .core = &core,
                                                  .final_completion = final_completion,
                                              });
@@ -12110,8 +12338,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const StreamingCorePlan& core = streaming_cores_[core_index];
         if (core.aggregate != nullptr) {
           if (auto emitted = EmitAggregateCore(core,
-                                               AggregateOutputContext{
-                                                   .mode = AggregateOutputMode::Streaming,
+                                               SelectOutputContext{
+                                                   .mode = SelectOutputMode::Streaming,
                                                    .core = &core,
                                                    .final_completion = *completion,
                                                });
@@ -12899,12 +13127,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                          HasAggregateRepresentativeController(),
         .may_stop_early =
             active_aggregate_output_.has_value()
-                ? active_aggregate_output_->mode == AggregateOutputMode::DemandOne ||
-                      (active_aggregate_output_->mode == AggregateOutputMode::Streaming &&
+                ? active_aggregate_output_->mode == SelectOutputMode::DemandOne ||
+                      (active_aggregate_output_->mode == SelectOutputMode::Streaming &&
                        limit_ != nullptr)
                 : limit_ != nullptr && !HasGroupedOuterOrder(),
         .stops_after_output = active_aggregate_output_.has_value() &&
-                              active_aggregate_output_->mode == AggregateOutputMode::DemandOne,
+                              active_aggregate_output_->mode == SelectOutputMode::DemandOne,
     };
     return input;
   }
@@ -13038,7 +13266,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::size_t active_source_column_begin_ = 0;
   std::size_t active_source_column_count_ = 0;
   std::vector<StreamingCorePlan> streaming_cores_;
-  std::optional<AggregateOutputContext> active_aggregate_output_{};
+  std::optional<SelectOutputContext> active_aggregate_output_{};
   std::optional<Label> aggregate_core_stopped_label_{};
   std::optional<Label> aggregate_core_completion_label_{};
   std::array<std::optional<RelationId>, 3> set_relations_{};
@@ -13127,7 +13355,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<TopNId> top_n_;
   std::optional<RelationId> distinct_relation_;
   std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
-  std::optional<CursorFieldId> source_rowid_cursor_field_;
+  std::vector<std::optional<SourceCursorBinding>> source_cursor_bindings_;
   std::vector<bool> source_field_real_affinity_;
   std::vector<RegisterId> source_snapshot_registers_;
   std::optional<RegisterId> source_rowid_register_;

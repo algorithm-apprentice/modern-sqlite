@@ -176,32 +176,40 @@ int main() try {
     }
   }
 
-  SyntaxTree aggregate_baseline_tree = ParseTree(kAggregateSql);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const BindStatementResult aggregate_baseline =
-      BindStatement(std::move(aggregate_baseline_tree), catalog);
-  if (!aggregate_baseline.has_value()) {
-    return 1;
-  }
-  const std::size_t aggregate_allocations = allocation_index.load(std::memory_order_relaxed);
-  if (aggregate_allocations == 0U || aggregate_allocations > 1024U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < aggregate_allocations; ++failure) {
-    SyntaxTree tree = ParseTree(kAggregateSql);
+  const std::array<std::string_view, 3> full_sweep_sqls{
+      kAggregateSql,
+      "SELECT a.*,b.Name FROM Items a CROSS JOIN Items b WHERE a.id=?1 "
+      "ORDER BY b.Name LIMIT ?2",
+      "SELECT a.Name FROM Items a,Items b UNION SELECT ?1 ORDER BY 1",
+  };
+  for (const std::string_view full_sweep_sql : full_sweep_sqls) {
+    SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const BindStatementResult unexpected =
-          BindStatement(std::move(tree), catalog);
-    } catch (const std::bad_alloc&) {
-      threw = true;
-    }
-    inject_failure = false;
-    if (!threw) {
+    const BindStatementResult aggregate_baseline =
+        BindStatement(std::move(aggregate_baseline_tree), catalog);
+    if (!aggregate_baseline.has_value()) {
       return 1;
+    }
+    const std::size_t aggregate_allocations = allocation_index.load(std::memory_order_relaxed);
+    if (aggregate_allocations == 0U || aggregate_allocations > 1024U) {
+      return 1;
+    }
+    for (std::size_t failure = 0; failure < aggregate_allocations; ++failure) {
+      SyntaxTree tree = ParseTree(full_sweep_sql);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const BindStatementResult unexpected =
+            BindStatement(std::move(tree), catalog);
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return 1;
+      }
     }
   }
 

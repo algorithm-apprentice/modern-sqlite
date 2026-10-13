@@ -101,6 +101,9 @@ struct BoundTableSource {
   BoundSourceKind kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   SourceSpan span{};
+  SourceJoinKind join = SourceJoinKind::kFirst;
+  std::size_t source_column_begin = 0;
+  std::size_t source_column_count = 0;
 };
 
 struct BoundSourceColumn {
@@ -321,7 +324,7 @@ struct BoundAggregateProgram {
 
 struct BoundSelectCore {
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
-  std::optional<BoundTableSource> table_source{};
+  std::vector<BoundTableSource> table_sources{};
   std::size_t source_column_begin = 0;
   std::size_t source_column_count = 0;
   std::vector<BoundResultColumn> result_columns{};
@@ -427,7 +430,7 @@ class BoundSelect final {
   [[nodiscard]] Utf8View source() const noexcept;
   [[nodiscard]] const CatalogSnapshot* catalog() const noexcept;
   [[nodiscard]] std::uint64_t registration_generation() const noexcept;
-  [[nodiscard]] const BoundTableSource* table_source() const noexcept;
+  [[nodiscard]] std::span<const BoundTableSource> table_sources() const noexcept;
   [[nodiscard]] std::span<const BoundSourceColumn> source_columns() const noexcept;
   [[nodiscard]] std::span<const std::string> registered_collations() const noexcept;
   [[nodiscard]] std::span<const BoundCollation> collations() const noexcept;

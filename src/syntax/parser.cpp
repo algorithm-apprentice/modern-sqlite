@@ -1288,7 +1288,7 @@ class Parser final {
       columns.push_back(*column);
     }
 
-    std::optional<TableSource> from;
+    std::vector<TableSource> from;
     if (ConsumeIf(TokenKind::kFrom)) {
       if (Peek().kind == TokenKind::kLeftParenthesis) {
         return std::unexpected(Unsupported(Peek()));
@@ -1297,10 +1297,37 @@ class Parser final {
       if (!source.has_value()) {
         return std::unexpected(source.error());
       }
-      from = std::move(*source);
-      if (Peek().kind == TokenKind::kComma || Peek().kind == TokenKind::kJoin ||
-          Peek().kind == TokenKind::kJoinKeyword || Peek().kind == TokenKind::kOn ||
-          Peek().kind == TokenKind::kUsing || Peek().kind == TokenKind::kIndexed ||
+      from.push_back(std::move(*source));
+      while (Peek().kind == TokenKind::kComma ||
+             (Peek().kind == TokenKind::kJoinKeyword &&
+              EqualsAsciiCaseInsensitive(Text(Peek()), "cross"))) {
+        const Token operation = Consume();
+        const bool cross = operation.kind == TokenKind::kJoinKeyword;
+        SourceSpan operator_span = operation.span;
+        if (cross) {
+          auto join = Expect(TokenKind::kJoin, ParseExpectation::kName);
+          if (!join.has_value()) {
+            return std::unexpected(join.error());
+          }
+          operator_span = MakeSpan(operation.span.begin(), join->span.end());
+        }
+        if (from.size() == kMaximumSelectSources) {
+          return std::unexpected(ResourceLimit(Peek()));
+        }
+        if (Peek().kind == TokenKind::kLeftParenthesis) {
+          return std::unexpected(Unsupported(Peek()));
+        }
+        auto next = ParseTableSource();
+        if (!next.has_value()) {
+          return std::unexpected(next.error());
+        }
+        next->join = cross ? SourceJoinKind::kCross : SourceJoinKind::kComma;
+        next->join_span = operator_span;
+        from.push_back(std::move(*next));
+      }
+      if (Peek().kind == TokenKind::kJoin || Peek().kind == TokenKind::kJoinKeyword ||
+          Peek().kind == TokenKind::kOn || Peek().kind == TokenKind::kUsing ||
+          Peek().kind == TokenKind::kIndexed ||
           (Peek().kind == TokenKind::kNot && Peek(1).kind == TokenKind::kIndexed)) {
         return std::unexpected(Unsupported(Peek()));
       }

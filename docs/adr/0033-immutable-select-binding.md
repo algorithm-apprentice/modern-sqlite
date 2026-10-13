@@ -197,7 +197,7 @@ binder does not translate it into a semantic error.
 
 ### Bound source and columns
 
-The current grammar produces at most one source:
+ADR-0073 extends each SELECT core to an ordered source vector:
 
 ```cpp
 enum class BoundSourceKind : std::uint8_t {
@@ -210,6 +210,9 @@ struct BoundTableSource {
   BoundSourceKind kind;
   std::optional<TableId> table;
   SourceSpan span;
+  SourceJoinKind join = SourceJoinKind::kFirst;
+  std::size_t source_column_begin = 0;
+  std::size_t source_column_count = 0;
 };
 
 struct BoundSourceColumn {
@@ -234,6 +237,12 @@ from catalog table IDs. Hidden rowid expressions retain their occurrence;
 INTEGER PRIMARY KEY aliases normalize through the shared binder-level source
 leaf identity. Constant-row and VALUES cores consume no occurrence. These
 contracts prepare joins without expanding the SQL surface in that foundation.
+
+ADR-0073 replaces the optional source accessor with `table_sources()` and the
+core's optional source with `table_sources`. Per-occurrence ranges partition
+the core's existing total source-column range. The shared resolver handles
+qualified/unqualified names and wildcard-generated qualified columns; it
+reports ambiguity rather than hiding duplicate-qualifier matches.
 
 Bound symbol tables own every downstream identity selected from the
 synchronous environment:

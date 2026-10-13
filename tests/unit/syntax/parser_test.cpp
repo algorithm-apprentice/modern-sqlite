@@ -877,6 +877,65 @@ TEST(Parser, RejectsMalformedAggregateSyntaxAndDeferredWindows) {
   EXPECT_EQ(TokenKind::kOver, filtered_window.error().actual);
 }
 
+TEST(Parser, ParsesOwnedCommaCrossSourcesAndPreservesOperatorSpans) {
+  const ParseOutput output =
+      ParseOrThrow("SELECT a.id FROM main.a AS a, b AS b CROSS JOIN c AS c WHERE a.id");
+  const SyntaxTree& tree = RequiredTree(output);
+  const SelectCore& core = FirstSelectCore(tree);
+  ASSERT_EQ(3U, core.from.size());
+  EXPECT_EQ(SourceJoinKind::kFirst, core.from[0].join);
+  EXPECT_FALSE(core.from[0].join_span.has_value());
+  EXPECT_EQ(SourceJoinKind::kComma, core.from[1].join);
+  EXPECT_EQ(",", SpanText(tree, RequiredOptional(core.from[1].join_span)));
+  EXPECT_EQ(SourceJoinKind::kCross, core.from[2].join);
+  EXPECT_EQ("CROSS JOIN", SpanText(tree, RequiredOptional(core.from[2].join_span)));
+  EXPECT_EQ("c", SpanText(tree, core.from[2].name.span));
+  EXPECT_EQ("c", SpanText(tree, RequiredOptional(core.from[2].alias)));
+}
+
+TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
+  const std::array malformed{
+      "SELECT * FROM a,",           "SELECT * FROM a CROSS",         "SELECT * FROM a CROSS b",
+      "SELECT * FROM a CROSS JOIN", "SELECT * FROM a CROSS JOIN b,",
+  };
+  for (const std::string_view sql : malformed) {
+    SCOPED_TRACE(sql);
+    const auto parsed = ParseOne(Utf8View{sql});
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code);
+  }
+  const std::array unsupported{
+      "SELECT * FROM a JOIN b",
+      "SELECT * FROM a INNER JOIN b",
+      "SELECT * FROM a LEFT JOIN b ON a.x=b.x",
+      "SELECT * FROM a CROSS JOIN b ON a.x=b.x",
+      "SELECT * FROM a,b USING(x)",
+      "SELECT * FROM a,(SELECT 1)",
+      "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
+  };
+  for (const std::string_view sql : unsupported) {
+    SCOPED_TRACE(sql);
+    const auto parsed = ParseOne(Utf8View{sql});
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(ParseErrorCode::kUnsupportedSyntax, parsed.error().code);
+  }
+}
+
+TEST(Parser, EnforcesThePinnedSixtyFourSourceLimit) {
+  std::string sql = "SELECT 1 FROM t AS t0";
+  for (std::size_t index = 1; index < kMaximumSelectSources; ++index) {
+    sql += " CROSS JOIN t AS t" + std::to_string(index);
+  }
+  const auto accepted = ParseOne(Utf8View{sql});
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->tree.has_value());
+  EXPECT_EQ(kMaximumSelectSources, FirstSelectCore(*accepted->tree).from.size());
+  sql += ",t AS last_source";
+  const auto rejected = ParseOne(Utf8View{sql});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, rejected.error().code);
+}
+
 TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
   const ParseOutput output = ParseOrThrow(
       "SELECT DISTINCT a AS x, b y FROM main.t AS source "
@@ -890,8 +949,8 @@ TEST(Parser, ParsesSelectClausesAndNormalizesLimitForms) {
   ASSERT_TRUE(core.result_columns[1].alias.has_value());
   EXPECT_EQ("x", SpanText(tree, RequiredOptional(core.result_columns[0].alias)));
   EXPECT_EQ("y", SpanText(tree, RequiredOptional(core.result_columns[1].alias)));
-  ASSERT_TRUE(core.from.has_value());
-  const TableSource& source = RequiredOptional(core.from);
+  ASSERT_EQ(1U, core.from.size());
+  const TableSource& source = core.from.front();
   ASSERT_EQ(2U, source.name.parts.size());
   EXPECT_EQ("source", SpanText(tree, RequiredOptional(source.alias)));
   ASSERT_TRUE(core.where.has_value());
