@@ -857,11 +857,11 @@ void RunJoinedModel(ReadSession& session, const std::array<std::uint64_t, 4>& wo
     ExpectInteger(statement.row()[0], left->id);
     ExpectInteger(statement.row()[1], right->id);
     ExpectInteger(statement.row()[2], left->value + right->value);
-    const std::optional<std::int64_t> nullable =
-        left->nullable.has_value() && right->nullable.has_value()
-            ? std::optional<std::int64_t>{*left->nullable + *right->nullable}
-            : std::nullopt;
-    ExpectNullable(statement.row()[3], nullable);
+    if (left->nullable.has_value() && right->nullable.has_value()) {
+      ExpectInteger(statement.row()[3], *left->nullable + *right->nullable);
+    } else {
+      ExpectNullable(statement.row()[3], std::nullopt);
+    }
   }
   ExpectDoneStep(statement);
   RequireStatus(statement.Finalize());
