@@ -18,6 +18,55 @@ namespace modern_sqlite::instrumentation {
 
 inline constexpr std::size_t kProbeTagCount = 512;
 
+enum class ProbeCollectionKind : std::uint8_t {
+  RowEvaluation,
+  AggregateWork,
+};
+
+enum class AggregateWorkMetric : std::uint8_t {
+  Open,
+  Step,
+  Finalize,
+  Reset,
+  Close,
+  RetainedBytesPeak,
+  WorkingSetBytesPeak,
+  LiveFilesPeak,
+  FileAcquisitions,
+  SorterSpillWrites,
+};
+
+inline constexpr std::size_t kAggregateWorkMetricCount =
+    static_cast<std::size_t>(AggregateWorkMetric::SorterSpillWrites) + 1U;
+inline constexpr std::size_t kAggregateWorkFirstTag = kProbeTagCount - kAggregateWorkMetricCount;
+
+[[nodiscard]] constexpr std::string_view AggregateWorkMetricName(
+    AggregateWorkMetric metric) noexcept {
+  switch (metric) {
+    case AggregateWorkMetric::Open:
+      return "open";
+    case AggregateWorkMetric::Step:
+      return "step";
+    case AggregateWorkMetric::Finalize:
+      return "finalize";
+    case AggregateWorkMetric::Reset:
+      return "reset";
+    case AggregateWorkMetric::Close:
+      return "close";
+    case AggregateWorkMetric::RetainedBytesPeak:
+      return "retained_bytes_peak";
+    case AggregateWorkMetric::WorkingSetBytesPeak:
+      return "working_set_bytes_peak";
+    case AggregateWorkMetric::LiveFilesPeak:
+      return "live_files_peak";
+    case AggregateWorkMetric::FileAcquisitions:
+      return "file_acquisitions";
+    case AggregateWorkMetric::SorterSpillWrites:
+      return "sorter_spill_writes";
+  }
+  return "unknown";
+}
+
 enum class Counter : std::uint8_t {
   kAllocations,
   kBytesCopied,
@@ -65,6 +114,7 @@ namespace detail {
 
 void RecordCounter(Counter counter, std::uint64_t amount) noexcept;
 void RecordProbeCall(std::size_t tag) noexcept;
+void RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount, bool maximum) noexcept;
 
 }  // namespace detail
 
@@ -97,20 +147,45 @@ class ScopedCounterCollection final {
 
 class ProbeCounterCollection final {
  public:
+  explicit ProbeCounterCollection(
+      ProbeCollectionKind kind = ProbeCollectionKind::RowEvaluation) noexcept
+      : kind_(kind) {}
+
   [[nodiscard]] std::uint64_t Value(std::size_t tag) const noexcept {
     return tag < values_.size() ? values_[tag] : 0;
+  }
+  [[nodiscard]] std::uint64_t Value(AggregateWorkMetric metric) const noexcept {
+    return Value(kAggregateWorkFirstTag + static_cast<std::size_t>(metric));
   }
   void Reset() noexcept { values_.fill(0); }
 
  private:
   friend void detail::RecordProbeCall(std::size_t tag) noexcept;
+  friend void detail::RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount,
+                                          bool maximum) noexcept;
 
   void Add(std::size_t tag) noexcept {
-    if (tag < values_.size()) {
+    if (tag < values_.size() &&
+        (kind_ != ProbeCollectionKind::AggregateWork || tag < kAggregateWorkFirstTag)) {
       ++values_[tag];
     }
   }
 
+  void Record(AggregateWorkMetric metric, std::uint64_t amount, bool maximum) noexcept {
+    const std::size_t tag = kAggregateWorkFirstTag + static_cast<std::size_t>(metric);
+    if (kind_ != ProbeCollectionKind::AggregateWork || tag >= values_.size()) {
+      return;
+    }
+    if (maximum) {
+      if (amount > values_[tag]) {
+        values_[tag] = amount;
+      }
+    } else {
+      values_[tag] += amount;
+    }
+  }
+
+  ProbeCollectionKind kind_;
   std::array<std::uint64_t, kProbeTagCount> values_{};
 };
 
@@ -140,6 +215,15 @@ class ScopedProbeCounterCollection final {
   do {                                                                                        \
     ::modern_sqlite::instrumentation::detail::RecordProbeCall(static_cast<std::size_t>(tag)); \
   } while (false)
+#define MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(metric)                                \
+  do {                                                                                  \
+    ::modern_sqlite::instrumentation::detail::RecordAggregateWork((metric), 1U, false); \
+  } while (false)
+#define MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(metric, amount)     \
+  do {                                                             \
+    ::modern_sqlite::instrumentation::detail::RecordAggregateWork( \
+        (metric), static_cast<std::uint64_t>(amount), true);       \
+  } while (false)
 #else
 #define MODERN_SQLITE_RECORD_COUNTER(counter, amount)                                              \
   do {                                                                                             \
@@ -153,6 +237,19 @@ class ScopedProbeCounterCollection final {
     if constexpr (false) {                                                                      \
       ::modern_sqlite::instrumentation::detail::RecordProbeCall(static_cast<std::size_t>(tag)); \
     }                                                                                           \
+  } while (false)
+#define MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(metric)                                  \
+  do {                                                                                    \
+    if constexpr (false) {                                                                \
+      ::modern_sqlite::instrumentation::detail::RecordAggregateWork((metric), 1U, false); \
+    }                                                                                     \
+  } while (false)
+#define MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(metric, amount)       \
+  do {                                                               \
+    if constexpr (false) {                                           \
+      ::modern_sqlite::instrumentation::detail::RecordAggregateWork( \
+          (metric), static_cast<std::uint64_t>(amount), true);       \
+    }                                                                \
   } while (false)
 #endif
 

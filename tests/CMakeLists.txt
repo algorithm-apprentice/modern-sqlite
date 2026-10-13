@@ -1089,6 +1089,29 @@ add_test(
     -m unittest
     tests.performance.distinct_compound_performance_tool_test
 )
+add_test(
+  NAME performance.aggregate_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest tests.performance.aggregate_performance_tool_test
+)
+set_tests_properties(
+  performance.aggregate_performance_tool
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
+  NAME performance.aggregate_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/aggregate_performance.py"
+    validate-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads "${PROJECT_SOURCE_DIR}/tests/performance/aggregate-workloads-v1.json"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/aggregate-baseline-v1"
+)
+set_tests_properties(
+  performance.aggregate_baseline_validation
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 set_tests_properties(
   performance.distinct_compound_performance_tool
   PROPERTIES
@@ -1457,6 +1480,22 @@ if(TARGET modern_sqlite_read_benchmark AND
         LABELS performance
         TIMEOUT 300
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+  if(TARGET modern_sqlite_aggregate_benchmark AND TARGET modern_sqlite_aggregate_diagnostics)
+    add_test(
+      NAME performance.aggregate_benchmark_cli
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/performance/aggregate_benchmark_cli_test.py"
+        --timing-binary "$<TARGET_FILE:modern_sqlite_aggregate_benchmark>"
+        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_aggregate_diagnostics>"
+        --repository-root "${PROJECT_SOURCE_DIR}"
+        --workloads "${PROJECT_SOURCE_DIR}/tests/performance/aggregate-workloads-v1.json"
+    )
+    set_tests_properties(
+      performance.aggregate_benchmark_cli
+      PROPERTIES LABELS performance TIMEOUT 300 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )
   endif()
   add_test(

@@ -15,6 +15,9 @@ TEST(InstrumentationDisabled, HookArgumentsAreNotEvaluatedOrLinked) {
 
   MODERN_SQLITE_RECORD_COUNTER((++counter_evaluations, Counter::kAllocations),
                                ++amount_evaluations);
+  MODERN_SQLITE_RECORD_AGGREGATE_OPERATION((++counter_evaluations, AggregateWorkMetric::Step));
+  MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(
+      (++counter_evaluations, AggregateWorkMetric::RetainedBytesPeak), ++amount_evaluations);
 
   EXPECT_EQ(0U, counter_evaluations);
   EXPECT_EQ(0U, amount_evaluations);

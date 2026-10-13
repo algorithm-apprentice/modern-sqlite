@@ -1,0 +1,1293 @@
+{
+  "schema_version": 1,
+  "workload_semantics_version": 1,
+  "sqlite_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "sqlite_semantic_compile_options": [
+    "ATOMIC_INTRINSICS=1",
+    "DEFAULT_AUTOVACUUM",
+    "DEFAULT_CACHE_SIZE=-2000",
+    "DEFAULT_FILE_FORMAT=4",
+    "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+    "DEFAULT_MMAP_SIZE=0",
+    "DEFAULT_PAGE_SIZE=4096",
+    "DEFAULT_PCACHE_INITSZ=20",
+    "DEFAULT_RECURSIVE_TRIGGERS",
+    "DEFAULT_SECTOR_SIZE=4096",
+    "DEFAULT_SYNCHRONOUS=2",
+    "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+    "DEFAULT_WAL_SYNCHRONOUS=2",
+    "DEFAULT_WORKER_THREADS=0",
+    "DIRECT_OVERFLOW_READ",
+    "DQS=3",
+    "MALLOC_SOFT_LIMIT=1024",
+    "MAX_ATTACHED=10",
+    "MAX_COLUMN=2000",
+    "MAX_COMPOUND_SELECT=500",
+    "MAX_DEFAULT_PAGE_SIZE=8192",
+    "MAX_EXPR_DEPTH=1000",
+    "MAX_FUNCTION_ARG=1000",
+    "MAX_LENGTH=1000000000",
+    "MAX_LIKE_PATTERN_LENGTH=50000",
+    "MAX_MMAP_SIZE=0x7fff0000",
+    "MAX_PAGE_COUNT=0xfffffffe",
+    "MAX_PAGE_SIZE=65536",
+    "MAX_SCHEMA=10000000",
+    "MAX_SQL_LENGTH=1000000000",
+    "MAX_TRIGGER_DEPTH=1000",
+    "MAX_VARIABLE_NUMBER=32766",
+    "MAX_VDBE_OP=250000000",
+    "MAX_WORKER_THREADS=0",
+    "MUTEX_OMIT",
+    "SYSTEM_MALLOC",
+    "TEMP_STORE=1",
+    "THREADSAFE=0"
+  ],
+  "configuration": {
+    "page_size": 4096,
+    "cache_pages": 512,
+    "mmap_bytes": 0,
+    "temp_store": "case",
+    "sorter_memory_threshold": "case",
+    "merge_fan_in": 16,
+    "synchronous": "full",
+    "journal_mode": "delete",
+    "query_only": true,
+    "thread_mode": "single"
+  },
+  "minimum_wall_ns": 5000000,
+  "permutation": {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "fingerprint": "fnv1a64-v1",
+    "fit_seed": "9e3779b97f4a7c15",
+    "pressure_seed": "d1b54a32d192ed03"
+  },
+  "rounds": [
+    {
+      "index": 0,
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ]
+    },
+    {
+      "index": 1,
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ]
+    },
+    {
+      "index": 2,
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "ordered",
+      "path": "tests/fixtures/order_by_performance/ordered.db",
+      "sql_path": "tests/fixtures/order_by_performance/ordered.sql",
+      "sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+      "sql_sha256": "9c127a78e025de7a50132e9e37017eb2e5be588ebff3e4d95fd9465da0a70649",
+      "size_bytes": 19931136,
+      "page_size": 4096,
+      "page_count": 4866,
+      "row_count": 65536,
+      "payload_size": 256
+    }
+  ],
+  "guard": {
+    "maximum_wall_ratio": {
+      "numerator": 40,
+      "denominator": 1
+    },
+    "maximum_cpu_ratio": {
+      "numerator": 40,
+      "denominator": 1
+    }
+  },
+  "cases": [
+    {
+      "id": "global-functions-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 8,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 1
+        }
+      ],
+      "aggregate_operations": {
+        "open": 6,
+        "step": 393216,
+        "finalize": 6,
+        "reset": 0,
+        "close": 6
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 48,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4faaa8e066a13c6e"
+        },
+        "measured": {
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 384,
+          "result_hits": 8,
+          "result_misses": 0,
+          "digest": "92ddae023fd3037d"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 48,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4faaa8e066a13c6e"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 48,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4faaa8e066a13c6e"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "global-empty-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items WHERE 0",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 65536,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 0,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 0
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 1
+        }
+      ],
+      "aggregate_operations": {
+        "open": 6,
+        "step": 0,
+        "finalize": 6,
+        "reset": 0,
+        "close": 6
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 0,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "7d7eeab76b309583"
+        },
+        "measured": {
+          "operations": 65536,
+          "items": 0,
+          "rows": 65536,
+          "bytes": 1048576,
+          "result_hits": 65536,
+          "result_misses": 0,
+          "digest": "e2f49f8851122325"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 0,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "7d7eeab76b309583"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 0,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "7d7eeab76b309583"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "indexed-min-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT min(score) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 65536,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 1,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 1
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 1,
+        "finalize": 1,
+        "reset": 0,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "156194db51eeea60"
+        },
+        "measured": {
+          "operations": 65536,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 524288,
+          "result_hits": 65536,
+          "result_misses": 0,
+          "digest": "946bff8b56ec2325"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "156194db51eeea60"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "156194db51eeea60"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "indexed-max-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT max(score) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 65536,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 1,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 1
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 1,
+        "finalize": 1,
+        "reset": 0,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "e9a131d7326b603a"
+        },
+        "measured": {
+          "operations": 65536,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 524288,
+          "result_hits": 65536,
+          "result_misses": 0,
+          "digest": "e9268781575a2325"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "e9a131d7326b603a"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 1,
+          "rows": 1,
+          "bytes": 8,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "e9a131d7326b603a"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "ordered-group-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT score,count(id) FROM items GROUP BY score ORDER BY score",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 16,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 4096,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 4096
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 65536,
+        "finalize": 4096,
+        "reset": 4095,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "measured": {
+          "operations": 16,
+          "items": 1048576,
+          "rows": 65536,
+          "bytes": 1048576,
+          "result_hits": 16,
+          "result_misses": 0,
+          "digest": "135eb317488e5ca5"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "sorted-group-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 4,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 4096,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 4096
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 65536,
+        "finalize": 4096,
+        "reset": 4095,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "measured": {
+          "operations": 4,
+          "items": 262144,
+          "rows": 16384,
+          "bytes": 262144,
+          "result_hits": 4,
+          "result_misses": 0,
+          "digest": "ddb07cac1b8f3485"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "sorted-group-file",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 8,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 4096,
+      "query_only": true,
+      "temporary_store": "file",
+      "sorter_memory_threshold": 2097152,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 4096
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 65536,
+        "finalize": 4096,
+        "reset": 4095,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "measured": {
+          "operations": 8,
+          "items": 524288,
+          "rows": 32768,
+          "bytes": 524288,
+          "result_hits": 8,
+          "result_misses": 0,
+          "digest": "7b09094f028c0ce5"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 4096,
+          "bytes": 65536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c8343924ddebd3ee"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "high-card-group-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT category,count(id) FROM items GROUP BY category ORDER BY category",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 2,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 65536,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 65536,
+        "finalize": 65536,
+        "reset": 65535,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 1638400,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4bcfdb1cb4de1e15"
+        },
+        "measured": {
+          "operations": 2,
+          "items": 131072,
+          "rows": 131072,
+          "bytes": 3276800,
+          "result_hits": 2,
+          "result_misses": 0,
+          "digest": "957da2d4a8db7f45"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 1638400,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4bcfdb1cb4de1e15"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 1638400,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "4bcfdb1cb4de1e15"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "grouped-having-topn-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 4,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 64,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 2,
+        "step": 131072,
+        "finalize": 8192,
+        "reset": 8190,
+        "close": 2
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 64,
+          "bytes": 1536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "0e03c4d112c9b3dc"
+        },
+        "measured": {
+          "operations": 4,
+          "items": 262144,
+          "rows": 256,
+          "bytes": 6144,
+          "result_hits": 4,
+          "result_misses": 0,
+          "digest": "5a77b6fb3107ee95"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 64,
+          "bytes": 1536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "0e03c4d112c9b3dc"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 64,
+          "bytes": 1536,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "0e03c4d112c9b3dc"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "distinct-state-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 4,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 2,
+        "step": 8192,
+        "finalize": 2,
+        "reset": 0,
+        "close": 2
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "9831a884d4b5c935"
+        },
+        "measured": {
+          "operations": 4,
+          "items": 262144,
+          "rows": 4,
+          "bytes": 64,
+          "result_hits": 4,
+          "result_misses": 0,
+          "digest": "e9671c75b1ed1c25"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "9831a884d4b5c935"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "9831a884d4b5c935"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "filtered-state-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 8,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 32768
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 32768
+        }
+      ],
+      "aggregate_operations": {
+        "open": 2,
+        "step": 65536,
+        "finalize": 2,
+        "reset": 0,
+        "close": 2
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "69b488f754f8f77e"
+        },
+        "measured": {
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 128,
+          "result_hits": 8,
+          "result_misses": 0,
+          "digest": "d781388b7c8cf59d"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "69b488f754f8f77e"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 16,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "69b488f754f8f77e"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "local-order-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT group_concat(score ORDER BY score DESC,id) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 4,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 65536,
+        "finalize": 1,
+        "reset": 0,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 309919,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "5d8975a11dedb5b6"
+        },
+        "measured": {
+          "operations": 4,
+          "items": 262144,
+          "rows": 4,
+          "bytes": 1239676,
+          "result_hits": 4,
+          "result_misses": 0,
+          "digest": "3d2df2add6d5ca81"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 309919,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "5d8975a11dedb5b6"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 309919,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "5d8975a11dedb5b6"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "unique-local-order-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT group_concat(DISTINCT score ORDER BY score) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 8,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 1,
+        "step": 4096,
+        "finalize": 1,
+        "reset": 0,
+        "close": 1
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 19369,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "09579402da892a6b"
+        },
+        "measured": {
+          "operations": 8,
+          "items": 524288,
+          "rows": 8,
+          "bytes": 154952,
+          "result_hits": 8,
+          "result_misses": 0,
+          "digest": "00cd5e2543ad11d5"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 19369,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "09579402da892a6b"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 19369,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "09579402da892a6b"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "wide-modifier-file",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT group_concat(score ORDER BY id),group_concat(score ORDER BY id DESC),count(DISTINCT category),group_concat(DISTINCT score ORDER BY score) FROM items",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 1,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 65536,
+      "result_rows_per_iteration": 1,
+      "query_only": true,
+      "temporary_store": "file",
+      "sorter_memory_threshold": 2097152,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 4,
+        "step": 200704,
+        "finalize": 4,
+        "reset": 0,
+        "close": 4
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 639215,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c9abc9b4135a16a2"
+        },
+        "measured": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 639215,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c9abc9b4135a16a2"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 639215,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c9abc9b4135a16a2"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 1,
+          "bytes": 639215,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "c9abc9b4135a16a2"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    },
+    {
+      "id": "aggregate-compound-memory",
+      "fixture": "ordered",
+      "kind": "order-by",
+      "sql": "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64",
+      "primary_unit": "source-row",
+      "warmup_iterations": 1,
+      "measured_iterations": 4,
+      "diagnostic_iterations": 1,
+      "items_per_iteration": 131072,
+      "result_rows_per_iteration": 64,
+      "query_only": true,
+      "temporary_store": "memory",
+      "sorter_memory_threshold": 67108864,
+      "diagnostic_probe_groups": [
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        },
+        {
+          "tag_count": 1,
+          "calls_per_tag": 65536
+        }
+      ],
+      "aggregate_operations": {
+        "open": 2,
+        "step": 131072,
+        "finalize": 4097,
+        "reset": 4095,
+        "close": 2
+      },
+      "expected": {
+        "warmup": {
+          "operations": 1,
+          "items": 131072,
+          "rows": 64,
+          "bytes": 1024,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "ddf54a75aaf0af2e"
+        },
+        "measured": {
+          "operations": 4,
+          "items": 524288,
+          "rows": 256,
+          "bytes": 4096,
+          "result_hits": 4,
+          "result_misses": 0,
+          "digest": "0431523d9bf32905"
+        },
+        "diagnostic": {
+          "operations": 1,
+          "items": 131072,
+          "rows": 64,
+          "bytes": 1024,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "ddf54a75aaf0af2e"
+        },
+        "smoke": {
+          "operations": 1,
+          "items": 131072,
+          "rows": 64,
+          "bytes": 1024,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "ddf54a75aaf0af2e"
+        },
+        "verification": {
+          "operations": 1,
+          "items": 65536,
+          "rows": 65536,
+          "bytes": 17301504,
+          "result_hits": 1,
+          "result_misses": 0,
+          "digest": "b760b119722fedf5"
+        }
+      }
+    }
+  ]
+}

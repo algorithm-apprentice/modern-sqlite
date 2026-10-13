@@ -76,6 +76,30 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                     block = event_block(workflow, event)
                     self.assertEqual(["**/*.md"], list_values(block, "paths-ignore"))
 
+    def test_ci_covers_aggregate_performance_contracts(self) -> None:
+        workflow = event_block(
+            STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"),
+            "read-performance-contract",
+        )
+        for required in (
+            "tools/aggregate_performance.py validate-workloads",
+            "tools/aggregate_performance.py validate-baseline",
+            "benchmarks/aggregate-baseline-v1",
+            "modern_sqlite_aggregate_benchmark",
+            "modern_sqlite_aggregate_diagnostics",
+        ):
+            with self.subTest(required=required):
+                self.assertTrue(required in workflow, f"CI must include {required}")
+
+        smoke_patterns = re.findall(r"-R '([^']+)'", workflow)
+        self.assertTrue(
+            any(
+                re.fullmatch(pattern, "performance.aggregate_benchmark_cli")
+                for pattern in smoke_patterns
+            ),
+            "CI must execute the aggregate timing and diagnostic CLI matrix",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

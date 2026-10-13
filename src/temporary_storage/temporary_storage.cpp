@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -348,6 +349,8 @@ struct StatementState {
         budget(memory_limit.value()),
         file_spill(owning_factory.file_spill_enabled()) {}
 
+  [[nodiscard]] ByteCount SorterPageSize() const noexcept { return factory->pager_->page_size(); }
+
   ~StatementState() {
     if (owners != nullptr || owner_count != 0U || live_relation_roots != 0U ||
         (sorter_arena != nullptr && sorter_arena->live_extents != 0U)) {
@@ -476,6 +479,8 @@ struct StatementState {
     registration.retained_bytes += amount;
     retained += amount;
     peak_retained = std::max(peak_retained, retained);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(instrumentation::AggregateWorkMetric::RetainedBytesPeak,
+                                           retained);
     return {};
   }
 
@@ -508,6 +513,8 @@ struct StatementState {
     registration.retained_bytes += amount;
     retained += amount;
     peak_retained = std::max(peak_retained, retained);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(
+        instrumentation::AggregateWorkMetric::WorkingSetBytesPeak, retained);
     return {};
   }
 
@@ -523,6 +530,10 @@ struct StatementState {
     }
     ++live_files;
     peak_live_files = std::max(peak_live_files, live_files);
+    MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(instrumentation::AggregateWorkMetric::LiveFilesPeak,
+                                           live_files);
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(
+        instrumentation::AggregateWorkMetric::FileAcquisitions);
     return TemporaryFileLease{*this};
   }
 
@@ -1024,19 +1035,201 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
 
   static_assert(sizeof(PmaRun) <= sizeof(Entry));
 
+  enum class PmaMemoryUse : std::uint8_t {
+    Drain,
+    Spill,
+  };
+
+  [[nodiscard]] static Status ReservePmaBytes(TemporaryMemoryAccount& account, ByteCount amount,
+                                              PmaMemoryUse use) {
+    if (use == PmaMemoryUse::Spill) {
+      return account.ReserveWorkingSet(amount);
+    }
+    auto reserved = account.Reserve(amount);
+    if (reserved.has_value() || reserved.error().code() != ErrorCode::kTooLarge) {
+      return reserved;
+    }
+    return account.ReserveWorkingSet(amount);
+  }
+
+  static void ReleasePmaBytes(TemporaryMemoryAccount& account, std::size_t amount) noexcept {
+    const auto released = account.Release(ByteCount{amount});
+    if (!released.has_value()) {
+      std::terminate();
+    }
+  }
+
+  [[nodiscard]] static Result<ByteBuffer> AllocatePmaBuffer(TemporaryMemoryAccount& account,
+                                                            ByteCount size, PmaMemoryUse use) {
+    auto reserved = ReservePmaBytes(account, size, use);
+    if (!reserved.has_value()) {
+      return std::unexpected(std::move(reserved.error()));
+    }
+    ByteBuffer buffer;
+    try {
+      buffer = ByteBuffer{size};
+    } catch (const std::bad_alloc&) {
+      ReleasePmaBytes(account, size.value());
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      ReleasePmaBytes(account, size.value());
+      return std::unexpected(Error::OutOfMemory());
+    }
+    const std::size_t actual_bytes = buffer.capacity().value();
+    if (actual_bytes > size.value()) {
+      auto additional = ReservePmaBytes(account, ByteCount{actual_bytes - size.value()}, use);
+      if (!additional.has_value()) {
+        buffer = ByteBuffer{};
+        ReleasePmaBytes(account, size.value());
+        return std::unexpected(std::move(additional.error()));
+      }
+    }
+    return buffer;
+  }
+
+  class PmaWriter final {
+   public:
+    PmaWriter(const PmaWriter&) = delete;
+    PmaWriter& operator=(const PmaWriter&) = delete;
+    PmaWriter(PmaWriter&& other) noexcept
+        : file_(other.file_),
+          account_(std::exchange(other.account_, nullptr)),
+          buffer_(std::move(other.buffer_)),
+          offset_(other.offset_),
+          limit_(other.limit_),
+          buffer_begin_(other.buffer_begin_),
+          buffer_end_(other.buffer_end_) {}
+    PmaWriter& operator=(PmaWriter&&) = delete;
+    ~PmaWriter() { ReleaseBuffer(); }
+
+    [[nodiscard]] static Result<PmaWriter> Create(
+        const temporary_storage_detail::SorterExtentLease& extent, TemporaryMemoryAccount& account,
+        ByteCount page_size) {
+      auto buffer = AllocatePmaBuffer(account, page_size, PmaMemoryUse::Spill);
+      if (!buffer.has_value()) {
+        return std::unexpected(std::move(buffer.error()));
+      }
+      return PmaWriter{extent, account, std::move(*buffer)};
+    }
+
+    [[nodiscard]] Status WriteRecord(ByteView record) {
+      auto storage_size = RecordStorageSize(record);
+      if (!storage_size.has_value()) {
+        return std::unexpected(std::move(storage_size.error()));
+      }
+      if (offset_ > limit_ || *storage_size > limit_ - offset_) {
+        return std::unexpected(Internal("PMA record exceeds its allocated extent"));
+      }
+      std::array<std::byte, 9> header{};
+      auto encoded = EncodeSqliteVarint(static_cast<std::uint64_t>(record.size()), header);
+      if (!encoded.has_value()) {
+        std::terminate();
+      }
+      auto appended = Append(ByteView{header}.first(encoded->value()));
+      if (!appended.has_value()) {
+        return std::unexpected(std::move(appended.error()));
+      }
+      return Append(record);
+    }
+
+    [[nodiscard]] Status Finish() {
+      if (offset_ != limit_) {
+        return std::unexpected(Internal("PMA run did not fill its allocated extent"));
+      }
+      auto flushed = Flush();
+      if (!flushed.has_value()) {
+        return std::unexpected(std::move(flushed.error()));
+      }
+      ReleaseBuffer();
+      return {};
+    }
+
+   private:
+    PmaWriter(const temporary_storage_detail::SorterExtentLease& extent,
+              TemporaryMemoryAccount& account, ByteBuffer buffer) noexcept
+        : file_(&extent.file()),
+          account_(&account),
+          buffer_(std::move(buffer)),
+          offset_(extent.begin()),
+          limit_(offset_ + extent.size()),
+          buffer_begin_(static_cast<std::size_t>(offset_ % buffer_.size().value())),
+          buffer_end_(buffer_begin_) {}
+
+    [[nodiscard]] Status Append(ByteView source) {
+      if (buffer_.empty()) {
+        return std::unexpected(Misuse("PMA writer has already finished"));
+      }
+      if (offset_ > limit_ || source.size() > limit_ - offset_) {
+        return std::unexpected(Internal("PMA output crosses its allocated extent"));
+      }
+      while (!source.empty()) {
+        const std::size_t amount = std::min(source.size(), buffer_.size().value() - buffer_end_);
+        std::ranges::copy(source.first(amount),
+                          buffer_.mutable_view().subspan(buffer_end_).begin());
+        buffer_end_ += amount;
+        offset_ += amount;
+        source = source.subspan(amount);
+        if (buffer_end_ == buffer_.size().value()) {
+          auto flushed = Flush();
+          if (!flushed.has_value()) {
+            return std::unexpected(std::move(flushed.error()));
+          }
+        }
+      }
+      return {};
+    }
+
+    [[nodiscard]] Status Flush() {
+      if (buffer_begin_ == buffer_end_) {
+        return {};
+      }
+      const std::size_t amount = buffer_end_ - buffer_begin_;
+      auto written = file_->WriteAt(buffer_.view().subspan(buffer_begin_, amount),
+                                    FileOffset{offset_ - amount});
+      if (!written.has_value()) {
+        return std::unexpected(std::move(written.error()));
+      }
+      MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(
+          instrumentation::AggregateWorkMetric::SorterSpillWrites);
+      buffer_begin_ = 0;
+      buffer_end_ = 0;
+      return {};
+    }
+
+    void ReleaseBuffer() noexcept {
+      const std::size_t bytes = buffer_.capacity().value();
+      buffer_ = ByteBuffer{};
+      if (account_ != nullptr && bytes != 0U) {
+        ReleasePmaBytes(*account_, bytes);
+      }
+    }
+
+    File* file_;
+    TemporaryMemoryAccount* account_;
+    ByteBuffer buffer_;
+    std::uint64_t offset_;
+    std::uint64_t limit_;
+    std::size_t buffer_begin_;
+    std::size_t buffer_end_;
+  };
+
   struct PmaReader {
-    PmaReader(File& input, const PmaRun& input_run) noexcept
+    PmaReader(File& input, const PmaRun& input_run, ByteBuffer page_buffer) noexcept
         : file(&input),
           begin(input_run.extent.begin()),
           end(begin + input_run.extent.size()),
           offset(begin),
-          ordinal(input_run.ordinal) {}
+          ordinal(input_run.ordinal),
+          buffer(std::move(page_buffer)) {}
 
     File* file;
     std::uint64_t begin;
     std::uint64_t end;
     std::uint64_t offset;
     std::uint64_t ordinal;
+    ByteBuffer buffer;
+    std::size_t buffer_position = 0;
+    std::size_t buffer_limit = 0;
     ByteBuffer record;
     std::optional<RecordView> view;
     bool exhausted = false;
@@ -1049,10 +1242,11 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     using HeapArray = std::unique_ptr<std::size_t[]>;
 
     MergeCursor(const RecordSorterDescriptor& sorter_descriptor,
-                TemporaryMemoryAccount* memory_account, ReaderArray owned_readers,
-                HeapArray owned_heap, std::size_t input_count) noexcept
+                TemporaryMemoryAccount& memory_account, PmaMemoryUse memory_use,
+                ReaderArray owned_readers, HeapArray owned_heap, std::size_t input_count) noexcept
         : descriptor(&sorter_descriptor),
           account(memory_account),
+          use(memory_use),
           readers(std::move(owned_readers)),
           heap(std::move(owned_heap)),
           reader_count(input_count) {}
@@ -1063,19 +1257,17 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
         if (reader.has_value()) {
           reader->view.reset();
           reader->record = ByteBuffer{};
+          reader->buffer = ByteBuffer{};
         }
       }
-      if (account != nullptr && charged_bytes != 0U) {
-        const auto released = account->Release(ByteCount{charged_bytes});
-        if (!released.has_value()) {
-          std::terminate();
-        }
+      if (charged_bytes != 0U) {
+        ReleasePmaBytes(account, charged_bytes);
       }
     }
 
     [[nodiscard]] static Result<std::unique_ptr<MergeCursor>> Create(
         File& file, std::span<PmaRun* const> runs, const RecordSorterDescriptor& descriptor,
-        TemporaryMemoryAccount* account) {
+        TemporaryMemoryAccount& account, ByteCount page_size, PmaMemoryUse use) {
       if (runs.empty() || runs.size() > kMergeFanIn) {
         return std::unexpected(Misuse("PMA merge fan-in is invalid"));
       }
@@ -1092,14 +1284,9 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
         return std::unexpected(TooLarge("PMA merge memory accounting overflows"));
       }
       const std::size_t base_bytes = sizeof(MergeCursor) + reader_bytes + heap_bytes;
-      if (account != nullptr) {
-        auto reserved = account->Reserve(ByteCount{base_bytes});
-        if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge) {
-          reserved = account->ReserveWorkingSet(ByteCount{base_bytes});
-        }
-        if (!reserved.has_value()) {
-          return std::unexpected(std::move(reserved.error()));
-        }
+      auto reserved = ReservePmaBytes(account, ByteCount{base_bytes}, use);
+      if (!reserved.has_value()) {
+        return std::unexpected(std::move(reserved.error()));
       }
       std::unique_ptr<MergeCursor> cursor;
       try {
@@ -1108,28 +1295,23 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
         auto readers = std::make_unique<std::optional<PmaReader>[]>(runs.size());
         // NOLINTNEXTLINE(modernize-avoid-c-arrays)
         auto heap = std::make_unique<std::size_t[]>(runs.size());
-        cursor = std::make_unique<MergeCursor>(descriptor, account, std::move(readers),
+        cursor = std::make_unique<MergeCursor>(descriptor, account, use, std::move(readers),
                                                std::move(heap), runs.size());
       } catch (const std::bad_alloc&) {
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{base_bytes});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
+        ReleasePmaBytes(account, base_bytes);
         return std::unexpected(Error::OutOfMemory());
       } catch (const std::length_error&) {
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{base_bytes});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
+        ReleasePmaBytes(account, base_bytes);
         return std::unexpected(Error::OutOfMemory());
       }
-      cursor->charged_bytes = account == nullptr ? 0U : base_bytes;
+      cursor->charged_bytes = base_bytes;
       for (std::size_t index = 0; index < runs.size(); ++index) {
-        cursor->readers[index].emplace(file, *runs[index]);
+        auto buffer = AllocatePmaBuffer(account, page_size, use);
+        if (!buffer.has_value()) {
+          return std::unexpected(std::move(buffer.error()));
+        }
+        cursor->charged_bytes += buffer->capacity().value();
+        cursor->readers[index].emplace(file, *runs[index], std::move(*buffer));
         auto advanced = cursor->AdvanceReader(index);
         if (!advanced.has_value()) {
           return std::unexpected(std::move(advanced.error()));
@@ -1193,18 +1375,9 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     [[nodiscard]] Result<void> AdvanceReader(std::size_t index) {
       PmaReader& reader = Reader(index);
       reader.view.reset();
-      const std::size_t old_bytes = reader.record.capacity().value();
-      if (old_bytes != 0U) {
-        reader.record = ByteBuffer{};
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{old_bytes});
-          if (!released.has_value() || old_bytes > charged_bytes) {
-            std::terminate();
-          }
-          charged_bytes -= old_bytes;
-        }
-      }
+      ReleaseBuffer(reader.record);
       if (reader.offset == reader.end) {
+        ReleaseBuffer(reader.buffer);
         reader.exhausted = true;
         return {};
       }
@@ -1213,15 +1386,17 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       }
 
       std::array<std::byte, 9> header{};
-      const std::size_t header_size = static_cast<std::size_t>(
-          std::min<std::uint64_t>(header.size(), reader.end - reader.offset));
-      auto header_read = reader.file->ReadAt(MutableByteView{header}.first(header_size),
-                                             FileOffset{reader.offset});
-      if (!header_read.has_value()) {
-        return std::unexpected(std::move(header_read.error()));
-      }
-      if (!header_read->complete()) {
-        return std::unexpected(Corruption("PMA record-size varint is truncated"));
+      const std::uint64_t record_offset = reader.offset;
+      std::size_t header_size = 0;
+      while (header_size < header.size() && reader.offset < reader.end) {
+        auto read = ReadBuffered(reader, MutableByteView{header}.subspan(header_size, 1U));
+        if (!read.has_value()) {
+          return std::unexpected(std::move(read.error()));
+        }
+        const std::byte byte = header[header_size++];
+        if ((std::to_integer<std::uint8_t>(byte) & 0x80U) == 0U) {
+          break;
+        }
       }
       auto decoded = DecodeSqliteVarint(ByteView{header}.first(header_size));
       if (!decoded.has_value()) {
@@ -1229,97 +1404,79 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       }
       const std::uint64_t size = decoded->value;
       const std::uint64_t header_bytes = decoded->bytes_consumed.value();
-      if (header_bytes > reader.end - reader.offset) {
+      if (header_bytes > reader.end - record_offset) {
         return std::unexpected(Corruption("PMA record-size varint crosses its extent"));
       }
-      const std::uint64_t payload_offset = reader.offset + header_bytes;
+      const std::uint64_t payload_offset = reader.offset;
       if (size > reader.end - payload_offset || size > std::numeric_limits<std::size_t>::max()) {
         return std::unexpected(Corruption("PMA record payload crosses its extent"));
       }
       const auto allocation_size = static_cast<std::size_t>(size);
-      if (account != nullptr) {
-        auto reserved = ReserveRecordBytes(allocation_size);
-        if (!reserved.has_value()) {
-          return std::unexpected(std::move(reserved.error()));
-        }
+      auto next_record = AllocatePmaBuffer(account, ByteCount{allocation_size}, use);
+      if (!next_record.has_value()) {
+        return std::unexpected(std::move(next_record.error()));
       }
-      ByteBuffer next_record;
-      try {
-        next_record = ByteBuffer{ByteCount{allocation_size}};
-      } catch (const std::bad_alloc&) {
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{allocation_size});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
-        return std::unexpected(Error::OutOfMemory());
-      } catch (const std::length_error&) {
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{allocation_size});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
-        return std::unexpected(Error::OutOfMemory());
+      charged_bytes += next_record->capacity().value();
+      reader.record = std::move(*next_record);
+      auto payload_read = ReadBuffered(reader, reader.record.mutable_view());
+      if (!payload_read.has_value()) {
+        return std::unexpected(std::move(payload_read.error()));
       }
-      const std::size_t actual_bytes = next_record.capacity().value();
-      if (account != nullptr && actual_bytes > allocation_size) {
-        auto additional = ReserveRecordBytes(actual_bytes - allocation_size);
-        if (!additional.has_value()) {
-          next_record = ByteBuffer{};
-          const auto released = account->Release(ByteCount{allocation_size});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-          return std::unexpected(std::move(additional.error()));
-        }
-      }
-      auto payload_read =
-          reader.file->ReadAt(next_record.mutable_view(), FileOffset{payload_offset});
-      if (!payload_read.has_value() || !payload_read->complete()) {
-        next_record = ByteBuffer{};
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{actual_bytes});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
-        if (!payload_read.has_value()) {
-          return std::unexpected(std::move(payload_read.error()));
-        }
-        return std::unexpected(Corruption("PMA record payload is truncated"));
-      }
-      auto parsed = RecordView::Parse(next_record.view(), descriptor->record_options);
+      auto parsed = RecordView::Parse(reader.record.view(), descriptor->record_options);
       if (!parsed.has_value()) {
-        next_record = ByteBuffer{};
-        if (account != nullptr) {
-          const auto released = account->Release(ByteCount{actual_bytes});
-          if (!released.has_value()) {
-            std::terminate();
-          }
-        }
         return std::unexpected(std::move(parsed.error()));
       }
-      reader.offset = payload_offset + size;
-      reader.record = std::move(next_record);
+      if (parsed->field_count() != descriptor->field_count) {
+        return std::unexpected(Corruption("PMA record field count does not match the descriptor"));
+      }
       reader.view = *parsed;
       reader.exhausted = false;
-      if (account != nullptr) {
-        charged_bytes += actual_bytes;
+      return {};
+    }
+
+    [[nodiscard]] static Status ReadBuffered(PmaReader& reader, MutableByteView destination) {
+      if (reader.offset > reader.end || destination.size() > reader.end - reader.offset) {
+        return std::unexpected(Corruption("PMA read crosses its extent"));
+      }
+      while (!destination.empty()) {
+        if (reader.buffer_position == reader.buffer_limit) {
+          const std::size_t page_size = reader.buffer.size().value();
+          const auto page_remaining =
+              page_size - static_cast<std::size_t>(reader.offset % page_size);
+          const auto amount = static_cast<std::size_t>(
+              std::min<std::uint64_t>(page_remaining, reader.end - reader.offset));
+          auto read = reader.file->ReadAt(reader.buffer.mutable_view().first(amount),
+                                          FileOffset{reader.offset});
+          if (!read.has_value()) {
+            return std::unexpected(std::move(read.error()));
+          }
+          if (!read->complete()) {
+            return std::unexpected(Corruption("PMA input refill is truncated"));
+          }
+          reader.buffer_position = 0;
+          reader.buffer_limit = amount;
+        }
+        const std::size_t amount =
+            std::min(destination.size(), reader.buffer_limit - reader.buffer_position);
+        std::ranges::copy(reader.buffer.view().subspan(reader.buffer_position, amount),
+                          destination.begin());
+        reader.buffer_position += amount;
+        reader.offset += amount;
+        destination = destination.subspan(amount);
       }
       return {};
     }
 
-    [[nodiscard]] Status ReserveRecordBytes(std::size_t amount) {
-      if (account == nullptr) {
-        return {};
+    void ReleaseBuffer(ByteBuffer& buffer) noexcept {
+      const std::size_t bytes = buffer.capacity().value();
+      buffer = ByteBuffer{};
+      if (bytes > charged_bytes) {
+        std::terminate();
       }
-      auto reserved = account->Reserve(ByteCount{amount});
-      if (reserved.has_value() || reserved.error().code() != ErrorCode::kTooLarge) {
-        return reserved;
+      if (bytes != 0U) {
+        ReleasePmaBytes(account, bytes);
+        charged_bytes -= bytes;
       }
-      return account->ReserveWorkingSet(ByteCount{amount});
     }
 
     [[nodiscard]] bool ComesBefore(std::size_t left_index, std::size_t right_index) const noexcept {
@@ -1359,7 +1516,8 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     }
 
     const RecordSorterDescriptor* descriptor;
-    TemporaryMemoryAccount* account;
+    TemporaryMemoryAccount& account;
+    PmaMemoryUse use;
     ReaderArray readers;
     HeapArray heap;
     std::size_t reader_count = 0;
@@ -1540,31 +1698,6 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     return header_size + record_size;
   }
 
-  [[nodiscard]] static Result<std::uint64_t> WriteRecord(File& file, std::uint64_t offset,
-                                                         std::uint64_t limit, ByteView record) {
-    auto storage_size = RecordStorageSize(record);
-    if (!storage_size.has_value()) {
-      return std::unexpected(std::move(storage_size.error()));
-    }
-    if (offset > limit || *storage_size > limit - offset) {
-      return std::unexpected(Internal("PMA record exceeds its allocated extent"));
-    }
-    std::array<std::byte, 9> header{};
-    auto encoded = EncodeSqliteVarint(static_cast<std::uint64_t>(record.size()), header);
-    if (!encoded.has_value()) {
-      std::terminate();
-    }
-    auto header_write = file.WriteAt(ByteView{header}.first(encoded->value()), FileOffset{offset});
-    if (!header_write.has_value()) {
-      return std::unexpected(std::move(header_write.error()));
-    }
-    auto record_write = file.WriteAt(record, FileOffset{offset + encoded->value()});
-    if (!record_write.has_value()) {
-      return std::unexpected(std::move(record_write.error()));
-    }
-    return offset + *storage_size;
-  }
-
   [[nodiscard]] Result<std::uint64_t> CurrentRunStorageSize() const {
     std::uint64_t total = 0;
     for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
@@ -1607,19 +1740,22 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (!extent.has_value()) {
       return std::unexpected(std::move(extent.error()));
     }
-    const std::uint64_t limit = extent->begin() + extent->size();
-    std::uint64_t offset = extent->begin();
+    auto writer = PmaWriter::Create(*extent, Account(), statement_state->SorterPageSize());
+    if (!writer.has_value()) {
+      MarkFailed();
+      return std::unexpected(std::move(writer.error()));
+    }
     for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
-      auto written = WriteRecord(extent->file(), offset, limit, entry->record.view());
+      auto written = writer->WriteRecord(entry->record.view());
       if (!written.has_value()) {
         MarkFailed();
         return std::unexpected(std::move(written.error()));
       }
-      offset = *written;
     }
-    if (offset != limit) {
+    auto finished = writer->Finish();
+    if (!finished.has_value()) {
       MarkFailed();
-      return std::unexpected(Internal("PMA run did not fill its allocated extent"));
+      return std::unexpected(std::move(finished.error()));
     }
     std::unique_ptr<PmaRun> run;
     try {
@@ -1659,15 +1795,20 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (!extent.has_value()) {
       return std::unexpected(std::move(extent.error()));
     }
-    auto written = WriteRecord(extent->file(), extent->begin(), extent->begin() + extent->size(),
-                               record.view());
+    auto writer = PmaWriter::Create(*extent, Account(), statement_state->SorterPageSize());
+    if (!writer.has_value()) {
+      MarkFailed();
+      return std::unexpected(std::move(writer.error()));
+    }
+    auto written = writer->WriteRecord(record.view());
     if (!written.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(written.error()));
     }
-    if (*written != extent->begin() + extent->size()) {
+    auto finished = writer->Finish();
+    if (!finished.has_value()) {
       MarkFailed();
-      return std::unexpected(Internal("direct PMA run did not fill its allocated extent"));
+      return std::unexpected(std::move(finished.error()));
     }
     std::unique_ptr<PmaRun> run;
     try {
@@ -1701,29 +1842,33 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (!output.has_value()) {
       return std::unexpected(std::move(output.error()));
     }
-    auto cursor = MergeCursor::Create(group.front()->extent.file(), group, descriptor, nullptr);
+    auto writer = PmaWriter::Create(*output, Account(), statement_state->SorterPageSize());
+    if (!writer.has_value()) {
+      MarkFailed();
+      return std::unexpected(std::move(writer.error()));
+    }
+    auto cursor = MergeCursor::Create(group.front()->extent.file(), group, descriptor, Account(),
+                                      statement_state->SorterPageSize(), PmaMemoryUse::Spill);
     if (!cursor.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(cursor.error()));
     }
-    const std::uint64_t limit = output->begin() + output->size();
-    std::uint64_t offset = output->begin();
     while (!(*cursor)->empty()) {
-      auto written = WriteRecord(output->file(), offset, limit, (*cursor)->current().encoded());
+      auto written = writer->WriteRecord((*cursor)->current().encoded());
       if (!written.has_value()) {
         MarkFailed();
         return std::unexpected(std::move(written.error()));
       }
-      offset = *written;
       auto advanced = (*cursor)->Next();
       if (!advanced.has_value()) {
         MarkFailed();
         return std::unexpected(std::move(advanced.error()));
       }
     }
-    if (offset != limit) {
+    auto finished = writer->Finish();
+    if (!finished.has_value()) {
       MarkFailed();
-      return std::unexpected(Internal("merged PMA did not fill its allocated extent"));
+      return std::unexpected(std::move(finished.error()));
     }
     try {
       return std::make_unique<PmaRun>(std::move(*output), group.front()->ordinal);
@@ -1809,7 +1954,8 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       return std::unexpected(Internal("final PMA merge has no runs"));
     }
     return MergeCursor::Create(runs->extent.file(), std::span<PmaRun* const>{group}.first(index),
-                               descriptor, &Account());
+                               descriptor, Account(), statement_state->SorterPageSize(),
+                               PmaMemoryUse::Drain);
   }
 
   RecordSorterDescriptor descriptor;

@@ -51,5 +51,11 @@ void RecordProbeCall(std::size_t tag) noexcept {
   }
 }
 
+void RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount, bool maximum) noexcept {
+  if (active_probe_collection != nullptr) {
+    active_probe_collection->Record(metric, amount, maximum);
+  }
+}
+
 }  // namespace detail
 }  // namespace modern_sqlite::instrumentation

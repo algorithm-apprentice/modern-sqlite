@@ -77,9 +77,10 @@ template <typename T>
   return TakeValue(EncodeRecord(fields));
 }
 
-[[nodiscard]] modern_sqlite::ByteBuffer EncodedBlobRecord(std::int64_t key) {
+[[nodiscard]] modern_sqlite::ByteBuffer EncodedBlobRecord(std::int64_t key,
+                                                          std::size_t payload_size = 900U) {
   using namespace modern_sqlite;
-  ByteBuffer payload{ByteCount{900}};
+  ByteBuffer payload{ByteCount{payload_size}};
   std::ranges::fill(payload.mutable_view(), std::byte{0x5a});
   std::array<SqlValue, 2> fields{
       SqlValue::Integer(key),
@@ -131,12 +132,66 @@ struct Outcome {
   if (sorter.valid()) {
     sorter.Close();
   }
+  const bool released = storage->retained_bytes() == ByteCount{0};
   storage.reset();
   return Outcome{
       .allocations = allocations,
       .succeeded = succeeded,
       .error = error,
-      .cleaned = !vfs.pathless_file_present(),
+      .cleaned = released && !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] Outcome RunFileMerge(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{2048},
+                                                }));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  RecordSorter sorter = TakeValue(storage->CreateRecordSorter(Descriptor()));
+  constexpr std::int64_t kRecordCount = 256;
+  for (std::int64_t key = kRecordCount; key > 0; --key) {
+    if (!sorter.Insert(EncodedBlobRecord(key, 64U)).has_value()) {
+      return {};
+    }
+  }
+  if (sorter.spilled_run_count() <= 16U) {
+    return {};
+  }
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  const Status rewound = sorter.Rewind();
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = rewound.has_value();
+  const ErrorCode error = succeeded ? ErrorCode::kGeneric : rewound.error().code();
+  bool positioned = !succeeded;
+  if (succeeded) {
+    const auto record = sorter.current_record();
+    if (record.has_value()) {
+      const auto key = record->field(0);
+      positioned = key.has_value() && key->integer_value() == 1;
+    }
+  }
+  sorter.Close();
+  const bool released = storage->retained_bytes() == ByteCount{0};
+  storage.reset();
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = positioned && released && !vfs.pathless_file_present(),
   };
 }
 
@@ -317,6 +372,9 @@ int main() try {
   if (!ExhaustAllocations(
           [](std::optional<std::size_t> failure) { return RunFileInsert(true, failure); })) {
     return 3;
+  }
+  if (!ExhaustAllocations(RunFileMerge)) {
+    return 4;
   }
   return 0;
 } catch (...) {

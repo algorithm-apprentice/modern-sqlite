@@ -1042,6 +1042,7 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime cannot be opened"));
     }
     runtime.state.emplace(runtime.function->CreateState());
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(instrumentation::AggregateWorkMetric::Open);
     return std::nullopt;
   }
 
@@ -1063,6 +1064,7 @@ struct Vm::Impl {
     if (!effect.has_value()) {
       return std::unexpected(std::move(effect.error()));
     }
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(instrumentation::AggregateWorkMetric::Step);
     if (!operation.effect_output.has_value()) {
       return std::nullopt;
     }
@@ -1091,6 +1093,7 @@ struct Vm::Impl {
     if (!result.has_value()) {
       return std::unexpected(std::move(result.error()));
     }
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(instrumentation::AggregateWorkMetric::Finalize);
     return SetRegister(operation.output, std::move(*result));
   }
 
@@ -1100,6 +1103,7 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
     }
     runtime.state->Reset();
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(instrumentation::AggregateWorkMetric::Reset);
     return std::nullopt;
   }
 
@@ -1109,6 +1113,7 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kInternal, "aggregate runtime is not open"));
     }
     runtime.state.reset();
+    MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(instrumentation::AggregateWorkMetric::Close);
     return std::nullopt;
   }
 

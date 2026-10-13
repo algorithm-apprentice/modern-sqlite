@@ -883,6 +883,71 @@ TEST(ReadSession, CleansAggregateTemporaryFilesAfterInjectedFailure) {
   RequireStatus(statement.Finalize());
 }
 
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSession, CapturesAggregateLifecycleAndSharedTemporaryPeaks) {
+  using instrumentation::AggregateWorkMetric;
+  using instrumentation::ProbeCollectionKind;
+  using instrumentation::ProbeCounterCollection;
+  using instrumentation::ScopedProbeCounterCollection;
+  constexpr ByteCount kBudget{64U * 1024U};
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = kBudget,
+          },
+  };
+  ReadSession session =
+      TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT nullable IS NULL,count(),group_concat(label ORDER BY id DESC),"
+      "count(DISTINCT value<0) FROM model_rows GROUP BY nullable IS NULL ORDER BY 1");
+  ProbeCounterCollection work{ProbeCollectionKind::AggregateWork};
+  {
+    const ScopedProbeCounterCollection scope{work};
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  EXPECT_EQ(3U, work.Value(AggregateWorkMetric::Open));
+  EXPECT_EQ(68U, work.Value(AggregateWorkMetric::Step));
+  EXPECT_EQ(6U, work.Value(AggregateWorkMetric::Finalize));
+  EXPECT_EQ(3U, work.Value(AggregateWorkMetric::Reset));
+  EXPECT_EQ(3U, work.Value(AggregateWorkMetric::Close));
+  EXPECT_GT(work.Value(AggregateWorkMetric::RetainedBytesPeak), 0U);
+  EXPECT_LE(work.Value(AggregateWorkMetric::RetainedBytesPeak), kBudget.value());
+  EXPECT_EQ(0U, work.Value(AggregateWorkMetric::LiveFilesPeak));
+  EXPECT_EQ(0U, work.Value(AggregateWorkMetric::FileAcquisitions));
+}
+
+TEST(ReadSession, CapturesActualSharedSorterSpillWrites) {
+  using instrumentation::AggregateWorkMetric;
+  using instrumentation::ProbeCollectionKind;
+  using instrumentation::ProbeCounterCollection;
+  using instrumentation::ScopedProbeCounterCollection;
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = ByteCount{4096},
+          },
+  };
+  ReadSession session =
+      TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(session, kSpillingAggregateCompoundSql);
+  ProbeCounterCollection work{ProbeCollectionKind::AggregateWork};
+  {
+    const ScopedProbeCounterCollection scope{work};
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  EXPECT_GT(work.Value(AggregateWorkMetric::SorterSpillWrites), 0U);
+  EXPECT_GT(work.Value(AggregateWorkMetric::LiveFilesPeak), 0U);
+  EXPECT_LE(work.Value(AggregateWorkMetric::LiveFilesPeak), 2U);
+}
+#endif
+
 TEST(ReadSession, CleansSpilledAggregateCompoundFilesOnEarlyStop) {
   constexpr ByteCount kFileBudget{4096};
   const auto state = std::make_shared<TemporaryFileState>();

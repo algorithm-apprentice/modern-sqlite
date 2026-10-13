@@ -475,6 +475,21 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   modern_sqlite_enable_clang_tidy(modern_sqlite_distinct_compound_benchmark)
 
   add_executable(
+    modern_sqlite_aggregate_benchmark
+    benchmarks/aggregate_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_aggregate_benchmark
+    PRIVATE "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_link_libraries(
+    modern_sqlite_aggregate_benchmark
+    PRIVATE modern_sqlite::modern_sqlite modern_sqlite_benchmark_sqlite
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_aggregate_benchmark PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_aggregate_benchmark)
+
+  add_executable(
     modern_sqlite_write_benchmark
     benchmarks/write_performance.cpp
   )
@@ -650,6 +665,35 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
   modern_sqlite_enable_clang_tidy(modern_sqlite_distinct_compound_diagnostics)
 
   add_executable(
+    modern_sqlite_aggregate_diagnostics
+    benchmarks/aggregate_performance.cpp
+  )
+  target_include_directories(
+    modern_sqlite_aggregate_diagnostics
+    PRIVATE "${_modern_sqlite_benchmark_generated_dir}"
+  )
+  target_compile_definitions(
+    modern_sqlite_aggregate_diagnostics
+    PRIVATE
+      MODERN_SQLITE_ENABLE_INSTRUMENTATION=1
+      MODERN_SQLITE_ORDER_BY_PERFORMANCE_DIAGNOSTICS=1
+  )
+  target_link_libraries(
+    modern_sqlite_aggregate_diagnostics
+    PRIVATE
+      modern_sqlite_diagnostic_engine
+      modern_sqlite_benchmark_sqlite
+      modern_sqlite::instrumentation
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_aggregate_diagnostics PRIVATE)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      modern_sqlite_aggregate_diagnostics PRIVATE -Wno-mismatched-new-delete
+    )
+  endif()
+  modern_sqlite_enable_clang_tidy(modern_sqlite_aggregate_diagnostics)
+
+  add_executable(
     modern_sqlite_write_diagnostics
     benchmarks/write_performance.cpp
   )
@@ -817,6 +861,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
+  "${PROJECT_SOURCE_DIR}/benchmarks/aggregate_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/index_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/distinct_compound_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/write_performance.cpp"

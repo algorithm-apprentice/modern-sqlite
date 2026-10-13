@@ -161,6 +161,15 @@ growth.
 Drain working sets remain bounded by merge fan-in, `maximum_value_bytes`, and
 the existing lowering limits on simultaneously positioned temporary streams.
 
+ADR-0071 adds one source-page-sized PMA buffer per live merge reader and one
+output page for an already-selected spill or intermediate merge. These
+buffers, intermediate current records, and allocated merge arrays are also
+charged. Every selected-spill and intermediate-merge reservation, including
+base/heap arrays and capacity reconciliation, bypasses recursive pressure
+selection from before input pointers are borrowed until run bookkeeping is
+restored. Final drain still attempts ordinary admission before its bounded
+file-mode fallback, after the sorter is positioned.
+
 Expose diagnostics:
 
 ```cpp
