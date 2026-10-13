@@ -75,3 +75,4 @@ their corresponding implementation begins.
 69. [ADR-0069: SQLite-Aligned Aggregate Modifier Execution](0069-sqlite-aligned-aggregate-modifier-execution.md)
 70. [ADR-0070: Matched Aggregate and Grouping Performance Baseline](0070-matched-aggregate-and-grouping-performance-baseline.md)
 71. [ADR-0071: SQLite-Faithful Buffered PMA I/O](0071-sqlite-faithful-buffered-pma-io.md)
+72. [ADR-0072: Explicit Bound Source Identities](0072-explicit-bound-source-identities.md)

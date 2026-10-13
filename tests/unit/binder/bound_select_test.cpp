@@ -45,6 +45,9 @@ static_assert(std::is_nothrow_move_assignable_v<BoundStatement>);
 
 const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core();
 
+static_assert(!std::is_convertible_v<BoundSourceId, BoundSourceColumnId>);
+static_assert(!std::is_convertible_v<BoundSourceColumnId, BoundSourceId>);
+
 [[nodiscard]] SourceSpan Span(std::size_t begin, std::size_t end) {
   const auto span = SourceSpan::FromBounds(ByteOffset{begin}, ByteOffset{end});
   if (!span.has_value()) {
@@ -531,6 +534,146 @@ TEST(Binder, PublishesIntegerPrimaryKeyMetadataForHiddenRowIdNames) {
     EXPECT_EQ(std::optional<std::string>{"INTEGER"}, result.declared_type);
     EXPECT_EQ(TypeAffinity::kInteger, result.affinity);
   }
+}
+
+TEST(Binder, PublishesDistinctOccurrenceOwnersAcrossCompoundSourceScopes) {
+  const BoundSelect select = BindOrThrow(
+      "SELECT a.id,a._rowid_ FROM Items AS a "
+      "UNION ALL VALUES(0,0) "
+      "UNION ALL SELECT b.id,b._rowid_ FROM Items AS b",
+      TestCatalog());
+  ASSERT_EQ(3U, select.query_cores().size());
+  const auto* left = std::get_if<BoundSelectCore>(&select.query_cores()[0]);
+  const auto* right = std::get_if<BoundSelectCore>(&select.query_cores()[2]);
+  ASSERT_NE(nullptr, left);
+  ASSERT_NE(nullptr, right);
+  ASSERT_TRUE(left->table_source.has_value());
+  ASSERT_TRUE(right->table_source.has_value());
+  EXPECT_EQ(left->table_source->table, right->table_source->table);
+  EXPECT_EQ(BoundSourceId{0}, left->table_source->id);
+  EXPECT_EQ(BoundSourceId{1}, right->table_source->id);
+  EXPECT_NE(left->table_source->id, right->table_source->id);
+  for (const BoundSelectCore* core : std::array{left, right}) {
+    const auto source_columns =
+        select.source_columns().subspan(core->source_column_begin, core->source_column_count);
+    ASSERT_EQ(5U, source_columns.size());
+    for (const BoundSourceColumn& column : source_columns) {
+      EXPECT_EQ(core->table_source->id, column.source);
+    }
+    EXPECT_TRUE(source_columns[0].rowid_alias);
+    EXPECT_FALSE(source_columns[3].rowid_alias);
+    const auto* rowid = std::get_if<BoundRowIdExpression>(
+        &select.expression(core->result_columns[1].expression).payload);
+    ASSERT_NE(nullptr, rowid);
+    EXPECT_EQ(core->table_source->id, rowid->source);
+  }
+}
+
+TEST(Binder, NormalizesOwnedRowIdAliasesThroughOneSourceLeafContract) {
+  const BoundSelect select = BindOrThrow(
+      "SELECT id,_rowid_,rowid,Name FROM Items "
+      "UNION ALL SELECT id,_rowid_,rowid,Name FROM Items",
+      TestCatalog());
+  std::array<BoundSourceLeafIdentity, 2> rowids;
+  for (std::size_t index = 0; index < rowids.size(); ++index) {
+    const auto& core = std::get<BoundSelectCore>(select.query_cores()[index]);
+    const auto identity = [&](std::size_t result) {
+      return RequiredOptional(BoundSourceLeafIdentityOf(
+          select.expression(core.result_columns[result].expression), select.source_columns()));
+    };
+    rowids[index] = identity(1);
+    EXPECT_EQ(identity(0), rowids[index]);
+    EXPECT_TRUE(rowids[index].is_rowid());
+    EXPECT_EQ(core.table_source->id, rowids[index].source);
+    const BoundSourceLeafIdentity declared_rowid = identity(2);
+    EXPECT_FALSE(declared_rowid.is_rowid());
+    EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(core.source_column_begin + 3U)},
+              declared_rowid.column);
+    EXPECT_NE(rowids[index], declared_rowid);
+    EXPECT_EQ(core.table_source->id, identity(3).source);
+  }
+  EXPECT_NE(rowids[0], rowids[1]);
+
+  const BoundSelect constant = BindOrThrow("SELECT 1", TestCatalog());
+  EXPECT_FALSE(BoundSourceLeafIdentityOf(ResultExpression(constant, 0), constant.source_columns())
+                   .has_value());
+}
+
+TEST(Binder, AllocatesOnlyRealOccurrencesAndSeparatesSchemaSources) {
+  const BoundSelect select = BindOrThrow(
+      "SELECT 0,'zero' UNION ALL VALUES(1,'one') "
+      "UNION ALL SELECT rowid,name FROM sqlite_schema "
+      "UNION ALL SELECT _rowid_,Name FROM Items",
+      TestCatalog());
+  ASSERT_EQ(4U, select.query_cores().size());
+  EXPECT_FALSE(std::get<BoundSelectCore>(select.query_cores()[0]).table_source.has_value());
+  EXPECT_TRUE(std::holds_alternative<BoundValuesCore>(select.query_cores()[1]));
+  for (std::size_t index = 2; index < select.query_cores().size(); ++index) {
+    const auto& core = std::get<BoundSelectCore>(select.query_cores()[index]);
+    ASSERT_TRUE(core.table_source.has_value());
+    EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(index - 2U)}, core.table_source->id);
+    const auto* rowid = std::get_if<BoundRowIdExpression>(
+        &select.expression(core.result_columns[0].expression).payload);
+    ASSERT_NE(nullptr, rowid);
+    EXPECT_EQ(core.table_source->id, rowid->source);
+    for (const BoundSourceColumn& column :
+         select.source_columns().subspan(core.source_column_begin, core.source_column_count)) {
+      EXPECT_EQ(core.table_source->id, column.source);
+      if (core.table_source->kind == BoundSourceKind::kSchemaTable) {
+        EXPECT_FALSE(column.rowid_alias);
+        EXPECT_FALSE(column.catalog_column.has_value());
+      }
+    }
+  }
+}
+
+TEST(StatementBinder, PreservesSingleTargetSourceOwnershipAndRowIdFacts) {
+  const std::array queries{
+      "INSERT INTO Items(id) VALUES(1)",
+      "UPDATE Items SET Score=Score+1 WHERE _rowid_=?1",
+      "DELETE FROM Items WHERE oid=?1",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    const BoundStatement statement = BindStatementOrThrow(sql, MutationCatalog());
+    std::visit(
+        [&](const auto& bound) {
+          using Bound = std::decay_t<decltype(bound)>;
+          if constexpr (std::is_same_v<Bound, BoundUpdate> || std::is_same_v<Bound, BoundDelete>) {
+            ASSERT_FALSE(bound.source_columns().empty());
+            for (const BoundSourceColumn& column : bound.source_columns()) {
+              EXPECT_EQ(BoundSourceId{0}, column.source);
+              EXPECT_EQ(column.catalog_column == bound.target().rowid_alias, column.rowid_alias);
+            }
+            for (const BoundExpression& expression : bound.expressions()) {
+              if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
+                  rowid != nullptr) {
+                EXPECT_EQ(BoundSourceId{0}, rowid->source);
+              }
+            }
+          } else if constexpr (std::is_same_v<Bound, BoundInsert>) {
+            for (const BoundExpression& expression : bound.expressions()) {
+              EXPECT_FALSE(BoundSourceLeafIdentityOf(expression, {}).has_value());
+            }
+          } else {
+            ADD_FAILURE() << "expected a single-target mutation";
+          }
+        },
+        statement);
+  }
+}
+
+TEST(Binder, RejectsInvalidTrustedColumnIdsInsteadOfHidingThemAsNonLeaves) {
+  const BoundSelect select = BindOrThrow("SELECT id FROM Items", TestCatalog());
+  const BoundExpression invalid{
+      .payload =
+          BoundColumnExpression{
+              .column =
+                  BoundSourceColumnId{static_cast<std::uint32_t>(select.source_columns().size())},
+          },
+  };
+  EXPECT_DEATH(static_cast<void>(BoundSourceLeafIdentityOf(invalid, select.source_columns())),
+               "terminat");
 }
 
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {

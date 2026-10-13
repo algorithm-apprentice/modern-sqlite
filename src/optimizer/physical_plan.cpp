@@ -28,6 +28,7 @@ constexpr std::uint64_t kDefaultEstimatedRows = 1U << 20U;
 
 struct SourceInfo {
   bool single_row = false;
+  BoundSourceId id{0};
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   RootPageId root_page{};
@@ -393,21 +394,8 @@ template <typename Bound>
     return false;
   }
   const BoundExpression& expression = bound_select.expression(id);
-  if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
-    return true;
-  }
-  const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
-  if (column == nullptr || source.source_kind != BoundSourceKind::kCatalogTable ||
-      !source.table.has_value() || column->column.value() >= bound_select.source_columns().size()) {
-    return false;
-  }
-  const CatalogSnapshot* catalog = bound_select.catalog();
-  if (catalog == nullptr || source.table->value >= catalog->tables().size()) {
-    return false;
-  }
-  const CatalogTable& table = catalog->table(*source.table);
-  return table.rowid_alias.has_value() &&
-         bound_select.source_columns()[column->column.value()].catalog_column == table.rowid_alias;
+  const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
+  return identity.has_value() && identity->source == source.id && identity->is_rowid();
 }
 
 template <typename Bound>
@@ -455,6 +443,7 @@ template <typename Bound>
   if (scan.source_kind == BoundSourceKind::kSchemaTable) {
     return SourceInfo{
         .single_row = false,
+        .id = scan.source,
         .source_kind = BoundSourceKind::kSchemaTable,
         .table = std::nullopt,
         .root_page = RootPageId{1},
@@ -469,6 +458,7 @@ template <typename Bound>
   const CatalogTable& table = catalog->table(table_id);
   return SourceInfo{
       .single_row = false,
+      .id = scan.source,
       .source_kind = BoundSourceKind::kCatalogTable,
       .table = table_id,
       .root_page = table.root_page,
@@ -495,6 +485,7 @@ template <typename Bound>
   if (core.table_source->kind == BoundSourceKind::kSchemaTable) {
     return SourceInfo{
         .single_row = false,
+        .id = core.table_source->id,
         .source_kind = BoundSourceKind::kSchemaTable,
         .table = std::nullopt,
         .root_page = RootPageId{1},
@@ -507,6 +498,7 @@ template <typename Bound>
   const CatalogTable& table = bound_select.catalog()->table(table_id);
   return SourceInfo{
       .single_row = false,
+      .id = core.table_source->id,
       .source_kind = BoundSourceKind::kCatalogTable,
       .table = table_id,
       .root_page = table.root_page,
@@ -869,6 +861,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] bool IsIndexedColumnReference(const BoundSelect& bound_select,
+                                            BoundSourceId source_id,
                                             std::size_t source_column_begin,
                                             std::size_t source_column_count, ColumnId column_id,
                                             BoundExpressionId expression_id) noexcept {
@@ -885,7 +878,7 @@ template <typename Bound>
     return false;
   }
   const BoundSourceColumn& source = bound_select.source_columns()[source_index];
-  return source.catalog_column == column_id;
+  return source.source == source_id && source.catalog_column == column_id;
 }
 
 [[nodiscard]] SqlComparison ReverseComparison(SqlComparison comparison) noexcept {
@@ -923,7 +916,7 @@ struct IndexConstraintMatch {
 };
 
 [[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
-    const BoundSelect& bound_select, std::size_t source_column_begin,
+    const BoundSelect& bound_select, BoundSourceId source_id, std::size_t source_column_begin,
     std::size_t source_column_count, const CatalogIndexTerm& term,
     const ReadPredicateTerm& predicate) {
   const auto* indexed_column = std::get_if<ColumnId>(&term.target);
@@ -940,10 +933,12 @@ struct IndexConstraintMatch {
     return std::nullopt;
   }
 
-  const bool left_column = IsIndexedColumnReference(
-      bound_select, source_column_begin, source_column_count, *indexed_column, comparison->left);
-  const bool right_column = IsIndexedColumnReference(
-      bound_select, source_column_begin, source_column_count, *indexed_column, comparison->right);
+  const bool left_column =
+      IsIndexedColumnReference(bound_select, source_id, source_column_begin, source_column_count,
+                               *indexed_column, comparison->left);
+  const bool right_column =
+      IsIndexedColumnReference(bound_select, source_id, source_column_begin, source_column_count,
+                               *indexed_column, comparison->right);
   if (left_column == right_column) {
     return std::nullopt;
   }
@@ -996,49 +991,54 @@ struct IndexConstraintMatch {
   return std::nullopt;
 }
 
-void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId id,
-                              std::vector<bool>* columns, bool* rowid) {
+void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId source_id,
+                              BoundExpressionId id, std::vector<bool>* columns, bool* rowid) {
   if (!IsValidExpressionId(bound_select, id)) {
     return;
   }
   const BoundExpression& expression = bound_select.expression(id);
+  if (const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
+      identity.has_value()) {
+    if (identity->source != source_id) {
+      return;
+    }
+    if (!identity->column.has_value()) {
+      *rowid = true;
+    } else {
+      const auto column = bound_select.source_columns()[identity->column->value()].catalog_column;
+      if (column.has_value() && column->value < columns->size()) {
+        (*columns)[column->value] = true;
+      }
+    }
+    return;
+  }
   std::visit(
       [&](const auto& payload) {
         using Payload = std::decay_t<decltype(payload)>;
-        if constexpr (std::is_same_v<Payload, BoundColumnExpression>) {
-          if (payload.column.value() < bound_select.source_columns().size()) {
-            const std::optional<ColumnId> column =
-                bound_select.source_columns()[payload.column.value()].catalog_column;
-            if (column.has_value() && column->value < columns->size()) {
-              (*columns)[column->value] = true;
-            }
-          }
-        } else if constexpr (std::is_same_v<Payload, BoundRowIdExpression>) {
-          *rowid = true;
-        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                             std::is_same_v<Payload, BoundTruthTestExpression> ||
-                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                             std::is_same_v<Payload, BoundCollateExpression>) {
-          MarkRequiredSourceValues(bound_select, payload.operand, columns, rowid);
+        if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
+                      std::is_same_v<Payload, BoundTruthTestExpression> ||
+                      std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                      std::is_same_v<Payload, BoundCollateExpression>) {
+          MarkRequiredSourceValues(bound_select, source_id, payload.operand, columns, rowid);
         } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
                              std::is_same_v<Payload, BoundComparisonExpression>) {
-          MarkRequiredSourceValues(bound_select, payload.left, columns, rowid);
-          MarkRequiredSourceValues(bound_select, payload.right, columns, rowid);
+          MarkRequiredSourceValues(bound_select, source_id, payload.left, columns, rowid);
+          MarkRequiredSourceValues(bound_select, source_id, payload.right, columns, rowid);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          MarkRequiredSourceValues(bound_select, payload.target, columns, rowid);
+          MarkRequiredSourceValues(bound_select, source_id, payload.target, columns, rowid);
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
           for (const BoundExpressionId argument : payload.arguments) {
-            MarkRequiredSourceValues(bound_select, argument, columns, rowid);
+            MarkRequiredSourceValues(bound_select, source_id, argument, columns, rowid);
           }
         }
       },
       expression.payload);
 }
 
-[[nodiscard]] bool IsCoveringIndex(const BoundSelect& bound_select, const CatalogTable& table,
-                                   const CatalogIndex& index,
+[[nodiscard]] bool IsCoveringIndex(const BoundSelect& bound_select, BoundSourceId source_id,
+                                   const CatalogTable& table, const CatalogIndex& index,
                                    std::span<const ReadPredicateTerm> predicates,
                                    const std::vector<bool>& selected_terms,
                                    const BoundSelectCore* aggregate_core = nullptr) {
@@ -1046,35 +1046,38 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   bool required_rowid = false;
   for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
     if (index_value >= selected_terms.size() || !selected_terms[index_value]) {
-      MarkRequiredSourceValues(bound_select, predicates[index_value].predicate, &required_columns,
-                               &required_rowid);
+      MarkRequiredSourceValues(bound_select, source_id, predicates[index_value].predicate,
+                               &required_columns, &required_rowid);
     }
   }
   if (aggregate_core != nullptr && aggregate_core->aggregate.has_value()) {
     const BoundAggregateProgram& aggregate = *aggregate_core->aggregate;
     for (const BoundExpressionId expression : aggregate.source_leaves) {
-      MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+      MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
+                               &required_rowid);
     }
     if (aggregate.group_by.empty()) {
       for (const BoundResultColumn& result : aggregate_core->result_columns) {
-        MarkRequiredSourceValues(bound_select, result.expression, &required_columns,
+        MarkRequiredSourceValues(bound_select, source_id, result.expression, &required_columns,
                                  &required_rowid);
       }
       if (aggregate.having.has_value()) {
-        MarkRequiredSourceValues(bound_select, *aggregate.having, &required_columns,
+        MarkRequiredSourceValues(bound_select, source_id, *aggregate.having, &required_columns,
                                  &required_rowid);
       }
     } else {
       for (const BoundExpressionId expression : aggregate.representative_leaves) {
-        MarkRequiredSourceValues(bound_select, expression, &required_columns, &required_rowid);
+        MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
+                                 &required_rowid);
       }
     }
   } else {
     for (const BoundResultColumn& result : bound_select.result_columns()) {
-      MarkRequiredSourceValues(bound_select, result.expression, &required_columns, &required_rowid);
+      MarkRequiredSourceValues(bound_select, source_id, result.expression, &required_columns,
+                               &required_rowid);
     }
     for (const BoundOrderingTerm& ordering : bound_select.order_by()) {
-      MarkRequiredSourceValues(bound_select, ordering.expression, &required_columns,
+      MarkRequiredSourceValues(bound_select, source_id, ordering.expression, &required_columns,
                                &required_rowid);
     }
   }
@@ -1176,8 +1179,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
 }
 
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
-    const BoundSelect& bound_select, TableId table_id, std::size_t source_column_begin,
-    std::size_t source_column_count, IndexId index_id,
+    const BoundSelect& bound_select, BoundSourceId source_id, TableId table_id,
+    std::size_t source_column_begin, std::size_t source_column_count, IndexId index_id,
     std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* aggregate_core = nullptr,
     bool allow_noncovering_full_scan = false) {
   const CatalogSnapshot& catalog = *bound_select.catalog();
@@ -1190,6 +1193,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   IndexCandidatePlan candidate{
       .node =
           PhysicalIndexScanNode{
+              .source = source_id,
               .table = table_id,
               .table_root_page = table.root_page,
               .index = index_id,
@@ -1211,8 +1215,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
         continue;
       }
       const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, source_column_begin, source_column_count, term,
-                               predicates[predicate_index]);
+          MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
+                               term, predicates[predicate_index]);
       if (match.has_value() && match->kind == IndexConstraintKind::kEquality) {
         selected = predicate_index;
         selected_match = match;
@@ -1250,8 +1254,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
         continue;
       }
       const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, source_column_begin, source_column_count, term,
-                               predicates[predicate_index]);
+          MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
+                               term, predicates[predicate_index]);
       if (!match.has_value()) {
         continue;
       }
@@ -1305,7 +1309,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundExpressionId
   if (!constrained && index.statistics.unordered) {
     return std::nullopt;
   }
-  candidate.node.covering = IsCoveringIndex(bound_select, table, index, predicates,
+  candidate.node.covering = IsCoveringIndex(bound_select, source_id, table, index, predicates,
                                             candidate.selected_terms, aggregate_core);
   if (!constrained && !candidate.node.covering && !allow_noncovering_full_scan) {
     return std::nullopt;
@@ -1418,23 +1422,17 @@ struct AggregateCorePlan {
     return std::nullopt;
   }
   const BoundExpression& expression = bound_select.expression(id);
-  if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
+  const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
+  if (!identity.has_value() || identity->source != source.id) {
+    return std::nullopt;
+  }
+  if (!identity->column.has_value()) {
     return DirectSourceIdentity{.rowid = true, .column = std::nullopt};
   }
-  const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
-  if (column == nullptr || column->column.value() >= bound_select.source_columns().size()) {
-    return std::nullopt;
-  }
   const std::optional<ColumnId> catalog_column =
-      bound_select.source_columns()[column->column.value()].catalog_column;
+      bound_select.source_columns()[identity->column->value()].catalog_column;
   if (!catalog_column.has_value()) {
     return std::nullopt;
-  }
-  if (source.table.has_value()) {
-    const CatalogTable& table = bound_select.catalog()->table(*source.table);
-    if (table.rowid_alias == catalog_column) {
-      return DirectSourceIdentity{.rowid = true, .column = std::nullopt};
-    }
   }
   return DirectSourceIdentity{.rowid = false, .column = catalog_column};
 }
@@ -1500,8 +1498,8 @@ struct AggregateCorePlan {
     return LiteralValuesEquivalent(literal->value,
                                    std::get<BoundLiteralExpression>(right.payload).value);
   }
-  if (std::holds_alternative<BoundRowIdExpression>(left.payload)) {
-    return true;
+  if (const auto* rowid = std::get_if<BoundRowIdExpression>(&left.payload); rowid != nullptr) {
+    return rowid->source == std::get<BoundRowIdExpression>(right.payload).source;
   }
   if (const auto* column = std::get_if<BoundColumnExpression>(&left.payload); column != nullptr) {
     return column->column == std::get<BoundColumnExpression>(right.payload).column;
@@ -1978,8 +1976,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
       plan.source.rowid_eligible) {
     for (const IndexId index_id : bound_select.catalog()->table_indexes(*plan.source.table)) {
       std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
-          bound_select, *plan.source.table, core.source_column_begin, core.source_column_count,
-          index_id, plan.predicates.terms, &core, true);
+          bound_select, plan.source.id, *plan.source.table, core.source_column_begin,
+          core.source_column_count, index_id, plan.predicates.terms, &core, true);
       if (!candidate.has_value()) {
         continue;
       }
@@ -2394,14 +2392,16 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
                 if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload);
                     rowid != nullptr) {
                   const auto* value = std::get_if<PhysicalRowIdLookupNode>(&physical);
-                  return value != nullptr && value->source_kind == aggregate.source.source_kind &&
+                  return value != nullptr && value->source == aggregate.source.id &&
+                         value->source_kind == aggregate.source.source_kind &&
                          value->table == aggregate.source.table &&
                          value->root_page == aggregate.source.root_page && value->key == rowid->key;
                 }
                 if (const auto* index_plan = std::get_if<IndexCandidatePlan>(&selected.payload);
                     index_plan != nullptr) {
                   const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
-                  return value != nullptr && value->table == index_plan->node.table &&
+                  return value != nullptr && value->source == index_plan->node.source &&
+                         value->table == index_plan->node.table &&
                          value->table_root_page == index_plan->node.table_root_page &&
                          value->index == index_plan->node.index &&
                          value->index_root_page == index_plan->node.index_root_page &&
@@ -2413,6 +2413,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
               }
               const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
               return value != nullptr && value->core_index == node.core_index &&
+                     value->source == aggregate.source.id &&
                      value->source_kind == aggregate.source.source_kind &&
                      value->table == aggregate.source.table &&
                      value->root_page == aggregate.source.root_page &&
@@ -2420,7 +2421,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
             }
             const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
             if (value == nullptr || value->core_index != node.core_index ||
-                value->source_kind != node.source_kind || value->table != node.table) {
+                value->source != node.source || value->source_kind != node.source_kind ||
+                value->table != node.table) {
               return false;
             }
             const RootPageId expected_root =
@@ -2608,24 +2610,24 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
     return validated;
   }
   if (const auto* scan = std::get_if<PhysicalTableScanNode>(&leaf.payload); scan != nullptr) {
-    if (source.single_row || scan->source_kind != source.source_kind ||
+    if (source.single_row || scan->source != source.id || scan->source_kind != source.source_kind ||
         scan->table != source.table || scan->root_page != source.root_page ||
         scan->direction != PhysicalScanDirection::kForward) {
       return std::unexpected{InvariantFailure("physical table scan does not match logical source")};
     }
   } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf.payload);
              lookup != nullptr) {
-    if (!source.rowid_eligible || lookup->source_kind != source.source_kind ||
-        lookup->table != source.table || lookup->root_page != source.root_page ||
-        !IsValidExpressionId(bound_select, lookup->key) ||
+    if (!source.rowid_eligible || lookup->source != source.id ||
+        lookup->source_kind != source.source_kind || lookup->table != source.table ||
+        lookup->root_page != source.root_page || !IsValidExpressionId(bound_select, lookup->key) ||
         ExpressionDependsOnSource(bound_select, lookup->key)) {
       return std::unexpected{InvariantFailure("physical rowid lookup is invalid")};
     }
   } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
              index_scan != nullptr) {
     if (source.source_kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
-        index_scan->table != source.table || index_scan->table_root_page != source.root_page ||
-        bound_select.catalog() == nullptr ||
+        index_scan->source != source.id || index_scan->table != source.table ||
+        index_scan->table_root_page != source.root_page || bound_select.catalog() == nullptr ||
         index_scan->index.value >= bound_select.catalog()->indexes().size()) {
       return std::unexpected{InvariantFailure("physical index scan source is invalid")};
     }
@@ -2641,12 +2643,12 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
       const PhysicalIndexEquality& equality = index_scan->equalities[term_index];
       const CatalogIndexTerm& term = index.terms[term_index];
       const auto* column = std::get_if<ColumnId>(&term.target);
-      const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, 0U, bound_select.source_columns().size(), term,
-                               ReadPredicateTerm{
-                                   .predicate = equality.predicate,
-                                   .conjunct_position = equality.conjunct_position,
-                               });
+      const std::optional<IndexConstraintMatch> match = MatchIndexConstraint(
+          bound_select, source.id, 0U, bound_select.source_columns().size(), term,
+          ReadPredicateTerm{
+              .predicate = equality.predicate,
+              .conjunct_position = equality.conjunct_position,
+          });
       if (column == nullptr || equality.column != *column ||
           equality.affinity != table.columns[column->value].affinity ||
           !CatalogNamesEqual(equality.collation_name, term.collation_name) ||
@@ -2672,12 +2674,12 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
       }
       const auto validate_bound = [&](const PhysicalIndexBound& bound,
                                       IndexConstraintKind expected) {
-        const std::optional<IndexConstraintMatch> match =
-            MatchIndexConstraint(bound_select, 0U, bound_select.source_columns().size(), term,
-                                 ReadPredicateTerm{
-                                     .predicate = bound.predicate,
-                                     .conjunct_position = bound.conjunct_position,
-                                 });
+        const std::optional<IndexConstraintMatch> match = MatchIndexConstraint(
+            bound_select, source.id, 0U, bound_select.source_columns().size(), term,
+            ReadPredicateTerm{
+                .predicate = bound.predicate,
+                .conjunct_position = bound.conjunct_position,
+            });
         return match.has_value() && match->kind == expected && match->key == bound.key &&
                match->inclusive == bound.inclusive;
       };
@@ -2902,7 +2904,7 @@ class PhysicalPlanBuilder final {
         const CatalogSnapshot& catalog = *logical_plan.bound_select().catalog();
         for (const IndexId index_id : catalog.table_indexes(*source.table)) {
           std::optional<IndexCandidatePlan> candidate = AnalyzeIndexCandidate(
-              logical_plan.bound_select(), *source.table, 0U,
+              logical_plan.bound_select(), source.id, *source.table, 0U,
               logical_plan.bound_select().source_columns().size(), index_id, predicates.terms);
           if (!candidate.has_value()) {
             continue;
@@ -2988,6 +2990,7 @@ class PhysicalPlanBuilder final {
         impl->nodes.push_back(PhysicalNode{
             .payload =
                 PhysicalRowIdLookupNode{
+                    .source = source.id,
                     .source_kind = source.source_kind,
                     .table = source.table,
                     .root_page = source.root_page,
@@ -3001,6 +3004,7 @@ class PhysicalPlanBuilder final {
         impl->nodes.push_back(PhysicalNode{
             .payload =
                 PhysicalTableScanNode{
+                    .source = source.id,
                     .source_kind = source.source_kind,
                     .table = source.table,
                     .root_page = source.root_page,
@@ -3153,6 +3157,7 @@ class PhysicalPlanBuilder final {
                       rowid != nullptr) {
                     return PhysicalRowIdLookupNode{
                         .core_index = node.core_index,
+                        .source = aggregate.source.id,
                         .source_kind = aggregate.source.source_kind,
                         .table = aggregate.source.table,
                         .root_page = aggregate.source.root_page,
@@ -3169,6 +3174,7 @@ class PhysicalPlanBuilder final {
                 }
                 return PhysicalTableScanNode{
                     .core_index = node.core_index,
+                    .source = aggregate.source.id,
                     .source_kind = aggregate.source.source_kind,
                     .table = aggregate.source.table,
                     .root_page = aggregate.source.root_page,
@@ -3182,6 +3188,7 @@ class PhysicalPlanBuilder final {
               }
               return PhysicalTableScanNode{
                   .core_index = node.core_index,
+                  .source = node.source,
                   .source_kind = node.source_kind,
                   .table = node.table,
                   .root_page = root_page,

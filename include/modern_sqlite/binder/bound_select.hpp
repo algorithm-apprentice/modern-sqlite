@@ -41,6 +41,7 @@ class BoundId final {
 };
 
 struct BoundExpressionIdTag;
+struct BoundSourceIdTag;
 struct BoundSourceColumnIdTag;
 struct BoundParameterIdTag;
 struct BoundCollationIdTag;
@@ -49,6 +50,7 @@ struct BoundAggregateFunctionIdTag;
 struct BoundAggregateInvocationIdTag;
 
 using BoundExpressionId = BoundId<BoundExpressionIdTag>;
+using BoundSourceId = BoundId<BoundSourceIdTag>;
 using BoundSourceColumnId = BoundId<BoundSourceColumnIdTag>;
 using BoundParameterId = BoundId<BoundParameterIdTag>;
 using BoundCollationId = BoundId<BoundCollationIdTag>;
@@ -95,12 +97,15 @@ enum class BoundTruthHint : std::uint8_t {
 };
 
 struct BoundTableSource {
+  BoundSourceId id{0};
   BoundSourceKind kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   SourceSpan span{};
 };
 
 struct BoundSourceColumn {
+  BoundSourceId source{0};
+  bool rowid_alias = false;
   std::string_view name{};
   std::optional<std::string_view> declared_type{};
   TypeAffinity affinity = TypeAffinity::kNone;
@@ -152,7 +157,9 @@ struct BoundColumnExpression {
   BoundSourceColumnId column;
 };
 
-struct BoundRowIdExpression {};
+struct BoundRowIdExpression {
+  BoundSourceId source{0};
+};
 
 struct BoundParameterExpression {
   BoundParameterId parameter;
@@ -227,6 +234,18 @@ struct BoundExpression {
   BoundExpressionProperties properties{};
   BoundExpressionPayload payload;
 };
+
+struct BoundSourceLeafIdentity {
+  BoundSourceId source{0};
+  // An omitted column identifies this source's rowid.
+  std::optional<BoundSourceColumnId> column{};
+
+  [[nodiscard]] constexpr bool is_rowid() const noexcept { return !column.has_value(); }
+  constexpr auto operator<=>(const BoundSourceLeafIdentity&) const noexcept = default;
+};
+
+[[nodiscard]] std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
+    const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept;
 
 enum class BoundExpressionKind : std::uint8_t {
   kLiteral,

@@ -366,6 +366,7 @@ struct AdvancedOrderLayout {
     if (select.table_source.has_value()) {
       const auto* scan = std::get_if<LogicalScanNode>(&nodes[index].payload);
       if (scan == nullptr || scan->core_index != core_index ||
+          scan->source != select.table_source->id ||
           scan->source_kind != select.table_source->kind ||
           scan->table != select.table_source->table || !IsValidSource(*select.table_source)) {
         return std::unexpected{InvariantError("advanced logical scan does not match bound core")};
@@ -566,8 +567,8 @@ struct AdvancedOrderLayout {
       return std::unexpected{InvariantError("bound table source violates source-kind invariants")};
     }
     const auto* scan = std::get_if<LogicalScanNode>(&nodes[0].payload);
-    if (scan == nullptr || scan->core_index != 0U || scan->source_kind != source->kind ||
-        scan->table != source->table) {
+    if (scan == nullptr || scan->core_index != 0U || scan->source != source->id ||
+        scan->source_kind != source->kind || scan->table != source->table) {
       return std::unexpected{InvariantError("logical scan does not match the bound table source")};
     }
   }
@@ -702,6 +703,7 @@ class LogicalPlanBuilder final {
       impl->nodes.push_back(LogicalNode{
           .payload =
               LogicalScanNode{
+                  .source = source->id,
                   .source_kind = source->kind,
                   .table = source->table,
               },
@@ -839,6 +841,7 @@ class LogicalPlanBuilder final {
             .payload =
                 LogicalScanNode{
                     .core_index = core_index,
+                    .source = select.table_source->id,
                     .source_kind = select.table_source->kind,
                     .table = select.table_source->table,
                 },

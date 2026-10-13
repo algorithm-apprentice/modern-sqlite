@@ -41,6 +41,7 @@ struct LogicalSingleRowNode {
 
 struct LogicalScanNode {
   std::size_t core_index = 0;
+  BoundSourceId source{0};
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
 };

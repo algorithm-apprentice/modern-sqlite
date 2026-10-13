@@ -770,6 +770,54 @@ TEST(PhysicalPlan, PlansAggregateDistinctAndCompoundCores) {
             std::get<PhysicalAggregateNode>(second_aggregate->payload).strategy);
 }
 
+TEST(PhysicalPlan, PreservesOccurrenceIdentityAcrossAllAccessKinds) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "VALUES(0) UNION ALL SELECT id FROM Items "
+      "UNION ALL SELECT count() FROM Items WHERE rowid=?1 "
+      "UNION ALL SELECT min(Score) FROM Items",
+      IndexedCatalog());
+  const auto cores = plan.logical_plan().bound_select().query_cores();
+  std::size_t logical_sources = 0;
+  for (const LogicalNode& node : plan.logical_plan().nodes()) {
+    if (const auto* scan = std::get_if<LogicalScanNode>(&node.payload); scan != nullptr) {
+      const auto& core = std::get<BoundSelectCore>(cores[scan->core_index]);
+      ASSERT_TRUE(core.table_source.has_value());
+      EXPECT_EQ(core.table_source->id, scan->source);
+      EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(logical_sources++)}, scan->source);
+    }
+  }
+  EXPECT_EQ(3U, logical_sources);
+  std::size_t scans = 0;
+  std::size_t lookups = 0;
+  std::size_t indexes = 0;
+  for (const PhysicalNode& node : plan.nodes()) {
+    std::visit(
+        [&](const auto& access) {
+          using Access = std::decay_t<decltype(access)>;
+          if constexpr (std::is_same_v<Access, PhysicalTableScanNode> ||
+                        std::is_same_v<Access, PhysicalRowIdLookupNode> ||
+                        std::is_same_v<Access, PhysicalIndexScanNode>) {
+            const auto& core = std::get<BoundSelectCore>(cores[access.core_index]);
+            ASSERT_TRUE(core.table_source.has_value());
+            EXPECT_EQ(core.table_source->id, access.source);
+            EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(access.core_index - 1U)},
+                      access.source);
+            if constexpr (std::is_same_v<Access, PhysicalTableScanNode>) {
+              ++scans;
+            } else if constexpr (std::is_same_v<Access, PhysicalRowIdLookupNode>) {
+              ++lookups;
+            } else {
+              ++indexes;
+            }
+          }
+        },
+        node.payload);
+  }
+  EXPECT_EQ(1U, scans);
+  EXPECT_EQ(1U, lookups);
+  EXPECT_EQ(1U, indexes);
+}
+
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());
