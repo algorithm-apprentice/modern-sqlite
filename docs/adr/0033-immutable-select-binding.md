@@ -110,6 +110,7 @@ class BoundId final {
 };
 
 using BoundExpressionId = BoundId<struct BoundExpressionIdTag>;
+using BoundSourceId = BoundId<struct BoundSourceIdTag>;
 using BoundSourceColumnId = BoundId<struct BoundSourceColumnIdTag>;
 using BoundParameterId = BoundId<struct BoundParameterIdTag>;
 using BoundCollationId = BoundId<struct BoundCollationIdTag>;
@@ -205,12 +206,15 @@ enum class BoundSourceKind : std::uint8_t {
 };
 
 struct BoundTableSource {
+  BoundSourceId id{0};
   BoundSourceKind kind;
   std::optional<TableId> table;
   SourceSpan span;
 };
 
 struct BoundSourceColumn {
+  BoundSourceId source{0};
+  bool rowid_alias = false;
   std::string_view name;
   std::optional<std::string_view> declared_type;
   TypeAffinity affinity;
@@ -224,6 +228,12 @@ array. Catalog-backed columns retain their catalog `ColumnId`. Synthetic
 schema columns have no catalog column ID. A later logical plan can therefore
 distinguish physical catalog columns, schema-table fields, and hidden rowid
 without pointers into parser objects.
+
+ADR-0072 adds explicit statement-local occurrence ownership independently
+from catalog table IDs. Hidden rowid expressions retain their occurrence;
+INTEGER PRIMARY KEY aliases normalize through the shared binder-level source
+leaf identity. Constant-row and VALUES cores consume no occurrence. These
+contracts prepare joins without expanding the SQL surface in that foundation.
 
 Bound symbol tables own every downstream identity selected from the
 synchronous environment:

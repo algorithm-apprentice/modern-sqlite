@@ -170,6 +170,7 @@ The public payload variants are:
 struct LogicalSingleRowNode {};
 
 struct LogicalScanNode {
+  BoundSourceId source{0};
   BoundSourceKind source_kind;
   std::optional<TableId> table;
 };

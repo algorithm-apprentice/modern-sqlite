@@ -79,6 +79,7 @@ struct PhysicalEmptyNode {
 
 struct PhysicalTableScanNode {
   std::size_t core_index = 0;
+  BoundSourceId source{0};
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   RootPageId root_page{};
@@ -87,6 +88,7 @@ struct PhysicalTableScanNode {
 
 struct PhysicalRowIdLookupNode {
   std::size_t core_index = 0;
+  BoundSourceId source{0};
   BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
   std::optional<TableId> table{};
   RootPageId root_page{};
@@ -128,6 +130,7 @@ struct PhysicalIndexRange {
 
 struct PhysicalIndexScanNode {
   std::size_t core_index = 0;
+  BoundSourceId source{0};
   TableId table{};
   RootPageId table_root_page{};
   IndexId index{};

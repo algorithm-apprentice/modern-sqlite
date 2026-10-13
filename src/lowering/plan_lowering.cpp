@@ -1076,18 +1076,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  struct AggregateLeafIdentity {
-    bool rowid = false;
-    std::optional<BoundSourceColumnId> column{};
-
-    constexpr auto operator<=>(const AggregateLeafIdentity&) const noexcept = default;
-  };
-
-  void CollectAggregateRepresentativeLeaves(BoundExpressionId id,
-                                            std::vector<BoundExpressionId>* leaves,
-                                            std::vector<AggregateLeafIdentity>* identities) const {
+  void CollectAggregateRepresentativeLeaves(
+      BoundExpressionId id, std::vector<BoundExpressionId>* leaves,
+      std::vector<BoundSourceLeafIdentity>* identities) const {
     const BoundExpression& expression = expressions_[id.value()];
-    if (const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(id);
+    if (const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(id);
         identity.has_value()) {
       if (!std::ranges::contains(*identities, *identity)) {
         identities->push_back(*identity);
@@ -1177,7 +1170,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           UnsupportedFailure("grouped or DISTINCT aggregate lowering is not implemented"));
     }
     aggregate_program_ = &*aggregate_core_->aggregate;
-    std::vector<AggregateLeafIdentity> representative_identities;
+    std::vector<BoundSourceLeafIdentity> representative_identities;
     for (const BoundResultColumn& result : aggregate_core_->result_columns) {
       CollectAggregateRepresentativeLeaves(result.expression, &global_representative_leaves_,
                                            &representative_identities);
@@ -1726,31 +1719,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] bool IsAggregateRowIdAlias(BoundSourceColumnId column) const noexcept {
     if (aggregate_core_ == nullptr || !aggregate_core_->table_source.has_value() ||
-        aggregate_core_->table_source->kind != BoundSourceKind::kCatalogTable ||
-        !aggregate_core_->table_source->table.has_value() ||
         column.value() >= bound_select_->source_columns().size()) {
       return false;
     }
     const BoundSourceColumn& source = bound_select_->source_columns()[column.value()];
-    const CatalogTable& table =
-        bound_select_->catalog()->table(AssumeValue(aggregate_core_->table_source->table));
-    return source.catalog_column.has_value() && table.rowid_alias == source.catalog_column;
+    return source.source == aggregate_core_->table_source->id && source.rowid_alias;
   }
 
-  [[nodiscard]] std::optional<AggregateLeafIdentity> AggregateIdentity(
+  [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
       BoundExpressionId id) const noexcept {
-    const BoundExpression& expression = expressions_[id.value()];
-    if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
-        column != nullptr) {
-      if (IsAggregateRowIdAlias(column->column)) {
-        return AggregateLeafIdentity{.rowid = true, .column = std::nullopt};
-      }
-      return AggregateLeafIdentity{.rowid = false, .column = column->column};
-    }
-    if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
-      return AggregateLeafIdentity{.rowid = true, .column = std::nullopt};
-    }
-    return std::nullopt;
+    return BoundSourceLeafIdentityOf(expressions_[id.value()], bound_select_->source_columns());
   }
 
   [[nodiscard]] LoweringResult<void> BuildGroupedRetainedLeaves() {
@@ -1758,18 +1736,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("grouped aggregate program is unavailable"));
     }
     grouped_retained_leaves_ = aggregate_program_->source_leaves;
-    std::vector<AggregateLeafIdentity> identities;
+    std::vector<BoundSourceLeafIdentity> identities;
     identities.reserve(grouped_retained_leaves_.size() +
                        aggregate_program_->representative_leaves.size());
     for (const BoundExpressionId leaf : grouped_retained_leaves_) {
-      const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(leaf);
+      const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(leaf);
       if (!identity.has_value()) {
         return std::unexpected(InternalFailure("grouped source leaf is not a source identity"));
       }
       identities.push_back(*identity);
     }
     for (const BoundExpressionId leaf : aggregate_program_->representative_leaves) {
-      const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(leaf);
+      const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(leaf);
       if (!identity.has_value()) {
         return std::unexpected(
             InternalFailure("grouped representative leaf is not a source identity"));
@@ -1791,11 +1769,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     columns->assign(bound_select_->source_columns().size(), std::nullopt);
     rowid->reset();
     for (std::size_t index = 0; index < leaves.size(); ++index) {
-      const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(leaves[index]);
+      const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(leaves[index]);
       if (!identity.has_value()) {
         return std::unexpected(InternalFailure("grouped retained leaf identity is invalid"));
       }
-      if (identity->rowid) {
+      if (identity->is_rowid()) {
         *rowid = registers[index];
       } else if (!identity->column.has_value() || identity->column->value() >= columns->size()) {
         return std::unexpected(InternalFailure("grouped retained column identity is invalid"));
@@ -2561,7 +2539,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     SetStreamingAggregateCoreBasics(*core);
     if (select->aggregate->group_by.empty()) {
       core->global_representative_leaves.clear();
-      std::vector<AggregateLeafIdentity> identities;
+      std::vector<BoundSourceLeafIdentity> identities;
       for (const BoundResultColumn& result : select->result_columns) {
         CollectAggregateRepresentativeLeaves(result.expression, &core->global_representative_leaves,
                                              &identities);
@@ -3267,6 +3245,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> AddStreamingCursorDescriptor(StreamingCorePlan& core,
                                                                   const BoundSelectCore& select) {
     if (core.table_scan == nullptr || !select.table_source.has_value() ||
+        core.table_scan->source != select.table_source->id ||
         select.source_column_begin > bound_select_->source_columns().size() ||
         select.source_column_count >
             bound_select_->source_columns().size() - select.source_column_begin) {
@@ -3274,6 +3253,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const std::span<const BoundSourceColumn> columns = bound_select_->source_columns().subspan(
         select.source_column_begin, select.source_column_count);
+    if (std::ranges::any_of(columns, [&](const BoundSourceColumn& column) {
+          return column.source != core.table_scan->source;
+        })) {
+      return std::unexpected(InternalFailure("streaming source column ownership is invalid"));
+    }
     ReadCursorDescriptor descriptor{
         .root_page = RootPageNumber(core.table_scan->root_page.value),
         .storage = CursorStorageKind::kRowIdTable,
@@ -3740,6 +3724,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const std::span<const BoundSourceColumn> active_columns =
         bound_select_->source_columns().subspan(active_source_column_begin_,
                                                 active_source_column_count_);
+    const std::optional<BoundSourceId> source_id =
+        table_scan_ != nullptr     ? std::optional{table_scan_->source}
+        : rowid_lookup_ != nullptr ? std::optional{rowid_lookup_->source}
+        : index_scan_ != nullptr   ? std::optional{index_scan_->source}
+                                   : std::nullopt;
+    if (!source_id.has_value()) {
+      return std::unexpected(InternalFailure("cursor access has no source identity"));
+    }
+    const BoundSourceId owner = *source_id;
+    if (std::ranges::any_of(active_columns, [owner](const BoundSourceColumn& column) {
+          return column.source != owner;
+        })) {
+      return std::unexpected(
+          InternalFailure("cursor source ownership does not match bound columns"));
+    }
 
     if (index_scan_ != nullptr) {
       const CatalogSnapshot& catalog = *bound_select_->catalog();

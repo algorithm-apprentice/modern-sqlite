@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <limits>
 #include <memory>
@@ -83,13 +84,6 @@ struct PendingAggregateInvocation {
   BoundExpressionId expression;
   BoundAggregateInvocation invocation;
   AggregateOccurrencePhase phase = AggregateOccurrencePhase::kResult;
-};
-
-struct AggregateLeafIdentity {
-  bool rowid = false;
-  std::optional<BoundSourceColumnId> column{};
-
-  constexpr auto operator<=>(const AggregateLeafIdentity&) const noexcept = default;
 };
 
 struct DecodedNamePart {
@@ -1411,6 +1405,8 @@ class StatementBinder final {
     impl_->source_columns.reserve(target.columns.size());
     for (const BoundMutationColumn& column : target.columns) {
       impl_->source_columns.push_back(BoundSourceColumn{
+          .source = impl_->table_source->id,
+          .rowid_alias = target.rowid_alias == column.column,
           .name = column.name,
           .declared_type = column.declared_type,
           .affinity = column.affinity,
@@ -1650,31 +1646,16 @@ class StatementBinder final {
   [[nodiscard]] bool IsActiveRowIdAlias(BoundSourceColumnId column) const noexcept {
     const std::size_t index = column.value();
     if (index < active_source_begin_ || index - active_source_begin_ >= active_source_count_ ||
-        !impl_->table_source.has_value() ||
-        impl_->table_source->kind != BoundSourceKind::kCatalogTable ||
-        !impl_->table_source->table.has_value()) {
+        !impl_->table_source.has_value()) {
       return false;
     }
     const BoundSourceColumn& source = impl_->source_columns[index];
-    const CatalogTable& table = catalog_->table(*impl_->table_source->table);
-    return source.catalog_column.has_value() && table.rowid_alias == source.catalog_column;
+    return source.source == impl_->table_source->id && source.rowid_alias;
   }
 
-  [[nodiscard]] std::optional<AggregateLeafIdentity> AggregateIdentity(
+  [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
       BoundExpressionId id) const noexcept {
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
-        column != nullptr) {
-      const bool rowid = IsActiveRowIdAlias(column->column);
-      return AggregateLeafIdentity{
-          .rowid = rowid,
-          .column = rowid ? std::nullopt : std::optional<BoundSourceColumnId>{column->column},
-      };
-    }
-    if (std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
-      return AggregateLeafIdentity{.rowid = true, .column = std::nullopt};
-    }
-    return std::nullopt;
+    return BoundSourceLeafIdentityOf(impl_->expressions[id.value()], impl_->source_columns);
   }
 
   [[nodiscard]] bool AggregateInvocationsEquivalent(const BoundAggregateInvocation& left,
@@ -1847,9 +1828,9 @@ class StatementBinder final {
   }
 
   void CollectAggregateLeaves(BoundExpressionId id, std::vector<BoundExpressionId>& leaves,
-                              std::vector<AggregateLeafIdentity>& identities) const {
+                              std::vector<BoundSourceLeafIdentity>& identities) const {
     const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const std::optional<AggregateLeafIdentity> identity = AggregateIdentity(id);
+    if (const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(id);
         identity.has_value()) {
       if (!std::ranges::contains(identities, *identity)) {
         identities.push_back(*identity);
@@ -1905,8 +1886,8 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> AnalyzeAggregateLeaves(BoundAggregateProgram& program) {
-    std::vector<AggregateLeafIdentity> source_identities;
-    std::vector<AggregateLeafIdentity> representative_identities;
+    std::vector<BoundSourceLeafIdentity> source_identities;
+    std::vector<BoundSourceLeafIdentity> representative_identities;
     for (const BoundGroupingTerm& term : program.group_by) {
       CollectAggregateLeaves(term.expression, program.source_leaves, source_identities);
     }
@@ -1939,8 +1920,8 @@ class StatementBinder final {
                              representative_identities);
     }
 
-    std::vector<AggregateLeafIdentity> retained = source_identities;
-    for (const AggregateLeafIdentity& identity : representative_identities) {
+    std::vector<BoundSourceLeafIdentity> retained = source_identities;
+    for (const BoundSourceLeafIdentity& identity : representative_identities) {
       if (!std::ranges::contains(retained, identity)) {
         retained.push_back(identity);
       }
@@ -2918,6 +2899,14 @@ class StatementBinder final {
     return {};
   }
 
+  [[nodiscard]] BindExpected<BoundSourceId> AllocateSourceId(SourceSpan span) {
+    if (next_source_id_ == std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInternalInvariant, span, "bound source ID overflow"));
+    }
+    return BoundSourceId{next_source_id_++};
+  }
+
   [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select) {
     if (!select.from.has_value()) {
       return {};
@@ -2941,6 +2930,10 @@ class StatementBinder final {
 
     const std::string_view requested_name = parts->back();
     if (IsSchemaTableName(requested_name)) {
+      auto source_id = AllocateSourceId(select.from->span);
+      if (!source_id.has_value()) {
+        return std::unexpected(std::move(source_id.error()));
+      }
       source_state_ = SourceState{
           .name = "sqlite_schema",
           .alias = std::move(alias),
@@ -2948,6 +2941,7 @@ class StatementBinder final {
           .schema_table = true,
       };
       impl_->table_source = BoundTableSource{
+          .id = *source_id,
           .kind = BoundSourceKind::kSchemaTable,
           .table = std::nullopt,
           .span = select.from->span,
@@ -2955,6 +2949,7 @@ class StatementBinder final {
       impl_->source_columns.reserve(impl_->source_columns.size() + kSchemaColumns.size());
       for (const SchemaColumnDefinition& column : kSchemaColumns) {
         impl_->source_columns.push_back(BoundSourceColumn{
+            .source = *source_id,
             .name = column.name,
             .declared_type = column.declared_type,
             .affinity = column.affinity,
@@ -2970,6 +2965,10 @@ class StatementBinder final {
     if (!table_id.has_value()) {
       return NoSuchTable(select.from->name.span);
     }
+    auto source_id = AllocateSourceId(select.from->span);
+    if (!source_id.has_value()) {
+      return std::unexpected(std::move(source_id.error()));
+    }
     const CatalogTable& table = catalog_->table(*table_id);
     source_state_ = SourceState{
         .name = table.name,
@@ -2978,6 +2977,7 @@ class StatementBinder final {
         .schema_table = false,
     };
     impl_->table_source = BoundTableSource{
+        .id = *source_id,
         .kind = BoundSourceKind::kCatalogTable,
         .table = *table_id,
         .span = select.from->span,
@@ -2986,6 +2986,8 @@ class StatementBinder final {
     for (std::size_t index = 0; index < table.columns.size(); ++index) {
       const CatalogColumn& column = table.columns[index];
       impl_->source_columns.push_back(BoundSourceColumn{
+          .source = *source_id,
+          .rowid_alias = table.rowid_alias == ColumnId{index},
           .name = column.name,
           .declared_type = column.declared_type.has_value()
                                ? std::optional<std::string_view>{*column.declared_type}
@@ -3323,8 +3325,8 @@ class StatementBinder final {
         alias != nullptr) {
       return BoundSemanticallyEquivalent(left_id, alias->target);
     }
-    const std::optional<AggregateLeafIdentity> left_identity = AggregateIdentity(left_id);
-    const std::optional<AggregateLeafIdentity> right_identity = AggregateIdentity(right_id);
+    const std::optional<BoundSourceLeafIdentity> left_identity = AggregateIdentity(left_id);
+    const std::optional<BoundSourceLeafIdentity> right_identity = AggregateIdentity(right_id);
     if (left_identity.has_value() || right_identity.has_value()) {
       return left_identity.has_value() && right_identity.has_value() &&
              *left_identity == *right_identity;
@@ -4020,7 +4022,11 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindRowId(SourceSpan span) {
-    return AppendExpression(span, BoundRowIdExpression{},
+    if (!impl_->table_source.has_value()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInternalInvariant, span, "rowid has no bound source"));
+    }
+    return AppendExpression(span, BoundRowIdExpression{.source = impl_->table_source->id},
                             ExpressionProperties{
                                 .affinity = TypeAffinity::kInteger,
                                 .collation = std::nullopt,
@@ -4862,6 +4868,7 @@ class StatementBinder final {
   std::vector<AliasEntry> aliases_;
   std::size_t active_source_begin_ = 0;
   std::size_t active_source_count_ = 0;
+  std::uint32_t next_source_id_ = 0;
   AggregateOccurrencePhase active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
   bool active_core_is_aggregate_ = false;
   std::vector<BoundGroupingTerm> active_group_by_;
@@ -4872,6 +4879,27 @@ class StatementBinder final {
 };
 
 }  // namespace binder_detail
+
+std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
+    const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept {
+  if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
+      column != nullptr) {
+    if (column->column.value() >= source_columns.size()) {
+      std::terminate();
+    }
+    const BoundSourceColumn& source = source_columns[column->column.value()];
+    return BoundSourceLeafIdentity{
+        .source = source.source,
+        .column =
+            source.rowid_alias ? std::nullopt : std::optional<BoundSourceColumnId>{column->column},
+    };
+  }
+  if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
+      rowid != nullptr) {
+    return BoundSourceLeafIdentity{.source = rowid->source};
+  }
+  return std::nullopt;
+}
 
 BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept {
   return static_cast<BoundExpressionKind>(expression.payload.index());
