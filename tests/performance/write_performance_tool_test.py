@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+import io
 import json
 import pathlib
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from copy import deepcopy
-import hashlib
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -18,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools import write_performance
+from tests.performance import write_benchmark_cli_test
 
 
 CASES = (
@@ -1446,6 +1451,96 @@ class WritePerformanceToolTest(unittest.TestCase):
         completed = self.run_tool(None)
         self.assertEqual(1, completed.returncode)
         self.assertIn("workload manifest does not exist", completed.stderr)
+
+
+class WriteCliSchedulingTest(unittest.TestCase):
+    arguments = [
+        "--binary", "timing",
+        "--diagnostic-binary", "diagnostic",
+        "--schema-fixture", "schema.db",
+        "--populated-fixture", "populated.db",
+        "--workloads", "workloads.json",
+    ]
+
+    def test_default_preserves_the_complete_suite(self) -> None:
+        parsed = write_benchmark_cli_test.parse_arguments(self.arguments)
+        self.assertEqual("all", parsed.suite)
+        self.assertIsNone(parsed.engine)
+        self.assertIsNone(parsed.profile)
+        self.assertIsNone(parsed.case)
+
+    def test_diagnostic_selection_requires_one_complete_child(self) -> None:
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                write_benchmark_cli_test.parse_arguments(
+                    self.arguments + ["--suite", "diagnostic"]
+                )
+        parsed = write_benchmark_cli_test.parse_arguments(self.arguments + [
+            "--suite", "diagnostic", "--engine", "modern",
+            "--profile", "matched-durable", "--case", "insert-point-implicit",
+        ])
+        self.assertEqual(("modern", "matched-durable", "insert-point-implicit"),
+                         (parsed.engine, parsed.profile, parsed.case))
+
+    def test_selected_children_are_not_silently_accepted_in_smoke_mode(self) -> None:
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                write_benchmark_cli_test.parse_arguments(
+                    self.arguments + ["--suite", "smoke", "--engine", "modern"]
+                )
+
+    def test_child_progress_identifies_the_running_combination(self) -> None:
+        case = write_benchmark_cli_test.WriteBenchmarkCliTest(
+            "test_diagnostic_matrix_has_strict_engine_specific_counters"
+        )
+        case.arguments = argparse.Namespace(diagnostic_binary=pathlib.Path("diagnostic"))
+        case.workloads = {}
+        result = object()
+        progress = io.StringIO()
+        with mock.patch.object(write_performance, "run_diagnostic_child", return_value=result), \
+                redirect_stderr(progress):
+            actual = case.run_validated_diagnostic(
+                "modern", "matched-durable", "insert-point-implicit",
+                pathlib.Path("fixture.db"), pathlib.Path("scratch"),
+            )
+        self.assertIs(result, actual)
+        self.assertIn("start phase=diagnostic engine=modern profile=matched-durable "
+                      "case=insert-point-implicit", progress.getvalue())
+        self.assertIn("done phase=diagnostic engine=modern profile=matched-durable "
+                      "case=insert-point-implicit", progress.getvalue())
+
+    def test_child_failure_does_not_print_successful_completion(self) -> None:
+        case = write_benchmark_cli_test.WriteBenchmarkCliTest(
+            "test_diagnostic_matrix_has_strict_engine_specific_counters"
+        )
+        case.arguments = argparse.Namespace(diagnostic_binary=pathlib.Path("diagnostic"))
+        case.workloads = {}
+        progress = io.StringIO()
+        with mock.patch.object(write_performance, "run_diagnostic_child",
+                               side_effect=write_performance.HarnessError("injected child failure")), \
+                redirect_stderr(progress):
+            with self.assertRaisesRegex(write_performance.HarnessError, "injected child failure"):
+                case.run_validated_diagnostic(
+                    "sqlite", "engine-default", "mixed-batch-commit",
+                    pathlib.Path("fixture.db"), pathlib.Path("scratch"),
+                )
+        self.assertIn("start phase=diagnostic engine=sqlite profile=engine-default "
+                      "case=mixed-batch-commit", progress.getvalue())
+        self.assertNotIn("done ", progress.getvalue())
+
+    def test_unknown_child_case_fails_before_running_work(self) -> None:
+        arguments = write_benchmark_cli_test.parse_arguments(self.arguments + [
+            "--suite", "diagnostic", "--engine", "modern",
+            "--profile", "matched-durable", "--case", "unknown-case",
+        ])
+        cls = write_benchmark_cli_test.WriteBenchmarkCliTest
+        with mock.patch.object(write_benchmark_cli_test, "_COMMAND_LINE_ARGUMENTS", arguments), \
+                mock.patch.object(cls, "arguments", None, create=True), \
+                mock.patch.object(cls, "workloads", None, create=True), \
+                mock.patch.object(write_performance, "load_and_validate_workloads",
+                                  return_value={"cases": [{"id": "insert-point-implicit"}]}):
+            with self.assertRaisesRegex(write_performance.HarnessError, "unknown diagnostic child"):
+                cls.setUpClass()
 
 
 if __name__ == "__main__":

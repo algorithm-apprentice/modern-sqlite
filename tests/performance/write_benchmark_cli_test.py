@@ -8,7 +8,10 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -21,14 +24,37 @@ from tools import write_performance
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=pathlib.Path, required=True)
     parser.add_argument("--diagnostic-binary", type=pathlib.Path, required=True)
     parser.add_argument("--schema-fixture", type=pathlib.Path, required=True)
     parser.add_argument("--populated-fixture", type=pathlib.Path, required=True)
     parser.add_argument("--workloads", type=pathlib.Path, required=True)
-    return parser.parse_args()
+    parser.add_argument("--suite", choices=("all", "smoke", "diagnostic"), default="all")
+    parser.add_argument("--engine", choices=("modern", "sqlite"))
+    parser.add_argument("--profile", choices=("engine-default", "matched-durable"))
+    parser.add_argument("--case")
+    arguments = parser.parse_args(argv)
+    selections = (arguments.engine, arguments.profile, arguments.case)
+    if arguments.suite == "diagnostic" and not all(selections):
+        parser.error("diagnostic suite requires --engine, --profile, and --case")
+    if arguments.suite != "diagnostic" and any(value is not None for value in selections):
+        parser.error("diagnostic child selectors require --suite diagnostic")
+    return arguments
+
+
+@contextmanager
+def child_progress(phase: str, engine: str, profile: str, case: str) -> Iterator[None]:
+    label = f"phase={phase} engine={engine} profile={profile} case={case}"
+    print(f"write-contract start {label}", file=sys.stderr, flush=True)
+    started = time.monotonic()
+    yield
+    print(
+        f"write-contract done {label} elapsed_seconds={time.monotonic() - started:.3f}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class WriteBenchmarkCliTest(unittest.TestCase):
@@ -40,6 +66,12 @@ class WriteBenchmarkCliTest(unittest.TestCase):
         cls.workloads = write_performance.load_and_validate_workloads(
             cls.arguments.workloads
         )
+        if cls.arguments.case is not None and cls.arguments.case not in {
+            case["id"] for case in cls.workloads["cases"]
+        }:
+            raise write_performance.HarnessError(
+                f"unknown diagnostic child case: {cls.arguments.case}"
+            )
 
     def fixture_for(self, case: str, zero_fixture: pathlib.Path) -> pathlib.Path:
         if case == "create-table-implicit":
@@ -103,17 +135,18 @@ class WriteBenchmarkCliTest(unittest.TestCase):
         fixture: pathlib.Path,
         scratch: pathlib.Path,
     ) -> write_performance.TimingChildResult:
-        return write_performance.run_timing_child(
-            binary_path=self.arguments.binary.resolve(),
-            repository_root=REPOSITORY_ROOT,
-            workload_manifest=self.workloads,
-            engine=engine,
-            profile=profile,
-            case_id=case,
-            fixture_path=fixture.resolve(),
-            scratch_path=scratch.resolve(),
-            run_kind="smoke",
-        )
+        with child_progress("smoke", engine, profile, case):
+            return write_performance.run_timing_child(
+                binary_path=self.arguments.binary.resolve(),
+                repository_root=REPOSITORY_ROOT,
+                workload_manifest=self.workloads,
+                engine=engine,
+                profile=profile,
+                case_id=case,
+                fixture_path=fixture.resolve(),
+                scratch_path=scratch.resolve(),
+                run_kind="smoke",
+            )
 
     def run_validated_diagnostic(
         self,
@@ -123,16 +156,17 @@ class WriteBenchmarkCliTest(unittest.TestCase):
         fixture: pathlib.Path,
         scratch: pathlib.Path,
     ) -> write_performance.DiagnosticChildResult:
-        return write_performance.run_diagnostic_child(
-            binary_path=self.arguments.diagnostic_binary.resolve(),
-            repository_root=REPOSITORY_ROOT,
-            workload_manifest=self.workloads,
-            engine=engine,
-            profile=profile,
-            case_id=case,
-            fixture_path=fixture.resolve(),
-            scratch_path=scratch.resolve(),
-        )
+        with child_progress("diagnostic", engine, profile, case):
+            return write_performance.run_diagnostic_child(
+                binary_path=self.arguments.diagnostic_binary.resolve(),
+                repository_root=REPOSITORY_ROOT,
+                workload_manifest=self.workloads,
+                engine=engine,
+                profile=profile,
+                case_id=case,
+                fixture_path=fixture.resolve(),
+                scratch_path=scratch.resolve(),
+            )
 
     def assert_work(
         self,
@@ -284,13 +318,29 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                 self.assertEqual(before, path.read_bytes())
 
     def test_diagnostic_matrix_has_strict_engine_specific_counters(self) -> None:
+        if self.arguments.suite == "smoke":
+            self.skipTest("full diagnostics are covered by independent CTest children")
+        profiles = (
+            (self.arguments.profile,)
+            if self.arguments.profile is not None
+            else ("engine-default", "matched-durable")
+        )
+        engines = (
+            (self.arguments.engine,)
+            if self.arguments.engine is not None
+            else ("modern", "sqlite")
+        )
+        cases = [
+            case for case in self.workloads["cases"]
+            if self.arguments.case is None or case["id"] == self.arguments.case
+        ]
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             zero_fixture = root / "zero.db"
             zero_fixture.write_bytes(b"")
-            for profile in ("engine-default", "matched-durable"):
-                for case in self.workloads["cases"]:
-                    for engine in ("modern", "sqlite"):
+            for profile in profiles:
+                for case in cases:
+                    for engine in engines:
                         scratch = root / f"{profile}-{case['id']}-{engine}"
                         scratch.mkdir()
                         with self.subTest(
@@ -465,4 +515,9 @@ class WriteBenchmarkCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     _COMMAND_LINE_ARGUMENTS = parse_arguments()
-    unittest.main(argv=[__file__])
+    tests = [__file__]
+    if _COMMAND_LINE_ARGUMENTS.suite == "diagnostic":
+        tests.append(
+            "WriteBenchmarkCliTest.test_diagnostic_matrix_has_strict_engine_specific_counters"
+        )
+    unittest.main(argv=tests)

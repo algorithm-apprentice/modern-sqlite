@@ -1512,6 +1512,7 @@ if(TARGET modern_sqlite_read_benchmark AND
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
       --workloads
         "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+      --suite smoke
   )
   set_tests_properties(
     performance.write_benchmark_cli
@@ -1520,6 +1521,40 @@ if(TARGET modern_sqlite_read_benchmark AND
       TIMEOUT 180
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
+  file(READ "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json" write_workloads_json)
+  string(JSON write_case_count LENGTH "${write_workloads_json}" cases)
+  math(EXPR write_last_case "${write_case_count} - 1")
+  foreach(write_engine IN ITEMS modern sqlite)
+    foreach(write_profile IN ITEMS engine-default matched-durable)
+      string(REPLACE "-" "_" write_profile_id "${write_profile}")
+      foreach(write_case_index RANGE 0 ${write_last_case})
+        string(JSON write_case GET "${write_workloads_json}" cases ${write_case_index} id)
+        string(REPLACE "-" "_" write_case_id "${write_case}")
+        set(write_diagnostic_test
+          "performance.write_benchmark_diagnostic_${write_engine}_${write_profile_id}_${write_case_id}"
+        )
+        add_test(
+          NAME "${write_diagnostic_test}"
+          COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/performance/write_benchmark_cli_test.py"
+            --binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_benchmark"
+            --diagnostic-binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_diagnostics"
+            --schema-fixture "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
+            --populated-fixture "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
+            --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+            --suite diagnostic
+            --engine "${write_engine}"
+            --profile "${write_profile}"
+            --case "${write_case}"
+        )
+        set_tests_properties(
+          "${write_diagnostic_test}"
+          PROPERTIES LABELS performance TIMEOUT 630 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+      endforeach()
+    endforeach()
+  endforeach()
   add_test(
     NAME performance.read_fixture_regeneration
     COMMAND
