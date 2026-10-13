@@ -372,6 +372,53 @@ int main() try {
     }
   }
 
+  constexpr std::string_view kJoinedPrepareSql =
+      "SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
+      "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3";
+  const std::string joined_path = ReadCompatibilityFixturePath().string();
+  std::size_t joined_prepare_allocations = 0;
+  {
+    auto session = ReadSession::Open(joined_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto prepared = session->Prepare(Utf8View{kJoinedPrepareSql});
+    if (!prepared.has_value() || !prepared->statement.has_value()) {
+      return 1;
+    }
+    joined_prepare_allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < joined_prepare_allocations; ++failure) {
+    const auto locks = std::make_shared<LockTrackingState>();
+    auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
+    if (!session.has_value()) {
+      return 1;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto prepared = session->Prepare(Utf8View{kJoinedPrepareSql});
+      returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
+    } catch (...) {
+      inject_failure = false;
+      return 1;
+    }
+    inject_failure = false;
+    if (!returned_oom || locks->shared_lock_held) {
+      return 1;
+    }
+    const auto recovered = session->Prepare(Utf8View{kJoinedPrepareSql});
+    if (!recovered.has_value() || !recovered->statement.has_value()) {
+      return 1;
+    }
+  }
+
   constexpr std::string_view kAggregateSyntax =
       "SELECT abs(1 ORDER BY 2) FILTER (WHERE 1) GROUP BY 1 HAVING 1";
   std::size_t aggregate_prepare_allocations = 0;
@@ -718,13 +765,17 @@ int main() try {
     }
   }
 
-  constexpr std::array<std::string_view, 2> kAggregateCompoundSqls{
+  constexpr std::array<std::string_view, 4> kTemporaryConsumerSqls{
       "SELECT count() FROM model_rows WHERE id<=?1 "
       "UNION ALL SELECT sum(id) FROM model_rows WHERE id<=?2 ORDER BY 1",
       "SELECT count(value) FROM model_rows WHERE id<=?1 GROUP BY id "
       "UNION SELECT sum(id) FROM model_rows WHERE id<=?2 LIMIT 1",
+      "SELECT a.label||b.label FROM model_rows a CROSS JOIN model_rows b "
+      "WHERE a.id<=?1/8 AND b.id<=?2/8 ORDER BY 1",
+      "SELECT b.label FROM model_rows a,model_rows b WHERE a.id=1 AND b.id>=?1 "
+      "UNION SELECT ?2 LIMIT 1",
   };
-  for (const std::string_view sql : kAggregateCompoundSqls) {
+  for (const std::string_view sql : kTemporaryConsumerSqls) {
     std::size_t aggregate_compound_allocations = 0;
     {
       auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);

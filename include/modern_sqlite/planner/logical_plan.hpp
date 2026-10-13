@@ -150,11 +150,18 @@ struct LogicalHavingNode {
   BoundExpressionId predicate;
 };
 
+struct LogicalJoinNode {
+  LogicalNodeId left;
+  LogicalNodeId right;
+  std::size_t core_index = 0;
+  SourceJoinKind join = SourceJoinKind::kCross;
+};
+
 using LogicalNodePayload =
     std::variant<LogicalSingleRowNode, LogicalScanNode, LogicalFilterNode, LogicalLimitNode,
                  LogicalProjectionNode, LogicalOrderNode, LogicalOutputNode, LogicalValuesNode,
                  LogicalDistinctNode, LogicalCompoundNode, LogicalAdvancedOrderNode,
-                 LogicalAggregateNode, LogicalHavingNode>;
+                 LogicalAggregateNode, LogicalHavingNode, LogicalJoinNode>;
 
 struct LogicalNode {
   LogicalNodePayload payload;
@@ -174,6 +181,7 @@ enum class LogicalNodeKind : std::uint8_t {
   kAdvancedOrder,
   kAggregate,
   kHaving,
+  kJoin,
 };
 
 [[nodiscard]] LogicalNodeKind LogicalNodeKindOf(const LogicalNode& node) noexcept;

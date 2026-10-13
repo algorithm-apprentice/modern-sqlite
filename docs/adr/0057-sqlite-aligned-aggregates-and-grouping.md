@@ -216,6 +216,10 @@ ordered and grouped demand-one compounds with post-reset recovery. Public
 session tests additionally force compound spill, require the two-file ceiling,
 and prove cleanup on early stop, reset, and injected write failure.
 
+ADR-0073's later canonical source-to-cursor map adds one source-backed lowering
+allocation; the current exact budgets are 79 and 85. The package-14 counts
+above remain its historical evidence, not the amended current budget.
+
 ### 2. Pin the accepted SQL surface
 
 Ordinary SELECT cores gain:

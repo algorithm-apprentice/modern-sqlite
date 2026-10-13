@@ -312,7 +312,7 @@ int main() try {
                       "SELECT Payload, Name FROM Items WHERE Name=?1 "
                       "ORDER BY id DESC LIMIT ?2 OFFSET ?3"),
   };
-  constexpr std::array<std::size_t, 8> kExpectedAllocations{17U, 28U, 27U, 34U, 34U, 39U, 46U, 59U};
+  constexpr std::array<std::size_t, 8> kExpectedAllocations{17U, 29U, 28U, 35U, 35U, 40U, 47U, 60U};
   std::unique_ptr<BytecodeProgram> published;
   for (std::size_t plan_index = 0; plan_index < physical_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -325,6 +325,8 @@ int main() try {
       }
       const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
       if (allocations != kExpectedAllocations[plan_index]) {
+        std::fprintf(stderr, "read plan %zu expected %zu allocations, got %zu\n", plan_index,
+                     kExpectedAllocations[plan_index], allocations);
         return 1;
       }
     }
@@ -337,7 +339,7 @@ int main() try {
       PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
       PhysicalFixture(indexed_catalog, "SELECT Payload,min(Name) FROM Items"),
   };
-  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{42U, 38U, 47U, 52U, 58U};
+  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{43U, 39U, 48U, 53U, 59U};
   std::unique_ptr<BytecodeProgram> aggregate_published;
   for (std::size_t plan_index = 0; plan_index < aggregate_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -366,7 +368,7 @@ int main() try {
                       "SELECT Name||'',count(),min(id) FROM Items "
                       "GROUP BY Name||'' ORDER BY count() DESC LIMIT ?1"),
   };
-  constexpr std::array<std::size_t, 2> kExpectedGroupedAllocations{57U, 73U};
+  constexpr std::array<std::size_t, 2> kExpectedGroupedAllocations{58U, 74U};
   std::unique_ptr<BytecodeProgram> grouped_published;
   for (std::size_t plan_index = 0; plan_index < grouped_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -399,7 +401,7 @@ int main() try {
                       "count(DISTINCT id) FILTER (WHERE id>?1) "
                       "FROM Items GROUP BY Name||'' ORDER BY 1"),
   };
-  constexpr std::array<std::size_t, 3> kExpectedModifierAllocations{56U, 65U, 77U};
+  constexpr std::array<std::size_t, 3> kExpectedModifierAllocations{57U, 66U, 78U};
   std::unique_ptr<BytecodeProgram> modifier_published;
   for (std::size_t plan_index = 0; plan_index < modifier_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -425,7 +427,7 @@ int main() try {
       PhysicalFixture(catalog,
                       "SELECT count() FROM Items UNION ALL SELECT sum(id) FROM Items ORDER BY 1"),
   };
-  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{78U, 84U};
+  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{79U, 85U};
   for (std::size_t plan_index = 0; plan_index < aggregate_integration_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
       allocation_count.store(0, std::memory_order_relaxed);

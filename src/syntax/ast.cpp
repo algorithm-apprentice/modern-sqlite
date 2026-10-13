@@ -644,15 +644,37 @@ class Validator final {
       previous_end = column.span.end();
     }
     ByteOffset clause_end = previous_end;
-    if (core.from.has_value()) {
-      const Status source_status = ValidateTableSource(*core.from, core.span);
+    if (core.from.size() > kMaximumSelectSources) {
+      return Misuse("select source count exceeds the join limit");
+    }
+    for (std::size_t index = 0; index < core.from.size(); ++index) {
+      const TableSource& source = core.from[index];
+      const Status source_status = ValidateTableSource(source, core.span);
       if (!source_status.has_value()) {
         return source_status;
       }
-      if (core.from->span.begin() < clause_end) {
+      if (source.span.begin() < clause_end) {
         return Misuse("select FROM clause is out of order");
       }
-      clause_end = core.from->span.end();
+      if (index == 0U) {
+        if (source.join != SourceJoinKind::kFirst || source.join_span.has_value()) {
+          return Misuse("first select source has a join operator");
+        }
+      } else {
+        if ((source.join != SourceJoinKind::kComma && source.join != SourceJoinKind::kCross) ||
+            !source.join_span.has_value()) {
+          return Misuse("joined select source has an invalid operator");
+        }
+        const Status joined_span = ValidateContainedSpan(*source.join_span, core.span);
+        if (!joined_span.has_value()) {
+          return joined_span;
+        }
+        if (source.join_span->empty() || source.join_span->begin() < clause_end ||
+            source.join_span->end() > source.span.begin()) {
+          return Misuse("select join operator is out of order");
+        }
+      }
+      clause_end = source.span.end();
     }
     if (core.where.has_value()) {
       const Status where_status = ReferenceExpression(*core.where, core.span, std::nullopt);

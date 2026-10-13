@@ -55,7 +55,9 @@ The initial parser and binder intentionally supported only:
 ADR-0054, ADR-0056, and ADR-0061 subsequently append ordering,
 VALUES/compound, and aggregate/HAVING nodes to the same immutable arena.
 Those extensions preserve this ownership boundary; joins, subqueries, and
-windows remain deferred. The logical plan must not pre-design statistics,
+windows remain deferred until their child ADRs. ADR-0073 adds left-associated
+comma/CROSS product nodes over the existing source scans, preserving this
+postorder arena and its semantic-only ownership. The logical plan must not pre-design statistics,
 physical cursors, registers, or bytecode control flow.
 
 ### Observable evaluation order

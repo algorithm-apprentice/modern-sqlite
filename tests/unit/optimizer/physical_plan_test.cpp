@@ -781,8 +781,8 @@ TEST(PhysicalPlan, PreservesOccurrenceIdentityAcrossAllAccessKinds) {
   for (const LogicalNode& node : plan.logical_plan().nodes()) {
     if (const auto* scan = std::get_if<LogicalScanNode>(&node.payload); scan != nullptr) {
       const auto& core = std::get<BoundSelectCore>(cores[scan->core_index]);
-      ASSERT_TRUE(core.table_source.has_value());
-      EXPECT_EQ(core.table_source->id, scan->source);
+      ASSERT_EQ(1U, core.table_sources.size());
+      EXPECT_EQ(core.table_sources.front().id, scan->source);
       EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(logical_sources++)}, scan->source);
     }
   }
@@ -798,8 +798,8 @@ TEST(PhysicalPlan, PreservesOccurrenceIdentityAcrossAllAccessKinds) {
                         std::is_same_v<Access, PhysicalRowIdLookupNode> ||
                         std::is_same_v<Access, PhysicalIndexScanNode>) {
             const auto& core = std::get<BoundSelectCore>(cores[access.core_index]);
-            ASSERT_TRUE(core.table_source.has_value());
-            EXPECT_EQ(core.table_source->id, access.source);
+            ASSERT_EQ(1U, core.table_sources.size());
+            EXPECT_EQ(core.table_sources.front().id, access.source);
             EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(access.core_index - 1U)},
                       access.source);
             if constexpr (std::is_same_v<Access, PhysicalTableScanNode>) {
@@ -816,6 +816,42 @@ TEST(PhysicalPlan, PreservesOccurrenceIdentityAcrossAllAccessKinds) {
   EXPECT_EQ(1U, scans);
   EXPECT_EQ(1U, lookups);
   EXPECT_EQ(1U, indexes);
+}
+
+TEST(PhysicalPlan, PublishesDeclaredJoinOrderAndEarliestReadyPredicateOwners) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+      "WHERE a.id>1 AND b.id>2 AND a.id+b.id>3",
+      TestCatalog());
+  std::size_t scans = 0;
+  std::size_t joins = 0;
+  const PhysicalFilterNode* filter = nullptr;
+  for (const PhysicalNode& node : plan.nodes()) {
+    if (const auto* scan = std::get_if<PhysicalTableScanNode>(&node.payload); scan != nullptr) {
+      EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(scans++)}, scan->source);
+    } else if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+               join != nullptr) {
+      EXPECT_EQ(SourceJoinKind::kCross, join->join);
+      EXPECT_EQ(PhysicalNodeId{0}, join->left);
+      EXPECT_EQ(PhysicalNodeId{1}, join->right);
+      ++joins;
+    } else if (const auto* predicates = std::get_if<PhysicalFilterNode>(&node.payload);
+               predicates != nullptr) {
+      filter = predicates;
+    }
+  }
+  EXPECT_EQ(2U, scans);
+  EXPECT_EQ(1U, joins);
+  ASSERT_NE(nullptr, filter);
+  EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{1}, BoundSourceId{1}}),
+            filter->predicate_sources);
+  EXPECT_EQ(filter->predicates.size(), filter->predicate_sources.size());
+  EXPECT_EQ("nested_loop_join", PhysicalNodeKindName(PhysicalNodeKind::kNestedLoopJoin));
+  EXPECT_EQ("join", LogicalNodeKindName(LogicalNodeKind::kJoin));
+  EXPECT_EQ(
+      "CORE 0 SCAN \"Items\" SOURCE 0\nCORE 0 SCAN \"Items\" SOURCE 1\n"
+      "CORE 0 NESTED LOOP CROSS JOIN",
+      ExplainPhysicalPlan(plan));
 }
 
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {

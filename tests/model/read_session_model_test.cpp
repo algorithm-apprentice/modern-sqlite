@@ -819,13 +819,62 @@ void RunGroupedAggregate(ReadSession& session, const std::array<std::uint64_t, 4
   RequireStatus(statement.Finalize());
 }
 
+void RunJoinedModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto left_count = static_cast<std::int64_t>(words[0] % 9U);
+  const auto right_count = static_cast<std::int64_t>(words[1] % 9U);
+  const std::int64_t limit = words[2] % 5U == 0U ? -1 : static_cast<std::int64_t>(words[2] % 10U);
+  const auto offset = static_cast<std::size_t>(words[3] % 6U);
+  ReadStatement statement = Prepare(session,
+                                    "SELECT a.id,b.id,a.value+b.value,a.nullable+b.nullable "
+                                    "FROM model_rows a CROSS JOIN model_rows b "
+                                    "WHERE a.id<=?1 AND b.id<=?2 AND a.value<=b.value "
+                                    "ORDER BY a.id DESC,b.id LIMIT ?3 OFFSET ?4");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(limit)));
+  RequireStatus(statement.Bind(4, SqlValue::Integer(static_cast<std::int64_t>(offset))));
+  using Pair = std::pair<const ModelRow*, const ModelRow*>;
+  std::vector<Pair> expected;
+  for (const ModelRow& left : kRows) {
+    for (const ModelRow& right : kRows) {
+      if (left.id <= left_count && right.id <= right_count && left.value <= right.value) {
+        expected.emplace_back(&left, &right);
+      }
+    }
+  }
+  std::ranges::sort(expected, [](const Pair& left, const Pair& right) {
+    return left.first->id != right.first->id ? left.first->id > right.first->id
+                                             : left.second->id < right.second->id;
+  });
+  const std::size_t begin = std::min(offset, expected.size());
+  const std::size_t available = expected.size() - begin;
+  const std::size_t count =
+      limit < 0 ? available : std::min(available, static_cast<std::size_t>(limit));
+  for (std::size_t index = begin; index < begin + count; ++index) {
+    const auto& [left, right] = expected[index];
+    ExpectRowStep(statement);
+    ASSERT_EQ(4U, statement.row().size());
+    ExpectInteger(statement.row()[0], left->id);
+    ExpectInteger(statement.row()[1], right->id);
+    ExpectInteger(statement.row()[2], left->value + right->value);
+    const std::optional<std::int64_t> nullable =
+        left->nullable.has_value() && right->nullable.has_value()
+            ? std::optional<std::int64_t>{*left->nullable + *right->nullable}
+            : std::nullopt;
+    ExpectNullable(statement.row()[3], nullable);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 12> templates{
+  constexpr std::array<std::string_view, 13> templates{
       "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
       "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
       "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
+      "cross-join",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -868,6 +917,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 11:
         RunGroupedAggregate(session, words);
+        break;
+      case 12:
+        RunJoinedModel(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

@@ -332,7 +332,8 @@ struct AdvancedOrderLayout {
     return true;
   }
   const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores().front());
-  return core == nullptr || core->quantifier == SelectQuantifier::kDistinct;
+  return core == nullptr || core->quantifier == SelectQuantifier::kDistinct ||
+         core->table_sources.size() > 1U;
 }
 
 [[nodiscard]] std::expected<void, LogicalPlanError> ValidateAdvancedLogicalPlan(
@@ -363,21 +364,41 @@ struct AdvancedOrderLayout {
       return std::unexpected{InvariantError("SELECT core source node is missing")};
     }
     LogicalNodeId input{static_cast<std::uint32_t>(index)};
-    if (select.table_source.has_value()) {
-      const auto* scan = std::get_if<LogicalScanNode>(&nodes[index].payload);
-      if (scan == nullptr || scan->core_index != core_index ||
-          scan->source != select.table_source->id ||
-          scan->source_kind != select.table_source->kind ||
-          scan->table != select.table_source->table || !IsValidSource(*select.table_source)) {
-        return std::unexpected{InvariantError("advanced logical scan does not match bound core")};
+    if (!select.table_sources.empty()) {
+      for (std::size_t source_index = 0; source_index < select.table_sources.size();
+           ++source_index) {
+        const BoundTableSource& source = select.table_sources[source_index];
+        if (index >= nodes.size()) {
+          return std::unexpected{InvariantError("advanced logical source is missing")};
+        }
+        const auto* scan = std::get_if<LogicalScanNode>(&nodes[index].payload);
+        if (scan == nullptr || scan->core_index != core_index || scan->source != source.id ||
+            scan->source_kind != source.kind || scan->table != source.table ||
+            !IsValidSource(source)) {
+          return std::unexpected{InvariantError("advanced logical scan does not match bound core")};
+        }
+        const LogicalNodeId right{static_cast<std::uint32_t>(index++)};
+        if (source_index == 0U) {
+          input = right;
+        } else {
+          if (index >= nodes.size()) {
+            return std::unexpected{InvariantError("advanced logical join is missing")};
+          }
+          const auto* join = std::get_if<LogicalJoinNode>(&nodes[index].payload);
+          if (join == nullptr || join->core_index != core_index || join->left != input ||
+              join->right != right || join->join != source.join) {
+            return std::unexpected{InvariantError("logical join does not match bound sources")};
+          }
+          input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
+        }
       }
     } else {
       const auto* single = std::get_if<LogicalSingleRowNode>(&nodes[index].payload);
       if (single == nullptr || single->core_index != core_index) {
         return std::unexpected{InvariantError("advanced source-free core has no single-row input")};
       }
+      ++index;
     }
-    ++index;
 
     if (select.where.has_value()) {
       if (index >= nodes.size()) {
@@ -555,7 +576,8 @@ struct AdvancedOrderLayout {
     return std::unexpected{InvariantError("logical plan root is not the final node")};
   }
 
-  const BoundTableSource* source = bound_select.table_source();
+  const auto sources = bound_select.table_sources();
+  const BoundTableSource* source = sources.empty() ? nullptr : &sources.front();
   if (source == nullptr) {
     const auto* single = std::get_if<LogicalSingleRowNode>(&nodes[0].payload);
     if (single == nullptr || single->core_index != 0U) {
@@ -696,7 +718,8 @@ class LogicalPlanBuilder final {
     auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
     impl->nodes.reserve(node_count);
 
-    const BoundTableSource* source = impl->bound_select.table_source();
+    const auto sources = impl->bound_select.table_sources();
+    const BoundTableSource* source = sources.empty() ? nullptr : &sources.front();
     if (source == nullptr) {
       impl->nodes.push_back(LogicalNode{.payload = LogicalSingleRowNode{}});
     } else {
@@ -811,8 +834,13 @@ class LogicalPlanBuilder final {
  private:
   [[nodiscard]] static BuildLogicalPlanResult BuildAdvanced(BoundSelect bound_select) {
     auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
-    const std::size_t estimated_nodes = impl->bound_select.query_cores().size() * 6U +
-                                        impl->bound_select.compound_operators().size() + 3U;
+    std::size_t estimated_nodes = impl->bound_select.query_cores().size() * 6U +
+                                  impl->bound_select.compound_operators().size() + 3U;
+    for (const BoundQueryCore& core : impl->bound_select.query_cores()) {
+      if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
+        estimated_nodes += select->table_sources.size() * 2U;
+      }
+    }
     if (estimated_nodes > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected{InvariantError("advanced logical plan exceeds node identities")};
     }
@@ -836,16 +864,31 @@ class LogicalPlanBuilder final {
 
       const auto& select = std::get<BoundSelectCore>(core);
       LogicalNodeId input{0};
-      if (select.table_source.has_value()) {
-        input = append(LogicalNode{
-            .payload =
-                LogicalScanNode{
-                    .core_index = core_index,
-                    .source = select.table_source->id,
-                    .source_kind = select.table_source->kind,
-                    .table = select.table_source->table,
-                },
-        });
+      if (!select.table_sources.empty()) {
+        for (const BoundTableSource& source : select.table_sources) {
+          const auto scan = append(LogicalNode{
+              .payload =
+                  LogicalScanNode{
+                      .core_index = core_index,
+                      .source = source.id,
+                      .source_kind = source.kind,
+                      .table = source.table,
+                  },
+          });
+          if (source.join == SourceJoinKind::kFirst) {
+            input = scan;
+          } else {
+            input = append(LogicalNode{
+                .payload =
+                    LogicalJoinNode{
+                        .left = input,
+                        .right = scan,
+                        .core_index = core_index,
+                        .join = source.join,
+                    },
+            });
+          }
+        }
       } else {
         input = append(LogicalNode{.payload = LogicalSingleRowNode{.core_index = core_index}});
       }
@@ -1140,6 +1183,8 @@ std::string_view LogicalNodeKindName(LogicalNodeKind kind) noexcept {
       return "aggregate";
     case LogicalNodeKind::kHaving:
       return "having";
+    case LogicalNodeKind::kJoin:
+      return "join";
   }
   return "unknown";
 }

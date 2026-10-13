@@ -183,10 +183,20 @@ struct ResultColumn {
   std::optional<SourceSpan> alias{};
 };
 
+inline constexpr std::size_t kMaximumSelectSources = 64;
+
+enum class SourceJoinKind : std::uint8_t {
+  kFirst,
+  kComma,
+  kCross,
+};
+
 struct TableSource {
   SourceSpan span;
   QualifiedName name;
   std::optional<SourceSpan> alias{};
+  SourceJoinKind join = SourceJoinKind::kFirst;
+  std::optional<SourceSpan> join_span{};
 };
 
 struct LimitClause {
@@ -207,7 +217,7 @@ struct SelectCore {
   SourceSpan span;
   SelectQuantifier quantifier = SelectQuantifier::kDefault;
   std::vector<ResultColumn> result_columns;
-  std::optional<TableSource> from{};
+  std::vector<TableSource> from{};
   std::optional<ExpressionId> where{};
   std::vector<ExpressionId> group_by{};
   std::optional<ExpressionId> having{};

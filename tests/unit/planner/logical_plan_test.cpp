@@ -466,9 +466,9 @@ TEST(LogicalPlan, BuildsExactScanFilterLimitProjectionChain) {
   EXPECT_EQ(TableId{0}, scan.table);
 
   const BoundSelect& bound = plan.bound_select();
-  ASSERT_NE(nullptr, bound.table_source());
-  EXPECT_EQ(bound.table_source()->kind, scan.source_kind);
-  EXPECT_EQ(bound.table_source()->table, scan.table);
+  ASSERT_EQ(1U, bound.table_sources().size());
+  EXPECT_EQ(bound.table_sources().front().kind, scan.source_kind);
+  EXPECT_EQ(bound.table_sources().front().table, scan.table);
 
   EXPECT_EQ(LogicalNodeKind::kFilter, LogicalNodeKindOf(plan.nodes()[1]));
   const auto& filter = std::get<LogicalFilterNode>(plan.nodes()[1].payload);

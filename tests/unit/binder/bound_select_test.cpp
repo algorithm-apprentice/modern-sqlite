@@ -475,9 +475,9 @@ TEST(Binder, ExpandsWildcardsAndPublishesDirectColumnMetadata) {
   EXPECT_EQ("SELECT *, q._rowid_ AS hidden, (q.Name) AS n, q.rowid FROM Items AS q",
             select.source().bytes());
   ASSERT_EQ(catalog.get(), select.catalog());
-  ASSERT_NE(nullptr, select.table_source());
-  EXPECT_EQ(BoundSourceKind::kCatalogTable, select.table_source()->kind);
-  EXPECT_EQ(TableId{0}, select.table_source()->table);
+  ASSERT_EQ(1U, select.table_sources().size());
+  EXPECT_EQ(BoundSourceKind::kCatalogTable, select.table_sources().front().kind);
+  EXPECT_EQ(TableId{0}, select.table_sources().front().table);
 
   ASSERT_EQ(5U, select.source_columns().size());
   EXPECT_EQ("Name", select.source_columns()[1].name);
@@ -547,25 +547,25 @@ TEST(Binder, PublishesDistinctOccurrenceOwnersAcrossCompoundSourceScopes) {
   const auto* right = std::get_if<BoundSelectCore>(&select.query_cores()[2]);
   ASSERT_NE(nullptr, left);
   ASSERT_NE(nullptr, right);
-  ASSERT_TRUE(left->table_source.has_value());
-  ASSERT_TRUE(right->table_source.has_value());
-  EXPECT_EQ(left->table_source->table, right->table_source->table);
-  EXPECT_EQ(BoundSourceId{0}, left->table_source->id);
-  EXPECT_EQ(BoundSourceId{1}, right->table_source->id);
-  EXPECT_NE(left->table_source->id, right->table_source->id);
+  ASSERT_EQ(1U, left->table_sources.size());
+  ASSERT_EQ(1U, right->table_sources.size());
+  EXPECT_EQ(left->table_sources.front().table, right->table_sources.front().table);
+  EXPECT_EQ(BoundSourceId{0}, left->table_sources.front().id);
+  EXPECT_EQ(BoundSourceId{1}, right->table_sources.front().id);
+  EXPECT_NE(left->table_sources.front().id, right->table_sources.front().id);
   for (const BoundSelectCore* core : std::array{left, right}) {
     const auto source_columns =
         select.source_columns().subspan(core->source_column_begin, core->source_column_count);
     ASSERT_EQ(5U, source_columns.size());
     for (const BoundSourceColumn& column : source_columns) {
-      EXPECT_EQ(core->table_source->id, column.source);
+      EXPECT_EQ(core->table_sources.front().id, column.source);
     }
     EXPECT_TRUE(source_columns[0].rowid_alias);
     EXPECT_FALSE(source_columns[3].rowid_alias);
     const auto* rowid = std::get_if<BoundRowIdExpression>(
         &select.expression(core->result_columns[1].expression).payload);
     ASSERT_NE(nullptr, rowid);
-    EXPECT_EQ(core->table_source->id, rowid->source);
+    EXPECT_EQ(core->table_sources.front().id, rowid->source);
   }
 }
 
@@ -584,13 +584,13 @@ TEST(Binder, NormalizesOwnedRowIdAliasesThroughOneSourceLeafContract) {
     rowids[index] = identity(1);
     EXPECT_EQ(identity(0), rowids[index]);
     EXPECT_TRUE(rowids[index].is_rowid());
-    EXPECT_EQ(core.table_source->id, rowids[index].source);
+    EXPECT_EQ(core.table_sources.front().id, rowids[index].source);
     const BoundSourceLeafIdentity declared_rowid = identity(2);
     EXPECT_FALSE(declared_rowid.is_rowid());
     EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(core.source_column_begin + 3U)},
               declared_rowid.column);
     EXPECT_NE(rowids[index], declared_rowid);
-    EXPECT_EQ(core.table_source->id, identity(3).source);
+    EXPECT_EQ(core.table_sources.front().id, identity(3).source);
   }
   EXPECT_NE(rowids[0], rowids[1]);
 
@@ -606,20 +606,20 @@ TEST(Binder, AllocatesOnlyRealOccurrencesAndSeparatesSchemaSources) {
       "UNION ALL SELECT _rowid_,Name FROM Items",
       TestCatalog());
   ASSERT_EQ(4U, select.query_cores().size());
-  EXPECT_FALSE(std::get<BoundSelectCore>(select.query_cores()[0]).table_source.has_value());
+  EXPECT_TRUE(std::get<BoundSelectCore>(select.query_cores()[0]).table_sources.empty());
   EXPECT_TRUE(std::holds_alternative<BoundValuesCore>(select.query_cores()[1]));
   for (std::size_t index = 2; index < select.query_cores().size(); ++index) {
     const auto& core = std::get<BoundSelectCore>(select.query_cores()[index]);
-    ASSERT_TRUE(core.table_source.has_value());
-    EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(index - 2U)}, core.table_source->id);
+    ASSERT_EQ(1U, core.table_sources.size());
+    EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(index - 2U)}, core.table_sources.front().id);
     const auto* rowid = std::get_if<BoundRowIdExpression>(
         &select.expression(core.result_columns[0].expression).payload);
     ASSERT_NE(nullptr, rowid);
-    EXPECT_EQ(core.table_source->id, rowid->source);
+    EXPECT_EQ(core.table_sources.front().id, rowid->source);
     for (const BoundSourceColumn& column :
          select.source_columns().subspan(core.source_column_begin, core.source_column_count)) {
-      EXPECT_EQ(core.table_source->id, column.source);
-      if (core.table_source->kind == BoundSourceKind::kSchemaTable) {
+      EXPECT_EQ(core.table_sources.front().id, column.source);
+      if (core.table_sources.front().kind == BoundSourceKind::kSchemaTable) {
         EXPECT_FALSE(column.rowid_alias);
         EXPECT_FALSE(column.catalog_column.has_value());
       }
@@ -676,14 +676,81 @@ TEST(Binder, RejectsInvalidTrustedColumnIdsInsteadOfHidingThemAsNonLeaves) {
                "terminat");
 }
 
+TEST(Binder, ResolvesJoinedAliasesActualMatchesAndWildcardOrder) {
+  const BoundSelect select =
+      BindOrThrow("SELECT q.id,q.key,q.* FROM Items AS q CROSS JOIN wr AS q", TestCatalog());
+  ASSERT_EQ(2U, select.table_sources().size());
+  ASSERT_EQ(8U, select.result_columns().size());
+  EXPECT_EQ("id", select.result_columns()[2].name);
+  EXPECT_EQ("Name", select.result_columns()[3].name);
+  EXPECT_EQ("key", select.result_columns()[7].name);
+  const auto identity = [&](std::size_t result) {
+    return RequiredOptional(
+        BoundSourceLeafIdentityOf(ResultExpression(select, result), select.source_columns()));
+  };
+  EXPECT_EQ(BoundSourceId{0}, identity(0).source);
+  EXPECT_EQ(BoundSourceId{1}, identity(1).source);
+  EXPECT_EQ(SourceJoinKind::kCross, select.table_sources()[1].join);
+  EXPECT_EQ(5U, select.table_sources()[1].source_column_begin);
+  EXPECT_EQ(1U, select.table_sources()[1].source_column_count);
+
+  const BoundSelect hidden = BindOrThrow("SELECT q.oid FROM wr AS q,Items AS q", TestCatalog());
+  const auto* rowid = std::get_if<BoundRowIdExpression>(&ResultExpression(hidden, 0).payload);
+  ASSERT_NE(nullptr, rowid);
+  EXPECT_EQ(BoundSourceId{1}, rowid->source);
+}
+
+TEST(Binder, RejectsJoinedAmbiguityBeforeAliasBooleanOrDqsFallback) {
+  const std::array queries{
+      "SELECT id FROM Items a,Items b",
+      "SELECT a.id FROM Items a,Items a",
+      "SELECT oid FROM Items a,Items b",
+      "SELECT \"id\" FROM Items a,Items b",
+      "SELECT a.Name AS id FROM Items a,Items b WHERE id>0",
+      "SELECT TRUE FROM Items a,Items b",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    const auto bound = BindSelectStatement(ParseTree(sql), TestCatalog());
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(BindErrorCode::kAmbiguousColumn, bound.error().code);
+    EXPECT_TRUE(bound.error().detail.starts_with("ambiguous column name: "));
+  }
+  const BoundSelect fallback =
+      BindOrThrow("SELECT \"missing\" FROM Items a,Items b", TestCatalog());
+  EXPECT_EQ("missing", std::get<BoundLiteralExpression>(ResultExpression(fallback, 0).payload)
+                           .value.text_value()
+                           ->bytes());
+  const auto aggregate = BindSelectStatement(
+      ParseTree("SELECT count() FROM Items a CROSS JOIN Items b"), TestCatalog());
+  ASSERT_FALSE(aggregate.has_value());
+  EXPECT_EQ(BindErrorCode::kUnsupportedFeature, aggregate.error().code);
+  EXPECT_EQ("aggregates over multiple sources are not supported", aggregate.error().detail);
+}
+
+TEST(Binder, ResolvesGeneratedWildcardColumnsAndRejectsDuplicateQualifierAmbiguity) {
+  const std::array queries{
+      "SELECT q.* FROM Items q,Items q",
+      "SELECT * FROM Items,Items",
+  };
+  for (const std::string_view sql : queries) {
+    SCOPED_TRACE(sql);
+    const auto rejected = BindSelectStatement(ParseTree(sql), TestCatalog());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kAmbiguousColumn, rejected.error().code);
+    EXPECT_TRUE(rejected.error().detail.starts_with("ambiguous column name: main."));
+    EXPECT_TRUE(rejected.error().detail.ends_with(".id"));
+  }
+}
+
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select =
       BindOrThrow("SELECT sqlite_master.*, rowid FROM main.sqlite_schema", catalog);
 
-  ASSERT_NE(nullptr, select.table_source());
-  EXPECT_EQ(BoundSourceKind::kSchemaTable, select.table_source()->kind);
-  EXPECT_FALSE(select.table_source()->table.has_value());
+  ASSERT_EQ(1U, select.table_sources().size());
+  EXPECT_EQ(BoundSourceKind::kSchemaTable, select.table_sources().front().kind);
+  EXPECT_FALSE(select.table_sources().front().table.has_value());
   ASSERT_EQ(5U, select.source_columns().size());
   EXPECT_EQ("type", select.source_columns()[0].name);
   EXPECT_EQ("INT", select.source_columns()[3].declared_type);

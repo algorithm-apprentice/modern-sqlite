@@ -50,6 +50,47 @@ static_assert(std::is_nothrow_move_assignable_v<SyntaxTree>);
   };
 }
 
+TEST(SyntaxTree, RejectsInvalidJoinOwnershipAndOperatorOrdering) {
+  constexpr std::string_view sql = "SELECT 1 FROM a,b";
+  const SourceSpan number = FindSpan(sql, "1");
+  const SourceSpan left = FindSpan(sql, "a", 9U);
+  const SourceSpan right = FindSpan(sql, "b");
+  const SourceSpan comma = FindSpan(sql, ",");
+  for (std::size_t fault = 0; fault < 4U; ++fault) {
+    SCOPED_TRACE(fault);
+    SelectCore core{
+        .span = Span(0, sql.size()),
+        .result_columns = {ResultColumn{.span = number, .expression = ExpressionId{0}}},
+        .from =
+            {
+                TableSource{.span = left, .name = Name(left, {left})},
+                TableSource{.span = right,
+                            .name = Name(right, {right}),
+                            .join = SourceJoinKind::kComma,
+                            .join_span = comma},
+            },
+    };
+    if (fault == 0U) {
+      core.from[0].join = SourceJoinKind::kCross;
+    } else if (fault == 1U) {
+      core.from[1].join_span.reset();
+    } else if (fault == 2U) {
+      core.from[1].join = SourceJoinKind::kFirst;
+    } else {
+      core.from[1].join_span = left;
+    }
+    std::vector<Expression> expressions{
+        Expression{.span = number,
+                   .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = number}},
+    };
+    const auto rejected =
+        SyntaxTree::Create(std::string{sql}, std::move(expressions),
+                           SelectStatement{.span = Span(0, sql.size()), .first = std::move(core)});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+  }
+}
+
 template <typename Enum>
 [[nodiscard]] constexpr Enum InvalidEnumValue(std::uint8_t value) noexcept {
   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
@@ -369,12 +410,11 @@ TEST(SyntaxTree, RepresentsTypedExpressionPayloadsInPostorder) {
                       },
                       ResultColumn{.span = wildcard, .expression = ExpressionId{3}},
                   },
-              .from =
-                  TableSource{
-                      .span = source_clause,
-                      .name = Name(source_name, {main_part, items_part}),
-                      .alias = source_alias,
-                  },
+              .from = {TableSource{
+                  .span = source_clause,
+                  .name = Name(source_name, {main_part, items_part}),
+                  .alias = source_alias,
+              }},
           },
   };
 
@@ -485,12 +525,11 @@ TEST(SyntaxTree, RepresentsSelectClausesAndNormalizesLimitOperands) {
                           .alias = result_alias,
                       },
                   },
-              .from =
-                  TableSource{
-                      .span = table_source,
-                      .name = Name(table_name, {main_part, table_part}),
-                      .alias = table_alias,
-                  },
+              .from = {TableSource{
+                  .span = table_source,
+                  .name = Name(table_name, {main_part, table_part}),
+                  .alias = table_alias,
+              }},
               .where = ExpressionId{3},
           },
       .limit =
@@ -508,8 +547,8 @@ TEST(SyntaxTree, RepresentsSelectClausesAndNormalizesLimitOperands) {
   const auto& select = std::get<SelectStatement>(result->statement());
   const auto& core = std::get<SelectCore>(select.first);
   EXPECT_EQ(SelectQuantifier::kDistinct, core.quantifier);
-  ASSERT_TRUE(core.from.has_value());
-  EXPECT_EQ(table_alias, core.from->alias);
+  ASSERT_EQ(1U, core.from.size());
+  EXPECT_EQ(table_alias, core.from.front().alias);
   EXPECT_EQ(ExpressionId{3}, core.where);
   ASSERT_TRUE(select.limit.has_value());
   EXPECT_EQ(ExpressionId{4}, select.limit->limit);
@@ -585,11 +624,10 @@ TEST(SyntaxTree, RepresentsAggregateClausesAndFunctionModifiers) {
                   {
                       ResultColumn{.span = function, .expression = ExpressionId{3}},
                   },
-              .from =
-                  TableSource{
-                      .span = table,
-                      .name = Name(table, {table}),
-                  },
+              .from = {TableSource{
+                  .span = table,
+                  .name = Name(table, {table}),
+              }},
               .where = ExpressionId{4},
               .group_by = {ExpressionId{5}},
               .having = ExpressionId{6},
