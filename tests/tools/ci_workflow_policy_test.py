@@ -76,6 +76,24 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                     block = event_block(workflow, event)
                     self.assertEqual(["**/*.md"], list_values(block, "paths-ignore"))
 
+    def test_write_diagnostics_have_independent_registration_and_ci_coverage(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        for required in (
+            "performance.write_benchmark_diagnostic_${write_engine}_${write_profile_id}_${write_case_id}",
+            "--suite diagnostic",
+            "TIMEOUT 630",
+            "foreach(write_engine IN ITEMS modern sqlite)",
+            "foreach(write_profile IN ITEMS engine-default matched-durable)",
+        ):
+            with self.subTest(required=required):
+                self.assertTrue(required in cmake, f"CTest must include {required}")
+        workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        patterns = re.findall(r"-R '([^']+)'", workflow)
+        self.assertTrue(any(re.fullmatch(
+            pattern,
+            "performance.write_benchmark_diagnostic_modern_matched_durable_update_point_implicit",
+        ) for pattern in patterns))
+
     def test_ci_covers_aggregate_performance_contracts(self) -> None:
         workflow = event_block(
             STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"),
