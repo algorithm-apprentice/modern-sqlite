@@ -640,6 +640,13 @@ Each program point tracks:
 - for every cursor, whether it is closed, open but unpositioned, or open and
   positioned on a valid row.
 
+ADR-0076 defines positioned as a valid logical row: a physical row or an
+explicitly published NULL row. `NullRowInstruction` requires an open ordinary
+read cursor and transitions to positioned when enabled, or unpositioned when
+disabled. Its descriptor cannot be used by mutation traversal in the same
+program. Physical/NULL row edges can therefore join while closed and
+unpositioned misuse remains rejected.
+
 Instruction transfer rules are:
 
 - constant, parameter, copy, unary, binary, affinity, cast, field, rowid,

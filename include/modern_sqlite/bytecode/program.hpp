@@ -415,6 +415,11 @@ struct ReadRowIdInstruction {
   RegisterId output;
 };
 
+struct NullRowInstruction {
+  CursorId cursor;
+  bool enabled = true;
+};
+
 struct ResolveInsertRowIdInstruction {
   WriteCursorId cursor;
   RegisterId input;
@@ -738,7 +743,7 @@ using Instruction = std::variant<
     ReadRelationFieldInstruction, NextRelationInstruction, ResetRelationInstruction,
     CloseRelationInstruction, CompareRecordsInstruction, OpenAggregateInstruction,
     StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
-    CloseAggregateInstruction, LastInstruction, PreviousInstruction>;
+    CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -827,6 +832,7 @@ enum class InstructionKind : std::uint8_t {
   kCloseAggregate,
   kLast,
   kPrevious,
+  kNullRow,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;

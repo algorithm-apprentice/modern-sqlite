@@ -2571,6 +2571,121 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
       });
 }
 
+TEST_F(VmTest, PublishesNullRowsThenRepositionsTheOwnedTableCursor) {
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 2, 0, {}, {},
+      {TableDescriptor({
+          CursorFieldSource{.kind = CursorFieldSourceKind::kRowId, .record_field = 0},
+          CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+      })},
+      {ResultColumn("id"), ResultColumn("key")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          NullRowInstruction{.cursor = Cursor(0)},
+          ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          NullRowInstruction{.cursor = Cursor(0), .enabled = false},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(12)},
+          ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(SqlValueType::kInteger, vm.row()[0].type());
+  EXPECT_EQ(SqlValueType::kText, vm.row()[1].type());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, NullPublicationDiscardsCachedRecordsAndIgnoresMissingFieldDefaults) {
+  CursorFieldSource missing{
+      .kind = CursorFieldSourceKind::kRecordField,
+      .record_field = 31,
+      .missing_value_kind = MissingFieldValueKind::kConstant,
+      .missing_value = Constant(0),
+  };
+  auto descriptor = TableDescriptor(
+      {
+          CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+          missing,
+      },
+      32);
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(42));
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 2, 0, std::move(constants), {}, {std::move(descriptor)},
+      {ResultColumn("key"), ResultColumn("default")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(12)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          NullRowInstruction{.cursor = Cursor(0)},
+          NullRowInstruction{.cursor = Cursor(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(SqlValueType::kText, vm.row()[0].type());
+  ExpectInteger(vm.row()[1], 42);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  EXPECT_EQ(SqlValueType::kText, vm.row()[0].type());
+}
+
+TEST_F(VmTest, ConsumesVirtualRowsWithoutAdvancingPhysicalTableOrIndexStorage) {
+  for (const bool index : {false, true}) {
+    for (const bool previous : {false, true}) {
+      auto descriptor = index ? BinaryIndexDescriptor()
+                              : TableDescriptor({
+                                    CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField,
+                                                      .record_field = 1},
+                                });
+      const std::vector<std::string> symbols =
+          index ? std::vector<std::string>{"BINARY"} : std::vector<std::string>{};
+      const Instruction advance =
+          previous
+              ? Instruction{PreviousInstruction{.cursor = Cursor(0), .previous_target = Address(4)}}
+              : Instruction{NextInstruction{.cursor = Cursor(0), .next_target = Address(4)}};
+      const BytecodeProgram program = BuildProgram(
+          *pager_, 1, 0, {}, symbols, {std::move(descriptor)}, {ResultColumn()},
+          {
+              OpenReadCursorInstruction{.cursor = Cursor(0)},
+              NullRowInstruction{.cursor = Cursor(0)},
+              ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+              ResultRowInstruction{.first = Reg(0), .count = 1},
+              advance,
+              CloseCursorInstruction{.cursor = Cursor(0)},
+              HaltInstruction{},
+          });
+      Vm vm = CreateCoreVm(program);
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      EXPECT_EQ(SqlValueType::kNull, OnlyRowValue(vm).type());
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      EXPECT_EQ(7U, vm.executed_instruction_count());
+    }
+  }
+}
+
 TEST_F(VmTest, ScansTableRowsAndClosesCursorsAtHalt) {
   const BytecodeProgram program = TableScanProgram(*pager_);
   Vm vm = CreateCoreVm(program);

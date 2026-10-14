@@ -61,6 +61,7 @@ class TableBtreeCursor final {
   ~TableBtreeCursor();
 
   [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] Status ClearPosition();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Last();
   [[nodiscard]] Result<bool> Next();
@@ -93,6 +94,7 @@ class IndexBtreeCursor final {
   ~IndexBtreeCursor();
 
   [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] Status ClearPosition();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Last();
   [[nodiscard]] Result<bool> Next();

@@ -174,7 +174,7 @@ class CursorCore final {
 
   [[nodiscard]] bool valid() const noexcept { return valid_ && !terminal_; }
 
-  void InvalidateForFailedSeek() noexcept { InvalidatePosition(); }
+  void ClearPosition() noexcept { InvalidatePosition(); }
 
   [[nodiscard]] Result<bool> First() {
     auto ready = ResetToRoot();
@@ -966,6 +966,14 @@ Result<TableBtreeCursor> TableBtreeCursor::Open(Pager& pager, PageNumber root_pa
 
 bool TableBtreeCursor::valid() const noexcept { return impl_ != nullptr && impl_->core.valid(); }
 
+Status TableBtreeCursor::ClearPosition() {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  impl_->core.ClearPosition();
+  return {};
+}
+
 Result<bool> TableBtreeCursor::First() {
   if (impl_ == nullptr) {
     return std::unexpected(MovedFromCursor());
@@ -1106,6 +1114,14 @@ Result<IndexBtreeCursor> IndexBtreeCursor::Open(Pager& pager, PageNumber root_pa
 
 bool IndexBtreeCursor::valid() const noexcept { return impl_ != nullptr && impl_->core.valid(); }
 
+Status IndexBtreeCursor::ClearPosition() {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  impl_->core.ClearPosition();
+  return {};
+}
+
 Result<bool> IndexBtreeCursor::First() {
   if (impl_ == nullptr) {
     return std::unexpected(MovedFromCursor());
@@ -1139,11 +1155,11 @@ Result<bool> IndexBtreeCursor::Seek(std::span<const SqlValue> key, BtreeSeekMode
     return std::unexpected(MovedFromCursor());
   }
   if (key.empty()) {
-    impl_->core.InvalidateForFailedSeek();
+    impl_->core.ClearPosition();
     return std::unexpected(Misuse("index seek key must not be empty"));
   }
   if (key.size() > impl_->columns.size()) {
-    impl_->core.InvalidateForFailedSeek();
+    impl_->core.ClearPosition();
     return std::unexpected(Misuse("index seek key is longer than the comparison metadata"));
   }
   const EqualPrefixResult prefix_result = PrefixResultFor(mode);

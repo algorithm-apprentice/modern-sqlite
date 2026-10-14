@@ -79,3 +79,4 @@ their corresponding implementation begins.
 73. [ADR-0073: Comma and CROSS Join Execution](0073-comma-and-cross-join-execution.md)
 74. [ADR-0074: Bounded Write Contract CI Execution](0074-bounded-write-contract-ci-execution.md)
 75. [ADR-0075: Joined Aggregate Consumer Integration](0075-joined-aggregate-consumer-integration.md)
+76. [ADR-0076: Typed NULL-Row Cursor Publication](0076-typed-null-row-cursor-publication.md)

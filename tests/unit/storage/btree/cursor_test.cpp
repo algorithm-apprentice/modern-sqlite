@@ -459,6 +459,40 @@ TEST_F(BtreeCursorCompatibilityTest, TraversesMultiLevelTableInBothDirections) {
   EXPECT_EQ(CollectTableReverse(cursor), reversed);
 }
 
+TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrRevivingCursors) {
+  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  ASSERT_TRUE(TakeValue(table.First()));
+  const std::int64_t first_rowid = TakeValue(table.rowid());
+  RequireStatus(table.ClearPosition());
+  RequireStatus(table.ClearPosition());
+  EXPECT_FALSE(table.valid());
+  EXPECT_FALSE(table.rowid().has_value());
+  ASSERT_TRUE(TakeValue(table.First()));
+  EXPECT_EQ(first_rowid, TakeValue(table.rowid()));
+  const auto columns = BinaryIndexColumns();
+  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  ASSERT_TRUE(TakeValue(index.First()));
+  const ByteBuffer first_record = TakeValue(index.CopyPayload());
+  RequireStatus(index.ClearPosition());
+  EXPECT_FALSE(index.valid());
+  EXPECT_FALSE(index.payload().has_value());
+  ASSERT_TRUE(TakeValue(index.First()));
+  const ByteBuffer restored = TakeValue(index.CopyPayload());
+  EXPECT_TRUE(std::ranges::equal(first_record.view(), restored.view()));
+  TableBtreeCursor moved_table = std::move(table);
+  IndexBtreeCursor moved_index = std::move(index);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const auto invalid_table = table.ClearPosition();
+  const auto invalid_index = index.ClearPosition();
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(invalid_table.has_value());
+  ASSERT_FALSE(invalid_index.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_table.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_index.error().code());
+  RequireStatus(moved_table.ClearPosition());
+  RequireStatus(moved_index.ClearPosition());
+}
+
 TEST_F(BtreeCursorCompatibilityTest, ImplementsAllDirectionalTableSeekModes) {
   TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
 
