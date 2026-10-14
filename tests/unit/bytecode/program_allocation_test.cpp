@@ -2,6 +2,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 
 #include "modern_sqlite/bytecode/program.hpp"
@@ -21,6 +22,33 @@ std::optional<std::size_t> failing_allocation{};
     return allocation;
   }
   throw std::bad_alloc{};
+}
+
+[[nodiscard]] bool SweepProgramCreation(const modern_sqlite::ProgramInput& input) {
+  allocation_index = 0;
+  const auto baseline = modern_sqlite::BytecodeProgram::Create(input);
+  if (!baseline.has_value()) {
+    return false;
+  }
+  const std::size_t allocations = allocation_index;
+  if (allocations == 0U || allocations > 128U) {
+    return false;
+  }
+  for (std::size_t failure = 0; failure < allocations; ++failure) {
+    allocation_index = 0;
+    failing_allocation = failure;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const auto rejected = modern_sqlite::BytecodeProgram::Create(input);
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    failing_allocation.reset();
+    if (!threw) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -201,29 +229,67 @@ int main() try {
       CloseCursorInstruction{.cursor = CursorId(0)},
       HaltInstruction{},
   };
+  if (!SweepProgramCreation(null_input)) {
+    return 2;
+  }
+  ProgramInput subroutine_input;
+  subroutine_input.register_count = 1;
+  subroutine_input.constants.push_back(SqlValue::Text(std::string(256, 's')));
+  subroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "value",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kText,
+  });
+  subroutine_input.subroutines.push_back(
+      SubroutineDescriptor{.entry = InstructionAddress(3), .end = InstructionAddress(5)});
+  subroutine_input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
+  };
+  if (!SweepProgramCreation(subroutine_input)) {
+    return 2;
+  }
+
+  ProgramLimits subroutine_limits;
+  subroutine_limits.maximum_owned_bytes = sizeof(SubroutineDescriptor) + 3U * sizeof(Instruction);
+  auto builder = ProgramBuilder::Create({}, {}, subroutine_limits);
+  if (!builder.has_value()) {
+    return 2;
+  }
+  const auto entry = builder->CreateLabel();
+  const auto last = builder->CreateLabel();
+  if (!entry.has_value() || !last.has_value()) {
+    return 2;
+  }
   allocation_index = 0;
-  const auto null_program = BytecodeProgram::Create(null_input);
-  if (!null_program.has_value()) {
+  failing_allocation = 0U;
+  bool failed_declaration = false;
+  try {
+    [[maybe_unused]] const auto rejected = builder->AddSubroutine(*entry, *last);
+  } catch (const std::bad_alloc&) {
+    failed_declaration = true;
+  }
+  failing_allocation.reset();
+  const auto declared = builder->AddSubroutine(*entry, *last);
+  if (!failed_declaration || !declared.has_value() || declared->value() != 0U ||
+      !builder->Append(CallSubroutineInstruction{.subroutine = *declared}).has_value() ||
+      !builder->Append(HaltInstruction{}).has_value() || !builder->BindLabel(*entry).has_value() ||
+      !builder->BindLabel(*last).has_value() ||
+      !builder->Append(ReturnSubroutineInstruction{.subroutine = *declared}).has_value()) {
     return 2;
   }
-  const std::size_t null_allocations = allocation_index;
-  if (null_allocations == 0U || null_allocations > 128U) {
+  const auto built = std::move(*builder).Build({});
+  if (!built.has_value()) {
     return 2;
   }
-  for (std::size_t failure = 0; failure < null_allocations; ++failure) {
-    allocation_index = 0;
-    failing_allocation = failure;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const auto rejected = BytecodeProgram::Create(null_input);
-    } catch (const std::bad_alloc&) {
-      threw = true;
-    }
-    failing_allocation.reset();
-    if (!threw) {
-      return 2;
-    }
-  }
+  fail_allocations = true;
+  checksum += built->subroutines().size();
+  checksum += built->subroutine(*declared).entry.value();
+  checksum += built->verification_metrics().maximum_subroutine_depth;
+  fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;
 } catch (...) {

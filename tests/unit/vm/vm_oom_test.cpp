@@ -1,8 +1,10 @@
 #include <array>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,9 +22,16 @@ namespace {
 
 bool fail_allocations = false;
 std::size_t minimum_failing_size = 1;
+std::size_t allocation_index = 0;
+std::optional<std::size_t> failing_allocation{};
+
+[[nodiscard]] bool ShouldFailAllocation(std::size_t size) {
+  const std::size_t index = allocation_index++;
+  return (fail_allocations && size >= minimum_failing_size) || failing_allocation == index;
+}
 
 [[nodiscard]] void* Allocate(std::size_t size) {
-  if (fail_allocations && size >= minimum_failing_size) {
+  if (ShouldFailAllocation(size)) {
     throw std::bad_alloc{};
   }
   if (void* allocation = std::malloc(size == 0 ? 1 : size); allocation != nullptr) {
@@ -32,7 +41,7 @@ std::size_t minimum_failing_size = 1;
 }
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  if (fail_allocations && size >= minimum_failing_size) {
+  if (ShouldFailAllocation(size)) {
     throw std::bad_alloc{};
   }
   void* allocation = nullptr;
@@ -132,6 +141,66 @@ int main() try {
   fail_allocations = false;
   if (step_failure.has_value() || step_failure.error().code() != ErrorCode::kOutOfMemory ||
       vm.state() != VmState::kError) {
+    return 1;
+  }
+
+  ProgramInput subroutine_input;
+  subroutine_input.schema_version = input.schema_version;
+  subroutine_input.register_count = 1;
+  subroutine_input.constants.push_back(SqlValue::Text(std::string(256, 's')));
+  subroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "value",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kText,
+  });
+  subroutine_input.subroutines.push_back(
+      SubroutineDescriptor{.entry = InstructionAddress(3), .end = InstructionAddress(5)});
+  subroutine_input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
+  };
+  const auto subroutine_program = BytecodeProgram::Create(subroutine_input);
+  if (!subroutine_program.has_value()) {
+    return 1;
+  }
+  allocation_index = 0;
+  auto subroutine_vm = Vm::Create(*subroutine_program, VmEnvironment::Core());
+  const std::size_t create_allocations = allocation_index;
+  if (!subroutine_vm.has_value() || create_allocations == 0U || create_allocations > 128U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < create_allocations; ++failure) {
+    allocation_index = 0;
+    failing_allocation = failure;
+    const auto rejected = Vm::Create(*subroutine_program, VmEnvironment::Core());
+    failing_allocation.reset();
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory) {
+      return 1;
+    }
+  }
+  if (!subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto subroutine_failure = subroutine_vm->Step();
+  fail_allocations = false;
+  if (subroutine_failure.has_value() ||
+      subroutine_failure.error().code() != ErrorCode::kOutOfMemory ||
+      subroutine_vm->state() != VmState::kError || !subroutine_vm->Reset().has_value() ||
+      !subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto recovered_subroutine = subroutine_vm->Step();
+  if (!recovered_subroutine.has_value() || *recovered_subroutine != VmStep::kRow ||
+      subroutine_vm->row().size() != 1U ||
+      subroutine_vm->row()[0].text_value().value_or(Utf8View{}).size_bytes() != 256U) {
+    return 1;
+  }
+  const auto finished_subroutine = subroutine_vm->Step();
+  if (!finished_subroutine.has_value() || *finished_subroutine != VmStep::kDone) {
     return 1;
   }
 
