@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -1270,6 +1271,231 @@ TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(vm).type(), SqlValueType::kNull);
+}
+
+TEST_F(VmTest, ExecutesNestedTypedSubroutinesAndRebindsWithoutLosingContinuations) {
+  for (const std::uint32_t count : {1U, 8U, 64U}) {
+    SCOPED_TRACE(count);
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 2;
+    input.parameter_count = 1;
+    input.constants.push_back(SqlValue::Integer(1));
+    input.result_columns.push_back(ResultColumn());
+    input.instructions = {
+        LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        HaltInstruction{},
+    };
+    for (std::uint32_t index = 0; index < count; ++index) {
+      const auto entry = static_cast<std::uint32_t>(input.instructions.size());
+      if (index + 1U < count) {
+        input.instructions.push_back(
+            CallSubroutineInstruction{.subroutine = SubroutineId{index + 1U}});
+      }
+      input.instructions.push_back(BinaryInstruction{
+          .operation = BinaryOperation::kAdd, .left = Reg(0), .right = Reg(1), .output = Reg(0)});
+      input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{index}});
+      input.subroutines.push_back(SubroutineDescriptor{
+          .entry = Address(entry),
+          .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+      });
+    }
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    EXPECT_EQ(count, program.verification_metrics().maximum_subroutine_depth);
+    Vm vm = CreateCoreVm(program);
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(10)));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 10 + count);
+    EXPECT_EQ(3U * count + 3U, vm.executed_instruction_count());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.Reset());
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 10 + count);
+    RequireStatus(vm.Reset());
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(20)));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 20 + count);
+  }
+}
+
+TEST_F(VmTest, ResetsInterruptedSubroutineContinuationsBeforeAnotherExecution) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 2;
+  input.parameter_count = 1;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.result_columns.push_back(ResultColumn());
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(8), .end = Address(11)});
+  input.instructions = {
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(0), .target = Address(5)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      HaltInstruction{},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      CopyInstruction{.input = Reg(1), .output = Reg(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program, VmLimits{.maximum_instructions_per_step = 4});
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(1)));
+  const auto interrupted = vm.Step();
+  ASSERT_FALSE(interrupted.has_value());
+  EXPECT_EQ(ErrorCode::kInterrupted, interrupted.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(0)));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, RecoversTypedScalarErrorsFromSubroutinesWithoutLosingBindings) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
+  input.parameter_count = 1;
+  input.symbols = {"BINARY", "abs"};
+  input.result_columns.push_back(ResultColumn());
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(4), .end = Address(6)});
+  input.instructions = {
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      CallScalarInstruction{.function = Symbol(1),
+                            .collation = Symbol(0),
+                            .first_argument = Reg(0),
+                            .argument_count = 1,
+                            .output = Reg(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(-7)));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 7);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, MatchesIndependentSharedSubroutineDagModel) {
+  std::minstd_rand random{0x53756231U};
+  for (std::uint32_t example = 0; example < 32U; ++example) {
+    const std::uint32_t count = example < 3U ? std::array{2U, 8U, 16U}[example]
+                                             : 2U + static_cast<std::uint32_t>(random() % 15U);
+    SCOPED_TRACE(example);
+    SCOPED_TRACE(count);
+    std::vector<std::optional<std::uint32_t>> extra_targets(count);
+    for (std::uint32_t index = 0; index + 2U < count; ++index) {
+      if (random() % 2U == 0U) {
+        extra_targets[index] =
+            index + 2U + static_cast<std::uint32_t>(random() % (count - index - 2U));
+      }
+    }
+    std::vector<std::int64_t> contributions(count, 1);
+    for (std::size_t index = count; index-- > 0U;) {
+      if (index + 1U < count) {
+        contributions[index] += contributions[index + 1U];
+      }
+      if (extra_targets[index].has_value()) {
+        contributions[index] += contributions[*extra_targets[index]];
+      }
+    }
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 2;
+    input.parameter_count = 1;
+    input.constants.push_back(SqlValue::Integer(1));
+    input.result_columns.push_back(ResultColumn());
+    input.instructions = {
+        LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{count - 1U}},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        HaltInstruction{},
+    };
+    for (std::uint32_t index = 0; index < count; ++index) {
+      const auto entry = static_cast<std::uint32_t>(input.instructions.size());
+      if (index + 1U < count) {
+        input.instructions.push_back(
+            CallSubroutineInstruction{.subroutine = SubroutineId{index + 1U}});
+      }
+      if (extra_targets[index].has_value()) {
+        input.instructions.push_back(
+            CallSubroutineInstruction{.subroutine = SubroutineId{*extra_targets[index]}});
+      }
+      input.instructions.push_back(BinaryInstruction{
+          .operation = BinaryOperation::kAdd, .left = Reg(0), .right = Reg(1), .output = Reg(0)});
+      input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{index}});
+      input.subroutines.push_back(SubroutineDescriptor{
+          .entry = Address(entry),
+          .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+      });
+    }
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    EXPECT_EQ(count, program.verification_metrics().maximum_subroutine_depth);
+    Vm vm = CreateCoreVm(program);
+    for (const std::int64_t seed : {-1, 0, 10}) {
+      RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(seed)));
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ExpectInteger(OnlyRowValue(vm), seed + 1 + contributions.front());
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(vm.Reset());
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+    }
+  }
+}
+
+TEST_F(VmTest, ExecutesLoopingSubroutineThroughTheCanonicalRegisterLattice) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 4;
+  input.constants.push_back(SqlValue::Integer(0));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(3));
+  input.symbols = {"BINARY"};
+  input.result_columns.push_back(ResultColumn());
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(6), .end = Address(10)});
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      BinaryInstruction{
+          .operation = BinaryOperation::kAdd, .left = Reg(0), .right = Reg(1), .output = Reg(0)},
+      CompareInstruction{.comparison = SqlComparison::kLess,
+                         .affinity = TypeAffinity::kNumeric,
+                         .collation = Symbol(0),
+                         .left = Reg(0),
+                         .right = Reg(2),
+                         .output = Reg(3)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(3), .target = Address(6)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 3);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 }
 
 TEST_F(VmTest, CollectsAndIteratesBoundedRowidLists) {

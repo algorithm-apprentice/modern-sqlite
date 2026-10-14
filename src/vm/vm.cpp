@@ -265,6 +265,11 @@ struct RuntimeWriteCursor {
 }  // namespace
 
 struct Vm::Impl {
+  struct SubroutineContinuation {
+    SubroutineId subroutine;
+    InstructionAddress return_address;
+  };
+
   Impl(const BytecodeProgram& program, VmEnvironment environment, VmLimits limits)
       : program_(&program),
         functions_(environment.functions_),
@@ -284,6 +289,7 @@ struct Vm::Impl {
     if (functions_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "VM environment is incomplete"));
     }
+    subroutine_continuations_.reserve(program_->verification_metrics().maximum_subroutine_depth);
     for (const Collation* collation : available_collations_) {
       if (collation == nullptr) {
         return std::unexpected(
@@ -1121,6 +1127,21 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const JumpInstruction& operation) {
     program_counter_ = operation.target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CallSubroutineInstruction& operation) {
+    subroutine_continuations_.push_back(SubroutineContinuation{
+        .subroutine = operation.subroutine,
+        .return_address = InstructionAddress{program_counter_},
+    });
+    program_counter_ = program_->subroutine(operation.subroutine).entry.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReturnSubroutineInstruction&) {
+    program_counter_ = subroutine_continuations_.back().return_address.value();
+    subroutine_continuations_.pop_back();
     return std::nullopt;
   }
 
@@ -2908,6 +2929,7 @@ struct Vm::Impl {
   }
 
   void CloseAllCursors() noexcept {
+    subroutine_continuations_.clear();
     for (RuntimeCursor& cursor : cursors_) {
       cursor.ClearRecordCache();
       cursor.storage = std::monostate{};
@@ -2962,6 +2984,7 @@ struct Vm::Impl {
   std::optional<std::int64_t> last_insert_rowid_event_;
   std::optional<std::uint64_t> execution_data_version_;
   std::vector<std::int64_t> rowid_list_;
+  std::vector<SubroutineContinuation> subroutine_continuations_;
   std::size_t rowid_list_index_ = 0;
   bool rowid_list_positioned_ = false;
 };

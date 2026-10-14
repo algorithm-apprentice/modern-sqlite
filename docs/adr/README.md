@@ -85,3 +85,4 @@ their corresponding implementation begins.
 79. [ADR-0079: RIGHT Join Matched-Row Replay](0079-right-join-matched-row-replay.md)
 80. [ADR-0080: FULL Join Two-Sided Preservation](0080-full-join-two-sided-preservation.md)
 81. [ADR-0081: Parameterized Joined Rowid Access](0081-parameterized-joined-rowid-access.md)
+82. [ADR-0082: Verified Static Value Subroutines](0082-verified-static-value-subroutines.md)

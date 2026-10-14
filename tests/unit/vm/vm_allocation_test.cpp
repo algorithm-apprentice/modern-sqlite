@@ -129,6 +129,60 @@ int main() try {
     return 1;
   }
 
+  ProgramInput subroutine_input;
+  subroutine_input.schema_version = input.schema_version;
+  subroutine_input.register_count = 2;
+  subroutine_input.constants.push_back(SqlValue::Integer(1'000));
+  subroutine_input.constants.push_back(SqlValue::Integer(1));
+  subroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "value",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kInteger,
+  });
+  subroutine_input.subroutines.push_back(
+      SubroutineDescriptor{.entry = InstructionAddress(6), .end = InstructionAddress(8)});
+  subroutine_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+      CallSubroutineInstruction{.subroutine = SubroutineId(0)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue,
+                        .input = RegisterId(0),
+                        .target = InstructionAddress(2)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+      BinaryInstruction{.operation = BinaryOperation::kSubtract,
+                        .left = RegisterId(0),
+                        .right = RegisterId(1),
+                        .output = RegisterId(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
+  };
+  const auto subroutine_program = BytecodeProgram::Create(subroutine_input);
+  if (!subroutine_program.has_value()) {
+    return 1;
+  }
+  auto subroutine_vm = Vm::Create(*subroutine_program, VmEnvironment::Core());
+  if (!subroutine_vm.has_value()) {
+    return 1;
+  }
+  const std::size_t before_subroutines = allocation_count.load(std::memory_order_relaxed);
+  for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+    if (!subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+      return 1;
+    }
+    const auto row = subroutine_vm->Step();
+    if (!row.has_value() || *row != VmStep::kRow || subroutine_vm->row().size() != 1U ||
+        subroutine_vm->row()[0].integer_value() != 0) {
+      return 1;
+    }
+    const auto done = subroutine_vm->Step();
+    if (!done.has_value() || *done != VmStep::kDone || !subroutine_vm->Reset().has_value()) {
+      return 1;
+    }
+  }
+  if (allocation_count.load(std::memory_order_relaxed) != before_subroutines) {
+    return 1;
+  }
+
   ProgramInput rowid_list_input;
   rowid_list_input.schema_version = input.schema_version;
   rowid_list_input.register_count = 1;
