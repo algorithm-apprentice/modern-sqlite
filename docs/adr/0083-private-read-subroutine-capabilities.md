@@ -37,6 +37,9 @@ rowid list, client result rows, and halt remain forbidden.
 This adds no VM opcode, parser acceptance, runtime compiler, persistent format,
 or separate temporary-storage factory.
 
+Value subroutines may call only value subroutines. Read subroutines may call
+either kind. The explicit opt-in cannot be bypassed by an indirect read call.
+
 ### 2. Prove one lexical owner for every mutable capability
 
 Every referenced mutable descriptor belongs to exactly one lexical region:
