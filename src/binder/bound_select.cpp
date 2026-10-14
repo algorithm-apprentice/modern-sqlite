@@ -2047,9 +2047,17 @@ class StatementBinder final {
                                          tree_.expression(*core.from.front().on).span,
                                          "a JOIN clause is required before ON"));
     }
+    if (!core.from.empty() && core.from.front().using_clause.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
+                                         core.from.front().using_clause->span,
+                                         "a JOIN clause is required before USING"));
+    }
     BindExpected<void> source = BindSource(core);
     if (!source.has_value()) {
       return source;
+    }
+    if (auto joined = BindJoinedColumns(core); !joined.has_value()) {
+      return joined;
     }
     RegisterActiveSourceCollations();
     ReserveOutputStorage(core);
@@ -2733,7 +2741,11 @@ class StatementBinder final {
         !std::ranges::all_of(core.from, [this](const TableSource& source) {
           return SpanIsValid(source.span) && QualifiedNameIsValid(source.name) &&
                  (!source.alias.has_value() || SpanIsValid(*source.alias)) &&
-                 (!source.on.has_value() || IdIsValid(*source.on));
+                 (!source.on.has_value() || IdIsValid(*source.on)) &&
+                 (!source.using_clause.has_value() ||
+                  (SpanIsValid(source.using_clause->span) &&
+                   std::ranges::all_of(source.using_clause->columns,
+                                       [this](SourceSpan column) { return SpanIsValid(column); })));
         })) {
       return false;
     }
@@ -2962,6 +2974,93 @@ class StatementBinder final {
       }
     }
     active_source_count_ = impl_->source_columns.size() - active_source_begin_;
+    return {};
+  }
+
+  [[nodiscard]] BoundSourceColumnId JoinedColumnRepresentative(
+      BoundSourceColumnId id) const noexcept {
+    return impl_->source_columns[id.value()].merged_into.value_or(id);
+  }
+
+  [[nodiscard]] std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
+      std::string_view name, std::size_t end) const noexcept {
+    for (std::size_t index = active_source_begin_; index < end; ++index) {
+      const BoundSourceColumn& column = impl_->source_columns[index];
+      if (!column.merged_into.has_value() && NamesEqual(column.name, name)) {
+        return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] BindExpected<void> BindUsingColumn(std::size_t source_index, std::string_view name,
+                                                   SourceSpan span) {
+    const SourceState& source = source_states_[source_index];
+    const auto left = FindVisibleLeftColumn(name, source.source_column_begin);
+    const auto right = FindSourceColumn(source, name);
+    if (!left.has_value() || !right.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, span,
+                                         "cannot join using column " + std::string{name} +
+                                             " - column not present in both tables"));
+    }
+    auto left_expression = BindColumn(*left, span);
+    if (!left_expression.has_value()) {
+      return std::unexpected(std::move(left_expression.error()));
+    }
+    auto right_expression = BindColumn(*right, span);
+    if (!right_expression.has_value()) {
+      return std::unexpected(std::move(right_expression.error()));
+    }
+    auto equality =
+        AppendBoundComparison(SqlComparison::kEqual, *left_expression, *right_expression, span);
+    if (!equality.has_value()) {
+      return std::unexpected(std::move(equality.error()));
+    }
+    auto& condition = impl_->table_sources[source_index].on;
+    if (condition.has_value()) {
+      auto conjunction =
+          AppendBoundBinary(BoundBinaryOperation::kLogicalAnd, *condition, *equality, span);
+      if (!conjunction.has_value()) {
+        return std::unexpected(std::move(conjunction.error()));
+      }
+      condition = *conjunction;
+    } else {
+      condition = *equality;
+    }
+    impl_->source_columns[right->value()].merged_into = *left;
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core) {
+    for (std::size_t index = 1; index < core.from.size(); ++index) {
+      const TableSource& source = core.from[index];
+      if (source.natural && (source.on.has_value() || source.using_clause.has_value())) {
+        return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, source.span,
+                                           "a NATURAL join may not have an ON or USING clause"));
+      }
+      if (source.using_clause.has_value()) {
+        for (const SourceSpan column : source.using_clause->columns) {
+          auto name = Dequote(column);
+          if (!name.has_value()) {
+            return std::unexpected(std::move(name.error()));
+          }
+          if (auto joined = BindUsingColumn(index, *name, column); !joined.has_value()) {
+            return joined;
+          }
+        }
+      } else if (source.natural) {
+        const SourceState& right = source_states_[index];
+        const std::size_t end = right.source_column_begin + right.source_column_count;
+        for (std::size_t column = right.source_column_begin; column < end; ++column) {
+          const std::string_view name = impl_->source_columns[column].name;
+          if (FindVisibleLeftColumn(name, right.source_column_begin).has_value()) {
+            if (auto joined = BindUsingColumn(index, name, source.span); !joined.has_value()) {
+              return joined;
+            }
+          }
+        }
+      }
+    }
     return {};
   }
 
@@ -3651,7 +3750,12 @@ class StatementBinder final {
     std::size_t expanded_count = 0;
     for (const SourceState& source : source_states_) {
       if (!qualifier.has_value() || WildcardQualifierMatches(source, *qualifier)) {
-        expanded_count += source.source_column_count;
+        const std::size_t end = source.source_column_begin + source.source_column_count;
+        for (std::size_t index = source.source_column_begin; index < end; ++index) {
+          if (qualifier.has_value() || !impl_->source_columns[index].merged_into.has_value()) {
+            ++expanded_count;
+          }
+        }
       }
     }
     if (impl_->result_columns.size() > options_.maximum_result_columns ||
@@ -3667,6 +3771,9 @@ class StatementBinder final {
       const std::size_t source_end = owner.source_column_begin + owner.source_column_count;
       for (std::size_t index = owner.source_column_begin; index < source_end; ++index) {
         const BoundSourceColumn& column = impl_->source_columns[index];
+        if (!qualifier.has_value() && column.merged_into.has_value()) {
+          continue;
+        }
         const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
         std::string_view source_name =
             owner.schema_table ? std::string_view{"sqlite_master"} : std::string_view{owner.name};
@@ -3687,18 +3794,17 @@ class StatementBinder final {
         const BoundExpressionId expression = **resolved;
         const auto* bound_column =
             std::get_if<BoundColumnExpression>(&impl_->expressions[expression.value()].payload);
-        if (bound_column == nullptr || bound_column->column != column_id) {
+        if (bound_column == nullptr || JoinedColumnRepresentative(bound_column->column) !=
+                                           JoinedColumnRepresentative(column_id)) {
           return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                              "expanded wildcard column has a different owner"));
         }
-        impl_->result_columns.push_back(BoundResultColumn{
+        BoundResultColumn result{
             .expression = expression,
-            .name = std::string{column.name},
-            .declared_type = column.declared_type.has_value()
-                                 ? std::optional<std::string>{std::string{*column.declared_type}}
-                                 : std::nullopt,
-            .affinity = column.affinity,
-        });
+            .affinity = Properties(expression).affinity,
+        };
+        PopulateImplicitResultMetadata(expression, span, result);
+        impl_->result_columns.push_back(std::move(result));
         impl_->result_syntax.emplace_back(std::nullopt);
       }
     }
@@ -4101,8 +4207,15 @@ class StatementBinder final {
         continue;
       }
       if (const auto column = FindSourceColumn(source, name); column.has_value()) {
+        if (!qualification.has_value() &&
+            impl_->source_columns[column->value()].merged_into.has_value()) {
+          continue;
+        }
         if (matched_column.has_value()) {
-          return std::unexpected(ambiguous());
+          if (JoinedColumnRepresentative(*matched_column) != JoinedColumnRepresentative(*column)) {
+            return std::unexpected(ambiguous());
+          }
+          continue;
         }
         matched_column = *column;
       }
@@ -4244,6 +4357,39 @@ class StatementBinder final {
     }
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundComparison(SqlComparison comparison,
+                                                                      BoundExpressionId left,
+                                                                      BoundExpressionId right,
+                                                                      SourceSpan span) {
+    auto collation = SelectComparisonCollation(std::array{left, right}, span);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return AppendExpression(span,
+                            BoundComparisonExpression{
+                                .comparison = comparison,
+                                .affinity = SelectComparisonAffinity(Properties(left).affinity,
+                                                                     Properties(right).affinity),
+                                .collation = *collation,
+                                .left = left,
+                                .right = right,
+                            },
+                            PropagatedExplicitProperties(std::array{left, right}));
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundBinary(BoundBinaryOperation operation,
+                                                                  BoundExpressionId left,
+                                                                  BoundExpressionId right,
+                                                                  SourceSpan span) {
+    return AppendExpression(span,
+                            BoundBinaryExpression{
+                                .operation = operation,
+                                .left = left,
+                                .right = right,
+                            },
+                            PropagatedExplicitProperties(std::array{left, right}));
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindBinary(const BinaryExpression& binary,
                                                            SourceSpan span, BindScope scope) {
     if (IsPatternOperation(binary.op)) {
@@ -4292,29 +4438,9 @@ class StatementBinder final {
       }
     }
     if (IsComparisonOperation(binary.op)) {
-      BindExpected<BoundCollationId> collation =
-          SelectComparisonCollation(std::array{*left, *right}, span);
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return AppendExpression(span,
-                              BoundComparisonExpression{
-                                  .comparison = ToSqlComparison(binary.op),
-                                  .affinity = SelectComparisonAffinity(Properties(*left).affinity,
-                                                                       Properties(*right).affinity),
-                                  .collation = *collation,
-                                  .left = *left,
-                                  .right = *right,
-                              },
-                              PropagatedExplicitProperties(std::array{*left, *right}));
+      return AppendBoundComparison(ToSqlComparison(binary.op), *left, *right, span);
     }
-    return AppendExpression(span,
-                            BoundBinaryExpression{
-                                .operation = ToBoundBinary(binary.op),
-                                .left = *left,
-                                .right = *right,
-                            },
-                            PropagatedExplicitProperties(std::array{*left, *right}));
+    return AppendBoundBinary(ToBoundBinary(binary.op), *left, *right, span);
   }
 
   [[nodiscard]] std::optional<bool> TruthLiteral(BoundExpressionId id) const noexcept {

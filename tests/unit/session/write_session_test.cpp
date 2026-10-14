@@ -139,7 +139,7 @@ TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
   ExecuteDone(session, "INSERT INTO a VALUES(2)");
   EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a INNER JOIN b ON a.id=b.id").empty());
   EXPECT_TRUE(QueryRows(session, "SELECT b.id,a.id FROM b LEFT JOIN a ON a.id=b.id").empty());
-  for (const std::string_view condition : {"", " ON a.id=b.id"}) {
+  for (const std::string_view condition : {"", " ON a.id=b.id", " USING(id)"}) {
     const auto rows = QueryRows(session, "SELECT a.id,b.id,b._rowid_ FROM a LEFT JOIN b" +
                                              std::string{condition} + " ORDER BY a.id");
     ASSERT_EQ(2U, rows.size());
@@ -162,6 +162,43 @@ TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
   EXPECT_EQ(2, empty[0][0].integer_value());
   EXPECT_EQ(0, empty[0][1].integer_value());
   EXPECT_TRUE(session.autocommit());
+}
+
+TEST(WriteSession, ComparesUsingColumnsWithCanonicalAffinityAndNullSemantics) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE l(k TEXT,lvalue INTEGER)");
+  ExecuteDone(session, "CREATE TABLE r(k TEXT,rvalue INTEGER)");
+  ExecuteDone(session, "INSERT INTO l VALUES('A',1)");
+  ExecuteDone(session, "INSERT INTO l VALUES('n',2)");
+  ExecuteDone(session, "INSERT INTO l VALUES(NULL,3)");
+  ExecuteDone(session, "INSERT INTO r VALUES('a',10)");
+  ExecuteDone(session, "INSERT INTO r VALUES(NULL,30)");
+  const auto forward =
+      QueryRows(session, "SELECT k,r.k,lvalue,rvalue FROM l LEFT JOIN r USING(k) ORDER BY lvalue");
+  ASSERT_EQ(3U, forward.size());
+  EXPECT_EQ("A", Text(forward[0][0]));
+  EXPECT_EQ("n", Text(forward[1][0]));
+  for (std::size_t index = 0; index < forward.size(); ++index) {
+    EXPECT_EQ(SqlValueType::kNull, forward[index][1].type());
+    EXPECT_EQ(SqlValueType::kNull, forward[index][3].type());
+  }
+  EXPECT_EQ(SqlValueType::kNull, forward[2][0].type());
+  const auto reversed =
+      QueryRows(session, "SELECT k,l.k,rvalue,lvalue FROM r LEFT JOIN l USING(k) ORDER BY rvalue");
+  ASSERT_EQ(2U, reversed.size());
+  for (const auto& row : reversed) {
+    EXPECT_EQ(SqlValueType::kNull, row[1].type());
+    EXPECT_EQ(SqlValueType::kNull, row[3].type());
+  }
+  ExecuteDone(session, "CREATE TABLE numeric_key(k INTEGER,rvalue INTEGER)");
+  ExecuteDone(session, "INSERT INTO numeric_key VALUES(1,40)");
+  ExecuteDone(session, "INSERT INTO l VALUES('01',4)");
+  const auto numeric = QueryRows(session, "SELECT k,n.k,lvalue FROM l JOIN numeric_key n USING(k)");
+  ASSERT_EQ(1U, numeric.size());
+  EXPECT_EQ("01", Text(numeric[0][0]));
+  EXPECT_EQ(1, numeric[0][1].integer_value());
+  EXPECT_EQ(4, numeric[0][2].integer_value());
 }
 
 TEST(WriteSession, ExecutesWritablePipelineAndPublishesConnectionState) {

@@ -706,6 +706,70 @@ TEST(ReadSession, ExecutesInnerLeftOnAndWhereWithoutFakeUnmatchedRows) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(filtered.Step()));
 }
 
+TEST(ReadSession, ExecutesMergedUsingAndNaturalOutputWithoutLosingQualifiedRightNulls) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement using_columns =
+      PrepareStatement(session,
+                       "SELECT id,a.id,b.id FROM model_rows a LEFT JOIN items b USING(id) "
+                       "WHERE a.id<=5 ORDER BY id");
+  for (std::int64_t id = 1; id <= 5; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(using_columns.Step()));
+    EXPECT_EQ(id, IntegerValue(using_columns.row()[0]));
+    EXPECT_EQ(id, IntegerValue(using_columns.row()[1]));
+    if (id == 5) {
+      EXPECT_EQ(SqlValueType::kNull, using_columns.row()[2].type());
+    } else {
+      EXPECT_EQ(id, IntegerValue(using_columns.row()[2]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(using_columns.Step()));
+  ReadStatement natural = PrepareStatement(
+      session, "SELECT a.id,b.id FROM items a NATURAL LEFT JOIN items b ORDER BY a.id");
+  for (std::int64_t id = 1; id <= 4; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(natural.Step()));
+    EXPECT_EQ(id, IntegerValue(natural.row()[0]));
+    if (id == 3) {
+      EXPECT_EQ(SqlValueType::kNull, natural.row()[1].type());
+    } else {
+      EXPECT_EQ(id, IntegerValue(natural.row()[1]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(natural.Step()));
+}
+
+TEST(ReadSession, RebindsMergedGroupingAcrossEarlyAndZeroLimits) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id,count(b.id),min(b.text_default) "
+                       "FROM model_rows a LEFT JOIN altered b USING(id) WHERE id<=?1 "
+                       "GROUP BY id ORDER BY id LIMIT ?2");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(5)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(-1)));
+  for (std::int64_t id = 1; id <= 5; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(id <= 4 ? 1 : 0, IntegerValue(statement.row()[1]));
+    if (id <= 2) {
+      EXPECT_EQ("fallback", TextValue(statement.row()[2]));
+    } else if (id == 3) {
+      EXPECT_EQ("stored", TextValue(statement.row()[2]));
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[2].type());
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(32)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Text("not reached")));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(0)));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
 TEST(ReadSession, ExecutesOwnedCommaAndCrossJoinRowsWithResetAndLimit) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   const std::array queries{
@@ -799,6 +863,11 @@ TEST(ReadSession, RecoversJoinedCursorReadFailureAndCleansOwnedState) {
            .second = 1},
       Case{.sql = "SELECT count(b.id) FROM Items a LEFT JOIN storage_values b ON b.id=a.id+99",
            .first = 0},
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN storage_values b USING(id) LIMIT 1",
+           .first = 1,
+           .second = 1},
+      Case{.sql = "SELECT count(b.id) FROM Items a LEFT JOIN storage_values b USING(id)",
+           .first = 4},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -851,6 +920,14 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
                       "GROUP BY b.id HAVING count()>1 ORDER BY b.id DESC",
                .rows = 32,
                .descending = true},
+      JoinCase{.sql = "SELECT a.id FROM model_rows a LEFT JOIN items b USING(id) "
+                      "CROSS JOIN model_rows c ORDER BY a.id DESC,c.id",
+               .rows = 1024,
+               .descending = true,
+               .copies = 32},
+      JoinCase{.sql = "SELECT id FROM model_rows a NATURAL LEFT JOIN model_rows b ORDER BY id DESC",
+               .rows = 32,
+               .descending = true},
   };
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<int>(mode));
@@ -868,6 +945,7 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
         ReadSession::Open(std::move(vfs), ReadCompatibilityFixturePath().string(), options));
     for (const JoinCase& test_case : cases) {
       SCOPED_TRACE(test_case.sql);
+      const std::size_t opens_before = state->open_count;
       ReadStatement statement = PrepareStatement(session, test_case.sql);
       std::size_t rows = 0;
       while (true) {
@@ -885,6 +963,9 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
         ++rows;
       }
       EXPECT_EQ(test_case.rows, rows);
+      if (mode == TemporaryStoreMode::kFile && test_case.copies > 1U) {
+        EXPECT_GT(state->open_count, opens_before);
+      }
       EXPECT_EQ(0U, state->live_count);
       EXPECT_LE(state->peak_live_count, 2U);
       RequireStatus(statement.Reset());
@@ -973,16 +1054,24 @@ TEST(ReadSession, GroupsPhysicalAndNullExtendedRowsThroughSharedSpillStorage) {
 }
 
 TEST(ReadSession, BypassesAllSixtyFourSourcesForZeroLimit) {
-  for (const bool left : {false, true}) {
-    SCOPED_TRACE(left);
+  struct Case {
+    std::string_view operation;
+    std::string_view condition;
+  };
+  const std::array cases{
+      Case{.operation = " CROSS JOIN Items AS t", .condition = ""},
+      Case{.operation = " LEFT JOIN Items AS t", .condition = " ON 0"},
+      Case{.operation = " LEFT JOIN Items AS t", .condition = " USING(id)"},
+      Case{.operation = " NATURAL LEFT JOIN Items AS t", .condition = ""},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.operation);
+    SCOPED_TRACE(test_case.condition);
     ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
     std::string sql = "SELECT 1 FROM Items AS t0";
     for (std::size_t index = 1; index < kMaximumSelectSources; ++index) {
-      sql += std::string{left ? " LEFT JOIN Items AS t" : " CROSS JOIN Items AS t"} +
-             std::to_string(index);
-      if (left) {
-        sql += " ON 0";
-      }
+      sql += std::string{test_case.operation} + std::to_string(index) +
+             std::string{test_case.condition};
     }
     sql += " LIMIT 0";
     ReadStatement statement = PrepareStatement(session, sql);
@@ -1264,6 +1353,9 @@ TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
       "FROM model_rows a CROSS JOIN model_rows b GROUP BY b.id ORDER BY b.id",
       "SELECT a.id,count(),group_concat(b.id ORDER BY b.id DESC) "
       "FROM model_rows a LEFT JOIN model_rows b ON a.id<32 GROUP BY a.id ORDER BY a.id",
+      "SELECT a.id,count(),group_concat(c.id ORDER BY c.id DESC) "
+      "FROM model_rows a LEFT JOIN items b USING(id) CROSS JOIN model_rows c "
+      "GROUP BY a.id ORDER BY a.id",
   };
   for (const std::string_view sql : queries) {
     SCOPED_TRACE(sql);
