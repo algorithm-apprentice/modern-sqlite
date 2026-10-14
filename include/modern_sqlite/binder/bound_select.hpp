@@ -117,6 +117,8 @@ struct BoundSourceColumn {
   TypeAffinity affinity = TypeAffinity::kNone;
   std::string_view collation_name{};
   std::optional<ColumnId> catalog_column{};
+  // A direct link to the visible USING/NATURAL representative in this core.
+  std::optional<BoundSourceColumnId> merged_into{};
 };
 
 struct BoundCollation {
@@ -421,6 +423,7 @@ enum class BindErrorCode : std::uint8_t {
   kObjectNameReserved,
   kIndexedTableUnsupported,
   kJoinConditionScope,
+  kExpressionDepthExceeded,
   kInternalInvariant,
 };
 

@@ -771,6 +771,171 @@ TEST(Binder, BindsOnAliasesAndInnerForwardSourcesButRejectsLeftForwardScope) {
   EXPECT_EQ(BindErrorCode::kAggregateMisuse, aggregate.error().code);
 }
 
+TEST(Binder, PublishesMergedColumnProvenanceWithoutChangingPhysicalOwnership) {
+  const BoundSelect select =
+      BindOrThrow("SELECT id,a.id,b.id FROM Items a LEFT JOIN Items b USING(id,id)", TestCatalog());
+  const auto sources = select.table_sources();
+  ASSERT_EQ(2U, sources.size());
+  const auto right =
+      BoundSourceColumnId{static_cast<std::uint32_t>(sources[1].source_column_begin)};
+  EXPECT_FALSE(select.source_columns()[0].merged_into.has_value());
+  EXPECT_EQ(BoundSourceColumnId{0}, select.source_columns()[right.value()].merged_into);
+  EXPECT_EQ(sources[1].id, select.source_columns()[right.value()].source);
+  ASSERT_TRUE(sources[1].on.has_value());
+  EXPECT_TRUE(
+      std::holds_alternative<BoundBinaryExpression>(select.expression(*sources[1].on).payload));
+  EXPECT_EQ(BoundSourceColumnId{0},
+            std::get<BoundColumnExpression>(ResultExpression(select, 0).payload).column);
+  EXPECT_EQ(BoundSourceColumnId{0},
+            std::get<BoundColumnExpression>(ResultExpression(select, 1).payload).column);
+  EXPECT_EQ(right, std::get<BoundColumnExpression>(ResultExpression(select, 2).payload).column);
+  const BoundSelect collated =
+      BindOrThrow("SELECT Name FROM Items a JOIN Items b USING(Name)", TestCatalog());
+  const auto& comparison = std::get<BoundComparisonExpression>(
+      collated.expression(*collated.table_sources()[1].on).payload);
+  EXPECT_EQ(TypeAffinity::kBlob, comparison.affinity);
+  EXPECT_EQ("NOCASE", collated.collations()[comparison.collation.value()].name);
+}
+
+TEST(Binder, ResolvesMergedDuplicateQualifiersThroughTheCanonicalWildcardResolver) {
+  const auto catalog = TestCatalog();
+  const BoundSelect natural =
+      BindOrThrow("SELECT q.* FROM Items q NATURAL LEFT JOIN Items q", catalog);
+  const std::size_t columns = natural.table_sources()[0].source_column_count;
+  ASSERT_EQ(columns * 2U, natural.result_columns().size());
+  for (std::size_t index = 0; index < natural.result_columns().size(); ++index) {
+    EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(index % columns)},
+              std::get<BoundColumnExpression>(ResultExpression(natural, index).payload).column);
+  }
+  const BoundSelect qualified =
+      BindOrThrow("SELECT q.id FROM Items q JOIN Items q USING(id)", catalog);
+  EXPECT_EQ(BoundSourceColumnId{0},
+            std::get<BoundColumnExpression>(ResultExpression(qualified, 0).payload).column);
+  const auto unrelated =
+      BindSelectStatement(ParseTree("SELECT * FROM Items q JOIN Items q USING(id)"), catalog);
+  ASSERT_FALSE(unrelated.has_value());
+  EXPECT_EQ(BindErrorCode::kAmbiguousColumn, unrelated.error().code);
+  const auto rowid =
+      BindSelectStatement(ParseTree("SELECT q.rowid FROM Items q JOIN Items q USING(id)"), catalog);
+  ASSERT_FALSE(rowid.has_value());
+  EXPECT_EQ(BindErrorCode::kAmbiguousColumn, rowid.error().code);
+}
+
+TEST(Binder, UsesFirstVisibleLeftUsingColumnAndRejectsMissingOrIllegalClauses) {
+  const auto catalog = TestCatalog();
+  const BoundSelect prefix =
+      BindOrThrow("SELECT a.id,b.id,c.id FROM Items a,Items b JOIN Items c USING(id)", catalog);
+  const auto sources = prefix.table_sources();
+  ASSERT_EQ(3U, sources.size());
+  const auto third_begin = sources[2].source_column_begin;
+  EXPECT_EQ(BoundSourceColumnId{0}, prefix.source_columns()[third_begin].merged_into);
+  EXPECT_FALSE(prefix.source_columns()[sources[1].source_column_begin].merged_into.has_value());
+  const auto ambiguous = BindSelectStatement(
+      ParseTree("SELECT id FROM Items a,Items b JOIN Items c USING(id)"), catalog);
+  ASSERT_FALSE(ambiguous.has_value());
+  EXPECT_EQ(BindErrorCode::kAmbiguousColumn, ambiguous.error().code);
+  struct Case {
+    std::string_view sql;
+    std::string_view detail;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT * FROM Items USING(id)",
+           .detail = "a JOIN clause is required before USING"},
+      Case{.sql = "SELECT * FROM Items a JOIN Items b USING(_rowid_)",
+           .detail = "cannot join using column _rowid_ - column not present in both tables"},
+      Case{.sql = "SELECT * FROM Items a JOIN Items b USING(absent)",
+           .detail = "cannot join using column absent - column not present in both tables"},
+      Case{.sql = "SELECT * FROM Items a NATURAL JOIN Items b ON 1",
+           .detail = "a NATURAL join may not have an ON or USING clause"},
+      Case{.sql = "SELECT * FROM Items a NATURAL JOIN Items b USING(id)",
+           .detail = "a NATURAL join may not have an ON or USING clause"},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto rejected = BindSelectStatement(ParseTree(test_case.sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kJoinConditionScope, rejected.error().code);
+    EXPECT_EQ(test_case.detail, rejected.error().detail);
+  }
+  const BoundSelect explicit_rowid =
+      BindOrThrow("SELECT rowid FROM Items a JOIN Items b USING(rowid)", catalog);
+  EXPECT_EQ(BoundSourceColumnId{3},
+            std::get<BoundColumnExpression>(ResultExpression(explicit_rowid, 0).payload).column);
+}
+
+TEST(Binder, EnforcesCombinedGeneratedJoinHeightAcrossSourcesAndWhere) {
+  struct Case {
+    std::size_t sources;
+    std::size_t names;
+    std::string_view where;
+    bool accepted;
+    std::string_view leading_on{};
+    std::string_view trailing_on{};
+  };
+  const std::array cases{
+      Case{.sources = 2, .names = 999, .where = "", .accepted = true},
+      Case{.sources = 2, .names = 1000, .where = "", .accepted = false},
+      Case{.sources = 3, .names = 499, .where = "", .accepted = true},
+      Case{.sources = 3, .names = 500, .where = "", .accepted = false},
+      Case{.sources = 2, .names = 998, .where = " WHERE 0", .accepted = true},
+      Case{.sources = 2, .names = 999, .where = " WHERE 0", .accepted = false},
+      Case{.sources = 2, .names = 997, .where = " WHERE t0.id>0", .accepted = true},
+      Case{.sources = 2, .names = 998, .where = " WHERE t0.id>0", .accepted = false},
+      Case{.sources = 2, .names = 998, .where = " WHERE id COLLATE BINARY>0", .accepted = true},
+      Case{.sources = 2, .names = 999, .where = " WHERE id COLLATE BINARY>0", .accepted = false},
+      Case{.sources = 10, .names = 111, .where = "", .accepted = true},
+      Case{.sources = 64, .names = 16, .where = "", .accepted = false},
+      Case{.sources = 2,
+           .names = 997,
+           .where = "",
+           .accepted = true,
+           .leading_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 998,
+           .where = "",
+           .accepted = false,
+           .leading_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 998,
+           .where = "",
+           .accepted = true,
+           .trailing_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 999,
+           .where = "",
+           .accepted = false,
+           .trailing_on = " JOIN Items extra ON t0.id=extra.id"},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sources);
+    SCOPED_TRACE(test_case.names);
+    SCOPED_TRACE(test_case.where);
+    SCOPED_TRACE(test_case.leading_on);
+    SCOPED_TRACE(test_case.trailing_on);
+    std::string sql = "SELECT count() FROM Items t0";
+    sql += test_case.leading_on;
+    for (std::size_t source = 1; source < test_case.sources; ++source) {
+      sql += " JOIN Items t" + std::to_string(source) + " USING(";
+      for (std::size_t name = 0; name < test_case.names; ++name) {
+        sql += name == 0U ? "id" : ",id";
+      }
+      sql += ')';
+    }
+    sql += test_case.trailing_on;
+    sql += test_case.where;
+    const auto bound = BindSelectStatement(ParseTree(sql), catalog);
+    if (test_case.accepted) {
+      ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+    } else {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+      EXPECT_EQ(ErrorCode::kGeneric, bound.error().base_error_code());
+      EXPECT_EQ("Expression tree is too large (maximum depth 1000)", bound.error().detail);
+    }
+  }
+}
+
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select =

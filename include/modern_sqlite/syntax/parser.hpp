@@ -58,7 +58,6 @@ struct ParseOptions {
   std::size_t maximum_compound_terms = 500;
 };
 
-inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
 inline constexpr std::size_t kMaximumParserRecursionDepth = 512;
 
 [[nodiscard]] constexpr std::string_view ParseErrorCodeName(ParseErrorCode code) noexcept {

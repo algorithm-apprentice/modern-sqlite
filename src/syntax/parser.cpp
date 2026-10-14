@@ -1132,6 +1132,7 @@ class Parser final {
     }
     ByteOffset end = alias->has_value() ? (*alias)->end() : name_span.end();
     std::optional<ExpressionId> on;
+    std::optional<JoinUsingClause> using_clause;
     if (ConsumeIf(TokenKind::kOn)) {
       auto condition = ParseGeneralExpression();
       if (!condition.has_value()) {
@@ -1139,12 +1140,42 @@ class Parser final {
       }
       on = *condition;
       end = expressions_[condition->value].span.end();
+    } else if (Peek().kind == TokenKind::kUsing) {
+      const Token keyword = Consume();
+      auto left = Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
+      if (!left.has_value()) {
+        return std::unexpected(left.error());
+      }
+      std::vector<SourceSpan> columns;
+      while (true) {
+        if (columns.size() >= options_.maximum_columns) {
+          return std::unexpected(ResourceLimit(Peek()));
+        }
+        auto column = ParseNameToken(NameClass::kNm);
+        if (!column.has_value()) {
+          return std::unexpected(column.error());
+        }
+        columns.push_back(column->span);
+        if (!ConsumeIf(TokenKind::kComma)) {
+          break;
+        }
+      }
+      auto right = Expect(TokenKind::kRightParenthesis, ParseExpectation::kCommaOrRightParenthesis);
+      if (!right.has_value()) {
+        return std::unexpected(right.error());
+      }
+      end = right->span.end();
+      using_clause = JoinUsingClause{
+          .span = MakeSpan(keyword.span.begin(), end),
+          .columns = std::move(columns),
+      };
     }
     return TableSource{
         .span = MakeSpan(name_span.begin(), end),
         .name = std::move(*name),
         .alias = *alias,
         .on = on,
+        .using_clause = std::move(using_clause),
     };
   }
 
@@ -1312,14 +1343,26 @@ class Parser final {
              (Peek().kind == TokenKind::kJoinKeyword &&
               (EqualsAsciiCaseInsensitive(Text(Peek()), "cross") ||
                EqualsAsciiCaseInsensitive(Text(Peek()), "inner") ||
-               EqualsAsciiCaseInsensitive(Text(Peek()), "left")))) {
+               EqualsAsciiCaseInsensitive(Text(Peek()), "left") ||
+               EqualsAsciiCaseInsensitive(Text(Peek()), "natural")))) {
         const Token operation = Consume();
+        const bool natural = operation.kind == TokenKind::kJoinKeyword &&
+                             EqualsAsciiCaseInsensitive(Text(operation), "natural");
+        Token modifier = operation;
+        if (natural && Peek().kind == TokenKind::kJoinKeyword) {
+          modifier = Consume();
+          if (!EqualsAsciiCaseInsensitive(Text(modifier), "cross") &&
+              !EqualsAsciiCaseInsensitive(Text(modifier), "inner") &&
+              !EqualsAsciiCaseInsensitive(Text(modifier), "left")) {
+            return std::unexpected(Unsupported(modifier));
+          }
+        }
         const SourceJoinKind kind =
-            operation.kind == TokenKind::kComma                    ? SourceJoinKind::kComma
-            : operation.kind == TokenKind::kJoin                   ? SourceJoinKind::kInner
-            : EqualsAsciiCaseInsensitive(Text(operation), "left")  ? SourceJoinKind::kLeft
-            : EqualsAsciiCaseInsensitive(Text(operation), "cross") ? SourceJoinKind::kCross
-                                                                   : SourceJoinKind::kInner;
+            operation.kind == TokenKind::kComma                   ? SourceJoinKind::kComma
+            : operation.kind == TokenKind::kJoin                  ? SourceJoinKind::kInner
+            : EqualsAsciiCaseInsensitive(Text(modifier), "left")  ? SourceJoinKind::kLeft
+            : EqualsAsciiCaseInsensitive(Text(modifier), "cross") ? SourceJoinKind::kCross
+                                                                  : SourceJoinKind::kInner;
         SourceSpan operator_span = operation.span;
         if (operation.kind == TokenKind::kJoinKeyword) {
           if (kind == SourceJoinKind::kLeft && Peek().kind == TokenKind::kJoinKeyword &&
@@ -1344,14 +1387,15 @@ class Parser final {
         }
         next->join = kind;
         next->join_span = operator_span;
+        next->natural = natural;
         from.push_back(std::move(*next));
       }
       if (Peek().kind == TokenKind::kJoin || Peek().kind == TokenKind::kJoinKeyword ||
-          Peek().kind == TokenKind::kUsing || Peek().kind == TokenKind::kIndexed ||
+          Peek().kind == TokenKind::kIndexed ||
           (Peek().kind == TokenKind::kNot && Peek(1).kind == TokenKind::kIndexed)) {
         return std::unexpected(Unsupported(Peek()));
       }
-      if (Peek().kind == TokenKind::kOn) {
+      if (Peek().kind == TokenKind::kOn || Peek().kind == TokenKind::kUsing) {
         return std::unexpected(Unexpected(Peek(), ParseExpectation::kEndOfStatement));
       }
     }

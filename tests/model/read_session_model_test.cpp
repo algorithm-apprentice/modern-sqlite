@@ -941,14 +941,45 @@ void RunLeftJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& 
   RequireStatus(statement.Finalize());
 }
 
+void RunMergedJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const std::size_t kind = static_cast<std::size_t>(words[0] % 3U);
+  const bool natural = kind != 0U;
+  const bool shared_alias = kind == 2U;
+  const auto limit = static_cast<std::int64_t>(words[1] % (kRows.size() + 1U));
+  const std::string_view left = shared_alias ? "q" : "a";
+  const std::string_view right = shared_alias ? "q" : "b";
+  const std::string sql =
+      "SELECT id," + std::string{left} + ".id," + std::string{right} + ".id FROM model_rows " +
+      std::string{left} + (natural ? " NATURAL LEFT JOIN model_rows " : " LEFT JOIN model_rows ") +
+      std::string{right} + (natural ? "" : " USING(id)") + " WHERE id<=?1 ORDER BY id";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(limit)));
+  for (const ModelRow& row : kRows) {
+    if (row.id > limit) {
+      continue;
+    }
+    ExpectRowStep(statement);
+    ASSERT_EQ(3U, statement.row().size());
+    ExpectInteger(statement.row()[0], row.id);
+    ExpectInteger(statement.row()[1], row.id);
+    if (!natural || shared_alias || row.nullable.has_value()) {
+      ExpectInteger(statement.row()[2], row.id);
+    } else {
+      ExpectNullable(statement.row()[2], std::nullopt);
+    }
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 15> templates{
+  constexpr std::array<std::string_view, 16> templates{
       "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
       "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
       "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
-      "cross-join",         "joined-aggregate",  "left-join",
+      "cross-join",         "joined-aggregate",  "left-join",        "merged-join",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -1000,6 +1031,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 14:
         RunLeftJoinModel(session, words);
+        break;
+      case 15:
+        RunMergedJoinModel(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

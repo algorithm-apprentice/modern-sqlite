@@ -657,7 +657,8 @@ class Validator final {
         return Misuse("select FROM clause is out of order");
       }
       if (index == 0U) {
-        if (source.join != SourceJoinKind::kFirst || source.join_span.has_value()) {
+        if (source.join != SourceJoinKind::kFirst || source.join_span.has_value() ||
+            source.natural) {
           return Misuse("first select source has a join operator");
         }
       } else {
@@ -676,6 +677,32 @@ class Validator final {
         }
       }
       clause_end = source.span.end();
+      if (source.using_clause.has_value()) {
+        if (source.on.has_value()) {
+          return Misuse("source cannot have both ON and USING clauses");
+        }
+        const JoinUsingClause& using_clause = *source.using_clause;
+        const Status using_status = ValidateContainedSpan(using_clause.span, source.span);
+        if (!using_status.has_value()) {
+          return using_status;
+        }
+        const ByteOffset source_name_end =
+            source.alias.has_value() ? source.alias->end() : source.name.span.end();
+        if (using_clause.columns.empty() || using_clause.span.begin() < source_name_end) {
+          return Misuse("source USING clause is empty or out of order");
+        }
+        ByteOffset column_end = using_clause.span.begin();
+        for (const SourceSpan column : using_clause.columns) {
+          const Status column_status = ValidateContainedSpan(column, using_clause.span);
+          if (!column_status.has_value()) {
+            return column_status;
+          }
+          if (column.empty() || column.begin() < column_end) {
+            return Misuse("source USING columns are empty or out of order");
+          }
+          column_end = column.end();
+        }
+      }
       if (source.on.has_value()) {
         const Status on_status = ReferenceExpression(*source.on, source.span, std::nullopt);
         if (!on_status.has_value()) {

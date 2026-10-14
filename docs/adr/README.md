@@ -81,3 +81,4 @@ their corresponding implementation begins.
 75. [ADR-0075: Joined Aggregate Consumer Integration](0075-joined-aggregate-consumer-integration.md)
 76. [ADR-0076: Typed NULL-Row Cursor Publication](0076-typed-null-row-cursor-publication.md)
 77. [ADR-0077: INNER and LEFT Join Execution](0077-inner-and-left-join-execution.md)
+78. [ADR-0078: USING and NATURAL Joined-Column Namespaces](0078-using-and-natural-joined-column-namespaces.md)

@@ -1109,6 +1109,63 @@ TEST_F(ReadLoweringJoin, EvaluatesLeftOnOnlyForPhysicalCandidates) {
   EXPECT_EQ(0U, callback_count);
 }
 
+TEST_F(ReadLoweringJoin, PreservesMergedScopesAcrossGroupingSetsAndValuesCores) {
+  const auto grouped = Execute(
+      "SELECT id,count(),count(b.id) FROM items a LEFT JOIN items b USING(id) "
+      "GROUP BY id HAVING count()>0 ORDER BY id");
+  ASSERT_EQ(3U, grouped.size());
+  for (std::size_t index = 0; index < grouped.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), grouped[index][0].integer_value());
+    EXPECT_EQ(1, grouped[index][1].integer_value());
+    EXPECT_EQ(1, grouped[index][2].integer_value());
+  }
+  struct Case {
+    std::string_view sql;
+    std::array<std::int64_t, 4> expected;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT id FROM items a LEFT JOIN items b USING(id) UNION SELECT 99 ORDER BY 1",
+           .expected = {1, 2, 3, 99}},
+      Case{.sql = "VALUES(0) UNION ALL SELECT id FROM items a NATURAL LEFT JOIN items b ORDER BY 1",
+           .expected = {0, 1, 2, 3}},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto rows = Execute(test_case.sql);
+    ASSERT_EQ(4U, rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      EXPECT_EQ(test_case.expected[index], rows[index][0].integer_value());
+    }
+  }
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto demanded = Execute(
+      "SELECT id FROM items a LEFT JOIN items b USING(id) "
+      "UNION SELECT failing() LIMIT 1",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, demanded.size());
+  EXPECT_EQ(1, demanded[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, KeepsUsingRepresentativesInTheirCoreAcrossSixtyFourSources) {
+  for (const std::size_t sources : {2U, 8U, 64U}) {
+    SCOPED_TRACE(sources);
+    std::string sql = "SELECT id,t" + std::to_string(sources - 1U) + ".id FROM items t0";
+    for (std::size_t index = 1; index < sources; ++index) {
+      sql += " LEFT JOIN items t" + std::to_string(index) + " USING(id)";
+    }
+    sql += " ORDER BY id";
+    const auto rows = Execute(sql);
+    ASSERT_EQ(3U, rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      const auto id = static_cast<std::int64_t>(index + 1U);
+      EXPECT_EQ(id, rows[index][0].integer_value());
+      EXPECT_EQ(id, rows[index][1].integer_value());
+    }
+  }
+}
+
 TEST_F(ReadLoweringJoin, SharesOneReadableBodyAcrossSixtyFourLeftSources) {
   for (const std::size_t sources : {2U, 8U, 32U, 64U}) {
     SCOPED_TRACE(sources);

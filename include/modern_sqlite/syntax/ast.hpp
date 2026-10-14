@@ -22,6 +22,8 @@ struct ExpressionId {
   constexpr auto operator<=>(const ExpressionId&) const noexcept = default;
 };
 
+inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
+
 enum class SortOrder : std::uint8_t {
   kDefault,
   kAscending,
@@ -193,6 +195,11 @@ enum class SourceJoinKind : std::uint8_t {
   kLeft,
 };
 
+struct JoinUsingClause {
+  SourceSpan span;
+  std::vector<SourceSpan> columns;
+};
+
 struct TableSource {
   SourceSpan span;
   QualifiedName name;
@@ -200,6 +207,8 @@ struct TableSource {
   SourceJoinKind join = SourceJoinKind::kFirst;
   std::optional<SourceSpan> join_span{};
   std::optional<ExpressionId> on{};
+  bool natural = false;
+  std::optional<JoinUsingClause> using_clause{};
 };
 
 struct LimitClause {

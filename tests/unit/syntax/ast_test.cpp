@@ -140,6 +140,61 @@ TEST(SyntaxTree, ValidatesOwnedOnReferencesAndConditionOrdering) {
   }
 }
 
+TEST(SyntaxTree, ValidatesOwnedUsingNamesAndRejectsMixedJoinClauses) {
+  constexpr std::string_view sql = "SELECT 1 FROM a LEFT JOIN b AS q USING(id,Name)";
+  const SourceSpan result = FindSpan(sql, "1");
+  const SourceSpan left = FindSpan(sql, "a", result.end().value());
+  const SourceSpan right = FindSpan(sql, "b");
+  const SourceSpan alias = FindSpan(sql, "q");
+  const SourceSpan using_span = FindSpan(sql, "USING(id,Name)");
+  for (std::size_t fault = 0; fault < 7U; ++fault) {
+    SCOPED_TRACE(fault);
+    SelectCore core{
+        .span = Span(0, sql.size()),
+        .result_columns = {ResultColumn{.span = result, .expression = ExpressionId{0}}},
+        .from =
+            {
+                TableSource{.span = left, .name = Name(left, {left})},
+                TableSource{.span = Span(right.begin().value(), sql.size()),
+                            .name = Name(right, {right}),
+                            .alias = alias,
+                            .join = SourceJoinKind::kLeft,
+                            .join_span = FindSpan(sql, "LEFT JOIN"),
+                            .using_clause = JoinUsingClause{.span = using_span,
+                                                            .columns = {FindSpan(sql, "id"),
+                                                                        FindSpan(sql, "Name")}}},
+            },
+    };
+    auto& clause = *core.from[1].using_clause;
+    if (fault == 1U) {
+      clause.columns.clear();
+    } else if (fault == 2U) {
+      std::swap(clause.columns[0], clause.columns[1]);
+    } else if (fault == 3U) {
+      clause.span = right;
+    } else if (fault == 4U) {
+      core.from[1].on = ExpressionId{0};
+    } else if (fault == 5U) {
+      clause.columns[0] = left;
+    } else if (fault == 6U) {
+      core.from[0].natural = true;
+    }
+    std::vector<Expression> expressions{
+        Expression{.span = result,
+                   .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = result}},
+    };
+    const auto created =
+        SyntaxTree::Create(std::string{sql}, std::move(expressions),
+                           SelectStatement{.span = Span(0, sql.size()), .first = std::move(core)});
+    if (fault == 0U) {
+      ASSERT_TRUE(created.has_value()) << created.error().ToString();
+    } else {
+      ASSERT_FALSE(created.has_value());
+      EXPECT_EQ(ErrorCode::kMisuse, created.error().code());
+    }
+  }
+}
+
 template <typename Enum>
 [[nodiscard]] constexpr Enum InvalidEnumValue(std::uint8_t value) noexcept {
   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
