@@ -281,6 +281,12 @@ and C API layers decide whether to expose automatic reset.
 
 ### Cursor slots and record caching
 
+ADR-0076 adds a NULL-publication flag to the same runtime slot, not a second
+cursor or row buffer. Publication clears the canonical physical position and
+record cache; field/rowid access returns NULL before default handling. Virtual
+Next/Previous consume that row as EOF without I/O, and repositioning/reset/
+close clear the flag. Mutation traversal cannot use this publication.
+
 Each runtime cursor slot contains:
 
 - either no cursor, a `TableBtreeCursor`, or an `IndexBtreeCursor`;
