@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -1394,15 +1395,26 @@ TEST_F(VmTest, RecoversTypedScalarErrorsFromSubroutinesWithoutLosingBindings) {
 }
 
 TEST_F(VmTest, MatchesIndependentSharedSubroutineDagModel) {
-  for (const std::uint32_t count : {2U, 8U, 16U}) {
+  std::minstd_rand random{0x53756231U};
+  for (std::uint32_t example = 0; example < 32U; ++example) {
+    const std::uint32_t count = example < 3U ? std::array{2U, 8U, 16U}[example]
+                                             : 2U + static_cast<std::uint32_t>(random() % 15U);
+    SCOPED_TRACE(example);
     SCOPED_TRACE(count);
+    std::vector<std::optional<std::uint32_t>> extra_targets(count);
+    for (std::uint32_t index = 0; index + 2U < count; ++index) {
+      if (random() % 2U == 0U) {
+        extra_targets[index] =
+            index + 2U + static_cast<std::uint32_t>(random() % (count - index - 2U));
+      }
+    }
     std::vector<std::int64_t> contributions(count, 1);
     for (std::size_t index = count; index-- > 0U;) {
       if (index + 1U < count) {
         contributions[index] += contributions[index + 1U];
       }
-      if (index + 2U < count && index % 3U == 0U) {
-        contributions[index] += contributions[index + 2U];
+      if (extra_targets[index].has_value()) {
+        contributions[index] += contributions[*extra_targets[index]];
       }
     }
     ProgramInput input;
@@ -1425,9 +1437,9 @@ TEST_F(VmTest, MatchesIndependentSharedSubroutineDagModel) {
         input.instructions.push_back(
             CallSubroutineInstruction{.subroutine = SubroutineId{index + 1U}});
       }
-      if (index + 2U < count && index % 3U == 0U) {
+      if (extra_targets[index].has_value()) {
         input.instructions.push_back(
-            CallSubroutineInstruction{.subroutine = SubroutineId{index + 2U}});
+            CallSubroutineInstruction{.subroutine = SubroutineId{*extra_targets[index]}});
       }
       input.instructions.push_back(BinaryInstruction{
           .operation = BinaryOperation::kAdd, .left = Reg(0), .right = Reg(1), .output = Reg(0)});
