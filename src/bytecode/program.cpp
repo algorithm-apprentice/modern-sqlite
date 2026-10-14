@@ -456,6 +456,10 @@ template <typename T>
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
   }
+  if (!AddArrayBytes<SubroutineDescriptor>(ElementCount(input.subroutines, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
   return total;
 }
 
@@ -562,6 +566,7 @@ template <typename T>
 
   clone.instructions.assign(input.instructions.begin(), input.instructions.end());
   clone.aggregates.assign(input.aggregates.begin(), input.aggregates.end());
+  clone.subroutines.assign(input.subroutines.begin(), input.subroutines.end());
   return clone;
 }
 
@@ -617,6 +622,9 @@ template <typename T>
   if (input.aggregates.size() > limits.maximum_aggregates ||
       input.aggregates.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAggregateLimitExceeded));
+  }
+  if (input.subroutines.size() > input.instructions.size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidSubroutineDescriptor));
   }
   return {};
 }
@@ -944,6 +952,13 @@ template <typename T>
         [&](const auto& operation) -> ProgramResult<void> {
           using Operation = std::decay_t<decltype(operation)>;
           if constexpr (std::is_same_v<Operation, HaltInstruction>) {
+            return {};
+          } else if constexpr (std::is_same_v<Operation, CallSubroutineInstruction> ||
+                               std::is_same_v<Operation, ReturnSubroutineInstruction>) {
+            if (operation.subroutine.value() >= input.subroutines.size()) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutine, index,
+                                             operation.subroutine.value()));
+            }
             return {};
           } else if constexpr (std::is_same_v<Operation, LoadConstantInstruction>) {
             if (operation.constant.value() >= input.constants.size()) {
@@ -1728,6 +1743,164 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
   state[word_index] = (state[word_index] & ~mask) | (static_cast<std::uint64_t>(value) << shift);
 }
 
+struct SubroutineGraphFrame {
+  std::uint32_t scope;
+  std::size_t next_instruction;
+};
+
+enum class SubroutineVisitState : std::uint8_t {
+  kUnvisited,
+  kActive,
+  kComplete,
+};
+
+struct SubroutineAnalysis {
+  std::vector<std::uint32_t> owners;
+  std::vector<std::uint32_t> order;
+  std::vector<std::uint64_t> inputs;
+  std::vector<std::uint64_t> outputs;
+  std::vector<std::uint64_t> returned;
+  std::size_t analysis_words = 0;
+  std::size_t processed_edge_words = 0;
+  std::size_t maximum_depth = 0;
+};
+
+[[nodiscard]] bool IsValueSubroutineInstruction(const Instruction& instruction) noexcept {
+  switch (InstructionKindOf(instruction)) {
+    case InstructionKind::kLoadConstant:
+    case InstructionKind::kLoadParameter:
+    case InstructionKind::kCopy:
+    case InstructionKind::kUnary:
+    case InstructionKind::kBinary:
+    case InstructionKind::kApplyAffinity:
+    case InstructionKind::kMustBeInteger:
+    case InstructionKind::kRealAffinity:
+    case InstructionKind::kRealStorageAffinity:
+    case InstructionKind::kCast:
+    case InstructionKind::kCompare:
+    case InstructionKind::kCompareRecords:
+    case InstructionKind::kCallScalar:
+    case InstructionKind::kJump:
+    case InstructionKind::kJumpIf:
+    case InstructionKind::kCallSubroutine:
+    case InstructionKind::kReturnSubroutine:
+      return true;
+    default:
+      return false;
+  }
+}
+
+[[nodiscard]] ProgramResult<SubroutineAnalysis> AnalyzeSubroutineGraph(
+    const ProgramInput& input, const ProgramLimits& limits, std::size_t register_words,
+    std::size_t existing_analysis_words) {
+  SubroutineAnalysis result;
+  const std::size_t count = input.subroutines.size();
+  if (count == 0U) {
+    return result;
+  }
+  const auto main = static_cast<std::uint32_t>(count);
+  std::size_t summary_words = 0;
+  std::size_t bytes = 0;
+  if (!CheckedMultiply(count, register_words, &summary_words) ||
+      !AddArrayBytes<std::uint32_t>(input.instructions.size(), &bytes) ||
+      !AddArrayBytes<std::uint32_t>(count + 1U, &bytes) ||
+      !AddArrayBytes<SubroutineVisitState>(count + 1U, &bytes) ||
+      !AddArrayBytes<std::size_t>(count + 1U, &bytes) ||
+      !AddArrayBytes<SubroutineGraphFrame>(count + 1U, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(CeilingDivide(count, kBitsPerWord), &bytes)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
+  result.analysis_words = CeilingDivide(bytes, sizeof(std::uint64_t));
+  if (result.analysis_words > limits.maximum_analysis_words - existing_analysis_words) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
+  result.owners.resize(input.instructions.size(), main);
+  for (std::size_t index = 0; index < count; ++index) {
+    const SubroutineDescriptor& region = input.subroutines[index];
+    if (region.entry.value() == 0U || region.entry >= region.end ||
+        region.end.value() > input.instructions.size()) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidSubroutineDescriptor, region.entry.value(), index));
+    }
+    for (std::size_t address = region.entry.value(); address < region.end.value(); ++address) {
+      if (result.owners[address] != main) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kInvalidSubroutineDescriptor, address, index));
+      }
+      result.owners[address] = static_cast<std::uint32_t>(index);
+    }
+  }
+  for (std::size_t address = 0; address < input.instructions.size(); ++address) {
+    const Instruction& instruction = input.instructions[address];
+    const auto* returned = std::get_if<ReturnSubroutineInstruction>(&instruction);
+    if ((result.owners[address] != main && !IsValueSubroutineInstruction(instruction)) ||
+        (returned != nullptr && returned->subroutine.value() != result.owners[address])) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, address));
+    }
+  }
+
+  std::vector<SubroutineVisitState> colors(count + 1U);
+  std::vector<std::size_t> depths(count + 1U);
+  std::vector<SubroutineGraphFrame> stack;
+  stack.reserve(count + 1U);
+  result.order.reserve(count + 1U);
+  stack.push_back(SubroutineGraphFrame{.scope = main, .next_instruction = 0});
+  colors[main] = SubroutineVisitState::kActive;
+  while (!stack.empty()) {
+    SubroutineGraphFrame& frame = stack.back();
+    const std::size_t end = frame.scope == main ? input.instructions.size()
+                                                : input.subroutines[frame.scope].end.value();
+    if (frame.next_instruction == end) {
+      const std::uint32_t completed = frame.scope;
+      result.order.push_back(completed);
+      colors[completed] = SubroutineVisitState::kComplete;
+      stack.pop_back();
+      if (!stack.empty()) {
+        depths[stack.back().scope] = std::max(depths[stack.back().scope], depths[completed] + 1U);
+      }
+      continue;
+    }
+    const std::size_t address = frame.next_instruction++;
+    if (result.processed_edge_words >= limits.maximum_analysis_edge_words) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+    }
+    ++result.processed_edge_words;
+    if (result.owners[address] != frame.scope) {
+      continue;
+    }
+    const auto* call = std::get_if<CallSubroutineInstruction>(&input.instructions[address]);
+    if (call == nullptr) {
+      continue;
+    }
+    const std::uint32_t target = call->subroutine.value();
+    if (colors[target] == SubroutineVisitState::kActive) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kRecursiveSubroutine, address, target));
+    }
+    if (colors[target] == SubroutineVisitState::kUnvisited) {
+      colors[target] = SubroutineVisitState::kActive;
+      stack.push_back(SubroutineGraphFrame{
+          .scope = target,
+          .next_instruction = input.subroutines[target].entry.value(),
+      });
+    } else {
+      depths[frame.scope] = std::max(depths[frame.scope], depths[target] + 1U);
+    }
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    if (colors[index] == SubroutineVisitState::kUnvisited) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kUnreachableInstruction,
+                                     input.subroutines[index].entry.value()));
+    }
+  }
+  result.maximum_depth = depths[main];
+  result.inputs.resize(summary_words);
+  result.outputs.resize(summary_words);
+  result.returned.resize(CeilingDivide(count, kBitsPerWord));
+  return result;
+}
+
 [[nodiscard]] ProgramResult<ProgramVerificationMetrics> AnalyzeProgram(const ProgramInput& input,
                                                                        const ProgramLimits& limits,
                                                                        std::size_t owned_bytes) {
@@ -1764,6 +1937,11 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       !CheckedAdd(state_words, &analysis_words) || analysis_words > limits.maximum_analysis_words) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
+  auto subroutines = AnalyzeSubroutineGraph(input, limits, register_words, analysis_words);
+  if (!subroutines) {
+    return std::unexpected(subroutines.error());
+  }
+  analysis_words += subroutines->analysis_words;
 
   std::vector<std::uint64_t> states(stored_state_words);
   std::vector<std::uint64_t> reachable(bitset_words);
@@ -1785,14 +1963,16 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     return std::span<const std::uint64_t>{states}.subspan(instruction * state_words, state_words);
   };
 
-  std::size_t reachable_count = 1;
-  std::size_t processed_edge_words = 0;
-  SetBit(reachable, 0, true);
-  SetBit(queued, 0, true);
-  worklist.push_back(0);
+  std::size_t reachable_count = 0;
+  std::size_t processed_edge_words = subroutines->processed_edge_words;
+  const auto main_scope = static_cast<std::uint32_t>(input.subroutines.size());
+  std::uint32_t active_scope = main_scope;
 
   const auto merge_state = [&](std::size_t target,
                                std::span<const std::uint64_t> incoming) -> ProgramResult<void> {
+    if (!subroutines->owners.empty() && subroutines->owners[target] != active_scope) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, target));
+    }
     const std::size_t edge_words = std::max<std::size_t>(state_words, 1);
     if (edge_words > limits.maximum_analysis_edge_words - processed_edge_words) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, target));
@@ -1844,6 +2024,19 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     return {};
   };
 
+  const std::size_t scope_count = input.subroutines.empty() ? 1U : subroutines->order.size();
+  std::size_t next_scope = 0;
+  const auto enter_scope = [&]() {
+    active_scope = input.subroutines.empty() ? main_scope : subroutines->order[next_scope];
+    ++next_scope;
+    const std::size_t entry =
+        active_scope == main_scope ? 0U : input.subroutines[active_scope].entry.value();
+    ++reachable_count;
+    SetBit(reachable, entry, true);
+    SetBit(queued, entry, true);
+    worklist.push_back(static_cast<std::uint32_t>(entry));
+  };
+  enter_scope();
   while (!worklist.empty()) {
     const std::size_t instruction_index = worklist.back();
     worklist.pop_back();
@@ -1853,6 +2046,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
 
     const auto require_initialized = [&](RegisterId id) -> ProgramResult<void> {
       if (!BitIsSet(std::span<const std::uint64_t>{state}.first(register_words), id.value())) {
+        if (active_scope != main_scope) {
+          // Callee bits track definite writes; other reads become caller requirements.
+          SetBit(std::span<std::uint64_t>{subroutines->inputs}.subspan(
+                     static_cast<std::size_t>(active_scope) * register_words, register_words),
+                 id.value(), true);
+          return {};
+        }
         return std::unexpected(
             ErrorAt(ProgramErrorCode::kUninitializedRegister, instruction_index, id.value()));
       }
@@ -2684,6 +2884,36 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             initialize(operation.output);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CallSubroutineInstruction>) {
+            const std::size_t offset =
+                static_cast<std::size_t>(operation.subroutine.value()) * register_words;
+            for (std::size_t word = 0; word < register_words; ++word) {
+              std::uint64_t missing = subroutines->inputs[offset + word] & ~state[word];
+              while (missing != 0U) {
+                const auto bit = static_cast<std::size_t>(std::countr_zero(missing));
+                if (auto checked = require_initialized(
+                        RegisterId{static_cast<std::uint32_t>(word * kBitsPerWord + bit)});
+                    !checked) {
+                  return checked;
+                }
+                missing &= missing - 1U;
+              }
+              state[word] |= subroutines->outputs[offset + word];
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ReturnSubroutineInstruction>) {
+            const std::size_t offset =
+                static_cast<std::size_t>(operation.subroutine.value()) * register_words;
+            if (!BitIsSet(subroutines->returned, operation.subroutine.value())) {
+              std::ranges::copy(state.first(register_words),
+                                subroutines->outputs.begin() + static_cast<std::ptrdiff_t>(offset));
+              SetBit(subroutines->returned, operation.subroutine.value(), true);
+            } else {
+              for (std::size_t word = 0; word < register_words; ++word) {
+                subroutines->outputs[offset + word] &= state[word];
+              }
+            }
+            return {};
           } else if constexpr (std::is_same_v<Operation, JumpInstruction>) {
             return merge_state(operation.target.value(), state);
           } else if constexpr (std::is_same_v<Operation, JumpIfInstruction>) {
@@ -2707,6 +2937,15 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
     if (!transferred) {
       return std::unexpected(transferred.error());
     }
+    if (worklist.empty()) {
+      if (active_scope != main_scope && !BitIsSet(subroutines->returned, active_scope)) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl,
+                                       input.subroutines[active_scope].entry.value()));
+      }
+      if (next_scope < scope_count) {
+        enter_scope();
+      }
+    }
   }
 
   for (std::size_t index = 0; index < instruction_count; ++index) {
@@ -2720,6 +2959,7 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
       .analysis_words = analysis_words,
       .processed_edge_words = processed_edge_words,
       .reachable_instruction_count = reachable_count,
+      .maximum_subroutine_depth = subroutines->maximum_depth,
   };
 }
 
@@ -2818,6 +3058,10 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "previous";
     case InstructionKind::kNullRow:
       return "null_row";
+    case InstructionKind::kCallSubroutine:
+      return "call_subroutine";
+    case InstructionKind::kReturnSubroutine:
+      return "return_subroutine";
     case InstructionKind::kClearRowIdList:
       return "clear_rowid_list";
     case InstructionKind::kAppendRowIdList:
@@ -3016,6 +3260,10 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kUnreachableInstruction:
     case ProgramErrorCode::kInvalidAggregate:
     case ProgramErrorCode::kInvalidAggregateDescriptor:
+    case ProgramErrorCode::kInvalidSubroutine:
+    case ProgramErrorCode::kInvalidSubroutineDescriptor:
+    case ProgramErrorCode::kRecursiveSubroutine:
+    case ProgramErrorCode::kInvalidSubroutineControl:
       return ErrorCode::kMisuse;
   }
   return ErrorCode::kInternal;
@@ -3116,6 +3364,10 @@ const AggregateDescriptor& BytecodeProgram::aggregate(AggregateId id) const noex
   return input_.aggregates[id.value()];
 }
 
+const SubroutineDescriptor& BytecodeProgram::subroutine(SubroutineId id) const noexcept {
+  return input_.subroutines[id.value()];
+}
+
 ProgramBuilder::ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                                ProgramResourceCounts resources, ProgramLimits limits) noexcept
     : owner_(owner), limits_(limits) {
@@ -3130,7 +3382,8 @@ ProgramBuilder::ProgramBuilder(ProgramBuilder&& other) noexcept
       owned_bytes_(std::exchange(other.owned_bytes_, 0)),
       input_(std::move(other.input_)),
       pending_(std::move(other.pending_)),
-      label_addresses_(std::move(other.label_addresses_)) {}
+      label_addresses_(std::move(other.label_addresses_)),
+      subroutine_regions_(std::move(other.subroutine_regions_)) {}
 
 ProgramBuilder& ProgramBuilder::operator=(ProgramBuilder&& other) noexcept {
   if (this != &other) {
@@ -3140,6 +3393,7 @@ ProgramBuilder& ProgramBuilder::operator=(ProgramBuilder&& other) noexcept {
     input_ = std::move(other.input_);
     pending_ = std::move(other.pending_);
     label_addresses_ = std::move(other.label_addresses_);
+    subroutine_regions_ = std::move(other.subroutine_regions_);
   }
   return *this;
 }
@@ -3389,6 +3643,29 @@ ProgramResult<AggregateId> ProgramBuilder::AddAggregate(AggregateDescriptor aggr
     throw;
   }
   return AggregateId(static_cast<std::uint32_t>(input_.aggregates.size() - 1U));
+}
+
+ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label last) {
+  if (auto checked = CheckLabel(entry); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (auto checked = CheckLabel(last); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (subroutine_regions_.size() >= limits_.maximum_instructions ||
+      subroutine_regions_.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  if (auto reserved = ReserveOwnedBytes(sizeof(SubroutineDescriptor)); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    subroutine_regions_.push_back(PendingSubroutine{.entry = entry, .last = last});
+  } catch (...) {
+    owned_bytes_ -= sizeof(SubroutineDescriptor);
+    throw;
+  }
+  return SubroutineId(static_cast<std::uint32_t>(subroutine_regions_.size() - 1U));
 }
 
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
@@ -3748,6 +4025,13 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
   const auto target = [&](Label label) {
     return InstructionAddress(static_cast<std::uint32_t>(label_addresses_[label.index_]));
   };
+  input_.subroutines.reserve(subroutine_regions_.size());
+  for (const PendingSubroutine& region : subroutine_regions_) {
+    input_.subroutines.push_back(SubroutineDescriptor{
+        .entry = target(region.entry),
+        .end = InstructionAddress{target(region.last).value() + 1U},
+    });
+  }
   for (const auto& pending : pending_) {
     input_.instructions.push_back(std::visit(
         [&](const auto& operation) -> Instruction {

@@ -45,6 +45,7 @@ struct ConstantIdTag;
 struct SymbolIdTag;
 struct RootPageNumberTag;
 struct CursorFieldIdTag;
+struct SubroutineIdTag;
 
 using InstructionAddress = BytecodeId<InstructionAddressTag>;
 using RegisterId = BytecodeId<RegisterIdTag>;
@@ -60,6 +61,14 @@ using ConstantId = BytecodeId<ConstantIdTag>;
 using SymbolId = BytecodeId<SymbolIdTag>;
 using RootPageNumber = BytecodeId<RootPageNumberTag>;
 using CursorFieldId = BytecodeId<CursorFieldIdTag>;
+using SubroutineId = BytecodeId<SubroutineIdTag>;
+
+struct SubroutineDescriptor {
+  InstructionAddress entry;
+  InstructionAddress end;
+
+  constexpr auto operator<=>(const SubroutineDescriptor&) const noexcept = default;
+};
 
 enum class CursorStorageKind : std::uint8_t {
   kRowIdTable,
@@ -244,6 +253,14 @@ struct ProgramResourceCounts {
 };
 
 struct HaltInstruction {};
+
+struct CallSubroutineInstruction {
+  SubroutineId subroutine;
+};
+
+struct ReturnSubroutineInstruction {
+  SubroutineId subroutine;
+};
 
 struct LoadConstantInstruction {
   ConstantId constant;
@@ -743,7 +760,8 @@ using Instruction = std::variant<
     ReadRelationFieldInstruction, NextRelationInstruction, ResetRelationInstruction,
     CloseRelationInstruction, CompareRecordsInstruction, OpenAggregateInstruction,
     StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
-    CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction>;
+    CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction,
+    CallSubroutineInstruction, ReturnSubroutineInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -833,6 +851,8 @@ enum class InstructionKind : std::uint8_t {
   kLast,
   kPrevious,
   kNullRow,
+  kCallSubroutine,
+  kReturnSubroutine,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -858,6 +878,7 @@ struct ProgramInput {
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
   std::vector<AggregateDescriptor> aggregates;
+  std::vector<SubroutineDescriptor> subroutines;
 };
 
 struct ProgramLimits {
@@ -943,6 +964,10 @@ enum class ProgramErrorCode : std::uint8_t {
   kAggregateLimitExceeded,
   kInvalidAggregate,
   kInvalidAggregateDescriptor,
+  kInvalidSubroutine,
+  kInvalidSubroutineDescriptor,
+  kRecursiveSubroutine,
+  kInvalidSubroutineControl,
 };
 
 struct ProgramError {
@@ -965,6 +990,7 @@ struct ProgramVerificationMetrics {
   std::size_t analysis_words = 0;
   std::size_t processed_edge_words = 0;
   std::size_t reachable_instruction_count = 0;
+  std::size_t maximum_subroutine_depth = 0;
 
   constexpr auto operator<=>(const ProgramVerificationMetrics&) const noexcept = default;
 };
@@ -1030,6 +1056,9 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const AggregateDescriptor> aggregates() const noexcept {
     return input_.aggregates;
   }
+  [[nodiscard]] std::span<const SubroutineDescriptor> subroutines() const noexcept {
+    return input_.subroutines;
+  }
   [[nodiscard]] const ProgramVerificationMetrics& verification_metrics() const noexcept {
     return metrics_;
   }
@@ -1045,6 +1074,7 @@ class BytecodeProgram final {
       RecordComparisonId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
   [[nodiscard]] const AggregateDescriptor& aggregate(AggregateId id) const noexcept;
+  [[nodiscard]] const SubroutineDescriptor& subroutine(SubroutineId id) const noexcept;
 
  private:
   BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics) noexcept
@@ -1090,6 +1120,7 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<RecordComparisonId> AddRecordComparison(
       OrderingRecordDescriptor comparison);
   [[nodiscard]] ProgramResult<AggregateId> AddAggregate(AggregateDescriptor aggregate);
+  [[nodiscard]] ProgramResult<SubroutineId> AddSubroutine(Label entry, Label last);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
@@ -1248,6 +1279,10 @@ class ProgramBuilder final {
     JumpCondition condition;
     Label target;
   };
+  struct PendingSubroutine {
+    Label entry;
+    Label last;
+  };
 
   using PendingInstruction =
       std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
@@ -1271,6 +1306,7 @@ class ProgramBuilder final {
   ProgramInput input_;
   std::vector<PendingInstruction> pending_;
   std::vector<std::size_t> label_addresses_;
+  std::vector<PendingSubroutine> subroutine_regions_;
 };
 
 }  // namespace modern_sqlite

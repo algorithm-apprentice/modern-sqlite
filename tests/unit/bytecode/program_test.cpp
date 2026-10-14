@@ -111,6 +111,216 @@ namespace {
   };
 }
 
+[[nodiscard]] ProgramInput SharedValueSubroutineInput() {
+  ProgramInput input;
+  input.register_count = 5;
+  input.parameter_count = 1;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(2));
+  input.result_columns.push_back(IntegerResultColumn());
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(11), .end = Address(13)});
+  input.instructions = {
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(0), .target = Address(7)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(2)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(2), .count = 1},
+      JumpInstruction{.target = Address(10)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(3)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(3), .count = 1},
+      HaltInstruction{},
+      CopyInstruction{.input = Reg(1), .output = Reg(4)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesSharedValueSubroutineWithoutMergingPrivateCallerRegisters) {
+  const ProgramInput input = SharedValueSubroutineInput();
+  auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(1U, program->subroutines().size());
+  EXPECT_EQ(1U, program->verification_metrics().maximum_subroutine_depth);
+  EXPECT_EQ(13U, program->verification_metrics().reachable_instruction_count);
+}
+
+TEST(BytecodeProgramTest, RejectsMalformedSubroutineRegionsAndReferences) {
+  for (const SubroutineDescriptor region :
+       {SubroutineDescriptor{.entry = Address(0), .end = Address(13)},
+        SubroutineDescriptor{.entry = Address(11), .end = Address(11)},
+        SubroutineDescriptor{.entry = Address(12), .end = Address(11)},
+        SubroutineDescriptor{.entry = Address(11), .end = Address(14)}}) {
+    auto input = SharedValueSubroutineInput();
+    input.subroutines[0] = region;
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineDescriptor, rejected.error().code);
+  }
+  auto overlap = SharedValueSubroutineInput();
+  overlap.subroutines.push_back(overlap.subroutines[0]);
+  const auto overlapping = BytecodeProgram::Create(overlap);
+  ASSERT_FALSE(overlapping.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineDescriptor, overlapping.error().code);
+  for (const Instruction instruction :
+       {Instruction{CallSubroutineInstruction{.subroutine = SubroutineId{1}}},
+        Instruction{ReturnSubroutineInstruction{.subroutine = SubroutineId{1}}}}) {
+    auto input = SharedValueSubroutineInput();
+    input.instructions[4] = instruction;
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutine, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsCrossRegionControlAndSubroutineCapabilityUse) {
+  for (const Instruction instruction :
+       {Instruction{JumpInstruction{.target = Address(10)}}, Instruction{HaltInstruction{}},
+        Instruction{ResultRowInstruction{.first = Reg(1), .count = 1}},
+        Instruction{OpenReadCursorInstruction{.cursor = Cursor(0)}}}) {
+    auto input = SharedValueSubroutineInput();
+    input.cursors.push_back(RowIdCursorDescriptor());
+    input.instructions[11] = instruction;
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+  }
+  auto entered = SharedValueSubroutineInput();
+  entered.instructions[6] = JumpInstruction{.target = Address(11)};
+  const auto cross_entry = BytecodeProgram::Create(entered);
+  ASSERT_FALSE(cross_entry.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, cross_entry.error().code);
+  auto main_return = SharedValueSubroutineInput();
+  main_return.instructions[4] = ReturnSubroutineInstruction{.subroutine = SubroutineId{0}};
+  const auto returned = BytecodeProgram::Create(main_return);
+  ASSERT_FALSE(returned.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, returned.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresSubroutineInputsAndOnlyPublishesDefiniteOutputs) {
+  auto missing = SharedValueSubroutineInput();
+  missing.instructions[1] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)};
+  const auto input_rejected = BytecodeProgram::Create(missing);
+  ASSERT_FALSE(input_rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, input_rejected.error().code);
+  EXPECT_EQ(1U, input_rejected.error().detail);
+
+  auto conditional = SharedValueSubroutineInput();
+  conditional.subroutines[0].end = Address(15);
+  conditional.instructions[11] = JumpIfInstruction{
+      .condition = JumpCondition::kIfTrue, .input = Reg(0), .target = Address(14)};
+  conditional.instructions[12] = CopyInstruction{.input = Reg(1), .output = Reg(4)};
+  conditional.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  conditional.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  ASSERT_TRUE(BytecodeProgram::Create(conditional).has_value());
+  conditional.instructions[5] = ResultRowInstruction{.first = Reg(4), .count = 1};
+  conditional.instructions[9] = ResultRowInstruction{.first = Reg(4), .count = 1};
+  const auto output_rejected = BytecodeProgram::Create(conditional);
+  ASSERT_FALSE(output_rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, output_rejected.error().code);
+  EXPECT_EQ(4U, output_rejected.error().detail);
+}
+
+TEST(BytecodeProgramTest, RejectsRecursiveUncalledAndNonreturningSubroutines) {
+  auto recursive = SharedValueSubroutineInput();
+  recursive.instructions[11] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+  const auto cycle = BytecodeProgram::Create(recursive);
+  ASSERT_FALSE(cycle.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRecursiveSubroutine, cycle.error().code);
+  auto uncalled = SharedValueSubroutineInput();
+  uncalled.instructions[4] = CopyInstruction{.input = Reg(1), .output = Reg(4)};
+  uncalled.instructions[8] = CopyInstruction{.input = Reg(1), .output = Reg(4)};
+  const auto unused = BytecodeProgram::Create(uncalled);
+  ASSERT_FALSE(unused.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUnreachableInstruction, unused.error().code);
+  auto looping = SharedValueSubroutineInput();
+  looping.subroutines[0].end = Address(12);
+  looping.instructions.pop_back();
+  looping.instructions[11] = JumpInstruction{.target = Address(11)};
+  const auto no_return = BytecodeProgram::Create(looping);
+  ASSERT_FALSE(no_return.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, no_return.error().code);
+}
+
+TEST(BytecodeProgramTest, ChargesSubroutineSummariesToExistingAnalysisBudgets) {
+  const auto input = SharedValueSubroutineInput();
+  const auto baseline = VerifyProgram(input);
+  ASSERT_TRUE(baseline.has_value());
+  ProgramLimits memory;
+  memory.maximum_analysis_words = baseline->analysis_words;
+  EXPECT_TRUE(VerifyProgram(input, memory).has_value());
+  --memory.maximum_analysis_words;
+  const auto exhausted_memory = VerifyProgram(input, memory);
+  ASSERT_FALSE(exhausted_memory.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisLimitExceeded, exhausted_memory.error().code);
+  ProgramLimits work;
+  work.maximum_analysis_edge_words = baseline->processed_edge_words;
+  EXPECT_TRUE(VerifyProgram(input, work).has_value());
+  --work.maximum_analysis_edge_words;
+  const auto exhausted_work = VerifyProgram(input, work);
+  ASSERT_FALSE(exhausted_work.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, exhausted_work.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsMutualCallsAndMismatchedReturns) {
+  ProgramInput input;
+  input.subroutines = {
+      SubroutineDescriptor{.entry = Address(2), .end = Address(4)},
+      SubroutineDescriptor{.entry = Address(4), .end = Address(6)},
+  };
+  input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      HaltInstruction{},
+      CallSubroutineInstruction{.subroutine = SubroutineId{1}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{1}},
+  };
+  const auto cycle = BytecodeProgram::Create(input);
+  ASSERT_FALSE(cycle.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRecursiveSubroutine, cycle.error().code);
+  input.instructions[3] = ReturnSubroutineInstruction{.subroutine = SubroutineId{1}};
+  const auto returned = BytecodeProgram::Create(input);
+  ASSERT_FALSE(returned.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, returned.error().code);
+}
+
+TEST(BytecodeProgramTest, ResolvesSubroutineLabelsWithoutRelaxingBranchOwnership) {
+  auto builder = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(builder.has_value());
+  const auto entry = builder->CreateLabel();
+  const auto last = builder->CreateLabel();
+  ASSERT_TRUE(entry.has_value());
+  ASSERT_TRUE(last.has_value());
+  const auto routine = builder->AddSubroutine(*entry, *last);
+  ASSERT_TRUE(routine.has_value());
+  const auto constant = builder->AddConstant(SqlValue::Integer(42));
+  ASSERT_TRUE(constant.has_value());
+  ASSERT_TRUE(builder->Append(CallSubroutineInstruction{.subroutine = *routine}).has_value());
+  ASSERT_TRUE(builder->Append(ResultRowInstruction{.first = Reg(0), .count = 1}).has_value());
+  ASSERT_TRUE(builder->Append(HaltInstruction{}).has_value());
+  ASSERT_TRUE(builder->BindLabel(*entry).has_value());
+  ASSERT_TRUE(builder->Append(LoadConstantInstruction{.constant = *constant, .output = Reg(0)})
+                  .has_value());
+  ASSERT_TRUE(builder->BindLabel(*last).has_value());
+  ASSERT_TRUE(builder->Append(ReturnSubroutineInstruction{.subroutine = *routine}).has_value());
+  const auto program = std::move(*builder).Build({IntegerResultColumn()});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ((SubroutineDescriptor{.entry = Address(3), .end = Address(5)}),
+            program->subroutine(*routine));
+  EXPECT_EQ("call_subroutine", InstructionKindName(InstructionKind::kCallSubroutine));
+  EXPECT_EQ("return_subroutine", InstructionKindName(InstructionKind::kReturnSubroutine));
+  auto foreign_builder = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(foreign_builder.has_value());
+  const auto foreign = foreign_builder->CreateLabel();
+  ASSERT_TRUE(foreign.has_value());
+  const auto rejected = foreign_builder->AddSubroutine(*foreign, *entry);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kForeignLabel, rejected.error().code);
+}
+
 TEST(BytecodeProgramTest, VerifiesNullRowsAsLogicalRowsAndRejectsClosedOrDisabledReads) {
   ProgramInput input;
   input.register_count = 1;
