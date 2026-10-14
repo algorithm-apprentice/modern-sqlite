@@ -200,6 +200,35 @@ class ByteReader final {
   return sql;
 }
 
+[[nodiscard]] std::string GenerateSubquerySql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  bool exists = input.Next() % 2U != 0U;
+  std::string child;
+  switch (input.Next() % 4U) {
+    case 0:
+      child = GeneratedCore(input, true);
+      break;
+    case 1:
+      child = GenerateCompoundSql(bytes);
+      break;
+    case 2:
+      child = GenerateAggregateSql(bytes);
+      exists = true;
+      break;
+    default:
+      child = GenerateJoinSql(bytes);
+      exists = true;
+      break;
+  }
+  std::string sql = "SELECT " + std::string{exists ? "EXISTS(" : "("} + child + ")";
+  const std::size_t nesting = input.Next() % 3U;
+  for (std::size_t depth = 0; depth < nesting; ++depth) {
+    sql = "SELECT (" + sql + ")";
+  }
+  return sql + " FROM model_rows WHERE id<=" + std::to_string(1U + input.Next() % 4U);
+}
+
 void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
   if (!prepared.has_value() || !prepared->statement.has_value()) {
     return;
@@ -219,6 +248,9 @@ void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
 std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
   ByteReader selector{input};
   const std::uint8_t selected = selector.Next();
+  if (selected % 8U == 3U) {
+    return GenerateSubquerySql(input);
+  }
   if (selected % kAggregateSelectionDivisor == 0U) {
     return GenerateAggregateSql(input);
   }

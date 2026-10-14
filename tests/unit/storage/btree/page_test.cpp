@@ -35,15 +35,15 @@ static_assert(std::is_trivially_copyable_v<BtreeCellView>);
 constexpr std::size_t kDefaultPageSize = 512;
 
 void Write16(MutableByteView bytes, std::size_t offset, std::uint16_t value) {
-  StoreBigEndian<std::uint16_t>(
-      std::span<std::byte, sizeof(std::uint16_t)>{bytes.data() + offset, sizeof(std::uint16_t)},
-      value);
+  const auto field = Slice(bytes, ByteOffset{offset}, ByteCount{sizeof(value)});
+  ASSERT_TRUE(field.has_value());
+  ASSERT_TRUE(WriteBigEndian<std::uint16_t>(*field, value).has_value());
 }
 
 void Write32(MutableByteView bytes, std::size_t offset, std::uint32_t value) {
-  StoreBigEndian<std::uint32_t>(
-      std::span<std::byte, sizeof(std::uint32_t)>{bytes.data() + offset, sizeof(std::uint32_t)},
-      value);
+  const auto field = Slice(bytes, ByteOffset{offset}, ByteCount{sizeof(value)});
+  ASSERT_TRUE(field.has_value());
+  ASSERT_TRUE(WriteBigEndian<std::uint32_t>(*field, value).has_value());
 }
 
 void AppendVarint(std::vector<std::byte>& output, std::uint64_t value) {
@@ -365,7 +365,7 @@ TEST(BtreePage, AcceptsHeaderBoundariesAndRejectsInvalidHeaderValues) {
   EXPECT_FALSE(BtreePageView::Parse(zero_content_offset, PageNumber{2}, geometry).has_value());
 
   std::vector<std::byte> invalid_type = page_bytes;
-  invalid_type[0] = std::byte{0x01};
+  invalid_type.at(0) = std::byte{0x01};
   EXPECT_FALSE(BtreePageView::Parse(invalid_type, PageNumber{2}, geometry).has_value());
 
   std::vector<std::byte> invalid_rightmost =

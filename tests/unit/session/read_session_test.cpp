@@ -950,6 +950,24 @@ TEST(ReadSession, DoesNotRequireUnusedScalarUnionComparisonCollations) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
+TEST(ReadSession, ExecutesTheAcceptedNestedJoinExpressionDepthBoundary) {
+  constexpr std::size_t kAcceptedOnTerms = 998;
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  std::string sql = "SELECT (SELECT 1 FROM items a JOIN items b ON 1";
+  for (std::size_t term = 1; term < kAcceptedOnTerms; ++term) {
+    sql.append(" AND 1");
+  }
+  sql.push_back(')');
+  ReadStatement statement = PrepareStatement(session, sql);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  sql.insert(sql.size() - 1U, " AND 1");
+  const auto rejected = session.Prepare(Utf8View{sql});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
 TEST(ReadSession, MatchesIndependentScalarAndExistsRangeModelsAcrossRebindings) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   for (const bool reverse : {false, true}) {

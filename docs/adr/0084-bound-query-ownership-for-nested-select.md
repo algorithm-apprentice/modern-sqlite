@@ -154,6 +154,14 @@ temporary comparator or resource.
 
 ### 4. Close reviewed scopes in prerequisite order
 
+The coverage-instrumented sanitizer campaign reproduced a compiler stack
+overflow on the accepted 998-term nested ON boundary. Keep the native depth
+contract and existing bytecode order. Separate typed eager value emitters
+from the canonical expression dispatcher so every recursive activation does
+not retain unrelated cursor/call/comparison emission temporaries. This is a
+behavior-preserving compiler-frame refactor, not a smaller SQL limit, larger
+process stack, new evaluator, or alternative expression algorithm.
+
 Review the ownership refactor and native audit before implementation of new
 SQL behavior. Each executable admission starts with a public-session red and
 adds scoped binder, planner, lowering, normal/boundary/error/failure/OOM,
@@ -164,6 +172,51 @@ unmodeled. Correlation, outer aggregate ownership, IN, FROM-derived sources,
 and coroutine consumers remain explicitly staged when their prerequisites
 are not yet complete. No intermediate ownership checkpoint completes the
 advanced-SQL node.
+
+### Closure evidence
+
+The admitted scalar and EXISTS surface uses the canonical query arenas,
+physical producers, verified private read calls, and statement lifecycle.
+Public-session cases cover first-row/empty scalar results, one-row demand,
+OFFSET and reset/rebinding, nested metadata, ignored EXISTS values and
+ordering, delayed aggregate errors, lazy calls, and private-source and PMA
+failure recovery. Independent range models exercise 192 bindings. Nested
+prepare and scalar-ordering, grouped, and EXISTS set execution cover their
+complete measured allocation-failure ranges.
+
+The final fast tier passes 1,272 unit cases. Complete Release and ASan/UBSan
+tiers pass 1,318 each; GCC 16 Debug and Release tiers pass 1,316 each. The
+30 affected capability, VFS, and B-tree fixture cases additionally pass in
+focused Release, ASan/UBSan, and GCC 16 Debug runs after the portability
+corrections.
+
+GCC 16 Release initially diagnosed fixture-internal vector insertion,
+optional payload initialization, and unchecked byte edits. Shared capability
+fixtures now assemble the caller and callee in final instruction order and
+derive their region addresses once. Backend-failure fixtures are explicitly
+value initialized, and page edits use the existing checked byte-slice and
+encoder contracts. These test-only corrections retain the same valid and
+malformed program/page inputs; compiler warnings remain errors, and no
+production semantics or compiler policy is weakened.
+
+Forty-four new pinned native comparisons and one correlation boundary replace
+the retired executable-subquery boundary. All 262 other prior corpus and
+oracle records remain identical as JSON data. The published matrix contains
+301 comparisons and six unsupported boundaries. The public-session nested
+JOIN regression accepts 998 ON terms and rejects 999 without reducing the
+native SQL limit.
+
+The grammar-aware ASan/UBSan campaign completes 20,000 inputs with seed 84.
+All 58 existing performance-tool, archived-baseline, CLI, diagnostic-work,
+and fixture contracts pass. Archived workloads, thresholds, allocation
+budgets, and timing baselines are unchanged; this slice makes no timing
+speedup claim. Pinned clang-format 23.1.2, changed-production-translation-unit
+clang-tidy, engineering discipline, and dependency-graph validation pass.
+Correlation, outer-owned aggregates, mutation query destinations, IN,
+FROM-derived sources, and coroutine consumers remain separate work.
+
+Incremental GPT-5.6 Sol design and implementation review reports no unresolved
+in-scope issue.
 
 ## Traceability
 

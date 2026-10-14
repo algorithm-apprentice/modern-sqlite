@@ -5147,6 +5147,182 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return RetainedAggregateRegister(BoundSourceLeafIdentity{.source = source});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitColumnValue(const BoundColumnExpression& column,
+                                                     RegisterId destination) {
+    if ((grouped_aggregate_query_ || global_representative_query_) &&
+        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+      const std::optional<RegisterId> source = GroupedColumnRegister(column.column);
+      if (!source.has_value()) {
+        return std::unexpected(InternalFailure("grouped column has no retained source register"));
+      }
+      return Append(CopyInstruction{.input = *source, .output = destination});
+    }
+    if (!source_snapshot_registers_.empty()) {
+      if (column.column.value() >= source_snapshot_registers_.size() ||
+          column.column.value() >= source_field_real_affinity_.size()) {
+        return std::unexpected(InternalFailure("bound column has no source snapshot field"));
+      }
+      if (auto copied = Append(CopyInstruction{
+              .input = source_snapshot_registers_[column.column.value()],
+              .output = destination,
+          });
+          !copied.has_value()) {
+        return copied;
+      }
+      if (source_field_real_affinity_[column.column.value()]) {
+        return Append(RealAffinityInstruction{.input = destination, .output = destination});
+      }
+      return {};
+    }
+    if (column.column.value() >= source_field_real_affinity_.size() ||
+        column.column.value() >= source_cursor_fields_.size() ||
+        !source_cursor_fields_[column.column.value()].has_value()) {
+      return std::unexpected(InternalFailure("bound column has no cursor field"));
+    }
+    auto binding = SourceCursor(bound_select_->source_columns()[column.column.value()].source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    if (auto read = Append(ReadFieldInstruction{
+            .cursor = binding->cursor,
+            .field = AssumeValue(source_cursor_fields_[column.column.value()]),
+            .output = destination,
+        });
+        !read.has_value()) {
+      return read;
+    }
+    if (source_field_real_affinity_[column.column.value()]) {
+      return Append(RealAffinityInstruction{.input = destination, .output = destination});
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitRowIdValue(const BoundRowIdExpression& rowid,
+                                                    RegisterId destination) {
+    if ((grouped_aggregate_query_ || global_representative_query_) &&
+        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+      const std::optional<RegisterId> source = GroupedRowIdRegister(rowid.source);
+      if (!source.has_value()) {
+        return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
+      }
+      return Append(CopyInstruction{.input = *source, .output = destination});
+    }
+    if (source_rowid_register_.has_value()) {
+      return Append(CopyInstruction{
+          .input = AssumeValue(source_rowid_register_),
+          .output = destination,
+      });
+    }
+    auto binding = SourceCursor(rowid.source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    if (binding->rowid_field.has_value()) {
+      return Append(ReadFieldInstruction{
+          .cursor = binding->cursor, .field = *binding->rowid_field, .output = destination});
+    }
+    return Append(ReadRowIdInstruction{.cursor = binding->cursor, .output = destination});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUnaryValue(const BoundUnaryExpression& unary,
+                                                    RegisterId destination) {
+    if (auto emitted = EmitExpression(unary.operand, destination); !emitted.has_value()) {
+      return emitted;
+    }
+    if (unary.operation == BoundUnaryOperation::kPositive) {
+      return {};
+    }
+    return Append(UnaryInstruction{.operation = ToUnaryOperation(unary.operation),
+                                   .input = destination,
+                                   .output = destination});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitBinaryValue(const BoundBinaryExpression& binary,
+                                                     RegisterId destination) {
+    if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(binary);
+        selected.has_value()) {
+      if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
+        return emitted;
+      }
+      return Append(BinaryInstruction{
+          .operation = ToBinaryOperation(binary.operation),
+          .left = destination,
+          .right = destination,
+          .output = destination,
+      });
+    }
+    const RegisterId left = Home(binary.left);
+    const RegisterId right = Home(binary.right);
+    if (auto emitted = EmitExpression(binary.left, left); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto emitted = EmitExpression(binary.right, right); !emitted.has_value()) {
+      return emitted;
+    }
+    return Append(BinaryInstruction{
+        .operation = ToBinaryOperation(binary.operation),
+        .left = left,
+        .right = right,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitComparisonValue(
+      const BoundComparisonExpression& comparison, RegisterId destination) {
+    const RegisterId left = Home(comparison.left);
+    const RegisterId right = Home(comparison.right);
+    if (auto emitted = EmitExpression(comparison.left, left); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto emitted = EmitExpression(comparison.right, right); !emitted.has_value()) {
+      return emitted;
+    }
+    auto collation = CollationSymbol(comparison.collation);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return Append(CompareInstruction{
+        .comparison = comparison.comparison,
+        .affinity = comparison.affinity,
+        .collation = *collation,
+        .left = left,
+        .right = right,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitScalarCallValue(BoundExpressionId id,
+                                                         const BoundScalarCallExpression& call,
+                                                         RegisterId destination) {
+    const std::optional<RegisterId>& argument_block = call_argument_blocks_[id.value()];
+    if (!argument_block.has_value()) {
+      return std::unexpected(InternalFailure("scalar call has no argument block"));
+    }
+    const RegisterId first = *argument_block;
+    for (std::size_t index = 0; index < call.arguments.size(); ++index) {
+      if (auto emitted = EmitExpression(
+              call.arguments[index], RegisterId{first.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    auto function = FunctionSymbol(call.function);
+    auto collation = CollationSymbol(call.collation);
+    if (!function.has_value()) {
+      return std::unexpected(std::move(function.error()));
+    }
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return Append(CallScalarInstruction{
+        .function = *function,
+        .collation = *collation,
+        .first_argument = first,
+        .argument_count = static_cast<std::uint32_t>(call.arguments.size()),
+        .output = destination,
+    });
+  }
+
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                     RegisterId destination) override {
     if (id.value() >= expressions_.size()) {
@@ -5183,162 +5359,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
         column != nullptr) {
-      if ((grouped_aggregate_query_ || global_representative_query_) &&
-          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
-        const std::optional<RegisterId> source = GroupedColumnRegister(column->column);
-        if (!source.has_value()) {
-          return std::unexpected(InternalFailure("grouped column has no retained source register"));
-        }
-        return Append(CopyInstruction{
-            .input = *source,
-            .output = destination,
-        });
-      }
-      if (!source_snapshot_registers_.empty()) {
-        if (column->column.value() >= source_snapshot_registers_.size() ||
-            column->column.value() >= source_field_real_affinity_.size()) {
-          return std::unexpected(InternalFailure("bound column has no source snapshot field"));
-        }
-        if (auto copied = Append(CopyInstruction{
-                .input = source_snapshot_registers_[column->column.value()],
-                .output = destination,
-            });
-            !copied.has_value()) {
-          return copied;
-        }
-        if (source_field_real_affinity_[column->column.value()]) {
-          return Append(RealAffinityInstruction{
-              .input = destination,
-              .output = destination,
-          });
-        }
-        return {};
-      }
-      if (column->column.value() >= source_field_real_affinity_.size() ||
-          column->column.value() >= source_cursor_fields_.size() ||
-          !source_cursor_fields_[column->column.value()].has_value()) {
-        return std::unexpected(InternalFailure("bound column has no cursor field"));
-      }
-      auto binding = SourceCursor(bound_select_->source_columns()[column->column.value()].source);
-      if (!binding.has_value()) {
-        return std::unexpected(std::move(binding.error()));
-      }
-      if (auto read = Append(ReadFieldInstruction{
-              .cursor = binding->cursor,
-              .field = AssumeValue(source_cursor_fields_[column->column.value()]),
-              .output = destination,
-          });
-          !read.has_value()) {
-        return read;
-      }
-      if (source_field_real_affinity_[column->column.value()]) {
-        return Append(RealAffinityInstruction{
-            .input = destination,
-            .output = destination,
-        });
-      }
-      return {};
+      return EmitColumnValue(*column, destination);
     }
     if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
         rowid != nullptr) {
-      if ((grouped_aggregate_query_ || global_representative_query_) &&
-          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
-        const std::optional<RegisterId> source = GroupedRowIdRegister(rowid->source);
-        if (!source.has_value()) {
-          return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
-        }
-        return Append(CopyInstruction{
-            .input = *source,
-            .output = destination,
-        });
-      }
-      if (source_rowid_register_.has_value()) {
-        return Append(CopyInstruction{
-            .input = AssumeValue(source_rowid_register_),
-            .output = destination,
-        });
-      }
-      auto binding = SourceCursor(rowid->source);
-      if (!binding.has_value()) {
-        return std::unexpected(std::move(binding.error()));
-      }
-      if (binding->rowid_field.has_value()) {
-        return Append(ReadFieldInstruction{
-            .cursor = binding->cursor,
-            .field = *binding->rowid_field,
-            .output = destination,
-        });
-      }
-      return Append(ReadRowIdInstruction{
-          .cursor = binding->cursor,
-          .output = destination,
-      });
+      return EmitRowIdValue(*rowid, destination);
     }
     if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
         unary != nullptr) {
-      if (auto emitted = EmitExpression(unary->operand, destination); !emitted.has_value()) {
-        return emitted;
-      }
-      if (unary->operation == BoundUnaryOperation::kPositive) {
-        return {};
-      }
-      return Append(UnaryInstruction{
-          .operation = ToUnaryOperation(unary->operation),
-          .input = destination,
-          .output = destination,
-      });
+      return EmitUnaryValue(*unary, destination);
     }
     if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
         binary != nullptr) {
-      if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(*binary);
-          selected.has_value()) {
-        if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
-          return emitted;
-        }
-        return Append(BinaryInstruction{
-            .operation = ToBinaryOperation(binary->operation),
-            .left = destination,
-            .right = destination,
-            .output = destination,
-        });
-      }
-      const RegisterId left = Home(binary->left);
-      const RegisterId right = Home(binary->right);
-      if (auto emitted = EmitExpression(binary->left, left); !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto emitted = EmitExpression(binary->right, right); !emitted.has_value()) {
-        return emitted;
-      }
-      return Append(BinaryInstruction{
-          .operation = ToBinaryOperation(binary->operation),
-          .left = left,
-          .right = right,
-          .output = destination,
-      });
+      return EmitBinaryValue(*binary, destination);
     }
     if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
         comparison != nullptr) {
-      const RegisterId left = Home(comparison->left);
-      const RegisterId right = Home(comparison->right);
-      if (auto emitted = EmitExpression(comparison->left, left); !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto emitted = EmitExpression(comparison->right, right); !emitted.has_value()) {
-        return emitted;
-      }
-      auto collation = CollationSymbol(comparison->collation);
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return Append(CompareInstruction{
-          .comparison = comparison->comparison,
-          .affinity = comparison->affinity,
-          .collation = *collation,
-          .left = left,
-          .right = right,
-          .output = destination,
-      });
+      return EmitComparisonValue(*comparison, destination);
     }
     if (const auto* truth_test = std::get_if<BoundTruthTestExpression>(&expression.payload);
         truth_test != nullptr) {
@@ -5350,34 +5387,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
         call != nullptr) {
-      const std::optional<RegisterId>& argument_block = call_argument_blocks_[id.value()];
-      if (!argument_block.has_value()) {
-        return std::unexpected(InternalFailure("scalar call has no argument block"));
-      }
-      const RegisterId first = AssumeValue(argument_block);
-      for (std::size_t index = 0; index < call->arguments.size(); ++index) {
-        if (auto emitted =
-                EmitExpression(call->arguments[index],
-                               RegisterId{first.value() + static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      auto function = FunctionSymbol(call->function);
-      auto collation = CollationSymbol(call->collation);
-      if (!function.has_value()) {
-        return std::unexpected(std::move(function.error()));
-      }
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return Append(CallScalarInstruction{
-          .function = *function,
-          .collation = *collation,
-          .first_argument = first,
-          .argument_count = static_cast<std::uint32_t>(call->arguments.size()),
-          .output = destination,
-      });
+      return EmitScalarCallValue(id, *call, destination);
     }
     if (const auto* call = std::get_if<BoundAggregateCallExpression>(&expression.payload);
         call != nullptr) {

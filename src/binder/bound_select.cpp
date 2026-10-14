@@ -1705,15 +1705,16 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindSingleRowDemand(SourceSpan span) {
-    if (!ActiveQuery().limit.has_value()) {
+    auto& bound_limit = ActiveQuery().limit;
+    if (!bound_limit.has_value()) {
       auto one = AppendExpression(span, BoundLiteralExpression{.value = SqlValue::Integer(1)}, {});
       if (!one.has_value()) {
         return std::unexpected(std::move(one.error()));
       }
-      ActiveQuery().limit = BoundLimit{.limit = *one};
+      bound_limit = BoundLimit{.limit = *one};
       return {};
     }
-    const BoundExpressionId limit = ActiveQuery().limit->limit;
+    const BoundExpressionId limit = bound_limit->limit;
     const auto* literal =
         std::get_if<BoundLiteralExpression>(&impl_->expressions[limit.value()].payload);
     if (literal != nullptr && literal->value.type() == SqlValueType::kInteger &&
@@ -1740,7 +1741,7 @@ class StatementBinder final {
     if (!nonzero.has_value()) {
       return std::unexpected(std::move(nonzero.error()));
     }
-    ActiveQuery().limit->limit = *nonzero;
+    bound_limit->limit = *nonzero;
     return {};
   }
 
@@ -1886,13 +1887,14 @@ class StatementBinder final {
     }
     return AppendExpression(
         span, BoundSubqueryExpression{.query = *existing},
-        ExpressionProperties{.affinity =
-                                 query.destination == BoundQueryDestination::kScalar
-                                     ? Properties(ScalarResultExpression(*existing)).affinity
-                                     : TypeAffinity::kNone});
+        ExpressionProperties{
+            .affinity = query.destination == BoundQueryDestination::kScalar
+                            ? Properties(ScalarResultExpression(*existing)).affinity
+                            : TypeAffinity::kNone,
+            .collation = std::nullopt});
   }
 
-  [[nodiscard]] BoundExpressionId ScalarResultExpression(BoundQueryId id) const noexcept {
+  [[nodiscard]] BoundExpressionId ScalarResultExpression(BoundQueryId id) const {
     const BoundQuery& query = Query(id);
     const BoundQueryCore& last = impl_->query_cores[query.core_begin + query.core_count - 1U];
     if (const auto* values = std::get_if<BoundValuesCore>(&last); values != nullptr) {
