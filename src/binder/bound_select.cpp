@@ -2066,7 +2066,7 @@ class StatementBinder final {
       return results;
     }
     const bool has_right = std::ranges::any_of(core.from, [](const TableSource& candidate) {
-      return candidate.join == SourceJoinKind::kRight;
+      return SourceJoinPreservesRight(candidate.join);
     });
     for (std::size_t index = 1; index < core.from.size(); ++index) {
       const auto& on = core.from[index].on;
@@ -2080,7 +2080,7 @@ class StatementBinder final {
       }
       BoundTableSource& bound_source = impl_->table_sources[index];
       bound_source.on = *condition;
-      if (bound_source.join == SourceJoinKind::kLeft || has_right) {
+      if (SourceJoinPreservesLeft(bound_source.join) || has_right) {
         bool forward = false;
         auto visitor = [&](BoundSourceId owner) { forward = forward || owner > bound_source.id; };
         if (!VisitSourceOwners(impl_->expressions, impl_->source_columns, *condition, visitor)) {
@@ -2995,6 +2995,56 @@ class StatementBinder final {
     return BindColumn(id, span);
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendJoinedCoalesce(
+      std::vector<BoundExpressionId> arguments, SourceSpan span) {
+    if (arguments.size() < 2U) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "joined coalesce requires multiple contributors"));
+    }
+    const ExpressionProperties properties = Properties(arguments.front());
+    return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(arguments)},
+                            properties);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendJoinedCoalesce(BoundExpressionId left,
+                                                                     BoundExpressionId right,
+                                                                     SourceSpan span) {
+    BoundExpressionId target = left;
+    while (const auto* alias = std::get_if<BoundAliasReferenceExpression>(
+               &impl_->expressions[target.value()].payload)) {
+      target = alias->target;
+    }
+    std::vector<BoundExpressionId> arguments;
+    if (const auto* coalesce =
+            std::get_if<BoundCoalesceExpression>(&impl_->expressions[target.value()].payload);
+        coalesce != nullptr) {
+      arguments = coalesce->arguments;
+    } else {
+      arguments.push_back(left);
+    }
+    arguments.push_back(right);
+    return AppendJoinedCoalesce(std::move(arguments), span);
+  }
+
+  [[nodiscard]] bool JoinedValueMatches(BoundSourceColumnId column, BoundExpressionId value) const {
+    const BoundExpression& expression = impl_->expressions[value.value()];
+    if (const auto* leaf = std::get_if<BoundColumnExpression>(&expression.payload);
+        leaf != nullptr) {
+      return JoinedColumnRepresentative(leaf->column) == JoinedColumnRepresentative(column);
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+        alias != nullptr) {
+      return JoinedValueMatches(column, alias->target);
+    }
+    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+        coalesce != nullptr) {
+      return std::ranges::all_of(coalesce->arguments, [&](BoundExpressionId argument) {
+        return JoinedValueMatches(column, argument);
+      });
+    }
+    return false;
+  }
+
   [[nodiscard]] std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
       std::string_view name, std::size_t end) const noexcept {
     for (std::size_t index = active_source_begin_; index < end; ++index) {
@@ -3044,9 +3094,7 @@ class StatementBinder final {
         contributors.push_back(*argument);
       }
       if (!contributors.empty()) {
-        const ExpressionProperties properties = Properties(*left_expression);
-        left_expression = AppendExpression(
-            span, BoundCoalesceExpression{.arguments = std::move(contributors)}, properties);
+        left_expression = AppendJoinedCoalesce(std::move(contributors), span);
         if (!left_expression.has_value()) {
           return std::unexpected(std::move(left_expression.error()));
         }
@@ -3074,7 +3122,18 @@ class StatementBinder final {
       condition = *equality;
     }
     impl_->source_columns[right->value()].merged_into = *left;
-    if (impl_->table_sources[source_index].join == SourceJoinKind::kRight) {
+    const SourceJoinKind kind = impl_->table_sources[source_index].join;
+    if (kind == SourceJoinKind::kFull) {
+      auto current = BindJoinedValue(*left, span);
+      if (!current.has_value()) {
+        return std::unexpected(std::move(current.error()));
+      }
+      auto merged = AppendJoinedCoalesce(*current, *right_expression, span);
+      if (!merged.has_value()) {
+        return std::unexpected(std::move(merged.error()));
+      }
+      impl_->source_columns[left->value()].joined_value = *merged;
+    } else if (kind == SourceJoinKind::kRight) {
       impl_->source_columns[left->value()].joined_value = *right_expression;
     }
     return equality_height;
@@ -3125,7 +3184,7 @@ class StatementBinder final {
     }
     std::size_t height = 0;
     const bool right_core = std::ranges::any_of(
-        core.from, [](const TableSource& source) { return source.join == SourceJoinKind::kRight; });
+        core.from, [](const TableSource& source) { return SourceJoinPreservesRight(source.join); });
     const auto admit = [&](std::size_t added, SourceSpan span) -> BindExpected<void> {
       height = height == 0U ? added : std::max(height, added) + 1U;
       if (height > kMaximumExpressionConstructionDepth) {
@@ -3813,8 +3872,9 @@ class StatementBinder final {
     return {};
   }
 
-  void PopulateImplicitResultMetadata(BoundExpressionId expression, SourceSpan span,
-                                      BoundResultColumn& result) const {
+  void PopulateImplicitResultMetadata(
+      BoundExpressionId expression, SourceSpan span, BoundResultColumn& result,
+      std::optional<std::string_view> synthetic_name = std::nullopt) const {
     while (const auto* alias = std::get_if<BoundAliasReferenceExpression>(
                &impl_->expressions[expression.value()].payload)) {
       expression = alias->target;
@@ -3851,7 +3911,7 @@ class StatementBinder final {
       result.declared_type = "INTEGER";
       return;
     }
-    result.name = std::string{SpanText(span)};
+    result.name = std::string{synthetic_name.value_or(SpanText(span))};
   }
 
   [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
@@ -3906,21 +3966,22 @@ class StatementBinder final {
         const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
         const SourceState* value_owner = &owner;
         const BoundSourceColumn* value_column = &column;
+        bool synthetic_value = false;
         if (!qualifier.has_value() && column.joined_value.has_value()) {
           const auto* value = std::get_if<BoundColumnExpression>(
               &impl_->expressions[column.joined_value->value()].payload);
           if (value == nullptr) {
-            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                               "RIGHT wildcard value is not a source column"));
+            synthetic_value = true;
+          } else {
+            value_column = &impl_->source_columns[value->column.value()];
+            const auto found =
+                std::ranges::find(source_states_, value_column->source, &SourceState::id);
+            if (found == source_states_.end()) {
+              return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                                 "joined wildcard value has no source owner"));
+            }
+            value_owner = &*found;
           }
-          value_column = &impl_->source_columns[value->column.value()];
-          const auto found =
-              std::ranges::find(source_states_, value_column->source, &SourceState::id);
-          if (found == source_states_.end()) {
-            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                               "RIGHT wildcard value has no source owner"));
-          }
-          value_owner = &*found;
         }
         std::string_view source_name = value_owner->schema_table
                                            ? std::string_view{"sqlite_master"}
@@ -3929,9 +3990,19 @@ class StatementBinder final {
         if (alias.has_value()) {
           source_name = *alias;
         }
-        auto resolved = ResolveSourceName(
-            value_column->name, span,
-            SourceQualification{.schema = catalog_->schema_name(), .name = source_name});
+        BindExpected<std::optional<BoundExpressionId>> resolved =
+            std::optional<BoundExpressionId>{};
+        if (synthetic_value) {
+          auto value = BindJoinedValue(column_id, span);
+          if (!value.has_value()) {
+            return std::unexpected(std::move(value.error()));
+          }
+          resolved = std::optional{*value};
+        } else {
+          resolved = ResolveSourceName(
+              value_column->name, span,
+              SourceQualification{.schema = catalog_->schema_name(), .name = source_name});
+        }
         if (!resolved.has_value()) {
           return std::unexpected(std::move(resolved.error()));
         }
@@ -3940,10 +4011,7 @@ class StatementBinder final {
                                              "expanded wildcard column did not resolve"));
         }
         const BoundExpressionId expression = **resolved;
-        const auto* bound_column =
-            std::get_if<BoundColumnExpression>(&impl_->expressions[expression.value()].payload);
-        if (bound_column == nullptr || JoinedColumnRepresentative(bound_column->column) !=
-                                           JoinedColumnRepresentative(column_id)) {
+        if (!JoinedValueMatches(column_id, expression)) {
           return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                              "expanded wildcard column has a different owner"));
         }
@@ -3951,7 +4019,7 @@ class StatementBinder final {
             .expression = expression,
             .affinity = Properties(expression).affinity,
         };
-        PopulateImplicitResultMetadata(expression, span, result);
+        PopulateImplicitResultMetadata(expression, span, result, column.name);
         impl_->result_columns.push_back(std::move(result));
         impl_->result_syntax.emplace_back(std::nullopt);
       }
@@ -4335,6 +4403,7 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSourceName(
       std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification) {
     std::optional<BoundSourceColumnId> matched_column;
+    std::optional<BoundExpressionId> matched_value;
     const auto matches = [&](const SourceState& source) {
       return !qualification.has_value() || QualifiedSourceMatches(source, *qualification);
     };
@@ -4365,8 +4434,28 @@ class StatementBinder final {
           }
           const auto owner =
               std::ranges::find(impl_->table_sources, source.id, &BoundTableSource::id);
-          if (owner != impl_->table_sources.end() && owner->join == SourceJoinKind::kRight) {
-            matched_column = *column;
+          if (owner != impl_->table_sources.end()) {
+            if (owner->join == SourceJoinKind::kRight) {
+              matched_column = *column;
+              matched_value.reset();
+            } else if (owner->join == SourceJoinKind::kFull) {
+              auto left = matched_value.has_value()
+                              ? BindExpected<BoundExpressionId>{*matched_value}
+                              : BindColumn(*matched_column, span);
+              if (!left.has_value()) {
+                return std::unexpected(std::move(left.error()));
+              }
+              auto right = BindColumn(*column, span);
+              if (!right.has_value()) {
+                return std::unexpected(std::move(right.error()));
+              }
+              auto merged = AppendJoinedCoalesce(*left, *right, span);
+              if (!merged.has_value()) {
+                return std::unexpected(std::move(merged.error()));
+              }
+              matched_value = *merged;
+              matched_column = *column;
+            }
           }
           continue;
         }
@@ -4374,6 +4463,9 @@ class StatementBinder final {
       }
     }
     if (matched_column.has_value()) {
+      if (matched_value.has_value()) {
+        return matched_value;
+      }
       auto bound = qualification.has_value() ? BindColumn(*matched_column, span)
                                              : BindJoinedValue(*matched_column, span);
       if (!bound.has_value()) {

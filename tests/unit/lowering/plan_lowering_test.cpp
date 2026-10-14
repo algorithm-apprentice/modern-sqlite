@@ -1083,6 +1083,25 @@ TEST_F(ReadLoweringJoin, SharesOneReadableBodyAcrossSixtyFourRightReplays) {
   }
 }
 
+TEST_F(ReadLoweringJoin, ComposesFullExtensionsThroughSixtyFourSourcesWithoutCopyingConsumers) {
+  for (const std::size_t sources : {2U, 8U, 64U}) {
+    SCOPED_TRACE(sources);
+    std::string sql = "SELECT count() FROM Items t0";
+    for (std::size_t index = 1; index < sources; ++index) {
+      sql += " FULL JOIN Items t" + std::to_string(index) + " ON 0";
+    }
+    const auto rows = Execute(sql);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(static_cast<std::int64_t>(sources * 3U), rows[0][0].integer_value());
+    const BytecodeProgram program = LowerOrThrow(sql, catalog());
+    const auto kinds = InstructionKinds(program);
+    EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+    EXPECT_EQ(sources - 1U,
+              static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenRelation)));
+    EXPECT_LE(program.instructions().size(), sources * sources * 2U + sources * 96U + 128U);
+  }
+}
+
 TEST_F(ReadLoweringJoin, AppliesInnerForwardConditionsAndConsumesLeftRowsInAllDestinations) {
   const auto forward = Execute(
       "SELECT a.id,b.id,c.id FROM items a JOIN items b ON c.id=b.id "
@@ -1140,6 +1159,31 @@ TEST_F(ReadLoweringJoin, EvaluatesLeftOnOnlyForPhysicalCandidates) {
                       custom.Binder(), custom.Vm())
                   .empty());
   EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, EvaluatesFullOnOnceAndNeverMarksVirtualRightRows) {
+  const CustomEnvironment custom;
+  callback_trace.clear();
+  const auto rows = Execute(
+      "SELECT trace_argument(coalesce(a.id,b.id)),a.id,b.id FROM items a "
+      "FULL JOIN items b ON trace_filter(b.id)>99",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(6U, rows.size());
+  EXPECT_EQ(9U, std::ranges::count(callback_trace, "filter"));
+  EXPECT_EQ(6U, std::ranges::count(callback_trace, "argument"));
+  std::size_t left_only = 0;
+  std::size_t right_only = 0;
+  for (const auto& row : rows) {
+    if (row[1].type() == SqlValueType::kNull) {
+      ++right_only;
+      EXPECT_NE(SqlValueType::kNull, row[2].type());
+    } else {
+      ++left_only;
+      EXPECT_EQ(SqlValueType::kNull, row[2].type());
+    }
+  }
+  EXPECT_EQ(3U, left_only);
+  EXPECT_EQ(3U, right_only);
 }
 
 TEST_F(ReadLoweringJoin, PreservesMergedScopesAcrossGroupingSetsAndValuesCores) {

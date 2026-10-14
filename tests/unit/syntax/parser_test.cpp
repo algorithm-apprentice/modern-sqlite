@@ -957,6 +957,20 @@ TEST(Parser, PreservesRightOuterAndNaturalRightOperators) {
   }
 }
 
+TEST(Parser, PreservesFullOuterAndNaturalFullOperators) {
+  for (const std::string_view operation :
+       {"FULL JOIN", "FULL OUTER JOIN", "NATURAL FULL JOIN", "NATURAL FULL OUTER JOIN"}) {
+    const auto parsed = ParseOrThrow("SELECT * FROM a " + std::string{operation} + " b");
+    const SyntaxTree& tree = RequiredTree(parsed);
+    const auto& source = FirstSelectCore(tree).from[1];
+    EXPECT_EQ(SourceJoinKind::kFull, source.join);
+    EXPECT_EQ(operation, SpanText(tree, RequiredOptional(source.join_span)));
+    EXPECT_EQ(operation.starts_with("NATURAL"), source.natural);
+    EXPECT_TRUE(SourceJoinPreservesLeft(source.join));
+    EXPECT_TRUE(SourceJoinPreservesRight(source.join));
+  }
+}
+
 TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
   const std::array malformed{
       "SELECT * FROM a,",
@@ -983,6 +997,9 @@ TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
       "SELECT * FROM a RIGHT",
       "SELECT * FROM a RIGHT OUTER",
       "SELECT * FROM a RIGHT JOIN",
+      "SELECT * FROM a FULL",
+      "SELECT * FROM a FULL OUTER",
+      "SELECT * FROM a FULL JOIN",
   };
   for (const std::string_view sql : malformed) {
     SCOPED_TRACE(sql);
@@ -991,8 +1008,6 @@ TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
     EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code);
   }
   const std::array unsupported{
-      "SELECT * FROM a FULL JOIN b",
-      "SELECT * FROM a NATURAL FULL JOIN b",
       "SELECT * FROM a,(SELECT 1)",
       "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
   };
@@ -1574,7 +1589,8 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
     TokenKind first_unsupported;
   };
   constexpr std::array cases{
-      Case{.sql = "SELECT * FROM a FULL JOIN b", .first_unsupported = TokenKind::kJoinKeyword},
+      Case{.sql = "SELECT * FROM a JOIN b INDEXED BY idx",
+           .first_unsupported = TokenKind::kIndexed},
       Case{.sql = "SELECT * FROM f(1)", .first_unsupported = TokenKind::kLeftParenthesis},
       Case{
           .sql = "SELECT * FROM (SELECT 1)",

@@ -194,7 +194,16 @@ enum class SourceJoinKind : std::uint8_t {
   kInner,
   kLeft,
   kRight,
+  kFull,
 };
+
+[[nodiscard]] constexpr bool SourceJoinPreservesLeft(SourceJoinKind kind) noexcept {
+  return kind == SourceJoinKind::kLeft || kind == SourceJoinKind::kFull;
+}
+
+[[nodiscard]] constexpr bool SourceJoinPreservesRight(SourceJoinKind kind) noexcept {
+  return kind == SourceJoinKind::kRight || kind == SourceJoinKind::kFull;
+}
 
 struct JoinUsingClause {
   SourceSpan span;

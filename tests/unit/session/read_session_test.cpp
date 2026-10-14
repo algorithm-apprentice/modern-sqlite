@@ -760,6 +760,118 @@ TEST(ReadSession, PreservesUnmatchedRightRowsAndNeverReplaysWhereRejectedMatches
   EXPECT_EQ(ReadStep::kDone, TakeValue(rejected.Step()));
 }
 
+TEST(ReadSession, PreservesBothFullJoinSidesAndPublishesMergedKeys) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement disjoint = PrepareStatement(
+      session, "SELECT count(),count(a.id),count(b.id) FROM items a FULL JOIN items b ON 0");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(disjoint.Step()));
+  EXPECT_EQ(8, IntegerValue(disjoint.row()[0]));
+  EXPECT_EQ(4, IntegerValue(disjoint.row()[1]));
+  EXPECT_EQ(4, IntegerValue(disjoint.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(disjoint.Step()));
+  ReadStatement merged =
+      PrepareStatement(session,
+                       "SELECT id,a.id,b.id FROM items a FULL JOIN model_rows b USING(id) "
+                       "WHERE id<=5 ORDER BY id");
+  EXPECT_EQ(std::nullopt, merged.result_columns()[0].declared_type);
+  for (std::int64_t id = 1; id <= 5; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(merged.Step()));
+    EXPECT_EQ(id, IntegerValue(merged.row()[0]));
+    EXPECT_EQ(id, IntegerValue(merged.row()[2]));
+    if (id == 5) {
+      EXPECT_EQ(SqlValueType::kNull, merged.row()[1].type());
+    } else {
+      EXPECT_EQ(id, IntegerValue(merged.row()[1]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(merged.Step()));
+}
+
+TEST(ReadSession, PreservesFullMergedAffinityCollationAndPhysicalSubgroups) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement affinity =
+      PrepareStatement(session,
+                       "SELECT id='5',coalesce(a.id,b.id)='5',typeof(id) FROM items a "
+                       "FULL JOIN model_rows b USING(id) WHERE id=5");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(affinity.Step()));
+  EXPECT_EQ(1, IntegerValue(affinity.row()[0]));
+  EXPECT_EQ(0, IntegerValue(affinity.row()[1]));
+  EXPECT_EQ("integer", TextValue(affinity.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(affinity.Step()));
+  for (const bool reverse : {false, true}) {
+    ReadStatement collation = PrepareStatement(
+        session, reverse ? "SELECT count() FROM sqlite_schema a FULL JOIN items b USING(name) "
+                           "WHERE name='ALPHA'"
+                         : "SELECT count() FROM items a FULL JOIN sqlite_schema b USING(name) "
+                           "WHERE name='ALPHA'");
+    ASSERT_EQ(ReadStep::kRow, TakeValue(collation.Step()));
+    EXPECT_EQ(reverse ? 0 : 1, IntegerValue(collation.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(collation.Step()));
+  }
+  ReadStatement subgroup =
+      PrepareStatement(session,
+                       "SELECT q.id,c.id FROM items q FULL JOIN items q USING(id) "
+                       "FULL JOIN model_rows c USING(id) WHERE id=5");
+  EXPECT_EQ("q.id", subgroup.result_columns()[0].name);
+  EXPECT_EQ(std::nullopt, subgroup.result_columns()[0].declared_type);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(subgroup.Step()));
+  EXPECT_EQ(SqlValueType::kNull, subgroup.row()[0].type());
+  EXPECT_EQ(5, IntegerValue(subgroup.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(subgroup.Step()));
+}
+
+TEST(ReadSession, RebindsFullMatchesAndSuppressesDefaultsOnBothMissingSides) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT a.id,b.id,a.text_default,b.text_default,a._rowid_,b._rowid_ "
+                       "FROM altered a FULL JOIN altered b ON b.id=a.id+abs(?1) "
+                       "ORDER BY b.id IS NULL,b.id LIMIT ?2");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(-1)));
+  for (const auto& expected : std::array{std::array{0, 1}, std::array{1, 2}, std::array{2, 3},
+                                         std::array{3, 4}, std::array{4, 0}}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    for (std::size_t side = 0; side < expected.size(); ++side) {
+      const int id = expected[side];
+      if (id == 0) {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[side].type());
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[side + 4U].type());
+      } else {
+        EXPECT_EQ(id, IntegerValue(statement.row()[side]));
+        EXPECT_EQ(id, IntegerValue(statement.row()[side + 4U]));
+      }
+      if (id == 1 || id == 2) {
+        EXPECT_EQ("fallback", TextValue(statement.row()[side + 2U]));
+      } else if (id == 3) {
+        EXPECT_EQ("stored", TextValue(statement.row()[side + 2U]));
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[side + 2U].type());
+      }
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(0)));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(-1)));
+  for (std::int64_t id = 1; id <= 4; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
 TEST(ReadSession, ResetsRightReplayAndKeepsNullPrefixDefaultsOutOfOutput) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -796,7 +908,7 @@ TEST(ReadSession, ResetsRightReplayAndKeepsNullPrefixDefaultsOutOfOutput) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
-TEST(ReadSession, CleansAndRecoversRightMatchRelationsAfterTemporaryWriteFailure) {
+void ExercisePreservedRightMatchFailure(std::string_view sql, std::int64_t expected) {
   const auto state = std::make_shared<TemporaryFileState>();
   const ReadSessionOptions options{
       .temporary_storage =
@@ -809,10 +921,7 @@ TEST(ReadSession, CleansAndRecoversRightMatchRelationsAfterTemporaryWriteFailure
                        "index_performance" / "indexed.db";
   ReadSession session = TakeValue(
       ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state), fixture.string(), options));
-  ReadStatement statement =
-      PrepareStatement(session,
-                       "SELECT count(),count(a.rowid) FROM sqlite_schema a RIGHT JOIN items b "
-                       "ON a.name='items'");
+  ReadStatement statement = PrepareStatement(session, sql);
   state->writes_until_failure = 0U;
   const auto failed = statement.Step();
   ASSERT_FALSE(failed.has_value());
@@ -823,11 +932,76 @@ TEST(ReadSession, CleansAndRecoversRightMatchRelationsAfterTemporaryWriteFailure
   ASSERT_FALSE(reset.has_value());
   EXPECT_EQ(ErrorCode::kIo, reset.error().code());
   ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
-  EXPECT_EQ(4096, IntegerValue(statement.row()[0]));
-  EXPECT_EQ(4096, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(expected, IntegerValue(statement.row()[1]));
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
   EXPECT_EQ(0U, state->live_count);
   RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, CleansAndRecoversRightMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(),count(a.rowid) FROM sqlite_schema a RIGHT JOIN items b ON a.name='items'",
+      4096);
+}
+
+TEST(ReadSession, CleansAndRecoversFullMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(),count(a.rowid) FROM sqlite_schema a FULL JOIN items b ON a.name='items'",
+      4100);
+}
+
+TEST(ReadSession, PreservesBothFullSidesAcrossExternalOrderAndPmaFailureRecovery) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    const auto state = std::make_shared<TemporaryFileState>();
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = mode,
+                .sorter_memory_threshold =
+                    ByteCount{mode == TemporaryStoreMode::kFile ? 32U << 10U : 1U << 20U},
+            },
+    };
+    ReadSession session =
+        TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                    ReadCompatibilityFixturePath().string(), options));
+    ReadStatement statement =
+        PrepareStatement(session,
+                         "SELECT coalesce(a.id,b.id) FROM model_rows a FULL JOIN model_rows b ON 0 "
+                         "CROSS JOIN model_rows c ORDER BY 1 DESC,a.id,b.id,c.id");
+    if (mode == TemporaryStoreMode::kFile) {
+      state->writes_until_failure = 0U;
+      const auto failed = statement.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+      EXPECT_GT(state->open_count, 0U);
+      EXPECT_EQ(0U, state->live_count);
+      const auto reset = statement.Reset();
+      ASSERT_FALSE(reset.has_value());
+      EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+    }
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::ProbeCounterCollection work{
+        instrumentation::ProbeCollectionKind::AggregateWork};
+    const instrumentation::ScopedProbeCounterCollection scope{work};
+#endif
+    for (std::size_t row = 0; row < 2048U; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(static_cast<std::int64_t>(32U - row / 64U), IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ(0U, state->live_count);
+    EXPECT_LE(state->peak_live_count, 3U);
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile,
+              work.Value(instrumentation::AggregateWorkMetric::SorterSpillWrites) > 0U);
+#endif
+    RequireStatus(statement.Reset());
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    RequireStatus(statement.Finalize());
+    EXPECT_EQ(0U, state->live_count);
+  }
 }
 
 TEST(ReadSession, PreservesRightMatchedSetsAcrossMemoryAndGenuineExternalOrderSpill) {
@@ -1009,6 +1183,11 @@ TEST(ReadSession, RecoversJoinedCursorReadFailureAndCleansOwnedState) {
            .second = 1},
       Case{.sql = "SELECT count() FROM Items a RIGHT JOIN storage_values b ON a.id=b.id",
            .first = 11},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN storage_values b ON a.id=b.id LIMIT 1",
+           .first = 1,
+           .second = 1},
+      Case{.sql = "SELECT count() FROM Items a FULL JOIN storage_values b ON 0", .first = 15},
+      Case{.sql = "SELECT count() FROM Items a FULL JOIN storage_values b USING(id)", .first = 11},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -1207,6 +1386,9 @@ TEST(ReadSession, BypassesAllSixtyFourSourcesForZeroLimit) {
       Case{.operation = " RIGHT JOIN Items AS t", .condition = " ON 0"},
       Case{.operation = " RIGHT JOIN Items AS t", .condition = " USING(id)"},
       Case{.operation = " NATURAL RIGHT JOIN Items AS t", .condition = ""},
+      Case{.operation = " FULL JOIN Items AS t", .condition = " ON 0"},
+      Case{.operation = " FULL JOIN Items AS t", .condition = " USING(id)"},
+      Case{.operation = " NATURAL FULL JOIN Items AS t", .condition = ""},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.operation);
@@ -1492,17 +1674,26 @@ TEST(ReadSession, CleansAggregateTemporaryFilesAfterInjectedFailure) {
 }
 
 TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
-  const std::array queries{
-      "SELECT b.id,count(),group_concat(a.id ORDER BY a.id DESC) "
-      "FROM model_rows a CROSS JOIN model_rows b GROUP BY b.id ORDER BY b.id",
-      "SELECT a.id,count(),group_concat(b.id ORDER BY b.id DESC) "
-      "FROM model_rows a LEFT JOIN model_rows b ON a.id<32 GROUP BY a.id ORDER BY a.id",
-      "SELECT a.id,count(),group_concat(c.id ORDER BY c.id DESC) "
-      "FROM model_rows a LEFT JOIN items b USING(id) CROSS JOIN model_rows c "
-      "GROUP BY a.id ORDER BY a.id",
+  struct Case {
+    std::string_view sql;
+    std::int64_t first_count = 32;
   };
-  for (const std::string_view sql : queries) {
-    SCOPED_TRACE(sql);
+  const std::array queries{
+      Case{.sql = "SELECT b.id,count(),group_concat(a.id ORDER BY a.id DESC) "
+                  "FROM model_rows a CROSS JOIN model_rows b GROUP BY b.id ORDER BY b.id"},
+      Case{.sql =
+               "SELECT a.id,count(),group_concat(b.id ORDER BY b.id DESC) "
+               "FROM model_rows a LEFT JOIN model_rows b ON a.id<32 GROUP BY a.id ORDER BY a.id"},
+      Case{.sql = "SELECT a.id,count(),group_concat(c.id ORDER BY c.id DESC) "
+                  "FROM model_rows a LEFT JOIN items b USING(id) CROSS JOIN model_rows c "
+                  "GROUP BY a.id ORDER BY a.id"},
+      Case{.sql = "SELECT coalesce(a.id,b.id),count(),group_concat(c.id ORDER BY c.id DESC) "
+                  "FROM model_rows a FULL JOIN model_rows b ON 0 CROSS JOIN model_rows c "
+                  "GROUP BY coalesce(a.id,b.id) ORDER BY coalesce(a.id,b.id)",
+           .first_count = 64},
+  };
+  for (const Case& test_case : queries) {
+    SCOPED_TRACE(test_case.sql);
     const auto state = std::make_shared<TemporaryFileState>();
     const ReadSessionOptions options{
         .temporary_storage =
@@ -1514,7 +1705,7 @@ TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
     ReadSession session =
         TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
                                     ReadCompatibilityFixturePath().string(), options));
-    ReadStatement statement = PrepareStatement(session, sql);
+    ReadStatement statement = PrepareStatement(session, test_case.sql);
     state->writes_until_failure = 0U;
     const auto failed = statement.Step();
     ASSERT_FALSE(failed.has_value());
@@ -1527,7 +1718,7 @@ TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
     EXPECT_EQ(ErrorCode::kIo, reset.error().code());
     ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
     EXPECT_EQ(1, IntegerValue(statement.row()[0]));
-    EXPECT_EQ(32, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(test_case.first_count, IntegerValue(statement.row()[1]));
     std::size_t rows = 1;
     while (TakeValue(statement.Step()) == ReadStep::kRow) {
       ++rows;

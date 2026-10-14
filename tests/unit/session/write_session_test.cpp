@@ -140,6 +140,21 @@ TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
   EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a INNER JOIN b ON a.id=b.id").empty());
   EXPECT_TRUE(QueryRows(session, "SELECT b.id,a.id FROM b LEFT JOIN a ON a.id=b.id").empty());
   EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a RIGHT JOIN b ON a.id=b.id").empty());
+  EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM b a FULL JOIN b b ON a.id=b.id").empty());
+  const auto full_empty_right =
+      QueryRows(session, "SELECT a.id,b.id FROM a FULL JOIN b ON a.id=b.id ORDER BY a.id");
+  ASSERT_EQ(2U, full_empty_right.size());
+  for (std::size_t index = 0; index < full_empty_right.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), full_empty_right[index][0].integer_value());
+    EXPECT_EQ(SqlValueType::kNull, full_empty_right[index][1].type());
+  }
+  const auto full_empty_left =
+      QueryRows(session, "SELECT b.id,a.id FROM b FULL JOIN a ON a.id=b.id ORDER BY a.id");
+  ASSERT_EQ(2U, full_empty_left.size());
+  for (std::size_t index = 0; index < full_empty_left.size(); ++index) {
+    EXPECT_EQ(SqlValueType::kNull, full_empty_left[index][0].type());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), full_empty_left[index][1].integer_value());
+  }
   const auto right_empty_prefix =
       QueryRows(session, "SELECT b.id,a.id FROM b RIGHT JOIN a ON a.id=b.id ORDER BY a.id");
   ASSERT_EQ(2U, right_empty_prefix.size());
