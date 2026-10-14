@@ -84,3 +84,4 @@ their corresponding implementation begins.
 78. [ADR-0078: USING and NATURAL Joined-Column Namespaces](0078-using-and-natural-joined-column-namespaces.md)
 79. [ADR-0079: RIGHT Join Matched-Row Replay](0079-right-join-matched-row-replay.md)
 80. [ADR-0080: FULL Join Two-Sided Preservation](0080-full-join-two-sided-preservation.md)
+81. [ADR-0081: Parameterized Joined Rowid Access](0081-parameterized-joined-rowid-access.md)
