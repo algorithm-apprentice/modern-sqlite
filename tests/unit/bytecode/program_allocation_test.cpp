@@ -252,6 +252,38 @@ int main() try {
   if (!SweepProgramCreation(subroutine_input)) {
     return 2;
   }
+  ProgramInput read_subroutine_input;
+  read_subroutine_input.register_count = 1;
+  read_subroutine_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {},
+      .index_columns = {},
+  });
+  read_subroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "rowid",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kInteger,
+  });
+  read_subroutine_input.subroutines.push_back(SubroutineDescriptor{
+      .entry = InstructionAddress(3),
+      .end = InstructionAddress(8),
+      .kind = SubroutineKind::kRead,
+  });
+  read_subroutine_input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
+  };
+  if (!SweepProgramCreation(read_subroutine_input)) {
+    return 2;
+  }
 
   ProgramLimits subroutine_limits;
   subroutine_limits.maximum_owned_bytes = sizeof(SubroutineDescriptor) + 3U * sizeof(Instruction);
