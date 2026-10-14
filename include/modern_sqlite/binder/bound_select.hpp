@@ -1,6 +1,7 @@
 #ifndef MODERN_SQLITE_BINDER_BOUND_SELECT_HPP_
 #define MODERN_SQLITE_BINDER_BOUND_SELECT_HPP_
 
+#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -104,6 +106,7 @@ struct BoundTableSource {
   SourceJoinKind join = SourceJoinKind::kFirst;
   std::size_t source_column_begin = 0;
   std::size_t source_column_count = 0;
+  std::optional<BoundExpressionId> on{};
 };
 
 struct BoundSourceColumn {
@@ -250,6 +253,49 @@ struct BoundSourceLeafIdentity {
 [[nodiscard]] std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
     const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept;
 
+namespace binder_detail {
+template <typename Visitor>
+[[nodiscard]] bool VisitSourceOwners(std::span<const BoundExpression> expressions,
+                                     std::span<const BoundSourceColumn> columns,
+                                     BoundExpressionId id, Visitor& visitor) {
+  if (id.value() >= expressions.size()) {
+    return false;
+  }
+  const BoundExpression& expression = expressions[id.value()];
+  if (const auto identity = BoundSourceLeafIdentityOf(expression, columns); identity.has_value()) {
+    visitor(identity->source);
+    return true;
+  }
+  return std::visit(
+      [&](const auto& payload) -> bool {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
+                      std::is_same_v<Payload, BoundParameterExpression>) {
+          return true;
+        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
+                             std::is_same_v<Payload, BoundTruthTestExpression> ||
+                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                             std::is_same_v<Payload, BoundCollateExpression>) {
+          return VisitSourceOwners(expressions, columns, payload.operand, visitor);
+        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
+                             std::is_same_v<Payload, BoundComparisonExpression>) {
+          return VisitSourceOwners(expressions, columns, payload.left, visitor) &&
+                 VisitSourceOwners(expressions, columns, payload.right, visitor);
+        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+          return VisitSourceOwners(expressions, columns, payload.target, visitor);
+        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
+                             std::is_same_v<Payload, BoundCoalesceExpression> ||
+                             std::is_same_v<Payload, BoundConditionalExpression>) {
+          return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
+            return VisitSourceOwners(expressions, columns, argument, visitor);
+          });
+        }
+        return false;
+      },
+      expression.payload);
+}
+}  // namespace binder_detail
+
 enum class BoundExpressionKind : std::uint8_t {
   kLiteral,
   kColumn,
@@ -374,6 +420,7 @@ enum class BindErrorCode : std::uint8_t {
   kIndexAlreadyExists,
   kObjectNameReserved,
   kIndexedTableUnsupported,
+  kJoinConditionScope,
   kInternalInvariant,
 };
 

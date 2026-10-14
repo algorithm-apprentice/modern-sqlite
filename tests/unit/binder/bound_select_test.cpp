@@ -745,6 +745,32 @@ TEST(Binder, ResolvesGeneratedWildcardColumnsAndRejectsDuplicateQualifierAmbigui
   }
 }
 
+TEST(Binder, BindsOnAliasesAndInnerForwardSourcesButRejectsLeftForwardScope) {
+  const auto catalog = TestCatalog();
+  const BoundSelect aliased =
+      BindOrThrow("SELECT a.id AS key FROM Items a LEFT JOIN Items b ON key=b.id", catalog);
+  ASSERT_EQ(2U, aliased.table_sources().size());
+  EXPECT_TRUE(aliased.table_sources()[1].on.has_value());
+  const BoundSelect forward = BindOrThrow(
+      "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id JOIN Items c ON c.id=a.id", catalog);
+  EXPECT_EQ(3U, forward.table_sources().size());
+  const auto invalid = BindSelectStatement(
+      ParseTree(
+          "SELECT a.id FROM Items a LEFT JOIN Items b ON c.id=b.id JOIN Items c ON c.id=a.id"),
+      catalog);
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(BindErrorCode::kJoinConditionScope, invalid.error().code);
+  EXPECT_EQ("ON clause references tables to its right", invalid.error().detail);
+  const auto first = BindSelectStatement(ParseTree("SELECT id FROM Items ON id=1"), catalog);
+  ASSERT_FALSE(first.has_value());
+  EXPECT_EQ(BindErrorCode::kJoinConditionScope, first.error().code);
+  EXPECT_EQ("a JOIN clause is required before ON", first.error().detail);
+  const auto aggregate = BindSelectStatement(
+      ParseTree("SELECT count() FROM Items a JOIN Items b ON count()>0"), catalog);
+  ASSERT_FALSE(aggregate.has_value());
+  EXPECT_EQ(BindErrorCode::kAggregateMisuse, aggregate.error().code);
+}
+
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select =

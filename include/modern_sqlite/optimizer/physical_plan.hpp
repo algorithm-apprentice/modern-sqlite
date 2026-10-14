@@ -280,6 +280,8 @@ struct PhysicalNestedLoopJoinNode {
   PhysicalNodeId right;
   std::size_t core_index = 0;
   SourceJoinKind join = SourceJoinKind::kCross;
+  std::optional<BoundExpressionId> on{};
+  std::optional<BoundSourceId> condition_source{};
 };
 
 using PhysicalNodePayload =

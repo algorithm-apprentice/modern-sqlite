@@ -2042,6 +2042,11 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<void> BindSelectCoreBody(const SelectCore& core) {
     BeginQueryCore();
+    if (!core.from.empty() && core.from.front().on.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
+                                         tree_.expression(*core.from.front().on).span,
+                                         "a JOIN clause is required before ON"));
+    }
     BindExpected<void> source = BindSource(core);
     if (!source.has_value()) {
       return source;
@@ -2051,6 +2056,33 @@ class StatementBinder final {
     BindExpected<void> results = BindResults(core);
     if (!results.has_value()) {
       return results;
+    }
+    for (std::size_t index = 1; index < core.from.size(); ++index) {
+      const auto& on = core.from[index].on;
+      if (!on.has_value()) {
+        continue;
+      }
+      auto condition =
+          BindExpression(*on, BindScope{.source_columns = true, .result_aliases = true});
+      if (!condition.has_value()) {
+        return std::unexpected(std::move(condition.error()));
+      }
+      BoundTableSource& bound_source = impl_->table_sources[index];
+      bound_source.on = *condition;
+      if (bound_source.join == SourceJoinKind::kLeft) {
+        bool forward = false;
+        auto visitor = [&](BoundSourceId owner) { forward = forward || owner > bound_source.id; };
+        if (!VisitSourceOwners(impl_->expressions, impl_->source_columns, *condition, visitor)) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             tree_.expression(*on).span,
+                                             "ON condition has invalid source dependencies"));
+        }
+        if (forward) {
+          return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
+                                             tree_.expression(*on).span,
+                                             "ON clause references tables to its right"));
+        }
+      }
     }
     active_core_is_aggregate_ =
         !core.group_by.empty() ||
@@ -2700,7 +2732,8 @@ class StatementBinder final {
     if (core.from.size() > kMaximumSelectSources ||
         !std::ranges::all_of(core.from, [this](const TableSource& source) {
           return SpanIsValid(source.span) && QualifiedNameIsValid(source.name) &&
-                 (!source.alias.has_value() || SpanIsValid(*source.alias));
+                 (!source.alias.has_value() || SpanIsValid(*source.alias)) &&
+                 (!source.on.has_value() || IdIsValid(*source.on));
         })) {
       return false;
     }
@@ -5094,6 +5127,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "object_name_reserved";
     case BindErrorCode::kIndexedTableUnsupported:
       return "indexed_table_unsupported";
+    case BindErrorCode::kJoinConditionScope:
+      return "join_condition_scope";
     case BindErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
@@ -5123,6 +5158,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kNoSuchTable:
     case BindErrorCode::kNoSuchColumn:
     case BindErrorCode::kAmbiguousColumn:
+    case BindErrorCode::kJoinConditionScope:
     case BindErrorCode::kNoTablesSpecified:
     case BindErrorCode::kNoSuchFunction:
     case BindErrorCode::kWrongFunctionArity:

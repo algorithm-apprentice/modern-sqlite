@@ -130,6 +130,40 @@ struct SessionFixture {
   std::optional<WriteSession> session;
 };
 
+TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE a(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "CREATE TABLE b(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO a VALUES(1)");
+  ExecuteDone(session, "INSERT INTO a VALUES(2)");
+  EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a INNER JOIN b ON a.id=b.id").empty());
+  EXPECT_TRUE(QueryRows(session, "SELECT b.id,a.id FROM b LEFT JOIN a ON a.id=b.id").empty());
+  for (const std::string_view condition : {"", " ON a.id=b.id"}) {
+    const auto rows = QueryRows(session, "SELECT a.id,b.id,b._rowid_ FROM a LEFT JOIN b" +
+                                             std::string{condition} + " ORDER BY a.id");
+    ASSERT_EQ(2U, rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+      EXPECT_EQ(SqlValueType::kNull, rows[index][1].type());
+      EXPECT_EQ(SqlValueType::kNull, rows[index][2].type());
+    }
+  }
+  ExecuteDone(session, "INSERT INTO b VALUES(2)");
+  const auto matched =
+      QueryRows(session, "SELECT a.id,b.id FROM a LEFT JOIN b ON a.id=b.id ORDER BY a.id");
+  ASSERT_EQ(2U, matched.size());
+  EXPECT_EQ(SqlValueType::kNull, matched[0][1].type());
+  EXPECT_EQ(2, matched[1][1].integer_value());
+  EXPECT_TRUE(
+      QueryRows(session, "SELECT a.id FROM a LEFT JOIN b ON a.id=b.id WHERE b.id>99").empty());
+  const auto empty = QueryRows(session, "SELECT count(),count(b.id) FROM a LEFT JOIN b ON 0");
+  ASSERT_EQ(1U, empty.size());
+  EXPECT_EQ(2, empty[0][0].integer_value());
+  EXPECT_EQ(0, empty[0][1].integer_value());
+  EXPECT_TRUE(session.autocommit());
+}
+
 TEST(WriteSession, ExecutesWritablePipelineAndPublishesConnectionState) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

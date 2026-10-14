@@ -893,10 +893,43 @@ TEST(Parser, ParsesOwnedCommaCrossSourcesAndPreservesOperatorSpans) {
   EXPECT_EQ("c", SpanText(tree, RequiredOptional(core.from[2].alias)));
 }
 
+TEST(Parser, ParsesConditionalJoinOperatorsAndOwnedOnSpans) {
+  const ParseOutput output = ParseOrThrow(
+      "SELECT a.id FROM a JOIN b ON a.id=b.id "
+      "LEFT OUTER JOIN c ON b.id=c.id INNER JOIN d ON d.id=a.id");
+  const SyntaxTree& tree = RequiredTree(output);
+  const auto& sources = FirstSelectCore(tree).from;
+  ASSERT_EQ(4U, sources.size());
+  EXPECT_EQ(SourceJoinKind::kInner, sources[1].join);
+  EXPECT_EQ("JOIN", SpanText(tree, RequiredOptional(sources[1].join_span)));
+  EXPECT_EQ(SourceJoinKind::kLeft, sources[2].join);
+  EXPECT_EQ("LEFT OUTER JOIN", SpanText(tree, RequiredOptional(sources[2].join_span)));
+  EXPECT_EQ(SourceJoinKind::kInner, sources[3].join);
+  EXPECT_EQ("a.id=b.id", SpanText(tree, tree.expression(RequiredOptional(sources[1].on)).span));
+  EXPECT_EQ("b.id=c.id", SpanText(tree, tree.expression(RequiredOptional(sources[2].on)).span));
+  EXPECT_EQ("d.id=a.id", SpanText(tree, tree.expression(RequiredOptional(sources[3].on)).span));
+  for (const auto& source : sources) {
+    if (source.on.has_value()) {
+      EXPECT_EQ(source.span.end(), tree.expression(*source.on).span.end());
+    }
+  }
+}
+
 TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
   const std::array malformed{
-      "SELECT * FROM a,",           "SELECT * FROM a CROSS",         "SELECT * FROM a CROSS b",
-      "SELECT * FROM a CROSS JOIN", "SELECT * FROM a CROSS JOIN b,",
+      "SELECT * FROM a,",
+      "SELECT * FROM a CROSS",
+      "SELECT * FROM a CROSS b",
+      "SELECT * FROM a CROSS JOIN",
+      "SELECT * FROM a CROSS JOIN b,",
+      "SELECT * FROM a JOIN",
+      "SELECT * FROM a INNER b",
+      "SELECT * FROM a LEFT",
+      "SELECT * FROM a LEFT OUTER",
+      "SELECT * FROM a LEFT JOIN",
+      "SELECT * FROM a JOIN b ON",
+      "SELECT * FROM a JOIN b ON 1 ON 2",
+      "SELECT * FROM a LEFT OUTER JOIN b ON WHERE 1",
   };
   for (const std::string_view sql : malformed) {
     SCOPED_TRACE(sql);
@@ -905,13 +938,9 @@ TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
     EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code);
   }
   const std::array unsupported{
-      "SELECT * FROM a JOIN b",
-      "SELECT * FROM a INNER JOIN b",
-      "SELECT * FROM a LEFT JOIN b ON a.x=b.x",
-      "SELECT * FROM a CROSS JOIN b ON a.x=b.x",
-      "SELECT * FROM a,b USING(x)",
-      "SELECT * FROM a,(SELECT 1)",
-      "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
+      "SELECT * FROM a RIGHT JOIN b",   "SELECT * FROM a FULL JOIN b",
+      "SELECT * FROM a NATURAL JOIN b", "SELECT * FROM a,b USING(x)",
+      "SELECT * FROM a,(SELECT 1)",     "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
   };
   for (const std::string_view sql : unsupported) {
     SCOPED_TRACE(sql);
@@ -1491,7 +1520,7 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
     TokenKind first_unsupported;
   };
   constexpr std::array cases{
-      Case{.sql = "SELECT * FROM a JOIN b", .first_unsupported = TokenKind::kJoin},
+      Case{.sql = "SELECT * FROM a RIGHT JOIN b", .first_unsupported = TokenKind::kJoinKeyword},
       Case{.sql = "SELECT * FROM f(1)", .first_unsupported = TokenKind::kLeftParenthesis},
       Case{
           .sql = "SELECT * FROM (SELECT 1)",

@@ -91,6 +91,55 @@ TEST(SyntaxTree, RejectsInvalidJoinOwnershipAndOperatorOrdering) {
   }
 }
 
+TEST(SyntaxTree, ValidatesOwnedOnReferencesAndConditionOrdering) {
+  constexpr std::string_view sql = "SELECT 1 FROM a LEFT JOIN b AS x ON 2";
+  const SourceSpan result = FindSpan(sql, "1");
+  const SourceSpan left = FindSpan(sql, "a", result.end().value());
+  const SourceSpan right = FindSpan(sql, "b");
+  const SourceSpan alias = FindSpan(sql, "x");
+  const SourceSpan condition = FindSpan(sql, "2");
+  for (std::size_t fault = 0; fault < 4U; ++fault) {
+    SCOPED_TRACE(fault);
+    SelectCore core{
+        .span = Span(0, sql.size()),
+        .result_columns = {ResultColumn{.span = result, .expression = ExpressionId{0}}},
+        .from =
+            {
+                TableSource{.span = left, .name = Name(left, {left})},
+                TableSource{.span = Span(right.begin().value(), condition.end().value()),
+                            .name = Name(right, {right}),
+                            .alias = alias,
+                            .join = SourceJoinKind::kLeft,
+                            .join_span = FindSpan(sql, "LEFT JOIN"),
+                            .on = ExpressionId{1}},
+            },
+    };
+    std::vector<Expression> expressions{
+        Expression{.span = result,
+                   .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = result}},
+        Expression{.span = condition,
+                   .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = condition}},
+    };
+    if (fault == 1U) {
+      core.from[1].on = ExpressionId{2};
+    } else if (fault == 2U) {
+      core.from[1].span = Span(right.begin().value(), alias.end().value());
+    } else if (fault == 3U) {
+      expressions[1].span = alias;
+      expressions[1].payload = IdentifierExpression{.name = Name(alias, {alias})};
+    }
+    const auto created =
+        SyntaxTree::Create(std::string{sql}, std::move(expressions),
+                           SelectStatement{.span = Span(0, sql.size()), .first = std::move(core)});
+    if (fault == 0U) {
+      ASSERT_TRUE(created.has_value()) << created.error().ToString();
+    } else {
+      ASSERT_FALSE(created.has_value());
+      EXPECT_EQ(ErrorCode::kMisuse, created.error().code());
+    }
+  }
+}
+
 template <typename Enum>
 [[nodiscard]] constexpr Enum InvalidEnumValue(std::uint8_t value) noexcept {
   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)

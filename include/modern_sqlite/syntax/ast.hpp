@@ -189,6 +189,8 @@ enum class SourceJoinKind : std::uint8_t {
   kFirst,
   kComma,
   kCross,
+  kInner,
+  kLeft,
 };
 
 struct TableSource {
@@ -197,6 +199,7 @@ struct TableSource {
   std::optional<SourceSpan> alias{};
   SourceJoinKind join = SourceJoinKind::kFirst;
   std::optional<SourceSpan> join_span{};
+  std::optional<ExpressionId> on{};
 };
 
 struct LimitClause {

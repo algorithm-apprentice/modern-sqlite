@@ -869,6 +869,37 @@ TEST(PhysicalPlan, PlansJoinedAggregationWithoutClaimingFirstSourceAccessOrOrder
   EXPECT_TRUE(grouped.candidates().empty());
 }
 
+TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "
+      "LEFT JOIN Items c ON a.id>0 INNER JOIN Items d ON 1",
+      TestCatalog());
+  const std::array kinds{SourceJoinKind::kInner, SourceJoinKind::kLeft, SourceJoinKind::kInner};
+  const std::array ready{BoundSourceId{2}, BoundSourceId{2}, BoundSourceId{0}};
+  const auto cores = plan.logical_plan().bound_select().query_cores();
+  const auto& sources = std::get<BoundSelectCore>(cores.front()).table_sources;
+  std::size_t index = 0;
+  for (std::size_t node_index = 0; node_index < plan.nodes().size(); ++node_index) {
+    const PhysicalNode& node = plan.nodes()[node_index];
+    if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+        join != nullptr) {
+      ASSERT_LT(index, kinds.size());
+      EXPECT_EQ(kinds[index], join->join);
+      EXPECT_EQ(ready[index], join->condition_source);
+      ASSERT_TRUE(join->on.has_value());
+      EXPECT_EQ(sources[index + 1U].on, join->on);
+      const auto* logical =
+          std::get_if<LogicalJoinNode>(&plan.logical_plan().nodes()[node_index].payload);
+      ASSERT_NE(nullptr, logical);
+      EXPECT_EQ(logical->on, join->on);
+      ++index;
+    }
+  }
+  EXPECT_EQ(kinds.size(), index);
+  EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP LEFT JOIN"));
+  EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP INNER JOIN"));
+}
+
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());
