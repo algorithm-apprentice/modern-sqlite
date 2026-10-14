@@ -926,11 +926,12 @@ template <typename T>
     return {};
   };
 
-  std::vector<bool> mutation_cursor_ids;
-  if (std::ranges::any_of(input.instructions, [](const Instruction& instruction) {
+  const bool has_null_rows =
+      std::ranges::any_of(input.instructions, [](const Instruction& instruction) {
         return std::holds_alternative<NullRowInstruction>(instruction);
-      })) {
-    mutation_cursor_ids.assign(input.cursors.size(), false);
+      });
+  std::vector<bool> mutation_cursor_ids(has_null_rows ? input.cursors.size() : 0U, false);
+  if (has_null_rows) {
     for (const Instruction& instruction : input.instructions) {
       if (const auto* mutation = std::get_if<OpenMutationCursorInstruction>(&instruction);
           mutation != nullptr && mutation->cursor.value() < mutation_cursor_ids.size()) {
