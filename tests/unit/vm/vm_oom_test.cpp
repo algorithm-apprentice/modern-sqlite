@@ -135,6 +135,63 @@ int main() try {
     return 1;
   }
 
+  ProgramInput null_input;
+  null_input.schema_version = input.schema_version;
+  null_input.register_count = 1;
+  null_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {CursorFieldSource{.kind = CursorFieldSourceKind::kRowId, .record_field = 0}},
+      .index_columns = {},
+  });
+  null_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "rowid",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kInteger,
+  });
+  null_input.instructions = {
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      RewindInstruction{.cursor = CursorId(0), .empty_target = InstructionAddress(10)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      NextInstruction{.cursor = CursorId(0), .next_target = InstructionAddress(7)},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+  };
+  auto null_program = BytecodeProgram::Create(null_input);
+  if (!null_program.has_value()) {
+    return 1;
+  }
+  auto null_vm = Vm::Create(*null_program, VmEnvironment::Core());
+  if (!null_vm.has_value() ||
+      !null_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto physical = null_vm->Step();
+  if (!physical.has_value() || *physical != VmStep::kRow ||
+      null_vm->row()[0].type() != SqlValueType::kInteger) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto virtual_row = null_vm->Step();
+  const bool virtual_null = virtual_row.has_value() && *virtual_row == VmStep::kRow &&
+                            null_vm->row()[0].type() == SqlValueType::kNull;
+  if (!virtual_null) {
+    fail_allocations = false;
+    return 1;
+  }
+  const auto virtual_done = null_vm->Step();
+  fail_allocations = false;
+  if (!virtual_done.has_value() || *virtual_done != VmStep::kDone) {
+    return 1;
+  }
+
   auto movable = Vm::Create(*program, VmEnvironment::Core());
   if (!movable.has_value()) {
     return 1;

@@ -9,9 +9,12 @@
 namespace {
 
 bool fail_allocations = false;
+std::size_t allocation_index = 0;
+std::optional<std::size_t> failing_allocation{};
 
 [[nodiscard]] void* Allocate(std::size_t size) {
-  if (fail_allocations) {
+  const std::size_t index = allocation_index++;
+  if (fail_allocations || failing_allocation == index) {
     throw std::bad_alloc{};
   }
   if (void* allocation = std::malloc(size == 0 ? 1 : size); allocation != nullptr) {
@@ -175,6 +178,52 @@ int main() try {
   checksum += program.mutation_result().publishes_changes ? 1U : 0U;
   checksum += program.constant(ConstantId(0)).text_value().value_or(Utf8View{}).size_bytes();
   fail_allocations = false;
+
+  ProgramInput null_input;
+  null_input.register_count = 1;
+  null_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {CursorFieldSource{.kind = CursorFieldSourceKind::kRowId, .record_field = 0}},
+      .index_columns = {},
+  });
+  null_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "rowid",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kInteger,
+  });
+  null_input.instructions = {
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+  };
+  allocation_index = 0;
+  const auto null_program = BytecodeProgram::Create(null_input);
+  if (!null_program.has_value()) {
+    return 2;
+  }
+  const std::size_t null_allocations = allocation_index;
+  if (null_allocations == 0U || null_allocations > 128U) {
+    return 2;
+  }
+  for (std::size_t failure = 0; failure < null_allocations; ++failure) {
+    allocation_index = 0;
+    failing_allocation = failure;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const auto rejected = BytecodeProgram::Create(null_input);
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    failing_allocation.reset();
+    if (!threw) {
+      return 2;
+    }
+  }
 
   return checksum == 0 ? 1 : 0;
 } catch (...) {
