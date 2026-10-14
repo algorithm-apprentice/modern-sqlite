@@ -111,6 +111,92 @@ namespace {
   };
 }
 
+TEST(BytecodeProgramTest, VerifiesNullRowsAsLogicalRowsAndRejectsClosedOrDisabledReads) {
+  ProgramInput input;
+  input.register_count = 1;
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.result_columns.push_back(IntegerResultColumn());
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
+  EXPECT_EQ("null_row", InstructionKindName(InstructionKind::kNullRow));
+  input.instructions[1] = NullRowInstruction{.cursor = Cursor(0), .enabled = false};
+  const auto disabled = BytecodeProgram::Create(input);
+  ASSERT_FALSE(disabled.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, disabled.error().code);
+  input.instructions[0] = NullRowInstruction{.cursor = Cursor(0)};
+  const auto closed = BytecodeProgram::Create(input);
+  ASSERT_FALSE(closed.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorNotOpen, closed.error().code);
+  input.instructions[0] = OpenReadCursorInstruction{.cursor = Cursor(0)};
+  input.instructions[1] = NullRowInstruction{.cursor = Cursor(99)};
+  const auto invalid = BytecodeProgram::Create(input);
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidCursor, invalid.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsNullPublicationForAnyMutationCursorUse) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kDelete;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.instructions = {
+      OpenMutationCursorInstruction{.cursor = Cursor(0)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  ASSERT_TRUE(BytecodeProgram::Create(input).has_value());
+  input.instructions.insert(input.instructions.begin() + 1,
+                            NullRowInstruction{.cursor = Cursor(0)});
+  const auto rejected = BytecodeProgram::Create(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, rejected.error().code);
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      OpenMutationCursorInstruction{.cursor = Cursor(1)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
+}
+
+TEST(BytecodeProgramTest, MergesPhysicalAndPublishedNullRowsWithoutWeakeningUnpositionedChecks) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.parameter_count = 1;
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.result_columns.push_back(IntegerResultColumn());
+  input.instructions = {
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      JumpIfInstruction{.condition = JumpCondition::kIfNull, .input = Reg(0), .target = Address(6)},
+      RewindInstruction{.cursor = Cursor(0), .empty_target = Address(6)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(1)},
+      JumpInstruction{.target = Address(8)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(1)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
+  input.instructions[6] = NullRowInstruction{.cursor = Cursor(0), .enabled = false};
+  const auto disabled = BytecodeProgram::Create(input);
+  ASSERT_FALSE(disabled.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, disabled.error().code);
+}
+
 [[nodiscard]] WriteCursorDescriptor IndexWriteCursorDescriptor() {
   return WriteCursorDescriptor{
       .root_page = RootPageNumber(3),

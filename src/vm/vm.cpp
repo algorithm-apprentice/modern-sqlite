@@ -240,6 +240,7 @@ struct RuntimeCursor {
       std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor, TableBtreeMutationCursor>;
 
   void ClearRecordCache() noexcept {
+    null_row = false;
     for (RecordFieldView& field : decoded_fields) {
       field = RecordFieldView{};
     }
@@ -253,6 +254,7 @@ struct RuntimeCursor {
   std::optional<RecordView> record;
   std::vector<RecordFieldView> decoded_fields;
   bool fields_decoded = false;
+  bool null_row = false;
 };
 
 struct RuntimeWriteCursor {
@@ -1209,6 +1211,28 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const NullRowInstruction& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    runtime.ClearRecordCache();
+    auto cleared = std::visit(
+        [](auto& cursor) -> Status {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, TableBtreeCursor> ||
+                        std::is_same_v<T, IndexBtreeCursor>) {
+            return cursor.ClearPosition();
+          } else {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "NULL-row publication requires an open read cursor"));
+          }
+        },
+        runtime.storage);
+    if (!cleared.has_value()) {
+      return std::unexpected(std::move(cleared.error()));
+    }
+    runtime.null_row = operation.enabled;
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenWriteCursorInstruction& operation) {
     if (writer_ == nullptr) {
       return std::unexpected(
@@ -1953,6 +1977,10 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
+    if (runtime.null_row) {
+      runtime.ClearRecordCache();
+      return std::nullopt;
+    }
     runtime.ClearRecordCache();
     auto has_entry = std::visit(
         [](auto& cursor) -> Result<bool> {
@@ -1999,6 +2027,10 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const PreviousInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
+    if (runtime.null_row) {
+      runtime.ClearRecordCache();
+      return std::nullopt;
+    }
     runtime.ClearRecordCache();
     auto has_entry = std::visit(
         [](auto& cursor) -> Result<bool> {
@@ -2173,6 +2205,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CheckIndexRangeInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
+    if (runtime.null_row) {
+      runtime.ClearRecordCache();
+      program_counter_ = operation.end_target.value();
+      return std::nullopt;
+    }
     IndexBtreeCursor* cursor = std::get_if<IndexBtreeCursor>(&runtime.storage);
     if (cursor == nullptr || !cursor->valid()) {
       return std::unexpected(
@@ -2209,6 +2246,9 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadFieldInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
+    if (runtime.null_row) {
+      return SetRegister(operation.output, SqlValue{});
+    }
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     const CursorFieldSource& source = descriptor.fields[operation.field.value()];
     SqlValue value;
@@ -2262,6 +2302,9 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadRowIdInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
+    if (runtime.null_row) {
+      return SetRegister(operation.output, SqlValue{});
+    }
     if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
         read_cursor != nullptr && read_cursor->valid()) {
       auto rowid = read_cursor->rowid();

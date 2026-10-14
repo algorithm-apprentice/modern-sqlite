@@ -926,6 +926,18 @@ template <typename T>
     return {};
   };
 
+  std::vector<bool> mutation_cursor_ids;
+  if (std::ranges::any_of(input.instructions, [](const Instruction& instruction) {
+        return std::holds_alternative<NullRowInstruction>(instruction);
+      })) {
+    mutation_cursor_ids.assign(input.cursors.size(), false);
+    for (const Instruction& instruction : input.instructions) {
+      if (const auto* mutation = std::get_if<OpenMutationCursorInstruction>(&instruction);
+          mutation != nullptr && mutation->cursor.value() < mutation_cursor_ids.size()) {
+        mutation_cursor_ids[mutation->cursor.value()] = true;
+      }
+    }
+  }
   for (std::size_t index = 0; index < input.instructions.size(); ++index) {
     const auto checked = std::visit(
         [&](const auto& operation) -> ProgramResult<void> {
@@ -994,6 +1006,15 @@ template <typename T>
           } else if constexpr (std::is_same_v<Operation, OpenReadCursorInstruction> ||
                                std::is_same_v<Operation, CloseCursorInstruction>) {
             return check_cursor(operation.cursor, index);
+          } else if constexpr (std::is_same_v<Operation, NullRowInstruction>) {
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            if (mutation_cursor_ids[operation.cursor.value()]) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index,
+                                             operation.cursor.value()));
+            }
+            return {};
           } else if constexpr (std::is_same_v<Operation, OpenMutationCursorInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kDelete &&
                 input.statement_kind != ProgramStatementKind::kUpdate) {
@@ -2383,6 +2404,13 @@ void SetCursorState(std::span<std::uint64_t> state, std::size_t register_words, 
             }
             set_write_cursor_state(operation.cursor, CursorState::kClosed);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, NullRowInstruction>) {
+            if (auto result = require_open(operation.cursor); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, operation.enabled ? CursorState::kPositioned
+                                                                 : CursorState::kUnpositioned);
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, RewindInstruction>) {
             if (auto result = require_open(operation.cursor); !result) {
               return result;
@@ -2787,6 +2815,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "last";
     case InstructionKind::kPrevious:
       return "previous";
+    case InstructionKind::kNullRow:
+      return "null_row";
     case InstructionKind::kClearRowIdList:
       return "clear_rowid_list";
     case InstructionKind::kAppendRowIdList:
