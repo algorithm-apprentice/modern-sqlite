@@ -50,6 +50,7 @@ struct BoundCollationIdTag;
 struct BoundFunctionIdTag;
 struct BoundAggregateFunctionIdTag;
 struct BoundAggregateInvocationIdTag;
+struct BoundQueryIdTag;
 
 using BoundExpressionId = BoundId<BoundExpressionIdTag>;
 using BoundSourceId = BoundId<BoundSourceIdTag>;
@@ -59,6 +60,7 @@ using BoundCollationId = BoundId<BoundCollationIdTag>;
 using BoundFunctionId = BoundId<BoundFunctionIdTag>;
 using BoundAggregateFunctionId = BoundId<BoundAggregateFunctionIdTag>;
 using BoundAggregateInvocationId = BoundId<BoundAggregateInvocationIdTag>;
+using BoundQueryId = BoundId<BoundQueryIdTag>;
 
 enum class BoundSourceKind : std::uint8_t {
   kCatalogTable,
@@ -394,6 +396,17 @@ struct BoundLimit {
   std::optional<BoundExpressionId> offset{};
 };
 
+struct BoundQuery {
+  BoundQueryId id{0};
+  std::size_t core_begin = 0;
+  std::size_t core_count = 0;
+  std::vector<CompoundOperator> compound_operators{};
+  std::vector<BoundCollationId> compound_collations{};
+  std::vector<BoundResultColumn> output_columns{};
+  std::vector<BoundOrderingTerm> order_by{};
+  std::optional<BoundLimit> limit{};
+};
+
 enum class BindErrorCode : std::uint8_t {
   kInvalidInput,
   kUnsupportedFeature,
@@ -491,6 +504,7 @@ class BoundSelect final {
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] const BoundQuery& root_query() const noexcept;
   [[nodiscard]] std::span<const BoundQueryCore> query_cores() const noexcept;
   [[nodiscard]] std::span<const CompoundOperator> compound_operators() const noexcept;
   [[nodiscard]] std::span<const BoundCollationId> compound_collations() const noexcept;

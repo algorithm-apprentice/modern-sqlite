@@ -47,6 +47,8 @@ const BindEnvironment kStaticInitializationEnvironment = BindEnvironment::Core()
 
 static_assert(!std::is_convertible_v<BoundSourceId, BoundSourceColumnId>);
 static_assert(!std::is_convertible_v<BoundSourceColumnId, BoundSourceId>);
+static_assert(!std::is_convertible_v<BoundQueryId, BoundSourceId>);
+static_assert(!std::is_convertible_v<BoundQueryId, BoundExpressionId>);
 
 [[nodiscard]] SourceSpan Span(std::size_t begin, std::size_t end) {
   const auto span = SourceSpan::FromBounds(ByteOffset{begin}, ByteOffset{end});
@@ -464,6 +466,27 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
             BindError{.code = BindErrorCode::kIndexedTableUnsupported}.base_error_code());
   EXPECT_EQ(ErrorCode::kMisuse, BindError{.code = BindErrorCode::kInvalidInput}.base_error_code());
   EXPECT_EQ(0U, BindEnvironment::Core().registration_generation());
+}
+
+TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT id FROM Items ORDER BY id LIMIT ?1",
+           "VALUES(1),(2) UNION ALL SELECT id FROM Items ORDER BY 1 LIMIT ?1 OFFSET ?2",
+           "SELECT count() FROM Items a FULL JOIN Items b USING(id)",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    const BoundQuery& query = bound.root_query();
+    EXPECT_EQ(BoundQueryId{0}, query.id);
+    EXPECT_EQ(0U, query.core_begin);
+    EXPECT_EQ(bound.query_cores().size(), query.core_count);
+    EXPECT_EQ(bound.compound_operators().data(), query.compound_operators.data());
+    EXPECT_EQ(bound.compound_collations().data(), query.compound_collations.data());
+    EXPECT_EQ(bound.result_columns().data(), query.output_columns.data());
+    EXPECT_EQ(bound.order_by().data(), query.order_by.data());
+    EXPECT_EQ(bound.limit(), query.limit.has_value() ? &*query.limit : nullptr);
+  }
 }
 
 TEST(Binder, ExpandsWildcardsAndPublishesDirectColumnMetadata) {
