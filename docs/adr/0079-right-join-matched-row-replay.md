@@ -136,6 +136,46 @@ existing allocation budgets and frozen performance inputs intact where
 behavior is unchanged. Publish one coherent slice and squash merge only after
 all required local and hosted gates pass.
 
+### Closure evidence
+
+The public-session test first failed at the unsupported RIGHT boundary before
+production changes. The implementation passes 1,173 fast unit cases, all 1,219
+cases in each complete optimized and ASan/UBSan tier, and all 1,217 independent
+GCC cases. Existing statements retain their exact allocation budgets.
+All 42 unchanged archived runner/work contracts also pass without modifying
+frozen workloads, fixtures, thresholds, or baselines.
+
+Twenty independently generated pinned SQLite vectors bring the committed
+matrix to 217 comparisons and six unsupported boundaries. All 203 previous
+oracle records remain identical as JSON data. The vectors cover mixed
+LEFT/RIGHT prefixes, multiple replays, matched/WHERE-rejected rows, suffix
+INNER barriers, merged/physical qualification and wildcard metadata, primary
+keys, grouping, sets, and demand-one.
+
+An independent deterministic model covers matched and missing right rows,
+rowid ownership, source limits, shifts, and WHERE rejection. The grammar-aware
+sanitized SQL campaign completed 20,000 inputs. Module-owned exhaustive OOM
+sweeps cover joined values, descriptor/register allocation, matched relations,
+and per-emission continuations.
+
+Physical empty sources, default suppression, reset/rebind, source-read failure,
+and early/zero LIMIT preserve the shared lifecycle. A 4,096-key source with a
+32 KiB budget proves actual matched-relation file migration, injected VFS
+write failure, complete cleanup, and reset recovery. An 8,192-row product
+proves memory/file ordering parity; the existing shared-sorter spill counter
+confirms genuine external work in the instrumented build.
+
+Two, eight, 32, and 64 source RIGHT chains emit 45, 243, 1,755, and 5,563
+instructions respectively. Each contains one readable result body and one
+matched relation per RIGHT occurrence. Prefix NULL publication is bounded
+quadratic setup, not copied suffix execution. A mixed LEFT/RIGHT verifier red
+identified prefix match registers that were undefined on empty-prefix replay;
+initialize them before entry only when RIGHT continuations are present.
+
+Direct design, implementation, and incremental evidence review found no
+unresolved issue. No VM opcode, verifier relaxation, alternative identity
+store, unbounded match bitmap, or runtime plan interpreter is introduced.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 slice 5.

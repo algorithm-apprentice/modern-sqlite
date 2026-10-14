@@ -1406,7 +1406,7 @@
       "operations": [
         {"op": "finalize"}
       ],
-      "sql_hex": "53454c45435420612e6e616d652046524f4d206974656d732041532061205249474854204a4f494e206974656d732041532062204f4e20612e69643d622e6964"
+      "sql_hex": "53454c45435420612e6e616d652046524f4d206974656d7320415320612046554c4c204a4f494e206974656d732041532062204f4e20612e69643d622e6964"
     },
     {
       "database": "core",
@@ -2208,6 +2208,166 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-matched-unmatched",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062204f4e20612e69643d622e696420574845524520622e69643c3d35204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-on-false",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e2030204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-where-rejected-match",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20612e69643d622e696420574845524520612e6964204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-null-left-prefix",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e2030205249474854204a4f494e206974656d732063204f4e20622e69643d632e6964204f5244455220425920632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-replay-chain-empty-on",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e2030205249474854204a4f494e206974656d732063204f4e2030204f5244455220425920632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-replay-chain-matched",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20612e69643d622e6964205249474854204a4f494e206974656d732063204f4e20622e69643d632e6964204f5244455220425920632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-followed-by-left",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062204f4e20612e69643d622e6964204c454654204a4f494e206974656d732063204f4e20622e69643d632e696420574845524520622e69643c3d35204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-suffix-inner-barrier",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062204f4e20612e69643d622e6964204a4f494e206974656d732063204f4e20612e69643d31204f5244455220425920622e69642c632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-where-missing-count",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062204f4e20612e69643d622e696420574845524520612e6964204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-using",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c612e69642c622e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643c3d35204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-using-duplicate-qualifier",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e69642046524f4d206974656d732071205249474854204a4f494e206d6f64656c5f726f77732071205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-using-qualifier-subgroup",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e69642c632e69642046524f4d206974656d732071204c454654204a4f494e206974656d732071205553494e4728696429205249474854204a4f494e206d6f64656c5f726f77732063205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-using-wildcard",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c454354202a2046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "natural-right-shared-wildcard",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e2a2046524f4d206974656d732071204e41545552414c205249474854204a4f494e206974656d732071204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-without-rowid",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c772e612c772e622046524f4d206974656d732061205249474854204a4f494e2077722077204f4e20612e69643d772e62204f5244455220425920772e612c772e62"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-unconditional-count",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d732061205249474854204a4f494e206974656d732062"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-forward-on-error",
+      "operations": [{"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e20632e69643d622e6964205249474854204a4f494e206974656d732063204f4e20632e69643d612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-set",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732061205249474854204a4f494e206974656d732062205553494e472869642920554e494f4e2053454c454354203939204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "natural-right-grouped",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c636f756e7428612e6964292046524f4d206974656d732061204e41545552414c205249474854204a4f494e206974656d7320622047524f5550204259206964204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-demand-one",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e203020554e494f4e2053454c4543542039392c3939204c494d49542031"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "subquery",
       "id": "unsupported-subquery",
@@ -2312,6 +2472,7 @@
     "parameters",
     "prepare-errors",
     "rowid-lookup",
+    "right-join",
     "schema-table",
     "set-operators",
     "statement-slicing",
