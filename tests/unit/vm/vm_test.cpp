@@ -1220,6 +1220,274 @@ class VmTest : public ::testing::Test {
   std::unique_ptr<Pager> pager_;
 };
 
+[[nodiscard]] BytecodeProgram PrivateReadSubroutineProgram(const Pager& pager) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager, 0);
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Integer(0));
+  const ReadCursorDescriptor cursor{
+      .root_page = RootPageNumber(1),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns = {},
+  };
+  input.cursors = {cursor, cursor};
+  input.result_columns = {ResultColumn("callee"), ResultColumn("caller")};
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(7), .end = Address(15), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(2)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(1)},
+      RewindInstruction{.cursor = Cursor(1), .empty_target = Address(12)},
+      ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+TEST(VmReadSubroutine, PreservesCallerRowsAcrossNormalEmptyAndRepeatedPrivateReads) {
+  for (const bool populated : {false, true}) {
+    SCOPED_TRACE(populated);
+    test::WritePagerFixedVfs vfs{false};
+    [[maybe_unused]] const auto initialized = InitializedWriteDatabase(vfs);
+    if (populated) {
+      InsertDirectWriteRow(vfs, 9, "private");
+    }
+    auto pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    const auto program = PrivateReadSubroutineProgram(*pager);
+    Vm vm = CreateAttachedVm(program, *pager, 0);
+    for (std::size_t iteration = 0; iteration < 3U; ++iteration) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ASSERT_EQ(2U, vm.row().size());
+      ExpectInteger(vm.row()[0], populated ? 9 : 0);
+      EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(vm.Reset());
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+    }
+    RequireStatus(pager->EndRead());
+  }
+}
+
+TEST(VmReadSubroutine, RecoversPrivateCursorIoFailureWithoutRetainingContinuations) {
+  test::WritePagerFixedVfs vfs{false};
+  [[maybe_unused]] const auto initialized = InitializedWriteDatabase(vfs);
+  InsertDirectWriteRow(vfs, 9, "private");
+  auto pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const auto program = PrivateReadSubroutineProgram(*pager);
+  Vm vm = CreateAttachedVm(program, *pager, 0);
+  vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(vm.row()[0], 9);
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager->EndRead());
+}
+
+TEST(VmReadSubroutine, PreservesParentCapabilitiesAcrossNestedReadCalls) {
+  test::WritePagerFixedVfs vfs{false};
+  [[maybe_unused]] const auto initialized = InitializedWriteDatabase(vfs);
+  auto pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const ReadCursorDescriptor cursor{
+      .root_page = RootPageNumber(1),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields = {},
+      .index_columns = {},
+  };
+  for (const std::uint32_t count : {1U, 8U, 33U, 64U}) {
+    SCOPED_TRACE(count);
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager, 0);
+    input.register_count = 1;
+    input.cursors = std::vector<ReadCursorDescriptor>(count, cursor);
+    input.result_columns = {ResultColumn()};
+    input.instructions = {
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        HaltInstruction{},
+    };
+    for (std::uint32_t index = 0; index < count; ++index) {
+      const auto entry = static_cast<std::uint32_t>(input.instructions.size());
+      input.instructions.push_back(OpenReadCursorInstruction{.cursor = Cursor(index)});
+      input.instructions.push_back(NullRowInstruction{.cursor = Cursor(index)});
+      if (index + 1U < count) {
+        input.instructions.push_back(
+            CallSubroutineInstruction{.subroutine = SubroutineId{index + 1U}});
+      }
+      input.instructions.push_back(ReadRowIdInstruction{.cursor = Cursor(index), .output = Reg(0)});
+      input.instructions.push_back(CloseCursorInstruction{.cursor = Cursor(index)});
+      input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{index}});
+      input.subroutines.push_back(SubroutineDescriptor{
+          .entry = Address(entry),
+          .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+          .kind = SubroutineKind::kRead,
+      });
+    }
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    EXPECT_EQ(count, program.verification_metrics().maximum_subroutine_depth);
+    Vm vm = CreateAttachedVm(program, *pager, 0);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(SqlValueType::kNull, OnlyRowValue(vm).type());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST_F(VmTest, ExecutesPrivateReadTemporaryAndAggregateLifecycles) {
+  const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs_, *pager_,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory,
+                              .sorter_memory_threshold = ByteCount{1U << 20U}}));
+  for (const std::uint32_t family : {0U, 1U, 2U, 3U}) {
+    SCOPED_TRACE(family);
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 2;
+    input.parameter_count = 1;
+    input.symbols = {"BINARY", "sum"};
+    input.result_columns = {ResultColumn()};
+    input.instructions = {
+        LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(1), .count = 1},
+        HaltInstruction{},
+    };
+    if (family == 0U) {
+      input.sorters.push_back(SorterDescriptor());
+      input.instructions.push_back(OpenSorterInstruction{.sorter = SorterId{0}});
+      input.instructions.push_back(CloseSorterInstruction{.sorter = SorterId{0}});
+    } else if (family == 1U) {
+      input.top_ns.push_back(SorterDescriptor());
+      input.instructions.push_back(OpenTopNInstruction{.top_n = TopNId{0}, .bound = Reg(0)});
+      input.instructions.push_back(CloseTopNInstruction{.top_n = TopNId{0}});
+    } else if (family == 2U) {
+      input.relations.push_back(SorterDescriptor());
+      input.instructions.push_back(OpenRelationInstruction{.relation = RelationId{0}});
+      input.instructions.push_back(CloseRelationInstruction{.relation = RelationId{0}});
+    } else {
+      input.aggregates.push_back(AggregateDescriptorFor(Symbol(1), Symbol(0), 1));
+      input.instructions.push_back(OpenAggregateInstruction{.aggregate = AggregateId{0}});
+      input.instructions.push_back(
+          StepAggregateInstruction{.aggregate = AggregateId{0}, .first_argument = Reg(0)});
+      input.instructions.push_back(
+          FinalizeAggregateInstruction{.aggregate = AggregateId{0}, .output = Reg(1)});
+      input.instructions.push_back(CloseAggregateInstruction{.aggregate = AggregateId{0}});
+    }
+    if (family != 3U) {
+      input.instructions.push_back(CopyInstruction{.input = Reg(0), .output = Reg(1)});
+    }
+    input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+    input.subroutines.push_back(SubroutineDescriptor{
+        .entry = Address(4),
+        .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+        .kind = SubroutineKind::kRead,
+    });
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+    for (const std::int64_t value : {1, 3}) {
+      RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(value)));
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ExpectInteger(OnlyRowValue(vm), value);
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(vm.Reset());
+      RequireStatus(
+          vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+    }
+  }
+}
+
+TEST(VmReadSubroutine, RecoversPrivateSorterFactoryAndPmaWriteFailures) {
+  test::WritePagerFixedVfs vfs;
+  const auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  RequireStatus(pager->BeginRead());
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager);
+  input.register_count = 2;
+  input.constants.push_back(SqlValue::Integer(4096));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(0));
+  input.symbols = {"BINARY"};
+  input.result_columns = {ResultColumn()};
+  input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns = {OrderingColumnMetadata{.collation = Symbol(0)}},
+  });
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(5), .end = Address(16), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      OpenSorterInstruction{.sorter = SorterId{0}},
+      InsertSorterInstruction{.sorter = SorterId{0}, .first_value = Reg(0), .value_count = 1},
+      BinaryInstruction{.operation = BinaryOperation::kSubtract,
+                        .left = Reg(0),
+                        .right = Reg(1),
+                        .output = Reg(0)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(0), .target = Address(6)},
+      RewindSorterInstruction{.sorter = SorterId{0}, .empty_target = Address(13)},
+      ReadSorterFieldInstruction{.sorter = SorterId{0}, .field = 0, .output = Reg(0)},
+      CloseSorterInstruction{.sorter = SorterId{0}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+      CloseSorterInstruction{.sorter = SorterId{0}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                              .sorter_memory_threshold = ByteCount{32U << 10U}}));
+  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  const auto missing = vm.Step();
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing.error().code());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  vfs.FailPathlessWriteAfter(0U, ErrorCode::kIo);
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_GT(vfs.pathless_open_count(), 0U);
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 1);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
 TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(40));

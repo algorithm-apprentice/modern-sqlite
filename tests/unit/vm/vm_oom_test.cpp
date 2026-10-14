@@ -56,6 +56,25 @@ std::optional<std::size_t> failing_allocation{};
          "btree_read" / "sqlite-3.54.0-btree-read.db";
 }
 
+[[nodiscard]] bool SweepVmCreation(const modern_sqlite::BytecodeProgram& program) {
+  allocation_index = 0;
+  const auto baseline = modern_sqlite::Vm::Create(program, modern_sqlite::VmEnvironment::Core());
+  const std::size_t allocations = allocation_index;
+  if (!baseline.has_value() || allocations == 0U || allocations > 128U) {
+    return false;
+  }
+  for (std::size_t failure = 0; failure < allocations; ++failure) {
+    allocation_index = 0;
+    failing_allocation = failure;
+    const auto rejected = modern_sqlite::Vm::Create(program, modern_sqlite::VmEnvironment::Core());
+    failing_allocation.reset();
+    if (rejected.has_value() || rejected.error().code() != modern_sqlite::ErrorCode::kOutOfMemory) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -166,22 +185,12 @@ int main() try {
   if (!subroutine_program.has_value()) {
     return 1;
   }
-  allocation_index = 0;
-  auto subroutine_vm = Vm::Create(*subroutine_program, VmEnvironment::Core());
-  const std::size_t create_allocations = allocation_index;
-  if (!subroutine_vm.has_value() || create_allocations == 0U || create_allocations > 128U) {
+  if (!SweepVmCreation(*subroutine_program)) {
     return 1;
   }
-  for (std::size_t failure = 0; failure < create_allocations; ++failure) {
-    allocation_index = 0;
-    failing_allocation = failure;
-    const auto rejected = Vm::Create(*subroutine_program, VmEnvironment::Core());
-    failing_allocation.reset();
-    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory) {
-      return 1;
-    }
-  }
-  if (!subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+  auto subroutine_vm = Vm::Create(*subroutine_program, VmEnvironment::Core());
+  if (!subroutine_vm.has_value() ||
+      !subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
     return 1;
   }
   fail_allocations = true;
@@ -201,6 +210,64 @@ int main() try {
   }
   const auto finished_subroutine = subroutine_vm->Step();
   if (!finished_subroutine.has_value() || *finished_subroutine != VmStep::kDone) {
+    return 1;
+  }
+
+  ProgramInput read_subroutine_input;
+  read_subroutine_input.schema_version = input.schema_version;
+  read_subroutine_input.register_count = 1;
+  read_subroutine_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {},
+      .index_columns = {},
+  });
+  read_subroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "rowid",
+      .declared_type = std::nullopt,
+      .affinity = TypeAffinity::kInteger,
+  });
+  read_subroutine_input.subroutines.push_back(SubroutineDescriptor{
+      .entry = InstructionAddress(3),
+      .end = InstructionAddress(8),
+      .kind = SubroutineKind::kRead,
+  });
+  read_subroutine_input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
+  };
+  const auto read_subroutine_program = BytecodeProgram::Create(read_subroutine_input);
+  if (!read_subroutine_program.has_value() || !SweepVmCreation(*read_subroutine_program)) {
+    return 1;
+  }
+  auto read_subroutine_vm = Vm::Create(*read_subroutine_program, VmEnvironment::Core());
+  if (!read_subroutine_vm.has_value() ||
+      !read_subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto read_failure = read_subroutine_vm->Step();
+  fail_allocations = false;
+  if (read_failure.has_value() || read_failure.error().code() != ErrorCode::kOutOfMemory ||
+      read_subroutine_vm->state() != VmState::kError || !read_subroutine_vm->Reset().has_value() ||
+      !read_subroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto read_recovery = read_subroutine_vm->Step();
+  if (!read_recovery.has_value() || *read_recovery != VmStep::kRow ||
+      read_subroutine_vm->row().size() != 1U ||
+      read_subroutine_vm->row()[0].type() != SqlValueType::kNull) {
+    return 1;
+  }
+  const auto read_finished = read_subroutine_vm->Step();
+  if (!read_finished.has_value() || *read_finished != VmStep::kDone) {
     return 1;
   }
 

@@ -347,6 +347,10 @@ class WritePagerMemoryVfs final : public Vfs {
     main_.write_failure = std::pair{successful_writes, code};
   }
 
+  void FailDatabaseReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
+    main_.read_failure = std::pair{successful_reads, code};
+  }
+
   void FailNextPathlessOpen(ErrorCode code) noexcept { pathless_open_failure_ = code; }
   void FailPathlessReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
     subjournal_.read_failure = std::pair{successful_reads, code};

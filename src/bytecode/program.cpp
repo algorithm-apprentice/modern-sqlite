@@ -299,6 +299,15 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(SubroutineKind kind) noexcept {
+  switch (kind) {
+    case SubroutineKind::kValue:
+    case SubroutineKind::kRead:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValidText(std::string_view text, bool allow_empty) noexcept {
   if ((!allow_empty && text.empty()) || text.find('\0') != std::string_view::npos) {
     return false;
@@ -857,7 +866,28 @@ template <typename T>
   return {};
 }
 
-[[nodiscard]] ProgramResult<void> CheckInstructions(const ProgramInput& input) {
+struct InstructionOwnership {
+  std::span<const std::uint32_t> regions;
+  std::span<std::optional<std::uint32_t>> cursors;
+  std::span<std::optional<std::uint32_t>> write_cursors;
+  std::span<std::optional<std::uint32_t>> sorters;
+  std::span<std::optional<std::uint32_t>> top_ns;
+  std::span<std::optional<std::uint32_t>> relations;
+  std::span<std::optional<std::uint32_t>> aggregates;
+};
+
+[[nodiscard]] ProgramResult<void> CheckInstructions(
+    const ProgramInput& input, std::optional<InstructionOwnership> ownership = std::nullopt) {
+  const auto check_owner = [&](std::span<std::optional<std::uint32_t>> owners, auto id,
+                               std::size_t instruction) -> ProgramResult<void> {
+    const std::uint32_t region = ownership->regions[instruction];
+    if (owners[id.value()].has_value() && *owners[id.value()] != region) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, instruction, id.value()));
+    }
+    owners[id.value()] = region;
+    return {};
+  };
   const auto check_register = [&](RegisterId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.register_count) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRegister, instruction, id.value()));
@@ -878,32 +908,37 @@ template <typename T>
     if (id.value() >= input.cursors.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursor, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->cursors, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_write_cursor = [&](WriteCursorId id,
                                       std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.write_cursors.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursor, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->write_cursors, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_sorter = [&](SorterId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.sorters.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSorter, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->sorters, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_top_n = [&](TopNId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.top_ns.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidTopN, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->top_ns, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_relation = [&](RelationId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.relations.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRelation, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->relations, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_record_comparison = [&](RecordComparisonId id,
                                            std::size_t instruction) -> ProgramResult<void> {
@@ -917,7 +952,8 @@ template <typename T>
     if (id.value() >= input.aggregates.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidAggregate, instruction, id.value()));
     }
-    return {};
+    return ownership.has_value() ? check_owner(ownership->aggregates, id, instruction)
+                                 : ProgramResult<void>{};
   };
   const auto check_symbol = [&](SymbolId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.symbols.size()) {
@@ -1790,6 +1826,59 @@ struct SubroutineAnalysis {
   }
 }
 
+[[nodiscard]] bool IsReadSubroutineInstruction(const Instruction& instruction) noexcept {
+  if (IsValueSubroutineInstruction(instruction)) {
+    return true;
+  }
+  switch (InstructionKindOf(instruction)) {
+    case InstructionKind::kOpenRead:
+    case InstructionKind::kClose:
+    case InstructionKind::kRewind:
+    case InstructionKind::kNext:
+    case InstructionKind::kLast:
+    case InstructionKind::kPrevious:
+    case InstructionKind::kSeekRowId:
+    case InstructionKind::kSeekTableRowId:
+    case InstructionKind::kSeekIndex:
+    case InstructionKind::kCheckIndexRange:
+    case InstructionKind::kReadField:
+    case InstructionKind::kReadRowId:
+    case InstructionKind::kNullRow:
+    case InstructionKind::kOpenSorter:
+    case InstructionKind::kInsertSorter:
+    case InstructionKind::kRewindSorter:
+    case InstructionKind::kReadSorterField:
+    case InstructionKind::kNextSorter:
+    case InstructionKind::kResetSorter:
+    case InstructionKind::kCloseSorter:
+    case InstructionKind::kOpenTopN:
+    case InstructionKind::kCheckTopN:
+    case InstructionKind::kInsertTopN:
+    case InstructionKind::kRewindTopN:
+    case InstructionKind::kReadTopNField:
+    case InstructionKind::kNextTopN:
+    case InstructionKind::kResetTopN:
+    case InstructionKind::kCloseTopN:
+    case InstructionKind::kOpenRelation:
+    case InstructionKind::kInsertRelation:
+    case InstructionKind::kContainsRelation:
+    case InstructionKind::kDeleteRelation:
+    case InstructionKind::kRewindRelation:
+    case InstructionKind::kReadRelationField:
+    case InstructionKind::kNextRelation:
+    case InstructionKind::kResetRelation:
+    case InstructionKind::kCloseRelation:
+    case InstructionKind::kOpenAggregate:
+    case InstructionKind::kStepAggregate:
+    case InstructionKind::kFinalizeAggregate:
+    case InstructionKind::kResetAggregate:
+    case InstructionKind::kCloseAggregate:
+      return true;
+    default:
+      return false;
+  }
+}
+
 [[nodiscard]] ProgramResult<SubroutineAnalysis> AnalyzeSubroutineGraph(
     const ProgramInput& input, const ProgramLimits& limits, std::size_t existing_analysis_words) {
   SubroutineAnalysis result;
@@ -1799,6 +1888,19 @@ struct SubroutineAnalysis {
   }
   const std::size_t register_words =
       CeilingDivide(static_cast<std::size_t>(input.register_count), kBitsPerWord);
+  const bool has_read = std::ranges::any_of(
+      input.subroutines,
+      [](const SubroutineDescriptor& region) { return region.kind == SubroutineKind::kRead; });
+  std::size_t resource_owner_count = 0;
+  if (has_read) {
+    for (const std::size_t size :
+         {input.cursors.size(), input.write_cursors.size(), input.sorters.size(),
+          input.top_ns.size(), input.relations.size(), input.aggregates.size()}) {
+      if (!CheckedAdd(size, &resource_owner_count)) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+      }
+    }
+  }
   const auto main = static_cast<std::uint32_t>(count);
   std::size_t summary_words = 0;
   std::size_t bytes = 0;
@@ -1810,6 +1912,7 @@ struct SubroutineAnalysis {
       !AddArrayBytes<SubroutineGraphFrame>(count + 1U, &bytes) ||
       !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
       !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
+      !AddArrayBytes<std::optional<std::uint32_t>>(resource_owner_count, &bytes) ||
       !AddArrayBytes<std::uint64_t>(CeilingDivide(count, kBitsPerWord), &bytes)) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
@@ -1820,6 +1923,10 @@ struct SubroutineAnalysis {
   result.owners.resize(input.instructions.size(), main);
   for (std::size_t index = 0; index < count; ++index) {
     const SubroutineDescriptor& region = input.subroutines[index];
+    if (!IsValid(region.kind)) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidEnumValue, region.entry.value(), index));
+    }
     if (region.entry.value() == 0U || region.entry >= region.end ||
         region.end.value() > input.instructions.size()) {
       return std::unexpected(
@@ -1836,9 +1943,40 @@ struct SubroutineAnalysis {
   for (std::size_t address = 0; address < input.instructions.size(); ++address) {
     const Instruction& instruction = input.instructions[address];
     const auto* returned = std::get_if<ReturnSubroutineInstruction>(&instruction);
-    if ((result.owners[address] != main && !IsValueSubroutineInstruction(instruction)) ||
+    const auto* called = std::get_if<CallSubroutineInstruction>(&instruction);
+    const std::uint32_t owner = result.owners[address];
+    const bool permitted = owner == main || (input.subroutines[owner].kind == SubroutineKind::kRead
+                                                 ? IsReadSubroutineInstruction(instruction)
+                                                 : IsValueSubroutineInstruction(instruction));
+    const bool indirect_read =
+        owner != main && called != nullptr &&
+        input.subroutines[owner].kind == SubroutineKind::kValue &&
+        input.subroutines[called->subroutine.value()].kind == SubroutineKind::kRead;
+    if (!permitted || indirect_read ||
         (returned != nullptr && returned->subroutine.value() != result.owners[address])) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, address));
+    }
+  }
+  if (has_read) {
+    std::vector<std::optional<std::uint32_t>> resource_owners(resource_owner_count);
+    std::size_t offset = 0;
+    const auto take = [&](std::size_t size) {
+      const auto owners =
+          std::span<std::optional<std::uint32_t>>{resource_owners}.subspan(offset, size);
+      offset += size;
+      return owners;
+    };
+    const InstructionOwnership ownership{
+        .regions = result.owners,
+        .cursors = take(input.cursors.size()),
+        .write_cursors = take(input.write_cursors.size()),
+        .sorters = take(input.sorters.size()),
+        .top_ns = take(input.top_ns.size()),
+        .relations = take(input.relations.size()),
+        .aggregates = take(input.aggregates.size()),
+    };
+    if (auto checked = CheckInstructions(input, ownership); !checked) {
+      return std::unexpected(checked.error());
     }
   }
 
@@ -2903,6 +3041,20 @@ struct SubroutineAnalysis {
             }
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ReturnSubroutineInstruction>) {
+            if (input.subroutines[operation.subroutine.value()].kind == SubroutineKind::kRead) {
+              for (std::size_t cursor = 0; cursor < state_cursor_count; ++cursor) {
+                if (GetCursorState(state, register_words, cursor) != CursorState::kClosed) {
+                  return std::unexpected(
+                      ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor));
+                }
+              }
+              for (std::size_t capability = 0; capability < capability_count; ++capability) {
+                if (state[capability_offset + capability] != 0U) {
+                  return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                                 instruction_index, capability));
+                }
+              }
+            }
             const std::size_t offset =
                 static_cast<std::size_t>(operation.subroutine.value()) * register_words;
             if (!BitIsSet(subroutines->returned, operation.subroutine.value())) {
@@ -3646,12 +3798,16 @@ ProgramResult<AggregateId> ProgramBuilder::AddAggregate(AggregateDescriptor aggr
   return AggregateId(static_cast<std::uint32_t>(input_.aggregates.size() - 1U));
 }
 
-ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label last) {
+ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label last,
+                                                          SubroutineKind kind) {
   if (auto checked = CheckLabel(entry); !checked) {
     return std::unexpected(checked.error());
   }
   if (auto checked = CheckLabel(last); !checked) {
     return std::unexpected(checked.error());
+  }
+  if (!IsValid(kind)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidEnumValue));
   }
   if (subroutine_regions_.size() >= limits_.maximum_instructions ||
       subroutine_regions_.size() >= std::numeric_limits<std::uint32_t>::max()) {
@@ -3661,7 +3817,7 @@ ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label las
     return std::unexpected(reserved.error());
   }
   try {
-    subroutine_regions_.push_back(PendingSubroutine{.entry = entry, .last = last});
+    subroutine_regions_.push_back(PendingSubroutine{.entry = entry, .last = last, .kind = kind});
   } catch (...) {
     owned_bytes_ -= sizeof(SubroutineDescriptor);
     throw;
@@ -4031,6 +4187,7 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
     input_.subroutines.push_back(SubroutineDescriptor{
         .entry = target(region.entry),
         .end = InstructionAddress{target(region.last).value() + 1U},
+        .kind = region.kind,
     });
   }
   for (const auto& pending : pending_) {

@@ -63,9 +63,15 @@ using RootPageNumber = BytecodeId<RootPageNumberTag>;
 using CursorFieldId = BytecodeId<CursorFieldIdTag>;
 using SubroutineId = BytecodeId<SubroutineIdTag>;
 
+enum class SubroutineKind : std::uint8_t {
+  kValue,
+  kRead,
+};
+
 struct SubroutineDescriptor {
   InstructionAddress entry;
   InstructionAddress end;
+  SubroutineKind kind = SubroutineKind::kValue;
 
   constexpr auto operator<=>(const SubroutineDescriptor&) const noexcept = default;
 };
@@ -1120,7 +1126,8 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<RecordComparisonId> AddRecordComparison(
       OrderingRecordDescriptor comparison);
   [[nodiscard]] ProgramResult<AggregateId> AddAggregate(AggregateDescriptor aggregate);
-  [[nodiscard]] ProgramResult<SubroutineId> AddSubroutine(Label entry, Label last);
+  [[nodiscard]] ProgramResult<SubroutineId> AddSubroutine(
+      Label entry, Label last, SubroutineKind kind = SubroutineKind::kValue);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
@@ -1282,6 +1289,7 @@ class ProgramBuilder final {
   struct PendingSubroutine {
     Label entry;
     Label last;
+    SubroutineKind kind;
   };
 
   using PendingInstruction =

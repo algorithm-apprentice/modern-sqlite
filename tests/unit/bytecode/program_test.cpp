@@ -321,6 +321,89 @@ TEST(BytecodeProgramTest, ResolvesSubroutineLabelsWithoutRelaxingBranchOwnership
   EXPECT_EQ(ProgramErrorCode::kForeignLabel, rejected.error().code);
 }
 
+[[nodiscard]] ProgramInput PrivateReadSubroutineInput() {
+  ProgramInput input;
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Integer(0));
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.result_columns = {IntegerResultColumn("callee"), IntegerResultColumn("caller")};
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(7), .end = Address(15), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(2)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(1)},
+      RewindInstruction{.cursor = Cursor(1), .empty_target = Address(12)},
+      ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesPrivateReadSubroutineWithoutChangingCallerCursorState) {
+  const auto input = PrivateReadSubroutineInput();
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(1U, program->verification_metrics().maximum_subroutine_depth);
+}
+
+TEST(BytecodeProgramTest, RejectsCrossOwnerCursorUse) {
+  for (const std::size_t address : {7U, 9U}) {
+    auto input = PrivateReadSubroutineInput();
+    input.instructions[address] =
+        address == 7U ? Instruction{OpenReadCursorInstruction{.cursor = Cursor(0)}}
+                      : Instruction{ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(1)}};
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+  }
+  auto closed_caller = PrivateReadSubroutineInput();
+  closed_caller.instructions[4] = CloseCursorInstruction{.cursor = Cursor(1)};
+  const auto caller_use = BytecodeProgram::Create(closed_caller);
+  ASSERT_FALSE(caller_use.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, caller_use.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresEveryReadSubroutineReturnToCloseItsCursor) {
+  for (const std::size_t address : {10U, 13U}) {
+    auto input = PrivateReadSubroutineInput();
+    input.instructions[address] = CopyInstruction{.input = Reg(1), .output = Reg(1)};
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, rejected.error().code);
+  }
+  auto unknown = PrivateReadSubroutineInput();
+  unknown.subroutines[0].kind = static_cast<SubroutineKind>(255);
+  const auto invalid_kind = BytecodeProgram::Create(unknown);
+  ASSERT_FALSE(invalid_kind.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, invalid_kind.error().code);
+  unknown.subroutines[0].kind = SubroutineKind::kValue;
+  const auto not_opted_in = BytecodeProgram::Create(unknown);
+  ASSERT_FALSE(not_opted_in.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, not_opted_in.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsIndirectReadEffectsThroughValueOnlySubroutines) {
+  auto input = PrivateReadSubroutineInput();
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(15), .end = Address(17)});
+  input.instructions[2] = CallSubroutineInstruction{.subroutine = SubroutineId{1}};
+  input.instructions.push_back(CallSubroutineInstruction{.subroutine = SubroutineId{0}});
+  input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{1}});
+  const auto rejected = BytecodeProgram::Create(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+}
+
 TEST(BytecodeProgramTest, VerifiesNullRowsAsLogicalRowsAndRejectsClosedOrDisabledReads) {
   ProgramInput input;
   input.register_count = 1;
@@ -443,6 +526,154 @@ TEST(BytecodeProgramTest, MergesPhysicalAndPublishedNullRowsWithoutWeakeningUnpo
               },
           },
   };
+}
+
+[[nodiscard]] ProgramInput PrivateCapabilitySubroutineInput(std::span<const Instruction> body) {
+  ProgramInput input;
+  input.register_count = 1;
+  input.constants.push_back(SqlValue::Integer(1));
+  input.symbols = {"BINARY", "count"};
+  input.sorters.push_back(OrderingDescriptor());
+  input.top_ns.push_back(OrderingDescriptor());
+  input.relations.push_back(OrderingDescriptor());
+  input.aggregates.push_back(
+      AggregateDescriptor{.function = Symbol(1), .collation = Symbol(0), .argument_count = 0});
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      HaltInstruction{},
+  };
+  input.instructions.insert(input.instructions.end(), body.begin(), body.end());
+  input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  input.subroutines.push_back(SubroutineDescriptor{
+      .entry = Address(3),
+      .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+      .kind = SubroutineKind::kRead,
+  });
+  return input;
+}
+
+TEST(BytecodeProgramTest, AppliesPrivateOwnershipAndClosedReturnToEveryTemporaryCapability) {
+  const std::array<std::vector<Instruction>, 4> bodies{
+      std::vector<Instruction>{OpenSorterInstruction{.sorter = Sorter(0)},
+                               CloseSorterInstruction{.sorter = Sorter(0)}},
+      std::vector<Instruction>{OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+                               CloseTopNInstruction{.top_n = TopN(0)}},
+      std::vector<Instruction>{OpenRelationInstruction{.relation = Relation(0)},
+                               CloseRelationInstruction{.relation = Relation(0)}},
+      std::vector<Instruction>{
+          OpenAggregateInstruction{.aggregate = Aggregate(0)},
+          FinalizeAggregateInstruction{.aggregate = Aggregate(0), .output = Reg(0)},
+          CloseAggregateInstruction{.aggregate = Aggregate(0)}},
+  };
+  for (const auto& body : bodies) {
+    SCOPED_TRACE(InstructionKindName(InstructionKindOf(body.front())));
+    const auto valid = PrivateCapabilitySubroutineInput(body);
+    EXPECT_TRUE(BytecodeProgram::Create(valid).has_value());
+
+    auto shared = PrivateCapabilitySubroutineInput(body);
+    shared.instructions.insert(shared.instructions.begin() + 1, body.begin(), body.end());
+    const auto added = static_cast<std::uint32_t>(body.size());
+    shared.subroutines[0].entry = Address(shared.subroutines[0].entry.value() + added);
+    shared.subroutines[0].end = Address(shared.subroutines[0].end.value() + added);
+    const auto cross_owner = BytecodeProgram::Create(shared);
+    ASSERT_FALSE(cross_owner.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, cross_owner.error().code);
+
+    const auto unclosed = PrivateCapabilitySubroutineInput(
+        std::span<const Instruction>{body}.first(body.size() - 1U));
+    const auto retained = BytecodeProgram::Create(unclosed);
+    ASSERT_FALSE(retained.has_value());
+    EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, retained.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsReadBodyGlobalAndClientControlOperations) {
+  for (const Instruction instruction :
+       {Instruction{ClearRowIdListInstruction{}}, Instruction{HaltInstruction{}},
+        Instruction{ResultRowInstruction{.first = Reg(0), .count = 1}}}) {
+    auto input = PrivateReadSubroutineInput();
+    input.instructions[9] = instruction;
+    if (std::holds_alternative<ResultRowInstruction>(instruction)) {
+      input.result_columns.resize(1);
+      input.instructions[5] = ResultRowInstruction{.first = Reg(1), .count = 1};
+    }
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, ChargesPrivateCapabilityOwnershipToExistingAnalysisLimits) {
+  const auto input = PrivateReadSubroutineInput();
+  const auto measured = VerifyProgram(input);
+  ASSERT_TRUE(measured.has_value());
+  ProgramLimits limits;
+  limits.maximum_analysis_words = measured->analysis_words;
+  EXPECT_TRUE(VerifyProgram(input, limits).has_value());
+  --limits.maximum_analysis_words;
+  const auto rejected = VerifyProgram(input, limits);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisLimitExceeded, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, PublishesReadKindThroughBuilderAndDoesNotConsumeInvalidDeclarations) {
+  auto builder = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(builder.has_value());
+  const auto entry = builder->CreateLabel();
+  const auto last = builder->CreateLabel();
+  ASSERT_TRUE(entry.has_value());
+  ASSERT_TRUE(last.has_value());
+  const auto invalid = builder->AddSubroutine(*entry, *last, static_cast<SubroutineKind>(255));
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, invalid.error().code);
+  const auto routine = builder->AddSubroutine(*entry, *last, SubroutineKind::kRead);
+  ASSERT_TRUE(routine.has_value());
+  EXPECT_EQ(0U, routine->value());
+  ASSERT_TRUE(builder->AddSymbol("BINARY").has_value());
+  const auto sorter = builder->AddSorter(OrderingDescriptor());
+  ASSERT_TRUE(sorter.has_value());
+  ASSERT_TRUE(builder->Append(CallSubroutineInstruction{.subroutine = *routine}).has_value());
+  ASSERT_TRUE(builder->Append(HaltInstruction{}).has_value());
+  ASSERT_TRUE(builder->BindLabel(*entry).has_value());
+  ASSERT_TRUE(builder->Append(OpenSorterInstruction{.sorter = *sorter}).has_value());
+  ASSERT_TRUE(builder->Append(CloseSorterInstruction{.sorter = *sorter}).has_value());
+  ASSERT_TRUE(builder->BindLabel(*last).has_value());
+  ASSERT_TRUE(builder->Append(ReturnSubroutineInstruction{.subroutine = *routine}).has_value());
+  const auto program = std::move(*builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(SubroutineKind::kRead, program->subroutine(*routine).kind);
+}
+
+TEST(BytecodeProgramTest, RejectsReadBodyPersistentMutationEvenInAWritableMainProgram) {
+  auto input = PrivateReadSubroutineInput();
+  input.statement_kind = ProgramStatementKind::kDelete;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.mutation_result.publishes_changes = true;
+  input.result_columns.clear();
+  input.instructions[5] = CopyInstruction{.input = Reg(1), .output = Reg(2)};
+  input.instructions[7] = OpenMutationCursorInstruction{.cursor = Cursor(1)};
+  const auto rejected = BytecodeProgram::Create(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, RetainsMainHaltCleanupPolicyOutsidePrivateReadRegions) {
+  ProgramInput input;
+  input.symbols = {"BINARY"};
+  input.sorters = {OrderingDescriptor(), OrderingDescriptor()};
+  input.subroutines = {
+      SubroutineDescriptor{.entry = Address(3), .end = Address(6), .kind = SubroutineKind::kRead}};
+  input.instructions = {
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      HaltInstruction{},
+      OpenSorterInstruction{.sorter = Sorter(1)},
+      CloseSorterInstruction{.sorter = Sorter(1)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
 }
 
 [[nodiscard]] OrderingRecordDescriptor RecordComparisonDescriptor() {
