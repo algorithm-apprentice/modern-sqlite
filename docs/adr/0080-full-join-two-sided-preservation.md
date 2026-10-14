@@ -125,6 +125,53 @@ Review design, implementation, and incremental corrections locally, publish
 one coherent slice, and squash merge only after all required local and hosted
 gates pass. Join access/scaling and subsequent SQL slices remain separate.
 
+### Closure evidence
+
+The public-session test first failed at the unsupported FULL boundary.
+The completed implementation passes 1,206 fast unit cases. Complete Release
+and ASan/UBSan tiers passed 1,251 cases each, and the independent GCC tier
+passed 1,249 cases before the final lifecycle-only additions. All three
+added or expanded default/rebinding, source-I/O, and aggregate-PMA cases then
+passed on all three compilers/configurations.
+
+Twenty-six independently generated pinned SQLite vectors bring the committed
+matrix to 244 comparisons and six unsupported boundaries. All 224 prior
+oracle records remain identical as JSON data. Another 231 native probes cover
+complete mixed INNER/LEFT/RIGHT/FULL result streams, rejected matches, wildcard
+consumers, aggregate modifiers, and generated-predicate depth boundaries.
+Eight additional native probes cover implicit metadata through parentheses,
+collations, schema qualification, and duplicate-qualifier wildcards.
+
+Independent deterministic model cases cover bounded left/right domains,
+positive and negative shifts, matching, and both unmatched sides. The
+grammar-aware ASan/UBSan campaign completed 20,000 inputs. Exhaustive
+module-owned allocation sweeps cover FULL coalesces, physical descriptors,
+matched relations, registers, and consumers; the natural-FULL demand-one
+sweep retains complete disjoint allocation partitions and ten-second bounds.
+
+Two, eight, and 64 source FULL chains execute through one readable result
+body, with one canonical matched relation per preserved right occurrence.
+A callback probe observes exactly one ON evaluation per physical candidate
+and none for either virtual side. Physical empty inputs, WHERE rejection,
+early/zero LIMIT, rebind, default suppression, and complete-prefix NULL
+publication retain their existing ownership and cleanup boundaries.
+
+A 4,096-key fixture under 32 KiB proves matched-relation file migration,
+typed injected write failure, complete cleanup, and reset recovery. Pinned
+SQLite independently confirms the recovered FULL counts of 4,100/4,100.
+A 2,048-row both-unmatched-side product proves memory/file ordering parity,
+PMA write failure and recovery, and genuine spill through the canonical
+instrumentation counter. Grouped consumers also recover after a failed PMA
+flush. All 36 focused instrumented checks pass.
+
+All 42 unchanged archived runner/work contracts pass. Frozen workloads,
+fixtures, allocation budgets, thresholds, and timing baselines are unchanged.
+Direct design, implementation, and incremental evidence review found no
+unresolved issue. Changed-translation-unit clang-tidy, formatting, engineering
+discipline, and dependency-graph validation pass. The slice introduces no VM
+opcode, verifier relaxation, alternate identity store, or new persistent
+transition.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 slice 5.
