@@ -640,6 +640,30 @@ TEST(PhysicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             OptimizerError{.code = OptimizerErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(PhysicalPlan, PlansAndExplainsLexicallyOwnedScalarAndExistsQueries) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT (SELECT id FROM Items WHERE id=2),EXISTS(SELECT Name FROM Items)", TestCatalog());
+  const PhysicalQueryView scalar{plan, BoundQueryId{1}};
+  const PhysicalQueryView exists{plan, BoundQueryId{2}};
+  ASSERT_TRUE(scalar.valid());
+  ASSERT_TRUE(exists.valid());
+  EXPECT_EQ(BoundQueryId{1}, plan.query_plan(BoundQueryId{1}).query);
+  EXPECT_EQ(BoundQueryId{2}, plan.query_plan(BoundQueryId{2}).query);
+  EXPECT_EQ(plan.logical_plan().bound_select().expressions().data(),
+            scalar.logical_plan().bound_select().expressions().data());
+  EXPECT_TRUE(std::ranges::any_of(scalar.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalRowIdLookupNode>(node.payload);
+  }));
+  EXPECT_TRUE(std::ranges::any_of(exists.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalTableScanNode>(node.payload) ||
+           std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+  }));
+  const std::string explanation = ExplainPhysicalPlan(plan);
+  EXPECT_NE(std::string::npos, explanation.find("SCALAR SUBQUERY 1"));
+  EXPECT_NE(std::string::npos, explanation.find("EXISTS SUBQUERY 2"));
+  EXPECT_NE(std::string::npos, explanation.find("USING INTEGER PRIMARY KEY"));
+}
+
 TEST(PhysicalPlan, PlansGlobalAggregate) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   BuildLogicalPlanResult logical =

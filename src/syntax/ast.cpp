@@ -177,10 +177,13 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
 
 class Validator final {
  public:
-  Validator(std::size_t source_size, std::span<const Expression> expressions)
+  Validator(std::size_t source_size, std::span<const Expression> expressions,
+            std::span<const SelectStatement> select_queries)
       : source_size_(source_size),
         expressions_(expressions),
-        reference_counts_(expressions.size(), 0) {}
+        reference_counts_(expressions.size(), 0),
+        select_queries_(select_queries),
+        query_reference_counts_(select_queries.size(), 0) {}
 
   [[nodiscard]] Status Validate(const Statement& statement) {
     if (source_size_ == 0U) {
@@ -235,6 +238,11 @@ class Validator final {
     for (const std::uint8_t count : reference_counts_) {
       if (count != 1U) {
         return Misuse("every expression must have exactly one owner");
+      }
+    }
+    for (const std::uint8_t count : query_reference_counts_) {
+      if (count != 1U) {
+        return Misuse("every nested query must have exactly one owner");
       }
     }
     return {};
@@ -314,7 +322,8 @@ class Validator final {
     if (id.value >= expressions_.size()) {
       return Misuse("expression reference is out of range");
     }
-    if (parent.has_value() && id.value >= *parent) {
+    if ((parent.has_value() && id.value >= *parent) ||
+        (query_parent_.has_value() && id.value >= *query_parent_)) {
       return Misuse("expression children must precede their parent");
     }
     if (!Contains(owner, expressions_[id.value].span)) {
@@ -527,6 +536,28 @@ class Validator final {
                 return Misuse("parenthesized expression must strictly contain its child");
               }
               return Status{};
+            },
+            [this, &expression, index](const SubqueryExpression& subquery) {
+              if ((subquery.kind != SubqueryKind::kScalar &&
+                   subquery.kind != SubqueryKind::kExists) ||
+                  subquery.query.value >= select_queries_.size()) {
+                return Misuse("subquery reference or kind is invalid");
+              }
+              if (query_reference_counts_[subquery.query.value] != 0U) {
+                return Misuse("nested query must not have multiple owners");
+              }
+              const SelectStatement& query = select_queries_[subquery.query.value];
+              if (!Contains(expression.span, query.span) ||
+                  expression.span.begin() >= query.span.begin() ||
+                  expression.span.end() <= query.span.end()) {
+                return Misuse("subquery expression must strictly contain its query");
+              }
+              query_reference_counts_[subquery.query.value] = 1U;
+              const auto previous = query_parent_;
+              query_parent_ = index;
+              const Status status = ValidateSelect(query);
+              query_parent_ = previous;
+              return status;
             },
         },
         expression.payload);
@@ -796,7 +827,8 @@ class Validator final {
   }
 
   [[nodiscard]] Status ValidateSelect(const SelectStatement& select) {
-    const Status root_status = ValidateRootSpan(select.span);
+    const Status root_status = query_parent_.has_value() ? ValidateRequiredSpan(select.span)
+                                                         : ValidateRootSpan(select.span);
     if (!root_status.has_value()) {
       return root_status;
     }
@@ -1273,23 +1305,33 @@ class Validator final {
   std::size_t source_size_;
   std::span<const Expression> expressions_;
   std::vector<std::uint8_t> reference_counts_;
+  std::span<const SelectStatement> select_queries_;
+  std::vector<std::uint8_t> query_reference_counts_;
+  std::optional<std::size_t> query_parent_{};
 };
 
 }  // namespace
 
 Result<SyntaxTree> SyntaxTree::Create(std::string source, std::vector<Expression> expressions,
-                                      Statement statement) {
-  Validator validator{source.size(), std::span<const Expression>{expressions}};
+                                      Statement statement,
+                                      std::vector<SelectStatement> select_queries) {
+  Validator validator{source.size(), std::span<const Expression>{expressions}, select_queries};
   Status status = validator.Validate(statement);
   if (!status.has_value()) {
     return std::unexpected(std::move(status.error()));
   }
-  return SyntaxTree{std::move(source), std::move(expressions), std::move(statement)};
+  return SyntaxTree{std::move(source), std::move(expressions), std::move(statement),
+                    std::move(select_queries)};
 }
 
 const Expression& SyntaxTree::expression(ExpressionId id) const noexcept {
   assert(id.value < expressions_.size());
   return expressions_[id.value];
+}
+
+const SelectStatement& SyntaxTree::select_query(SelectQueryId id) const noexcept {
+  assert(id.value < select_queries_.size());
+  return select_queries_[id.value];
 }
 
 }  // namespace modern_sqlite

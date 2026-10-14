@@ -89,6 +89,46 @@ static_assert(ParseOptions{}.maximum_compound_terms == 500U);
   return std::get<InsertStatement>(tree.statement());
 }
 
+TEST(Parser, ParsesFlatScalarExistsAndValuesQueryOwners) {
+  const ParseOutput output = ParseOrThrow(
+      "SELECT (SELECT EXISTS(VALUES(?1),(2))) AS x,"
+      "EXISTS(SELECT name FROM items ORDER BY id DESC LIMIT 2 OFFSET ?2)");
+  const SyntaxTree& tree = RequiredTree(output);
+  ASSERT_EQ(3U, tree.select_queries().size());
+  const auto& root = FirstSelectCore(tree);
+  ASSERT_EQ(2U, root.result_columns.size());
+  const auto& scalar =
+      std::get<SubqueryExpression>(tree.expression(root.result_columns[0].expression).payload);
+  EXPECT_EQ(SubqueryKind::kScalar, scalar.kind);
+  const auto& scalar_core = std::get<SelectCore>(tree.select_query(scalar.query).first);
+  const auto& inner_exists = std::get<SubqueryExpression>(
+      tree.expression(scalar_core.result_columns[0].expression).payload);
+  EXPECT_EQ(SubqueryKind::kExists, inner_exists.kind);
+  EXPECT_EQ(2U, std::get<ValuesCore>(tree.select_query(inner_exists.query).first).rows.size());
+  const auto& exists =
+      std::get<SubqueryExpression>(tree.expression(root.result_columns[1].expression).payload);
+  const auto& child = tree.select_query(exists.query);
+  EXPECT_EQ(SubqueryKind::kExists, exists.kind);
+  ASSERT_TRUE(child.limit.has_value());
+  EXPECT_TRUE(child.limit->offset.has_value());
+  ASSERT_EQ(1U, child.order_by.size());
+  EXPECT_EQ(SortOrder::kDescending, child.order_by[0].order);
+}
+
+TEST(Parser, SharesRecursionBudgetAcrossNestedQueryAndExpressionScopes) {
+  const auto nested = [](std::size_t levels) {
+    std::string sql = "1";
+    for (std::size_t level = 0; level < levels; ++level) {
+      sql = std::string(16, '(') + "(SELECT " + sql + ")" + std::string(16, ')');
+    }
+    return "SELECT " + sql;
+  };
+  EXPECT_TRUE(ParseOne(Utf8View{nested(8)}).has_value());
+  const auto rejected = ParseOne(Utf8View{nested(32)});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ParseErrorCode::kParserDepthExceeded, rejected.error().code);
+}
+
 [[nodiscard]] const UpdateStatement& Update(const SyntaxTree& tree) {
   return std::get<UpdateStatement>(tree.statement());
 }

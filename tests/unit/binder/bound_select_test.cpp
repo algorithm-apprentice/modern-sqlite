@@ -489,6 +489,116 @@ TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
   }
 }
 
+TEST(Binder, KeepsNestedQueriesInReservedCoreRangesAndStatementGlobalArenas) {
+  const BoundSelect bound = BindOrThrow(
+      "SELECT (SELECT id FROM Items WHERE id=:one) AS x,(SELECT 7) AS y FROM Items AS parent "
+      "UNION ALL SELECT (VALUES(8)),EXISTS(SELECT sum(id) FROM Items)",
+      TestCatalog());
+  ASSERT_EQ(5U, bound.query_count());
+  ASSERT_EQ(6U, bound.query_cores().size());
+  EXPECT_EQ(0U, bound.root_query().core_begin);
+  EXPECT_EQ(2U, bound.root_query().core_count);
+  ASSERT_EQ(1U, bound.parameters().size());
+  EXPECT_EQ(":one", bound.parameters()[0].name);
+  for (std::uint32_t index = 1; index < 5U; ++index) {
+    const BoundQueryView query{bound, BoundQueryId{index}};
+    EXPECT_TRUE(query.valid());
+    EXPECT_EQ(index + 1U, query.query().core_begin);
+    EXPECT_EQ(1U, query.query().core_count);
+    EXPECT_EQ(bound.expressions().data(), query.expressions().data());
+    EXPECT_EQ(bound.source_columns().data(), query.source_columns().data());
+    EXPECT_EQ(bound.parameters().data(), query.parameters().data());
+    ASSERT_NE(nullptr, query.limit());
+  }
+  const auto& parent = std::get<BoundSelectCore>(bound.query_cores()[0]);
+  const auto& first_child = std::get<BoundSelectCore>(bound.query_cores()[2]);
+  const auto& last_child = std::get<BoundSelectCore>(bound.query_cores()[5]);
+  EXPECT_EQ(BoundSourceId{0}, parent.table_sources[0].id);
+  EXPECT_EQ(BoundSourceId{1}, first_child.table_sources[0].id);
+  EXPECT_EQ(BoundSourceId{2}, last_child.table_sources[0].id);
+  EXPECT_FALSE(parent.aggregate.has_value());
+  ASSERT_TRUE(last_child.aggregate.has_value());
+  EXPECT_EQ(BoundQueryDestination::kExists, bound.query(BoundQueryId{4}).destination);
+}
+
+TEST(Binder, PublishesScalarAffinityAndTypeWithoutBorrowingChildCollation) {
+  const BoundSelect bound = BindOrThrow(
+      "SELECT (SELECT Name FROM Items),(SELECT id FROM Items WHERE 0),EXISTS(SELECT id,Name FROM "
+      "Items)",
+      TestCatalog());
+  ASSERT_EQ(3U, bound.result_columns().size());
+  EXPECT_EQ("TEXT", bound.result_columns()[0].declared_type);
+  EXPECT_EQ(TypeAffinity::kText, bound.result_columns()[0].affinity);
+  EXPECT_EQ("INTEGER", bound.result_columns()[1].declared_type);
+  EXPECT_EQ(TypeAffinity::kInteger, bound.result_columns()[1].affinity);
+  EXPECT_EQ(std::nullopt, ResultExpression(bound, 0).properties.collation);
+  EXPECT_EQ(std::nullopt, bound.result_columns()[2].declared_type);
+  EXPECT_FALSE(ResultExpression(bound, 2).properties.contains_aggregate);
+  const BoundSelect values = BindOrThrow("VALUES((SELECT id FROM Items))", TestCatalog());
+  EXPECT_EQ("INTEGER", values.result_columns()[0].declared_type);
+}
+
+TEST(Binder, RejectsScalarWidthParentAliasesAndUnadmittedCorrelation) {
+  const auto catalog = TestCatalog();
+  ExpectBindError("SELECT (SELECT id,Name FROM Items)", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+  ExpectBindError("SELECT id AS x,(SELECT x) FROM Items", catalog, BindErrorCode::kNoSuchColumn,
+                  "no such column: x");
+  ExpectBindError("SELECT (SELECT x),1 AS x", catalog, BindErrorCode::kNoSuchColumn,
+                  "no such column: x");
+  ExpectBindError("SELECT (SELECT parent.id) FROM Items parent", catalog,
+                  BindErrorCode::kUnsupportedFeature, "correlated subqueries are not supported");
+  ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
+                           BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
+                           "subqueries in mutation statements");
+}
+
+TEST(Binder, CountsNestedResolutionAndNormalizedJoinHeightsTogether) {
+  const auto catalog = TestCatalog();
+  struct Case {
+    std::string_view prefix;
+    std::string_view suffix;
+    std::size_t accepted_terms;
+    bool joined = true;
+  };
+  const std::array cases{
+      Case{.prefix = "SELECT (", .suffix = ")", .accepted_terms = 998},
+      Case{.prefix = "SELECT 0+(", .suffix = ")", .accepted_terms = 997},
+      Case{.prefix = "SELECT (SELECT (", .suffix = "))", .accepted_terms = 995},
+      Case{.prefix = "SELECT (", .suffix = ")", .accepted_terms = 499, .joined = false},
+  };
+  for (const Case& test_case : cases) {
+    for (const std::size_t extra : {0U, 1U}) {
+      SCOPED_TRACE(::testing::Message{} << test_case.prefix << '/' << test_case.joined << '/'
+                                        << extra);
+      std::string sql{test_case.prefix};
+      sql.append(test_case.joined ? "SELECT 1 FROM Items a JOIN Items b ON " : "SELECT 1 WHERE ");
+      sql.append("1");
+      for (std::size_t term = 1; term < test_case.accepted_terms + extra; ++term) {
+        sql.append(" AND 1");
+      }
+      sql.append(test_case.suffix);
+      const auto bound = BindSelectStatement(ParseTree(sql), catalog);
+      if (extra == 0U) {
+        ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+      } else {
+        ASSERT_FALSE(bound.has_value());
+        EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+      }
+    }
+  }
+}
+
+TEST(Binder, AppliesThePinnedCumulativeNestedSelectResolutionLimit) {
+  std::string sql = "SELECT 7";
+  for (std::size_t depth = 0; depth < 44U; ++depth) {
+    sql = "SELECT (" + sql + ")";
+  }
+  const auto bound = BindSelectStatement(ParseTree(sql), TestCatalog());
+  ASSERT_FALSE(bound.has_value());
+  EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+}
+
 TEST(Binder, ExpandsWildcardsAndPublishesDirectColumnMetadata) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   BoundSelect select =

@@ -1,12 +1,14 @@
 #ifndef MODERN_SQLITE_SYNTAX_AST_HPP_
 #define MODERN_SQLITE_SYNTAX_AST_HPP_
 
+#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -20,6 +22,12 @@ struct ExpressionId {
   std::size_t value = 0;
 
   constexpr auto operator<=>(const ExpressionId&) const noexcept = default;
+};
+
+struct SelectQueryId {
+  std::size_t value = 0;
+
+  constexpr auto operator<=>(const SelectQueryId&) const noexcept = default;
 };
 
 inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
@@ -148,10 +156,20 @@ struct ParenthesizedExpression {
   ExpressionId inner;
 };
 
+enum class SubqueryKind : std::uint8_t {
+  kScalar,
+  kExists,
+};
+
+struct SubqueryExpression {
+  SelectQueryId query;
+  SubqueryKind kind = SubqueryKind::kScalar;
+};
+
 using ExpressionPayload =
     std::variant<LiteralExpression, VariableExpression, IdentifierExpression, WildcardExpression,
                  UnaryExpression, BinaryExpression, FunctionCallExpression, CollateExpression,
-                 ParenthesizedExpression>;
+                 ParenthesizedExpression, SubqueryExpression>;
 
 struct Expression {
   SourceSpan span;
@@ -228,6 +246,16 @@ struct LimitClause {
   LimitSyntax syntax = LimitSyntax::kLimitOnly;
 };
 
+template <typename ExpressionHeight>
+[[nodiscard]] std::size_t LimitExpressionHeight(const LimitClause& limit,
+                                                const ExpressionHeight& expression_height) {
+  std::size_t height = expression_height(limit.limit);
+  if (limit.offset.has_value()) {
+    height = std::max(height, expression_height(*limit.offset));
+  }
+  return std::min(height, kMaximumExpressionConstructionDepth) + 1U;
+}
+
 enum class CompoundOperator : std::uint8_t {
   kUnion,
   kUnionAll,
@@ -265,6 +293,53 @@ struct SelectStatement {
   std::vector<OrderingTerm> order_by{};
   std::optional<LimitClause> limit{};
 };
+
+template <typename ExpressionHeight>
+[[nodiscard]] std::size_t SelectExpressionHeight(const SelectStatement& query,
+                                                 const ExpressionHeight& expression_height) {
+  std::size_t height = 0;
+  const auto include = [&height, &expression_height](ExpressionId expression) {
+    height = std::max(height, expression_height(expression));
+  };
+  const auto include_core = [&include](const QueryCore& core) {
+    std::visit(
+        [&include](const auto& value) {
+          using Core = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<Core, SelectCore>) {
+            for (const ResultColumn& result : value.result_columns) {
+              include(result.expression);
+            }
+            if (value.where.has_value()) {
+              include(*value.where);
+            }
+            for (const ExpressionId group : value.group_by) {
+              include(group);
+            }
+            if (value.having.has_value()) {
+              include(*value.having);
+            }
+          } else {
+            for (const auto& row : value.rows) {
+              for (const ExpressionId expression : row) {
+                include(expression);
+              }
+            }
+          }
+        },
+        core);
+  };
+  include_core(query.first);
+  for (const CompoundTerm& compound : query.compounds) {
+    include_core(compound.core);
+  }
+  for (const OrderingTerm& order : query.order_by) {
+    include(order.expression);
+  }
+  if (query.limit.has_value()) {
+    height = std::max(height, LimitExpressionHeight(*query.limit, expression_height));
+  }
+  return height;
+}
 
 struct IndexedTerm {
   SourceSpan span;
@@ -463,7 +538,8 @@ class SyntaxTree final {
  public:
   [[nodiscard]] static Result<SyntaxTree> Create(std::string source,
                                                  std::vector<Expression> expressions,
-                                                 Statement statement);
+                                                 Statement statement,
+                                                 std::vector<SelectStatement> select_queries = {});
 
   SyntaxTree(const SyntaxTree&) = delete;
   SyntaxTree& operator=(const SyntaxTree&) = delete;
@@ -477,16 +553,23 @@ class SyntaxTree final {
     return std::span<const Expression>{expressions_};
   }
   [[nodiscard]] const Expression& expression(ExpressionId id) const noexcept;
+  [[nodiscard]] std::span<const SelectStatement> select_queries() const noexcept {
+    return select_queries_;
+  }
+  [[nodiscard]] const SelectStatement& select_query(SelectQueryId id) const noexcept;
 
  private:
-  SyntaxTree(std::string source, std::vector<Expression> expressions, Statement statement) noexcept
+  SyntaxTree(std::string source, std::vector<Expression> expressions, Statement statement,
+             std::vector<SelectStatement> select_queries) noexcept
       : source_(std::move(source)),
         expressions_(std::move(expressions)),
-        statement_(std::move(statement)) {}
+        statement_(std::move(statement)),
+        select_queries_(std::move(select_queries)) {}
 
   std::string source_;
   std::vector<Expression> expressions_;
   Statement statement_;
+  std::vector<SelectStatement> select_queries_;
 };
 
 }  // namespace modern_sqlite

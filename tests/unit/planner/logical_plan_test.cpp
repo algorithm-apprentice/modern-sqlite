@@ -139,6 +139,26 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalPlanError{.code = LogicalPlanErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(LogicalPlan, PublishesFlatQueryPlansThroughOneBoundStatementOwner) {
+  const LogicalPlan plan = PlanOrThrow(
+      "SELECT (SELECT id FROM Items WHERE id=2),EXISTS(SELECT Name FROM Items)", TestCatalog());
+  ASSERT_EQ(3U, plan.bound_select().query_count());
+  const LogicalQueryView root{plan};
+  EXPECT_EQ(plan.nodes().data(), root.nodes().data());
+  EXPECT_EQ(plan.root(), root.root());
+  for (std::uint32_t index = 1; index < 3U; ++index) {
+    const BoundQueryId id{index};
+    const LogicalQueryView child{plan, id};
+    EXPECT_TRUE(child.valid());
+    EXPECT_EQ(id, plan.query_plan(id).query);
+    EXPECT_EQ(&plan.bound_select(), &child.bound_select().owner());
+    EXPECT_EQ(plan.bound_select().expressions().data(), child.bound_select().expressions().data());
+    EXPECT_NE(plan.nodes().data(), child.nodes().data());
+    ASSERT_FALSE(child.nodes().empty());
+    EXPECT_LT(child.root().value(), child.nodes().size());
+  }
+}
+
 TEST(LogicalPlan, BuildsAggregateQueries) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   BuildLogicalPlanResult plan =

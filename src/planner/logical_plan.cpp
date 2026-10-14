@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <ranges>
@@ -24,12 +25,12 @@ namespace {
   return PlanError(LogicalPlanErrorCode::kInternalInvariant, detail);
 }
 
-[[nodiscard]] bool IsValidExpressionId(const BoundSelect& bound_select,
+[[nodiscard]] bool IsValidExpressionId(const BoundQueryView& bound_select,
                                        BoundExpressionId id) noexcept {
   return id.value() < bound_select.expressions().size();
 }
 
-[[nodiscard]] bool IsValidCollationId(const BoundSelect& bound_select,
+[[nodiscard]] bool IsValidCollationId(const BoundQueryView& bound_select,
                                       BoundCollationId id) noexcept {
   return id.value() < bound_select.collations().size();
 }
@@ -69,7 +70,7 @@ namespace {
 }
 
 [[nodiscard]] std::expected<std::vector<BoundCollationId>, LogicalPlanError> DistinctCollations(
-    const BoundSelect& bound_select, const BoundSelectCore& core) {
+    const BoundQueryView& bound_select, const BoundSelectCore& core) {
   std::optional<BoundCollationId> binary;
   for (std::size_t index = 0; index < bound_select.collations().size(); ++index) {
     if (EqualsAsciiCaseInsensitive(bound_select.collations()[index].name, "BINARY")) {
@@ -111,7 +112,7 @@ struct AdvancedOrderLayout {
       core);
 }
 
-[[nodiscard]] bool RequiresFullRowsBeforeOrder(const BoundSelect& bound_select) {
+[[nodiscard]] bool RequiresFullRowsBeforeOrder(const BoundQueryView& bound_select) {
   for (const BoundQueryCore& core : bound_select.query_cores()) {
     if (const auto* select = std::get_if<BoundSelectCore>(&core);
         select != nullptr && select->quantifier == SelectQuantifier::kDistinct) {
@@ -123,14 +124,14 @@ struct AdvancedOrderLayout {
   });
 }
 
-[[nodiscard]] OrderEvaluationSchedule ExpectedOrderSchedule(const BoundSelect& bound_select) {
+[[nodiscard]] OrderEvaluationSchedule ExpectedOrderSchedule(const BoundQueryView& bound_select) {
   return bound_select.limit() != nullptr && !RequiresFullRowsBeforeOrder(bound_select)
              ? OrderEvaluationSchedule::kKeysThenAdmissionThenPayload
              : OrderEvaluationSchedule::kPayloadThenKeys;
 }
 
 [[nodiscard]] std::expected<OrderLayout, LogicalPlanError> BuildOrderLayout(
-    const BoundSelect& bound_select) {
+    const BoundQueryView& bound_select) {
   const std::span<const BoundOrderingTerm> terms = bound_select.order_by();
   const std::span<const BoundResultColumn> results = bound_select.result_columns();
   if (terms.size() > std::numeric_limits<std::uint32_t>::max() ||
@@ -169,7 +170,7 @@ struct AdvancedOrderLayout {
 }
 
 [[nodiscard]] std::expected<AdvancedOrderLayout, LogicalPlanError> BuildAdvancedOrderLayout(
-    const BoundSelect& bound_select) {
+    const BoundQueryView& bound_select) {
   const std::span<const BoundOrderingTerm> terms = bound_select.order_by();
   const std::span<const BoundQueryCore> cores = bound_select.query_cores();
   if (terms.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -280,7 +281,7 @@ struct AdvancedOrderLayout {
 }
 
 [[nodiscard]] std::expected<void, LogicalPlanError> ValidateLogicalOrder(
-    const BoundSelect& bound_select, const LogicalOrderNode& order, LogicalNodeId input) {
+    const BoundQueryView& bound_select, const LogicalOrderNode& order, LogicalNodeId input) {
   const std::span<const BoundOrderingTerm> bound_terms = bound_select.order_by();
   const std::span<const BoundResultColumn> results = bound_select.result_columns();
   const OrderEvaluationSchedule expected_schedule = ExpectedOrderSchedule(bound_select);
@@ -327,7 +328,7 @@ struct AdvancedOrderLayout {
   return {};
 }
 
-[[nodiscard]] bool IsAdvancedQuery(const BoundSelect& bound_select) {
+[[nodiscard]] bool IsAdvancedQuery(const BoundQueryView& bound_select) {
   if (bound_select.query_cores().size() != 1U) {
     return true;
   }
@@ -337,7 +338,7 @@ struct AdvancedOrderLayout {
 }
 
 [[nodiscard]] std::expected<void, LogicalPlanError> ValidateAdvancedLogicalPlan(
-    const BoundSelect& bound_select, std::span<const LogicalNode> nodes, LogicalNodeId root) {
+    const BoundQueryView& bound_select, std::span<const LogicalNode> nodes, LogicalNodeId root) {
   if (nodes.empty() || root.value() >= nodes.size()) {
     return std::unexpected{InvariantError("advanced logical plan root is invalid")};
   }
@@ -552,7 +553,7 @@ struct AdvancedOrderLayout {
 }
 
 [[nodiscard]] std::expected<void, LogicalPlanError> ValidateLogicalPlan(
-    const BoundSelect& bound_select, std::span<const LogicalNode> nodes, LogicalNodeId root) {
+    const BoundQueryView& bound_select, std::span<const LogicalNode> nodes, LogicalNodeId root) {
   if (!bound_select.valid()) {
     return std::unexpected{InvariantError("logical plan retained an invalid bound select")};
   }
@@ -682,8 +683,8 @@ struct LogicalPlan::Impl {
   explicit Impl(BoundSelect input) noexcept : bound_select(std::move(input)) {}
 
   BoundSelect bound_select;
-  std::vector<LogicalNode> nodes;
-  LogicalNodeId root{0};
+  LogicalQueryPlan root_query;
+  std::vector<LogicalQueryPlan> nested_queries;
 };
 
 struct LogicalMutationPlan::Impl {
@@ -703,8 +704,26 @@ class LogicalPlanBuilder final {
       return std::unexpected{
           PlanError(LogicalPlanErrorCode::kInvalidInput, "bound select is invalid")};
     }
+    auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
+    const std::size_t count = impl->bound_select.query_count();
+    impl->nested_queries.resize(count - 1U);
+    for (std::size_t index = 0; index < count; ++index) {
+      const BoundQueryId id{static_cast<std::uint32_t>(index)};
+      LogicalQueryPlan& query = index == 0U ? impl->root_query : impl->nested_queries[index - 1U];
+      query.query = id;
+      if (auto built = BuildQuery(BoundQueryView{impl->bound_select, id}, &query);
+          !built.has_value()) {
+        return std::unexpected(std::move(built.error()));
+      }
+    }
+    return LogicalPlan{std::move(impl)};
+  }
+
+ private:
+  [[nodiscard]] static std::expected<void, LogicalPlanError> BuildQuery(
+      const BoundQueryView& bound_select, LogicalQueryPlan* impl) {
     if (IsAdvancedQuery(bound_select)) {
-      return BuildAdvanced(std::move(bound_select));
+      return BuildAdvanced(bound_select, impl);
     }
     const auto& simple_core = std::get<BoundSelectCore>(bound_select.query_cores().front());
     const BoundAggregateProgram* aggregate =
@@ -715,10 +734,9 @@ class LogicalPlanBuilder final {
         static_cast<std::size_t>(bound_select.limit() != nullptr) +
         static_cast<std::size_t>(ordered) + static_cast<std::size_t>(aggregate != nullptr) +
         static_cast<std::size_t>(aggregate != nullptr && aggregate->having.has_value());
-    auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
     impl->nodes.reserve(node_count);
 
-    const auto sources = impl->bound_select.table_sources();
+    const auto sources = bound_select.table_sources();
     const BoundTableSource* source = sources.empty() ? nullptr : &sources.front();
     if (source == nullptr) {
       impl->nodes.push_back(LogicalNode{.payload = LogicalSingleRowNode{}});
@@ -734,7 +752,7 @@ class LogicalPlanBuilder final {
     }
 
     LogicalNodeId input{0};
-    if (const std::optional<BoundExpressionId> predicate = impl->bound_select.where_expression();
+    if (const std::optional<BoundExpressionId> predicate = bound_select.where_expression();
         predicate.has_value()) {
       impl->nodes.push_back(LogicalNode{
           .payload =
@@ -769,7 +787,7 @@ class LogicalPlanBuilder final {
     }
 
     if (ordered) {
-      std::expected<OrderLayout, LogicalPlanError> layout = BuildOrderLayout(impl->bound_select);
+      std::expected<OrderLayout, LogicalPlanError> layout = BuildOrderLayout(bound_select);
       if (!layout.has_value()) {
         return std::unexpected{std::move(layout.error())};
       }
@@ -780,7 +798,7 @@ class LogicalPlanBuilder final {
                   .terms = std::move(layout->terms),
                   .payload_expressions = std::move(layout->payload_expressions),
                   .output_fields = std::move(layout->output_fields),
-                  .schedule = impl->bound_select.limit() == nullptr
+                  .schedule = bound_select.limit() == nullptr
                                   ? OrderEvaluationSchedule::kPayloadThenKeys
                                   : OrderEvaluationSchedule::kKeysThenAdmissionThenPayload,
               },
@@ -788,7 +806,7 @@ class LogicalPlanBuilder final {
       input = LogicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
 
-    if (const BoundLimit* limit = impl->bound_select.limit(); limit != nullptr) {
+    if (const BoundLimit* limit = bound_select.limit(); limit != nullptr) {
       impl->nodes.push_back(LogicalNode{
           .payload =
               LogicalLimitNode{
@@ -809,8 +827,8 @@ class LogicalPlanBuilder final {
       });
     } else {
       std::vector<BoundExpressionId> projections;
-      projections.reserve(impl->bound_select.result_columns().size());
-      for (const BoundResultColumn& result : impl->bound_select.result_columns()) {
+      projections.reserve(bound_select.result_columns().size());
+      for (const BoundResultColumn& result : bound_select.result_columns()) {
         projections.push_back(result.expression);
       }
       impl->nodes.push_back(LogicalNode{
@@ -824,19 +842,18 @@ class LogicalPlanBuilder final {
     impl->root = LogicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
 
     if (std::expected<void, LogicalPlanError> validated =
-            ValidateLogicalPlan(impl->bound_select, impl->nodes, impl->root);
+            ValidateLogicalPlan(bound_select, impl->nodes, impl->root);
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
-    return LogicalPlan{std::move(impl)};
+    return {};
   }
 
- private:
-  [[nodiscard]] static BuildLogicalPlanResult BuildAdvanced(BoundSelect bound_select) {
-    auto impl = std::make_unique<LogicalPlan::Impl>(std::move(bound_select));
-    std::size_t estimated_nodes = impl->bound_select.query_cores().size() * 6U +
-                                  impl->bound_select.compound_operators().size() + 3U;
-    for (const BoundQueryCore& core : impl->bound_select.query_cores()) {
+  [[nodiscard]] static std::expected<void, LogicalPlanError> BuildAdvanced(
+      const BoundQueryView& bound_select, LogicalQueryPlan* impl) {
+    std::size_t estimated_nodes =
+        bound_select.query_cores().size() * 6U + bound_select.compound_operators().size() + 3U;
+    for (const BoundQueryCore& core : bound_select.query_cores()) {
       if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
         estimated_nodes += select->table_sources.size() * 2U;
       }
@@ -852,10 +869,9 @@ class LogicalPlanBuilder final {
     };
 
     std::vector<LogicalNodeId> core_roots;
-    core_roots.reserve(impl->bound_select.query_cores().size());
-    for (std::size_t core_index = 0; core_index < impl->bound_select.query_cores().size();
-         ++core_index) {
-      const BoundQueryCore& core = impl->bound_select.query_cores()[core_index];
+    core_roots.reserve(bound_select.query_cores().size());
+    for (std::size_t core_index = 0; core_index < bound_select.query_cores().size(); ++core_index) {
+      const BoundQueryCore& core = bound_select.query_cores()[core_index];
       if (std::holds_alternative<BoundValuesCore>(core)) {
         core_roots.push_back(
             append(LogicalNode{.payload = LogicalValuesNode{.core_index = core_index}}));
@@ -940,7 +956,7 @@ class LogicalPlanBuilder final {
 
       if (select.quantifier == SelectQuantifier::kDistinct) {
         std::expected<std::vector<BoundCollationId>, LogicalPlanError> collations =
-            DistinctCollations(impl->bound_select, select);
+            DistinctCollations(bound_select, select);
         if (!collations.has_value()) {
           return std::unexpected{std::move(collations.error())};
         }
@@ -957,25 +973,25 @@ class LogicalPlanBuilder final {
     }
 
     LogicalNodeId input = core_roots.front();
-    for (std::size_t index = 0; index < impl->bound_select.compound_operators().size(); ++index) {
+    for (std::size_t index = 0; index < bound_select.compound_operators().size(); ++index) {
       std::vector<BoundCollationId> collations{
-          impl->bound_select.compound_collations().begin(),
-          impl->bound_select.compound_collations().end(),
+          bound_select.compound_collations().begin(),
+          bound_select.compound_collations().end(),
       };
       input = append(LogicalNode{
           .payload =
               LogicalCompoundNode{
                   .left = input,
                   .right = core_roots[index + 1U],
-                  .operation = impl->bound_select.compound_operators()[index],
+                  .operation = bound_select.compound_operators()[index],
                   .collations = std::move(collations),
               },
       });
     }
 
-    if (!impl->bound_select.order_by().empty()) {
+    if (!bound_select.order_by().empty()) {
       std::expected<AdvancedOrderLayout, LogicalPlanError> layout =
-          BuildAdvancedOrderLayout(impl->bound_select);
+          BuildAdvancedOrderLayout(bound_select);
       if (!layout.has_value()) {
         return std::unexpected{std::move(layout.error())};
       }
@@ -990,7 +1006,7 @@ class LogicalPlanBuilder final {
       });
     }
 
-    if (const BoundLimit* limit = impl->bound_select.limit(); limit != nullptr) {
+    if (const BoundLimit* limit = bound_select.limit(); limit != nullptr) {
       input = append(LogicalNode{
           .payload =
               LogicalLimitNode{
@@ -1001,17 +1017,17 @@ class LogicalPlanBuilder final {
       });
     }
 
-    if (!impl->bound_select.order_by().empty()) {
+    if (!bound_select.order_by().empty()) {
       input = append(LogicalNode{.payload = LogicalOutputNode{.input = input}});
     }
     impl->root = input;
 
     std::expected<void, LogicalPlanError> validated =
-        ValidateLogicalPlan(impl->bound_select, impl->nodes, impl->root);
+        ValidateLogicalPlan(bound_select, impl->nodes, impl->root);
     if (!validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
-    return LogicalPlan{std::move(impl)};
+    return {};
   }
 };
 
@@ -1227,15 +1243,22 @@ bool LogicalPlan::valid() const noexcept { return impl_ != nullptr; }
 const BoundSelect& LogicalPlan::bound_select() const noexcept { return impl_->bound_select; }
 
 std::span<const LogicalNode> LogicalPlan::nodes() const noexcept {
-  return impl_ != nullptr ? std::span<const LogicalNode>{impl_->nodes}
+  return impl_ != nullptr ? std::span<const LogicalNode>{impl_->root_query.nodes}
                           : std::span<const LogicalNode>{};
 }
 
 const LogicalNode& LogicalPlan::node(LogicalNodeId id) const noexcept {
-  return impl_->nodes[id.value()];
+  return impl_->root_query.nodes[id.value()];
 }
 
-LogicalNodeId LogicalPlan::root() const noexcept { return impl_->root; }
+LogicalNodeId LogicalPlan::root() const noexcept { return impl_->root_query.root; }
+
+const LogicalQueryPlan& LogicalPlan::query_plan(BoundQueryId id) const noexcept {
+  if (impl_ == nullptr || id.value() >= impl_->bound_select.query_count()) {
+    std::terminate();
+  }
+  return id.value() == 0U ? impl_->root_query : impl_->nested_queries[id.value() - 1U];
+}
 
 BuildLogicalPlanResult BuildLogicalPlan(BoundSelect bound_select) {
   return planner_detail::LogicalPlanBuilder::Build(std::move(bound_select));

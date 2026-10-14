@@ -816,6 +816,173 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST(PlanLowering, UsesTypedReadRegionsForFlatNestedQueryCalls) {
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT (SELECT (SELECT id FROM items)),EXISTS(SELECT 1 FROM items)", TestCatalog());
+  ASSERT_EQ(3U, program.subroutines().size());
+  EXPECT_EQ(2U, program.cursors().size());
+  EXPECT_EQ(2U, program.verification_metrics().maximum_subroutine_depth);
+  std::size_t result_rows = 0;
+  for (const Instruction& instruction : program.instructions()) {
+    result_rows += std::holds_alternative<ResultRowInstruction>(instruction) ? 1U : 0U;
+  }
+  EXPECT_EQ(1U, result_rows);
+  for (std::size_t index = 0; index < program.subroutines().size(); ++index) {
+    const SubroutineDescriptor& subroutine = program.subroutines()[index];
+    EXPECT_EQ(SubroutineKind::kRead, subroutine.kind);
+    ASSERT_LT(subroutine.entry.value(), subroutine.end.value());
+    for (std::uint32_t address = subroutine.entry.value(); address < subroutine.end.value();
+         ++address) {
+      EXPECT_FALSE(std::holds_alternative<HaltInstruction>(program.instructions()[address]));
+      EXPECT_FALSE(std::holds_alternative<ResultRowInstruction>(program.instructions()[address]));
+    }
+    const auto* returned = std::get_if<ReturnSubroutineInstruction>(
+        &program.instructions()[subroutine.end.value() - 1U]);
+    ASSERT_NE(nullptr, returned);
+    EXPECT_EQ(SubroutineId{static_cast<std::uint32_t>(index)}, returned->subroutine);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, LazilyCachesVolatileUncorrelatedQueriesPerExecution) {
+  const CustomEnvironment custom;
+  const auto rows =
+      Execute("SELECT (SELECT volatile_counter()) FROM Items", custom.Binder(), custom.Vm());
+  ASSERT_GT(rows.size(), 1U);
+  EXPECT_EQ(1U, callback_count);
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    EXPECT_EQ(1, row[0].integer_value());
+  }
+  const auto next_execution =
+      Execute("SELECT (SELECT volatile_counter()) FROM Items", custom.Binder(), custom.Vm());
+  ASSERT_EQ(rows.size(), next_execution.size());
+  EXPECT_EQ(2U, callback_count);
+  for (const auto& row : next_execution) {
+    EXPECT_EQ(2, row[0].integer_value());
+  }
+  callback_count = 0;
+  const auto exists =
+      Execute("SELECT EXISTS(SELECT failing() FROM Items)", custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, exists.size());
+  EXPECT_EQ(1, exists[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+  const auto lazy =
+      Execute("SELECT coalesce(7,(SELECT failing())) FROM Items", custom.Binder(), custom.Vm());
+  ASSERT_EQ(rows.size(), lazy.size());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, UsesCanonicalPrivatePointAccessAndStatementGuards) {
+  for (const std::int64_t allowed : {0, 1}) {
+    const std::array parameters{SqlValue::Integer(allowed)};
+    const auto rows = Execute(
+        "SELECT (SELECT id FROM Items WHERE ?1 AND id=1),"
+        "EXISTS(SELECT Name FROM Items WHERE ?1)",
+        BindEnvironment::Core(), VmEnvironment::Core(), parameters);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(2U, rows[0].size());
+    if (allowed == 0) {
+      EXPECT_EQ(SqlValueType::kNull, rows[0][0].type());
+    } else {
+      EXPECT_EQ(1, rows[0][0].integer_value());
+    }
+    EXPECT_EQ(allowed, rows[0][1].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ExecutesDeepFlatQueryCallGraphs) {
+  for (const std::uint32_t depth : {1U, 8U, 43U}) {
+    SCOPED_TRACE(depth);
+    std::string sql = "SELECT 7";
+    for (std::uint32_t index = 0; index < depth; ++index) {
+      sql = "SELECT (" + sql + ")";
+    }
+    const BytecodeProgram program = LowerOrThrow(sql, catalog());
+    EXPECT_EQ(depth, program.subroutines().size());
+    EXPECT_EQ(depth, program.verification_metrics().maximum_subroutine_depth);
+    const auto rows = Execute(sql);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(7, rows[0][0].integer_value());
+  }
+}
+
+TEST(PlanLowering, RecoversPrivateQueryIoFailureWithAParentCursorOpen) {
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto catalog = MutationCatalog();
+  ASSERT_TRUE(
+      ExecuteMutationProgram(
+          LowerMutationOrThrow("INSERT INTO Items(id,Name) VALUES(9,'private')", catalog), vfs)
+          .has_value());
+  ASSERT_TRUE(ExecuteMutationProgram(
+                  LowerMutationOrThrow("INSERT INTO Plain(Value) VALUES('parent')", catalog), vfs)
+                  .has_value());
+  auto pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program =
+      LowerOrThrow("SELECT Value,(SELECT Name FROM Items WHERE id=9) FROM Plain", catalog);
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  RequireStatus(vm.Reset());
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  EXPECT_EQ("parent", TextBytes(vm.row()[0]));
+  EXPECT_EQ("private", TextBytes(vm.row()[1]));
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager->EndRead());
+}
+
+TEST(PlanLowering, RecoversActualPrivateAggregatePmaWriteFailure) {
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto catalog = MutationCatalog();
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name) VALUES(?1,?2)", catalog);
+  for (std::int64_t id = 1; id <= 32; ++id) {
+    const std::array parameters{SqlValue::Integer(id), SqlValue::Text("row" + std::to_string(id))};
+    ASSERT_TRUE(ExecuteMutationProgram(insert, vfs, parameters).has_value());
+  }
+  auto pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT (SELECT group_concat(a.Name ORDER BY b.id,a.id) FROM Items a CROSS JOIN Items b)",
+      catalog);
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                              .sorter_memory_threshold = ByteCount{32U << 10U}}));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, factory}));
+  vfs.FailPathlessWriteAfter(0U, ErrorCode::kIo);
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_GT(vfs.pathless_open_count(), 0U);
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager, catalog->version().generation, factory}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(1U, vm.row().size());
+  EXPECT_FALSE(TextBytes(vm.row()[0]).empty());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
 TEST_F(ReadLoweringJoin, PreservesEarliestReadyPredicateCallSchedules) {
   const CustomEnvironment custom;
   struct Case {
@@ -2323,6 +2490,23 @@ TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
   ASSERT_EQ(2U, rows[0].size());
   EXPECT_EQ(0, rows[0][0].integer_value());
   EXPECT_EQ(2048, rows[0][1].integer_value());
+  EXPECT_EQ(2048U, callback_count);
+}
+
+TEST(ReadLowering, ClosesPrivateOrderedGroupIndexesOnEarlyOutput) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT (SELECT count(volatile_counter()) FROM items GROUP BY flag ORDER BY flag LIMIT 1)",
+      catalog, custom.Binder());
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(1U, rows[0].size());
+  EXPECT_EQ(2048, rows[0][0].integer_value());
   EXPECT_EQ(2048U, callback_count);
 }
 
