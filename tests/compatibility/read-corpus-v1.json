@@ -2368,6 +2368,14 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "right-join",
+      "id": "right-ambiguous-using-prefix",
+      "operations": [{"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642046524f4d206974656d7320612c6974656d732062205249474854204a4f494e206974656d732063205553494e4728696429"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "subquery",
       "id": "unsupported-subquery",

@@ -50,7 +50,12 @@ joined value expression. RIGHT stores the already bound right leaf from its
 USING equality; ordinary columns and existing INNER/LEFT forms retain their
 current value when no override is required.
 
-Later USING comparisons bind the current joined value of their left prefix.
+In a core containing RIGHT, USING comparisons gather all prior physical
+contributors to the named key through the existing lazy coalesce payload,
+retaining the first contributor's affinity and collation. A second unmerged
+left-prefix match is an explicit ambiguous-USING error. This predicate value
+is distinct from the published RIGHT merged value. Its extra coalesce level
+also participates in the existing combined predicate-height check.
 Unqualified names and wildcard publication read that value while retaining
 the established visible slot order. Unique qualified names still bind their
 actual physical source. The existing generated-name resolver handles
@@ -142,6 +147,10 @@ existing ten-second bound, full measured allocation range, injected OOM
 checks, and reset recovery. The core lifecycle sweep remains separate.
 This prevents an expanding collection of otherwise independent cases from
 exceeding one shared parent timeout; selectors do not reduce failure coverage.
+When an individual exhaustive case exceeds that bound on an instrumented
+host, split its allocation indices into four disjoint modulo partitions.
+Every partition measures the same baseline and checks every assigned failure
+plus reset recovery; their union is the complete original allocation range.
 
 ### Closure evidence
 
@@ -192,6 +201,21 @@ Release, ASan/UBSan, and GCC; the longest local sanitizer child takes 4.66
 seconds. The revised complete fast tier has 1,187 cases. Each child retains
 the original ten-second bound; no failure sampling or production change is
 part of this orchestration correction.
+
+A second hosted run isolated the natural-RIGHT demand-one sweep itself:
+its 77 allocation boundaries still exceeded ten seconds on the instrumented
+Linux runner. Four modulo partitions cover exactly 20, 19, 19, and 19 indices,
+without overlap or omissions. The longest corrected local sanitizer partition
+takes 1.28 seconds; each retains the ten-second limit.
+
+The accompanying reference audit of pinned `src/select.c:594-649` confirms
+that a RIGHT core coalesces every prior physical USING contributor for its
+predicate, rather than reusing the published right value. Independent red
+coverage preceded that normalization and ambiguity correction. Thirty native
+mixed-join and 997/998/999-depth probes agree after the change. The additional
+ambiguous-prefix vector brings the committed matrix to 218 comparisons.
+The revised fast tier passes 1,192 cases, complete Release and ASan/UBSan
+tiers pass 1,238 each, and 40 focused GCC cases cover both corrections.
 
 ## Traceability
 

@@ -902,6 +902,30 @@ TEST(Binder, RejectsForwardOnThroughoutRightCoresWithoutAffectingOtherArms) {
   EXPECT_EQ(2U, independent.query_cores().size());
 }
 
+TEST(Binder, NormalizesRightUsingPredicatesFromAllPriorPhysicalContributors) {
+  const auto catalog = TestCatalog();
+  const BoundSelect bound = BindOrThrow(
+      "SELECT a.id FROM Items a LEFT JOIN Items b USING(id) RIGHT JOIN Items c USING(id)", catalog);
+  const auto on = bound.table_sources()[2].on;
+  ASSERT_TRUE(on.has_value());
+  const auto& equality = std::get<BoundComparisonExpression>(bound.expression(*on).payload);
+  const auto* coalesce =
+      std::get_if<BoundCoalesceExpression>(&bound.expression(equality.left).payload);
+  ASSERT_NE(nullptr, coalesce);
+  ASSERT_EQ(2U, coalesce->arguments.size());
+  EXPECT_EQ(
+      BoundSourceColumnId{0},
+      std::get<BoundColumnExpression>(bound.expression(coalesce->arguments[0]).payload).column);
+  EXPECT_EQ(
+      BoundSourceColumnId{5},
+      std::get<BoundColumnExpression>(bound.expression(coalesce->arguments[1]).payload).column);
+  const auto ambiguous = BindSelectStatement(
+      ParseTree("SELECT a.id FROM Items a,Items b RIGHT JOIN Items c USING(id)"), catalog);
+  ASSERT_FALSE(ambiguous.has_value());
+  EXPECT_EQ(BindErrorCode::kJoinConditionScope, ambiguous.error().code);
+  EXPECT_EQ("ambiguous reference to id in USING()", ambiguous.error().detail);
+}
+
 TEST(Binder, EnforcesCombinedGeneratedJoinHeightAcrossSourcesAndWhere) {
   struct Case {
     std::size_t sources;
@@ -944,6 +968,11 @@ TEST(Binder, EnforcesCombinedGeneratedJoinHeightAcrossSourcesAndWhere) {
            .where = "",
            .accepted = false,
            .trailing_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 998,
+           .where = "",
+           .accepted = false,
+           .leading_on = " RIGHT JOIN Items extra USING(id)"},
   };
   const auto catalog = TestCatalog();
   for (const Case& test_case : cases) {

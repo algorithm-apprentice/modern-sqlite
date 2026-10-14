@@ -23779,6 +23779,20 @@
       }
     },
     {
+      "expectation": "compare",
+      "id": "right-ambiguous-using-prefix",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "616d626967756f7573207265666572656e636520746f20696420696e205553494e472829",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
       "boundary": {
         "first_step": "row",
         "prepare": "statement"
@@ -23956,7 +23970,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "3e0484117ee64de011385c806afa94f231c6bfa65c0a24785e1e11e1416a7894",
+  "corpus_sha256": "ed809ab51c1e3687c8731e41fdaeb4e624c48722660a1d1c8271d4ac064dc76f",
   "databases": [
     {
       "id": "core",

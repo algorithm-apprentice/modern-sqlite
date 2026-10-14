@@ -3006,8 +3006,9 @@ class StatementBinder final {
     return std::nullopt;
   }
 
-  [[nodiscard]] BindExpected<void> BindUsingColumn(std::size_t source_index, std::string_view name,
-                                                   SourceSpan span) {
+  [[nodiscard]] BindExpected<std::size_t> BindUsingColumn(std::size_t source_index,
+                                                          std::string_view name, SourceSpan span,
+                                                          bool right_core) {
     const SourceState& source = source_states_[source_index];
     const auto left = FindVisibleLeftColumn(name, source.source_column_begin);
     const auto right = FindSourceColumn(source, name);
@@ -3016,9 +3017,41 @@ class StatementBinder final {
                                          "cannot join using column " + std::string{name} +
                                              " - column not present in both tables"));
     }
-    auto left_expression = BindJoinedValue(*left, span);
+    auto left_expression = right_core ? BindColumn(*left, span) : BindJoinedValue(*left, span);
     if (!left_expression.has_value()) {
       return std::unexpected(std::move(left_expression.error()));
+    }
+    std::size_t equality_height = 2;
+    if (right_core) {
+      std::vector<BoundExpressionId> contributors;
+      for (std::size_t index = left->value() + 1U; index < source.source_column_begin; ++index) {
+        const BoundSourceColumn& column = impl_->source_columns[index];
+        if (!NamesEqual(column.name, name)) {
+          continue;
+        }
+        if (!column.merged_into.has_value()) {
+          return std::unexpected(
+              BinderError(BindErrorCode::kJoinConditionScope, span,
+                          "ambiguous reference to " + std::string{name} + " in USING()"));
+        }
+        if (contributors.empty()) {
+          contributors.push_back(*left_expression);
+        }
+        auto argument = BindColumn(BoundSourceColumnId{static_cast<std::uint32_t>(index)}, span);
+        if (!argument.has_value()) {
+          return std::unexpected(std::move(argument.error()));
+        }
+        contributors.push_back(*argument);
+      }
+      if (!contributors.empty()) {
+        const ExpressionProperties properties = Properties(*left_expression);
+        left_expression = AppendExpression(
+            span, BoundCoalesceExpression{.arguments = std::move(contributors)}, properties);
+        if (!left_expression.has_value()) {
+          return std::unexpected(std::move(left_expression.error()));
+        }
+        equality_height = 3;
+      }
     }
     auto right_expression = BindColumn(*right, span);
     if (!right_expression.has_value()) {
@@ -3044,7 +3077,7 @@ class StatementBinder final {
     if (impl_->table_sources[source_index].join == SourceJoinKind::kRight) {
       impl_->source_columns[left->value()].joined_value = *right_expression;
     }
-    return {};
+    return equality_height;
   }
 
   [[nodiscard]] std::size_t JoinConditionSyntaxHeight(ExpressionId id) const {
@@ -3091,6 +3124,8 @@ class StatementBinder final {
       return {};
     }
     std::size_t height = 0;
+    const bool right_core = std::ranges::any_of(
+        core.from, [](const TableSource& source) { return source.join == SourceJoinKind::kRight; });
     const auto admit = [&](std::size_t added, SourceSpan span) -> BindExpected<void> {
       height = height == 0U ? added : std::max(height, added) + 1U;
       if (height > kMaximumExpressionConstructionDepth) {
@@ -3126,10 +3161,11 @@ class StatementBinder final {
           if (!name.has_value()) {
             return std::unexpected(std::move(name.error()));
           }
-          if (auto joined = BindUsingColumn(index, *name, column); !joined.has_value()) {
-            return joined;
+          auto joined = BindUsingColumn(index, *name, column, right_core);
+          if (!joined.has_value()) {
+            return std::unexpected(std::move(joined.error()));
           }
-          if (auto admitted = admit(2U, column); !admitted.has_value()) {
+          if (auto admitted = admit(*joined, column); !admitted.has_value()) {
             return admitted;
           }
         }
@@ -3139,10 +3175,11 @@ class StatementBinder final {
         for (std::size_t column = right.source_column_begin; column < end; ++column) {
           const std::string_view name = impl_->source_columns[column].name;
           if (FindVisibleLeftColumn(name, right.source_column_begin).has_value()) {
-            if (auto joined = BindUsingColumn(index, name, source.span); !joined.has_value()) {
-              return joined;
+            auto joined = BindUsingColumn(index, name, source.span, right_core);
+            if (!joined.has_value()) {
+              return std::unexpected(std::move(joined.error()));
             }
-            if (auto admitted = admit(2U, source.span); !admitted.has_value()) {
+            if (auto admitted = admit(*joined, source.span); !admitted.has_value()) {
               return admitted;
             }
           }
