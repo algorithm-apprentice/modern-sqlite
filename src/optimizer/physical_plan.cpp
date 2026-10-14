@@ -302,7 +302,7 @@ template <typename Bound>
   sources.reserve(predicates.size());
   BoundSourceId floor = core.table_sources.front().id;
   for (const BoundTableSource& source : core.table_sources) {
-    if (source.join == SourceJoinKind::kRight &&
+    if (SourceJoinPreservesRight(source.join) &&
         (!condition_owner.has_value() || source.id <= *condition_owner)) {
       floor = source.id;
     }
@@ -344,7 +344,7 @@ template <typename Bound>
   if (sources->size() != 1U) {
     return std::unexpected(InvariantFailure("join condition has invalid source placement"));
   }
-  return std::optional{join.join == SourceJoinKind::kLeft || join.join == SourceJoinKind::kRight
+  return std::optional{SourceJoinPreservesLeft(join.join) || SourceJoinPreservesRight(join.join)
                            ? right->source
                            : sources->front()};
 }
@@ -3873,6 +3873,7 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
                      : join->join == SourceJoinKind::kCross ? "CROSS JOIN"
                      : join->join == SourceJoinKind::kLeft  ? "LEFT JOIN"
                      : join->join == SourceJoinKind::kRight ? "RIGHT JOIN"
+                     : join->join == SourceJoinKind::kFull  ? "FULL JOIN"
                                                             : "INNER JOIN"));
       } else if (std::holds_alternative<PhysicalEmptyNode>(node.payload)) {
         append_line("EMPTY INPUT");

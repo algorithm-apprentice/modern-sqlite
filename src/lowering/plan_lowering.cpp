@@ -2393,14 +2393,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (StreamingCorePlan& core : streaming_cores_) {
       for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
         JoinedSourcePlan& source = core.joined_sources[index];
-        if (source.join != nullptr && source.join->join == SourceJoinKind::kLeft) {
+        if (source.join != nullptr && SourceJoinPreservesLeft(source.join->join)) {
           auto matched = AllocateRegisters(1);
           if (!matched.has_value()) {
             return std::unexpected(std::move(matched.error()));
           }
           source.matched = *matched;
         }
-        if (source.join != nullptr && source.join->join == SourceJoinKind::kRight) {
+        if (source.join != nullptr && SourceJoinPreservesRight(source.join->join)) {
           const auto& select = std::get<BoundSelectCore>(*core.bound);
           const BoundTableSource& bound_source = select.table_sources[index];
           std::size_t key_count = 1;
@@ -8754,8 +8754,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
     }
     const bool has_inner = depth + 1U < core.joined_sources.size();
-    const bool left = source.join != nullptr && source.join->join == SourceJoinKind::kLeft;
-    const bool right = source.join != nullptr && source.join->join == SourceJoinKind::kRight;
+    const bool left = source.join != nullptr && SourceJoinPreservesLeft(source.join->join);
+    const bool right = source.join != nullptr && SourceJoinPreservesRight(source.join->join);
     const auto replay = std::ranges::find(replays, depth, &RightJoinContinuation::depth);
     if (right && (replay == replays.end() || !source.replay_mode.has_value() ||
                   !source.right_matches.has_value() || !source.right_key_first.has_value())) {
@@ -8779,19 +8779,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(done.error()));
     }
     std::optional<Label> published;
+    if (right) {
+      published = replay->published;
+    }
     if (left) {
       if (!source.matched.has_value()) {
         return std::unexpected(InternalFailure("LEFT source has no match register"));
       }
-      auto label = CreateLabel();
-      auto zero = EnsureZeroConstant();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
+      if (!right) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        published = *label;
       }
+      auto zero = EnsureZeroConstant();
       if (!zero.has_value()) {
         return std::unexpected(std::move(zero.error()));
       }
-      published = *label;
       if (auto initialized =
               Append(LoadConstantInstruction{.constant = *zero, .output = *source.matched});
           !initialized.has_value()) {
@@ -8815,31 +8820,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
-    if (left) {
+    if (left || right) {
       if (source.join->on.has_value()) {
         if (auto on = EmitPredicate(*source.join->on, advance.value_or(*done)); !on.has_value()) {
           return on;
         }
       }
-      auto one = EnsureOneConstant();
-      if (!one.has_value()) {
-        return std::unexpected(std::move(one.error()));
-      }
-      if (auto matched = Append(
-              LoadConstantInstruction{.constant = *one, .output = AssumeValue(source.matched)});
-          !matched.has_value()) {
-        return matched;
-      }
-      if (auto bound = BindLabel(AssumeValue(published)); !bound.has_value()) {
-        return bound;
+      if (left) {
+        auto one = EnsureOneConstant();
+        if (!one.has_value()) {
+          return std::unexpected(std::move(one.error()));
+        }
+        if (auto matched = Append(
+                LoadConstantInstruction{.constant = *one, .output = AssumeValue(source.matched)});
+            !matched.has_value()) {
+          return matched;
+        }
       }
     }
     if (right) {
-      if (source.join->on.has_value()) {
-        if (auto on = EmitPredicate(*source.join->on, advance.value_or(*done)); !on.has_value()) {
-          return on;
-        }
-      }
       if (auto key = EmitRightJoinKey(core, depth); !key.has_value()) {
         return key;
       }
@@ -8851,13 +8850,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
-      if (auto bound = BindLabel(replay->published); !bound.has_value()) {
+    }
+    if (left || right) {
+      if (auto bound = BindLabel(AssumeValue(published)); !bound.has_value()) {
         return bound;
       }
     }
     for (const JoinedSourcePlan& candidate : core.joined_sources) {
-      if (candidate.join != nullptr && candidate.join->join != SourceJoinKind::kLeft &&
-          candidate.join->join != SourceJoinKind::kRight) {
+      if (candidate.join != nullptr && !SourceJoinPreservesLeft(candidate.join->join) &&
+          !SourceJoinPreservesRight(candidate.join->join)) {
         const auto& condition = candidate.join->on;
         if (condition.has_value() && candidate.join->condition_source == source.scan->source) {
           if (auto on = EmitPredicate(*condition, advance.value_or(*done)); !on.has_value()) {

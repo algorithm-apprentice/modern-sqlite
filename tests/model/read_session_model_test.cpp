@@ -1012,15 +1012,63 @@ void RunRightJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>&
   RequireStatus(statement.Finalize());
 }
 
+void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto left_count = static_cast<std::int64_t>(words[0] % 9U);
+  const auto right_count = static_cast<std::int64_t>(words[1] % 9U);
+  const std::int64_t shift = static_cast<std::int64_t>(words[2] % 3U) - 1;
+  ReadStatement statement =
+      Prepare(session,
+              "SELECT a.id,b.id FROM model_rows a FULL JOIN model_rows b "
+              "ON b.id=a.id+?3 AND a.id<=?1 AND b.id<=?2 "
+              "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL) "
+              "ORDER BY a.id IS NULL,a.id,b.id");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(shift)));
+  for (const ModelRow& left : kRows) {
+    if (left.id > left_count) {
+      continue;
+    }
+    const auto right = std::ranges::find_if(kRows, [&](const ModelRow& row) {
+      return row.id <= right_count && row.id == left.id + shift;
+    });
+    ExpectRowStep(statement);
+    ASSERT_EQ(2U, statement.row().size());
+    ExpectInteger(statement.row()[0], left.id);
+    if (right == kRows.end()) {
+      ExpectNullable(statement.row()[1], std::nullopt);
+    } else {
+      ExpectInteger(statement.row()[1], right->id);
+    }
+  }
+  for (const ModelRow& right : kRows) {
+    if (right.id > right_count) {
+      continue;
+    }
+    const auto left = std::ranges::find_if(kRows, [&](const ModelRow& row) {
+      return row.id <= left_count && row.id + shift == right.id;
+    });
+    if (left != kRows.end()) {
+      continue;
+    }
+    ExpectRowStep(statement);
+    ASSERT_EQ(2U, statement.row().size());
+    ExpectNullable(statement.row()[0], std::nullopt);
+    ExpectInteger(statement.row()[1], right.id);
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 17> templates{
+  constexpr std::array<std::string_view, 18> templates{
       "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
       "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
       "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
       "cross-join",         "joined-aggregate",  "left-join",        "merged-join",
-      "right-join",
+      "right-join",         "full-join",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -1078,6 +1126,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 16:
         RunRightJoinModel(session, words);
+        break;
+      case 17:
+        RunFullJoinModel(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

@@ -882,6 +882,35 @@ TEST(Binder, PublishesRightMergedValuesWithoutChangingUniquePhysicalQualifiers) 
             std::get<BoundColumnExpression>(ResultExpression(duplicate, 0).payload).column);
 }
 
+TEST(Binder, PublishesFullMergedCoalescesWithScopedProvenanceAndDeferredProperties) {
+  const auto catalog = TestCatalog();
+  const BoundSelect bound =
+      BindOrThrow("SELECT id,a.id,b.id FROM Items a FULL JOIN Items b USING(id)", catalog);
+  const auto& merged = std::get<BoundAliasReferenceExpression>(ResultExpression(bound, 0).payload);
+  const BoundExpression& value = bound.expression(merged.target);
+  EXPECT_TRUE(std::holds_alternative<BoundCoalesceExpression>(value.payload));
+  EXPECT_EQ(TypeAffinity::kInteger, value.properties.affinity);
+  EXPECT_EQ(std::nullopt, bound.result_columns()[0].declared_type);
+  EXPECT_EQ(BoundSourceColumnId{0},
+            std::get<BoundColumnExpression>(ResultExpression(bound, 1).payload).column);
+  EXPECT_EQ(BoundSourceColumnId{5},
+            std::get<BoundColumnExpression>(ResultExpression(bound, 2).payload).column);
+  const BoundSelect subgroup = BindOrThrow(
+      "SELECT q.id,c.id FROM Items q FULL JOIN Items q USING(id) FULL JOIN Items c USING(id)",
+      catalog);
+  const auto& scoped = std::get<BoundCoalesceExpression>(ResultExpression(subgroup, 0).payload);
+  ASSERT_EQ(2U, scoped.arguments.size());
+  EXPECT_EQ("q.id", subgroup.result_columns()[0].name);
+  EXPECT_EQ(std::nullopt, subgroup.result_columns()[0].declared_type);
+  EXPECT_EQ(BoundSourceColumnId{10},
+            std::get<BoundColumnExpression>(ResultExpression(subgroup, 1).payload).column);
+  const BoundSelect replaced = BindOrThrow(
+      "SELECT q.id FROM Items q FULL JOIN Items q USING(id) RIGHT JOIN Items q USING(id)", catalog);
+  EXPECT_EQ(BoundSourceColumnId{10},
+            std::get<BoundColumnExpression>(ResultExpression(replaced, 0).payload).column);
+  EXPECT_EQ("INTEGER", replaced.result_columns()[0].declared_type);
+}
+
 TEST(Binder, RejectsForwardOnThroughoutRightCoresWithoutAffectingOtherArms) {
   const auto catalog = TestCatalog();
   for (const std::string_view sql : {
