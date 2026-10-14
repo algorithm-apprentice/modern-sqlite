@@ -885,19 +885,39 @@ foreach(consumer_case IN ITEMS
     natural_left_demand_one
     right_grouping
     natural_right_demand_one)
-  add_test(
-    NAME session.read_session_oom.${consumer_case}
-    COMMAND modern_sqlite_read_session_oom_test
-      --temporary-consumer "${consumer_case}"
-  )
-  set_tests_properties(session.read_session_oom.${consumer_case}
-    PROPERTIES LABELS unit TIMEOUT 10)
+  if(consumer_case STREQUAL "natural_right_demand_one")
+    foreach(partition RANGE 0 3)
+      add_test(
+        NAME session.read_session_oom.${consumer_case}.${partition}
+        COMMAND modern_sqlite_read_session_oom_test
+          --temporary-consumer "${consumer_case}"
+          --allocation-partition "${partition}"
+      )
+      set_tests_properties(session.read_session_oom.${consumer_case}.${partition}
+        PROPERTIES LABELS unit TIMEOUT 10)
+    endforeach()
+  else()
+    add_test(
+      NAME session.read_session_oom.${consumer_case}
+      COMMAND modern_sqlite_read_session_oom_test
+        --temporary-consumer "${consumer_case}"
+    )
+    set_tests_properties(session.read_session_oom.${consumer_case}
+      PROPERTIES LABELS unit TIMEOUT 10)
+  endif()
 endforeach()
 add_test(
   NAME session.read_session_oom.invalid_selector
   COMMAND modern_sqlite_read_session_oom_test --temporary-consumer unknown
 )
 set_tests_properties(session.read_session_oom.invalid_selector
+  PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
+add_test(
+  NAME session.read_session_oom.invalid_partition
+  COMMAND modern_sqlite_read_session_oom_test
+    --temporary-consumer natural_right_demand_one --allocation-partition 4
+)
+set_tests_properties(session.read_session_oom.invalid_partition
   PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
 
 add_executable(

@@ -333,7 +333,10 @@ constexpr std::array<TemporaryConsumerCase, 13> kTemporaryConsumers{
                "WHERE b.id<=?1 UNION SELECT ?2 LIMIT 1"},
 };
 
-[[nodiscard]] int RunTemporaryConsumer(const TemporaryConsumerCase& test_case) {
+inline constexpr std::size_t kAllocationPartitions = 4;
+
+[[nodiscard]] int RunTemporaryConsumer(const TemporaryConsumerCase& test_case,
+                                       std::optional<std::size_t> partition) {
   using namespace modern_sqlite;
   std::cout << "OOM temporary consumer " << test_case.name << ": start\n" << std::flush;
   const ReadSessionOptions options{
@@ -371,7 +374,13 @@ constexpr std::array<TemporaryConsumerCase, 13> kTemporaryConsumers{
   std::cout << "OOM temporary consumer " << test_case.name << ": " << allocations
             << " allocation boundaries\n"
             << std::flush;
-  for (std::size_t failure = 0; failure < allocations; ++failure) {
+  if (partition.has_value()) {
+    std::cout << "OOM temporary consumer " << test_case.name << ": partition " << *partition << '/'
+              << kAllocationPartitions << '\n'
+              << std::flush;
+  }
+  const std::size_t stride = partition.has_value() ? kAllocationPartitions : 1U;
+  for (std::size_t failure = partition.value_or(0U); failure < allocations; failure += stride) {
     auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), options);
     if (!session.has_value()) {
       return failed("injection setup open failed");
@@ -432,8 +441,9 @@ int main(int argc, char** argv) try {
   using namespace modern_sqlite;
 
   if (argc != 1) {
-    if (argc != 3 || std::string_view{argv[1]} != "--temporary-consumer") {
-      std::cerr << "usage: read_session_oom_test [--temporary-consumer NAME]\n";
+    if ((argc != 3 && argc != 5) || std::string_view{argv[1]} != "--temporary-consumer") {
+      std::cerr << "usage: read_session_oom_test "
+                   "[--temporary-consumer NAME [--allocation-partition 0|1|2|3]]\n";
       return 2;
     }
     const auto selected = std::ranges::find(kTemporaryConsumers, std::string_view{argv[2]},
@@ -442,7 +452,17 @@ int main(int argc, char** argv) try {
       std::cerr << "unknown temporary consumer: " << argv[2] << '\n';
       return 2;
     }
-    return RunTemporaryConsumer(*selected);
+    std::optional<std::size_t> partition;
+    if (argc == 5) {
+      const std::string_view number{argv[4]};
+      if (std::string_view{argv[3]} != "--allocation-partition" || number.size() != 1U ||
+          number[0] < '0' || number[0] > '3') {
+        std::cerr << "allocation partition must be one of 0, 1, 2, 3\n";
+        return 2;
+      }
+      partition = static_cast<std::size_t>(number[0] - '0');
+    }
+    return RunTemporaryConsumer(*selected, partition);
   }
 
   const std::vector<char> empty_bytes;
