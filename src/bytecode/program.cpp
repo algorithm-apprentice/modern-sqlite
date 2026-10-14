@@ -1791,13 +1791,14 @@ struct SubroutineAnalysis {
 }
 
 [[nodiscard]] ProgramResult<SubroutineAnalysis> AnalyzeSubroutineGraph(
-    const ProgramInput& input, const ProgramLimits& limits, std::size_t register_words,
-    std::size_t existing_analysis_words) {
+    const ProgramInput& input, const ProgramLimits& limits, std::size_t existing_analysis_words) {
   SubroutineAnalysis result;
   const std::size_t count = input.subroutines.size();
   if (count == 0U) {
     return result;
   }
+  const std::size_t register_words =
+      CeilingDivide(static_cast<std::size_t>(input.register_count), kBitsPerWord);
   const auto main = static_cast<std::uint32_t>(count);
   std::size_t summary_words = 0;
   std::size_t bytes = 0;
@@ -1937,7 +1938,7 @@ struct SubroutineAnalysis {
       !CheckedAdd(state_words, &analysis_words) || analysis_words > limits.maximum_analysis_words) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
-  auto subroutines = AnalyzeSubroutineGraph(input, limits, register_words, analysis_words);
+  auto subroutines = AnalyzeSubroutineGraph(input, limits, analysis_words);
   if (!subroutines) {
     return std::unexpected(subroutines.error());
   }
