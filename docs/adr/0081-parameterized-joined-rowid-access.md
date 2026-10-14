@@ -35,16 +35,27 @@ lookup leaf. Keep declared source order and reuse the canonical bound source
 identity, physical access descriptors, cursor acquisition, and field mapping.
 No syntax, VM instruction, or runtime plan interpreter is added.
 
-Reuse rowid predicate normalization and cost functions. A parameterized key
-must be deterministic and depend only on already positioned earlier sources
-of its core. A reference to the current or a later source cannot become an
-access key. Nonjoined key evaluation remains unchanged.
+Reuse rowid predicate normalization and cost functions. This prerequisite
+admits literal, parameter, declared-column, and rowid values, their transparent
+aliases/collations, and lazy coalesces containing only such values. A key must
+depend only on already positioned earlier sources of its core. A reference
+to the current or a later source cannot become an access key. Nonjoined key
+evaluation remains unchanged.
 
 Prefer an eligible own-ON equality/IS conjunct. WHERE constraints are admitted
 only for non-preserved sources in cores with no RIGHT/FULL boundary; retain
 the existing conservative outer barriers. In particular, a LEFT `WHERE
 right.rowid IS NULL` cannot restrict candidate matching. Retain original ON
 and WHERE predicates after the seek.
+
+Independent native error-phase probes show that determinism alone does not
+permit arbitrary key hoisting. INNER constant guards, source-dependent guards,
+outer ON conditions, and join reordering do not share one error-evaluation
+phase. Computed and function keys therefore retain their existing candidate
+scan in this prerequisite. Do not add a second predicate/guard collection to
+approximate those native phases. A later computed-key admission must establish
+the corresponding evaluation schedule before broadening this value-only
+contract.
 
 ### 2. Position once per logical prefix
 
@@ -62,9 +73,9 @@ the parameterized normal-access key. Their mode-dispatched advance continues
 the replay cursor normally. Both modes enter the same accepted suffix body
 and retain exact matched-ledger and cursor cleanup.
 
-Use one canonical key-evaluation/seek emitter wherever the lowering module
-already performs the same rowid positioning operation. Do not duplicate a
-conversion algorithm or add per-source key caches.
+Use one canonical rowid-key emitter across lowering consumers and the existing
+typed seek. Preserve each consumer's pre-/post-open key-evaluation phase.
+Do not duplicate a conversion algorithm or add per-source key caches.
 
 ### 3. Prove bounded work without a timing detour
 

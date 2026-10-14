@@ -433,9 +433,38 @@ template <typename Bound>
 }
 
 template <typename Bound>
-[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(const Bound& bound_select,
-                                                              const SourceInfo& source,
-                                                              BoundExpressionId predicate) {
+[[nodiscard]] bool ExpressionAvailableBeforeSource(const Bound& bound_select,
+                                                   BoundExpressionId expression,
+                                                   BoundSourceId source) {
+  bool available = ExpressionIsDeterministic(bound_select, expression);
+  auto visitor = [&](BoundSourceId owner) { available = available && owner < source; };
+  return VisitExpressionSources(bound_select, expression, visitor) && available;
+}
+
+template <typename Bound>
+[[nodiscard]] bool IsJoinedLookupValue(const Bound& bound_select, BoundExpressionId id) {
+  id = TransparentRowIdOperandId(bound_select, id);
+  if (!IsValidExpressionId(bound_select, id)) {
+    return false;
+  }
+  const BoundExpression& expression = bound_select.expression(id);
+  if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
+      std::holds_alternative<BoundParameterExpression>(expression.payload) ||
+      std::holds_alternative<BoundColumnExpression>(expression.payload) ||
+      std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
+    return true;
+  }
+  const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+  return coalesce != nullptr &&
+         std::ranges::all_of(coalesce->arguments, [&](BoundExpressionId argument) {
+           return IsJoinedLookupValue(bound_select, argument);
+         });
+}
+
+template <typename Bound>
+[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(
+    const Bound& bound_select, const SourceInfo& source, BoundExpressionId predicate,
+    std::optional<BoundSourceId> available_before = std::nullopt) {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, predicate);
   if (!IsValidExpressionId(bound_select, transparent)) {
     return std::nullopt;
@@ -452,32 +481,23 @@ template <typename Bound>
     return std::nullopt;
   }
   const BoundExpressionId key = left_rowid ? comparison->right : comparison->left;
-  if (ExpressionDependsOnSource(bound_select, key)) {
+  if (available_before.has_value()) {
+    if (!IsJoinedLookupValue(bound_select, key) ||
+        !ExpressionAvailableBeforeSource(bound_select, key, *available_before)) {
+      return std::nullopt;
+    }
+  } else if (ExpressionDependsOnSource(bound_select, key)) {
     return std::nullopt;
   }
   return key;
 }
 
-[[nodiscard]] SourceInfo ResolveSource(const LogicalPlan& logical_plan) {
-  const BoundSelect& bound_select = logical_plan.bound_select();
-  const LogicalNode& source_node = logical_plan.nodes().front();
-  if (std::holds_alternative<LogicalSingleRowNode>(source_node.payload)) {
-    return SourceInfo{
-        .single_row = true,
-        .source_kind = BoundSourceKind::kCatalogTable,
-        .table = std::nullopt,
-        .root_page = RootPageId{},
-        .estimated_rows = 1,
-        .estimated_row_size = 1,
-        .rowid_eligible = false,
-    };
-  }
-
-  const auto& scan = std::get<LogicalScanNode>(source_node.payload);
-  if (scan.source_kind == BoundSourceKind::kSchemaTable) {
+[[nodiscard]] SourceInfo ResolveTableSource(const BoundSelect& bound_select,
+                                            const BoundTableSource& source) {
+  if (source.kind == BoundSourceKind::kSchemaTable) {
     return SourceInfo{
         .single_row = false,
-        .id = scan.source,
+        .id = source.id,
         .source_kind = BoundSourceKind::kSchemaTable,
         .table = std::nullopt,
         .root_page = RootPageId{1},
@@ -487,12 +507,11 @@ template <typename Bound>
     };
   }
 
-  const CatalogSnapshot* catalog = bound_select.catalog();
-  const TableId table_id = scan.table.value_or(TableId{});
-  const CatalogTable& table = catalog->table(table_id);
+  const TableId table_id = source.table.value_or(TableId{});
+  const CatalogTable& table = bound_select.catalog()->table(table_id);
   return SourceInfo{
       .single_row = false,
-      .id = scan.source,
+      .id = source.id,
       .source_kind = BoundSourceKind::kCatalogTable,
       .table = table_id,
       .root_page = table.root_page,
@@ -516,31 +535,11 @@ template <typename Bound>
         .rowid_eligible = false,
     };
   }
-  const BoundTableSource& source = core.table_sources.front();
-  if (source.kind == BoundSourceKind::kSchemaTable) {
-    return SourceInfo{
-        .single_row = false,
-        .id = source.id,
-        .source_kind = BoundSourceKind::kSchemaTable,
-        .table = std::nullopt,
-        .root_page = RootPageId{1},
-        .estimated_rows = kDefaultEstimatedRows,
-        .estimated_row_size = 1,
-        .rowid_eligible = true,
-    };
-  }
-  const TableId table_id = source.table.value_or(TableId{});
-  const CatalogTable& table = bound_select.catalog()->table(table_id);
-  return SourceInfo{
-      .single_row = false,
-      .id = source.id,
-      .source_kind = BoundSourceKind::kCatalogTable,
-      .table = table_id,
-      .root_page = table.root_page,
-      .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
-      .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
-      .rowid_eligible = !table.without_rowid,
-  };
+  return ResolveTableSource(bound_select, core.table_sources.front());
+}
+
+[[nodiscard]] SourceInfo ResolveSource(const LogicalPlan& logical_plan) {
+  return ResolveCoreSource(logical_plan.bound_select(), 0);
 }
 
 [[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalPlan& logical_plan) {
@@ -1212,6 +1211,41 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
       .estimated_output_rows = std::min<std::uint64_t>(rows, 1U),
       .work_units = static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(rows, 1U))),
   };
+}
+
+[[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(const BoundSelect& bound_select,
+                                                                    std::size_t core_index,
+                                                                    BoundSourceId source_id) {
+  const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[core_index]);
+  if (core == nullptr || core->table_sources.size() < 2U) {
+    return std::nullopt;
+  }
+  const auto source = std::ranges::find(core->table_sources, source_id, &BoundTableSource::id);
+  if (source == core->table_sources.end()) {
+    return std::nullopt;
+  }
+  const SourceInfo info = ResolveTableSource(bound_select, *source);
+  if (!info.rowid_eligible ||
+      RowIdCost(info.estimated_rows).work_units >=
+          ScanCost(info.estimated_rows, info.estimated_row_size).work_units) {
+    return std::nullopt;
+  }
+  std::optional<BoundExpressionId> key;
+  auto visitor = [&](BoundExpressionId predicate) {
+    key = RowIdLookupKey(bound_select, info, predicate, source_id);
+    return !key.has_value();
+  };
+  if (source->on.has_value()) {
+    static_cast<void>(VisitConjuncts(bound_select, *source->on, &visitor));
+  }
+  const bool right_core = std::ranges::any_of(
+      core->table_sources,
+      [](const BoundTableSource& item) { return SourceJoinPreservesRight(item.join); });
+  if (!key.has_value() && !SourceJoinPreservesLeft(source->join) && !right_core &&
+      core->where.has_value()) {
+    static_cast<void>(VisitConjuncts(bound_select, *core->where, &visitor));
+  }
+  return key;
 }
 
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
@@ -2479,17 +2513,23 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
                      value->root_page == aggregate.source.root_page &&
                      value->direction == aggregate.direction;
             }
-            const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
-            if (value == nullptr || value->core_index != node.core_index ||
-                value->source != node.source || value->source_kind != node.source_kind ||
-                value->table != node.table) {
-              return false;
-            }
             const RootPageId expected_root =
                 node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()
                     ? logical_plan.bound_select().catalog()->table(*node.table).root_page
                     : RootPageId{1};
-            return value->root_page == expected_root &&
+            if (const auto key =
+                    JoinedRowIdLookupKey(logical_plan.bound_select(), node.core_index, node.source);
+                key.has_value()) {
+              const auto* value = std::get_if<PhysicalRowIdLookupNode>(&physical);
+              return value != nullptr && value->core_index == node.core_index &&
+                     value->source == node.source && value->source_kind == node.source_kind &&
+                     value->table == node.table && value->root_page == expected_root &&
+                     value->key == *key;
+            }
+            const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
+            return value != nullptr && value->core_index == node.core_index &&
+                   value->source == node.source && value->source_kind == node.source_kind &&
+                   value->table == node.table && value->root_page == expected_root &&
                    value->direction == PhysicalScanDirection::kForward;
           } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
             const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
@@ -3299,6 +3339,18 @@ class PhysicalPlanBuilder final {
               if (node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()) {
                 root_page =
                     impl->logical_plan.bound_select().catalog()->table(*node.table).root_page;
+              }
+              if (const auto key = JoinedRowIdLookupKey(impl->logical_plan.bound_select(),
+                                                        node.core_index, node.source);
+                  key.has_value()) {
+                return PhysicalRowIdLookupNode{
+                    .core_index = node.core_index,
+                    .source = node.source,
+                    .source_kind = node.source_kind,
+                    .table = node.table,
+                    .root_page = root_page,
+                    .key = *key,
+                };
               }
               return PhysicalTableScanNode{
                   .core_index = node.core_index,

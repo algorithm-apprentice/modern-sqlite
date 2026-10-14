@@ -681,7 +681,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   struct JoinedSourcePlan {
-    const PhysicalTableScanNode* scan = nullptr;
+    const PhysicalNode* access = nullptr;
+    BoundSourceId source{0};
     std::optional<CursorId> cursor{};
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::optional<RegisterId> matched{};
@@ -733,6 +734,26 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::vector<BoundExpressionId> grouped_retained_leaves{};
     bool global_filtered_controller_defaults = false;
   };
+
+  [[nodiscard]] LoweringResult<bool> InspectJoinedAccess(const PhysicalNode& access,
+                                                         std::size_t core_index,
+                                                         BoundSourceId source) {
+    if (core_index >= streaming_cores_.size()) {
+      return std::unexpected(InternalFailure("streaming source core is invalid"));
+    }
+    StreamingCorePlan& core = streaming_cores_[core_index];
+    const auto* select = std::get_if<BoundSelectCore>(core.bound);
+    if (select == nullptr || select->table_sources.size() < 2U) {
+      return false;
+    }
+    const std::size_t source_index = core.joined_sources.size();
+    if (source_index >= select->table_sources.size() ||
+        source != select->table_sources[source_index].id) {
+      return std::unexpected(InternalFailure("join access does not match declared sources"));
+    }
+    core.joined_sources.push_back(JoinedSourcePlan{.access = &access, .source = source});
+    return true;
+  }
 
   enum class SelectOutputMode : std::uint8_t {
     Streaming,
@@ -821,19 +842,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         node_cores[index] = single->core_index;
       } else if (const auto* scan = std::get_if<PhysicalTableScanNode>(&physical.payload);
                  scan != nullptr) {
-        if (scan->core_index >= streaming_cores_.size()) {
-          return std::unexpected(InternalFailure("streaming table core is invalid"));
+        auto joined = InspectJoinedAccess(physical, scan->core_index, scan->source);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
         }
         StreamingCorePlan& core = streaming_cores_[scan->core_index];
-        const auto* select = std::get_if<BoundSelectCore>(core.bound);
-        if (select != nullptr && select->table_sources.size() > 1U) {
-          const std::size_t source_index = core.joined_sources.size();
-          if (source_index >= select->table_sources.size() ||
-              scan->source != select->table_sources[source_index].id) {
-            return std::unexpected(InternalFailure("join scans do not match declared sources"));
-          }
-          core.joined_sources.push_back(JoinedSourcePlan{.scan = scan});
-        } else {
+        if (!*joined) {
           if (has_access(core)) {
             return std::unexpected(InternalFailure("streaming core has duplicate access"));
           }
@@ -861,12 +875,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         node_cores[index] = join->core_index;
       } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&physical.payload);
                  lookup != nullptr) {
-        if (lookup->core_index >= streaming_cores_.size() ||
-            has_access(streaming_cores_[lookup->core_index])) {
-          return std::unexpected(InternalFailure("streaming rowid core is invalid"));
+        auto joined = InspectJoinedAccess(physical, lookup->core_index, lookup->source);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
         }
-        streaming_cores_[lookup->core_index].leaf = &physical;
-        streaming_cores_[lookup->core_index].rowid_lookup = lookup;
+        StreamingCorePlan& core = streaming_cores_[lookup->core_index];
+        if (!*joined) {
+          if (has_access(core)) {
+            return std::unexpected(InternalFailure("streaming rowid core is invalid"));
+          }
+          core.leaf = &physical;
+          core.rowid_lookup = lookup;
+        }
         node_cores[index] = lookup->core_index;
         streaming_requires_snapshot_ = true;
       } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&physical.payload);
@@ -3418,10 +3438,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
             JoinedSourcePlan& joined = core.joined_sources[index];
             const BoundTableSource& source = select->table_sources[index];
-            table_scan_ = joined.scan;
-            rowid_lookup_ = nullptr;
+            if (joined.access == nullptr) {
+              return std::unexpected(InternalFailure("joined source has no access leaf"));
+            }
+            table_scan_ = std::get_if<PhysicalTableScanNode>(&joined.access->payload);
+            rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&joined.access->payload);
             index_scan_ = nullptr;
-            leaf_ = nullptr;
+            leaf_ = joined.access;
             active_source_column_begin_ = source.source_column_begin;
             active_source_column_count_ = source.source_column_count;
             if (auto added = AddCursorDescriptor(); !added.has_value()) {
@@ -6962,6 +6985,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<RegisterId> EmitRowIdLookupKey(
+      BoundExpressionId expression) override {
+    const RegisterId key = Home(expression);
+    if (auto emitted = EmitExpression(expression, key); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+    return key;
+  }
+
   [[nodiscard]] LoweringResult<void> EmitRowIdLookup(const PhysicalRowIdLookupNode& lookup) {
     if (!cursor_.has_value()) {
       return std::unexpected(InternalFailure("rowid lookup has no cursor"));
@@ -6985,9 +7017,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return opened;
     }
 
-    const RegisterId key = Home(lookup.key);
-    if (auto emitted = EmitExpression(lookup.key, key); !emitted.has_value()) {
-      return emitted;
+    auto key = EmitRowIdLookupKey(lookup.key);
+    if (!key.has_value()) {
+      return std::unexpected(std::move(key.error()));
     }
     auto missing = CreateLabel();
     auto positioned = CreateLabel();
@@ -6998,7 +7030,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(positioned.error()));
     }
     auto sought = ConvertProgramResult(
-        AssumeValue(builder_).EmitSeekRowId(AssumeValue(cursor_), key, AssumeValue(missing)),
+        AssumeValue(builder_).EmitSeekRowId(AssumeValue(cursor_), *key, AssumeValue(missing)),
         "unable to emit rowid seek");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
@@ -8750,9 +8782,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
       std::optional<Label> stopped, std::span<const RightJoinContinuation> replays) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
-    if (source.scan == nullptr || !source.cursor.has_value()) {
+    if (source.access == nullptr || !source.cursor.has_value()) {
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
     }
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
     const bool has_inner = depth + 1U < core.joined_sources.size();
     const bool left = source.join != nullptr && SourceJoinPreservesLeft(source.join->join);
     const bool right = source.join != nullptr && SourceJoinPreservesRight(source.join->join);
@@ -8764,11 +8797,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const bool has_on =
         std::ranges::any_of(core.joined_sources, [&](const JoinedSourcePlan& candidate) {
           return candidate.join != nullptr && candidate.join->on.has_value() &&
-                 candidate.join->condition_source == source.scan->source;
+                 candidate.join->condition_source == source.source;
         });
-    const bool has_predicate =
-        core.filter != nullptr &&
-        std::ranges::contains(core.filter->predicate_sources, source.scan->source);
+    const bool has_predicate = core.filter != nullptr &&
+                               std::ranges::contains(core.filter->predicate_sources, source.source);
     const bool can_advance = right || has_inner || has_predicate || has_on || !always_stops;
     auto row = CreateLabel();
     auto done = CreateLabel();
@@ -8812,10 +8844,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       advance = *label;
     }
     const CursorId cursor = *source.cursor;
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                        "unable to position joined source");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
+    if (lookup != nullptr) {
+      auto key = EmitRowIdLookupKey(lookup->key);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      auto sought = ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(cursor, *key, *done),
+                                         "unable to position joined rowid lookup");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
+    } else {
+      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                          "unable to position joined source");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
     }
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
@@ -8860,7 +8904,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (candidate.join != nullptr && !SourceJoinPreservesLeft(candidate.join->join) &&
           !SourceJoinPreservesRight(candidate.join->join)) {
         const auto& condition = candidate.join->on;
-        if (condition.has_value() && candidate.join->condition_source == source.scan->source) {
+        if (condition.has_value() && candidate.join->condition_source == source.source) {
           if (auto on = EmitPredicate(*condition, advance.value_or(*done)); !on.has_value()) {
             return on;
           }
@@ -8869,7 +8913,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (core.filter != nullptr) {
       for (std::size_t index = 0; index < core.filter->predicates.size(); ++index) {
-        if (core.filter->predicate_sources[index] == source.scan->source) {
+        if (core.filter->predicate_sources[index] == source.source) {
           if (auto filtered =
                   EmitPredicate(core.filter->predicates[index], advance.value_or(*done));
               !filtered.has_value()) {
@@ -8912,10 +8956,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return bound;
         }
       }
-      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                       "unable to advance joined source");
-      if (!next.has_value()) {
-        return std::unexpected(std::move(next.error()));
+      if (lookup != nullptr) {
+        if (auto cleared = Append(NullRowInstruction{.cursor = cursor, .enabled = false});
+            !cleared.has_value()) {
+          return cleared;
+        }
+        if (auto finished = EmitJump(*done); !finished.has_value()) {
+          return finished;
+        }
+      } else {
+        auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+                                         "unable to advance joined source");
+        if (!next.has_value()) {
+          return std::unexpected(std::move(next.error()));
+        }
       }
     }
     if (auto bound = BindLabel(*done); !bound.has_value()) {

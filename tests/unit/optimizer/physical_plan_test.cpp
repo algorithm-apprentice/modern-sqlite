@@ -869,6 +869,62 @@ TEST(PhysicalPlan, PlansJoinedAggregationWithoutClaimingFirstSourceAccessOrOrder
   EXPECT_TRUE(grouped.candidates().empty());
 }
 
+TEST(PhysicalPlan, SelectsSourceOwnedRowidSeeksForAlreadyPositionedJoinPrefixes) {
+  for (const std::string_view operation : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(operation);
+    const PhysicalPlan plan = OptimizeOrThrow(
+        "SELECT a.id,b.id FROM Items a " + std::string{operation} + " Items b ON b.id=a.id",
+        TestCatalog());
+    ASSERT_GE(plan.nodes().size(), 2U);
+    EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&plan.nodes()[1].payload);
+    ASSERT_NE(nullptr, lookup);
+    EXPECT_EQ(BoundSourceId{1}, lookup->source);
+    EXPECT_EQ(TableId{0}, lookup->table);
+    const BoundSelect& bound = plan.logical_plan().bound_select();
+    const auto& key = std::get<BoundColumnExpression>(bound.expression(lookup->key).payload);
+    EXPECT_EQ(BoundSourceId{0}, bound.source_columns()[key.column.value()].source);
+  }
+}
+
+TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers) {
+  struct Case {
+    std::string_view sql;
+    std::vector<BoundSourceId> lookups;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON b.Name=a.Name "
+                  "WHERE b.id IS NULL",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON 1 WHERE a.id=1",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=c.id "
+                  "LEFT JOIN Items c ON c.id=a.id",
+           .lookups = {BoundSourceId{2}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON +b.id=a.id", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=b.Value", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=abs(a.id)", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.key FROM Items a JOIN wr b ON b.key=a.id", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                  "WHERE a.id=2 AND b.id=a.id",
+           .lookups = {BoundSourceId{0}, BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON b.id=a.id WHERE a.id=2",
+           .lookups = {BoundSourceId{1}}},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test_case.sql, TestCatalog());
+    std::vector<BoundSourceId> lookups;
+    for (const PhysicalNode& node : plan.nodes()) {
+      if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+          lookup != nullptr) {
+        lookups.push_back(lookup->source);
+      }
+    }
+    EXPECT_EQ(test_case.lookups, lookups);
+  }
+}
+
 TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "

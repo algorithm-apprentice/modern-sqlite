@@ -1186,6 +1186,30 @@ TEST_F(ReadLoweringJoin, EvaluatesFullOnOnceAndNeverMarksVirtualRightRows) {
   EXPECT_EQ(3U, right_only);
 }
 
+TEST_F(ReadLoweringJoin, KeepsComputedJoinKeysInTheirExistingCandidatePhase) {
+  const auto rows = Execute(
+      "SELECT count() FROM items a JOIN items b ON 0 "
+      "AND b.id=abs(a.id-a.id-9223372036854775807-1)");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_THROW(static_cast<void>(Execute("SELECT count() FROM items a JOIN items b ON a.id<0 "
+                                         "AND b.id=abs(a.id-a.id-9223372036854775807-1)")),
+               std::runtime_error);
+}
+
+TEST_F(ReadLoweringJoin, KeepsNondeterministicJoinKeysInTheirPhysicalCandidatePhase) {
+  const CustomEnvironment custom;
+  for (const std::string_view key : {"trace_argument(a.id)", "trace_argument(2)"}) {
+    SCOPED_TRACE(key);
+    callback_trace.clear();
+    const auto rows =
+        Execute("SELECT a.id,b.id FROM items a JOIN items b ON b.id=" + std::string{key},
+                custom.Binder(), custom.Vm());
+    EXPECT_EQ(3U, rows.size());
+    EXPECT_EQ(9U, std::ranges::count(callback_trace, "argument"));
+  }
+}
+
 TEST_F(ReadLoweringJoin, PreservesMergedScopesAcrossGroupingSetsAndValuesCores) {
   const auto grouped = Execute(
       "SELECT id,count(),count(b.id) FROM items a LEFT JOIN items b USING(id) "
