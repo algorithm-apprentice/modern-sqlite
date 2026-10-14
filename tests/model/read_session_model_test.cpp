@@ -867,14 +867,47 @@ void RunJoinedModel(ReadSession& session, const std::array<std::uint64_t, 4>& wo
   RequireStatus(statement.Finalize());
 }
 
+void RunJoinedAggregateModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto left_count = static_cast<std::int64_t>(words[0] % 6U);
+  const auto right_count = static_cast<std::int64_t>(words[1] % 6U);
+  const auto having_floor = static_cast<std::int64_t>(words[2] % 4U);
+  ReadStatement statement =
+      Prepare(session,
+              "SELECT b.id,count(),sum(a.value),max(a.oid),b._rowid_ "
+              "FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=?1 AND b.id<=?2 "
+              "GROUP BY b.id HAVING count()>?3 ORDER BY b.id DESC");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(having_floor)));
+  std::int64_t sum = 0;
+  for (const ModelRow& row : kRows) {
+    if (row.id <= left_count) {
+      sum += row.value;
+    }
+  }
+  if (left_count > having_floor) {
+    for (std::int64_t right_id = right_count; right_id > 0; --right_id) {
+      ExpectRowStep(statement);
+      ASSERT_EQ(5U, statement.row().size());
+      ExpectInteger(statement.row()[0], right_id);
+      ExpectInteger(statement.row()[1], left_count);
+      ExpectInteger(statement.row()[2], sum);
+      ExpectInteger(statement.row()[3], left_count);
+      ExpectInteger(statement.row()[4], right_id);
+    }
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 13> templates{
+  constexpr std::array<std::string_view, 14> templates{
       "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
       "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
       "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
-      "cross-join",
+      "cross-join",         "joined-aggregate",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -920,6 +953,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 12:
         RunJoinedModel(session, words);
+        break;
+      case 13:
+        RunJoinedAggregateModel(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

@@ -2016,11 +2016,6 @@ class StatementBinder final {
       return std::unexpected(std::move(aggregate.error()));
     }
     if (aggregate->has_value()) {
-      if (impl_->table_sources.size() > 1U) {
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature,
-                                           impl_->table_sources.front().span,
-                                           "aggregates over multiple sources are not supported"));
-      }
       BindExpected<void> analyzed = AnalyzeAggregateLeaves(**aggregate);
       if (!analyzed.has_value()) {
         return analyzed;

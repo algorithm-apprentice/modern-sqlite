@@ -78,3 +78,4 @@ their corresponding implementation begins.
 72. [ADR-0072: Explicit Bound Source Identities](0072-explicit-bound-source-identities.md)
 73. [ADR-0073: Comma and CROSS Join Execution](0073-comma-and-cross-join-execution.md)
 74. [ADR-0074: Bounded Write Contract CI Execution](0074-bounded-write-contract-ci-execution.md)
+75. [ADR-0075: Joined Aggregate Consumer Integration](0075-joined-aggregate-consumer-integration.md)

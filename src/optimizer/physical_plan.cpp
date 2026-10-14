@@ -1440,6 +1440,7 @@ struct AggregateGroupingChoice {
 };
 
 struct AggregateCorePlan {
+  bool joined = false;
   SourceInfo source{};
   ReadPredicateAnalysis predicates{};
   std::vector<ReadAccessCandidate> access_candidates{};
@@ -1636,6 +1637,19 @@ struct AggregateCorePlan {
                                              const SourceInfo& source,
                                              const BoundGroupingTerm& group_term,
                                              const ReadAccessCandidate& candidate);
+
+void ConfigureSortedGrouping(const BoundAggregateProgram& aggregate, AggregateCorePlan& plan) {
+  plan.strategy = PhysicalAggregateStrategy::kSortedGroup;
+  plan.grouping_order.clear();
+  plan.grouping_order.reserve(aggregate.group_by.size());
+  for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
+    plan.grouping_order.push_back(PhysicalGroupingOrderTerm{
+        .group_term_index = static_cast<std::uint32_t>(term),
+        .order = SortOrder::kAscending,
+        .null_placement = BoundNullPlacement::kFirst,
+    });
+  }
+}
 
 void ConfigureAggregateOrder(const BoundSelect& bound_select,
                              const BoundAggregateProgram& aggregate, AggregateCorePlan* plan) {
@@ -1959,10 +1973,20 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 [[nodiscard]] AggregateCorePlan BuildAggregateCorePlan(const BoundSelect& bound_select,
                                                        std::size_t core_index) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
-  const BoundAggregateProgram& aggregate = *core.aggregate;
-  AggregateCorePlan plan{
-      .source = ResolveCoreSource(bound_select, core_index),
-  };
+  const BoundAggregateProgram& aggregate = AssumePresent(core.aggregate);
+  AggregateCorePlan plan;
+  if (core.table_sources.size() > 1U) {
+    plan.joined = true;
+    if (aggregate.group_by.empty()) {
+      plan.strategy = PhysicalAggregateStrategy::kGlobal;
+    } else {
+      ConfigureSortedGrouping(aggregate, plan);
+    }
+    plan.at_most_one_row = aggregate.group_by.empty();
+    ConfigureAggregateOrder(bound_select, aggregate, &plan);
+    return plan;
+  }
+  plan.source = ResolveCoreSource(bound_select, core_index);
   plan.predicates = AnalyzeReadPredicate(bound_select, plan.source, core.where);
   if (plan.predicates.empty) {
     plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
@@ -2055,8 +2079,9 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
     }
     if (selected_ordered.has_value()) {
       plan.strategy = PhysicalAggregateStrategy::kIndexedMinMax;
-      plan.min_max = min_max->plan;
-      plan.direction = min_max->direction;
+      const AggregateMinMaxChoice& selected_min_max = AssumePresent(min_max);
+      plan.min_max = selected_min_max.plan;
+      plan.direction = selected_min_max.direction;
       plan.at_most_one_row = true;
     } else {
       plan.strategy = PhysicalAggregateStrategy::kGlobal;
@@ -2078,20 +2103,16 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
       }
     }
     if (selected_ordered.has_value()) {
-      plan.strategy = PhysicalAggregateStrategy::kOrderedGroup;
-      plan.grouping_order = std::move(grouping->order);
-      plan.direction = grouping->direction;
-      plan.at_most_one_row = grouping->at_most_one_row;
-    } else {
-      plan.strategy = PhysicalAggregateStrategy::kSortedGroup;
-      plan.grouping_order.reserve(aggregate.group_by.size());
-      for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
-        plan.grouping_order.push_back(PhysicalGroupingOrderTerm{
-            .group_term_index = static_cast<std::uint32_t>(term),
-            .order = SortOrder::kAscending,
-            .null_placement = BoundNullPlacement::kFirst,
-        });
+      if (!grouping.has_value()) {
+        std::terminate();
       }
+      AggregateGroupingChoice& selected_grouping = *grouping;
+      plan.strategy = PhysicalAggregateStrategy::kOrderedGroup;
+      plan.grouping_order = std::move(selected_grouping.order);
+      plan.direction = selected_grouping.direction;
+      plan.at_most_one_row = selected_grouping.at_most_one_row;
+    } else {
+      ConfigureSortedGrouping(aggregate, plan);
     }
   }
 
@@ -2356,7 +2377,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
       aggregate_plans[core] = BuildAggregateCorePlan(logical_plan.bound_select(), core);
     }
   }
-  if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value()) {
+  if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value() &&
+      !AssumePresent(aggregate_plans.front()).joined) {
     const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans.front());
     std::vector<AccessPathCandidate> expected;
     if (aggregate.predicates.empty) {
@@ -2420,7 +2442,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
             const auto* value = std::get_if<PhysicalSingleRowNode>(&physical);
             return value != nullptr && value->core_index == node.core_index;
           } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
-            if (aggregate_plans[node.core_index].has_value()) {
+            if (aggregate_plans[node.core_index].has_value() &&
+                !aggregate_plans[node.core_index]->joined) {
               const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
               if (aggregate.predicates.empty) {
                 return std::holds_alternative<PhysicalEmptyNode>(physical);
@@ -2490,7 +2513,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
             } else if (const auto* join = std::get_if<LogicalJoinNode>(&source); join != nullptr) {
               core_index = join->core_index;
             }
-            if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
+            if (core_index.has_value() && aggregate_plans[*core_index].has_value() &&
+                !aggregate_plans[*core_index]->joined) {
               const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
               return value->predicates == aggregate.residuals &&
                      value->guards == aggregate.predicates.guards &&
@@ -3223,7 +3247,8 @@ class PhysicalPlanBuilder final {
               }
               return PhysicalSingleRowNode{.core_index = node.core_index};
             } else if constexpr (std::is_same_v<Node, LogicalScanNode>) {
-              if (aggregate_plans[node.core_index].has_value()) {
+              if (aggregate_plans[node.core_index].has_value() &&
+                  !aggregate_plans[node.core_index]->joined) {
                 const AggregateCorePlan& aggregate =
                     AssumePresent(aggregate_plans[node.core_index]);
                 if (aggregate.predicates.empty) {
@@ -3292,7 +3317,8 @@ class PhysicalPlanBuilder final {
                          join != nullptr) {
                 core_index = join->core_index;
               }
-              if (core_index.has_value() && aggregate_plans[*core_index].has_value()) {
+              if (core_index.has_value() && aggregate_plans[*core_index].has_value() &&
+                  !aggregate_plans[*core_index]->joined) {
                 const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[*core_index]);
                 return PhysicalFilterNode{
                     .input = mapped[node.input.value()],
@@ -3422,7 +3448,8 @@ class PhysicalPlanBuilder final {
     }
 
     impl->root = mapped[impl->logical_plan.root().value()];
-    if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value()) {
+    if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value() &&
+        !AssumePresent(aggregate_plans.front()).joined) {
       const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans.front());
       if (aggregate.predicates.empty) {
         impl->candidates.push_back(AccessPathCandidate{

@@ -427,7 +427,7 @@ int main() try {
       PhysicalFixture(catalog,
                       "SELECT count() FROM Items UNION ALL SELECT sum(id) FROM Items ORDER BY 1"),
   };
-  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{79U, 85U};
+  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{77U, 82U};
   for (std::size_t plan_index = 0; plan_index < aggregate_integration_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
       allocation_count.store(0, std::memory_order_relaxed);

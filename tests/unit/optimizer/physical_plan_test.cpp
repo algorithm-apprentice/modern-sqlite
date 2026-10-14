@@ -854,6 +854,21 @@ TEST(PhysicalPlan, PublishesDeclaredJoinOrderAndEarliestReadyPredicateOwners) {
       ExplainPhysicalPlan(plan));
 }
 
+TEST(PhysicalPlan, PlansJoinedAggregationWithoutClaimingFirstSourceAccessOrOrder) {
+  const PhysicalPlan global = OptimizeOrThrow(
+      "SELECT min(a.id),count() FROM Items a CROSS JOIN Items b ORDER BY 1", TestCatalog());
+  EXPECT_EQ(PhysicalAggregateStrategy::kGlobal, AggregateNode(global).strategy);
+  EXPECT_TRUE(AggregateNode(global).at_most_one_row);
+  EXPECT_FALSE(AggregateNode(global).min_max.has_value());
+  EXPECT_TRUE(global.candidates().empty());
+  const PhysicalPlan grouped = OptimizeOrThrow(
+      "SELECT b.id,count() FROM Items a CROSS JOIN Items b GROUP BY b.id ORDER BY b.id",
+      TestCatalog());
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(grouped).strategy);
+  EXPECT_FALSE(AggregateNode(grouped).at_most_one_row);
+  EXPECT_TRUE(grouped.candidates().empty());
+}
+
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());

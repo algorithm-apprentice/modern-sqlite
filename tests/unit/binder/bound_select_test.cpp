@@ -723,9 +723,11 @@ TEST(Binder, RejectsJoinedAmbiguityBeforeAliasBooleanOrDqsFallback) {
                            ->bytes());
   const auto aggregate = BindSelectStatement(
       ParseTree("SELECT count() FROM Items a CROSS JOIN Items b"), TestCatalog());
-  ASSERT_FALSE(aggregate.has_value());
-  EXPECT_EQ(BindErrorCode::kUnsupportedFeature, aggregate.error().code);
-  EXPECT_EQ("aggregates over multiple sources are not supported", aggregate.error().detail);
+  ASSERT_TRUE(aggregate.has_value());
+  const auto& core = std::get<BoundSelectCore>(aggregate->query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  EXPECT_EQ(2U, core.table_sources.size());
+  EXPECT_EQ(1U, core.aggregate->invocations.size());
 }
 
 TEST(Binder, ResolvesGeneratedWildcardColumnsAndRejectsDuplicateQualifierAmbiguity) {

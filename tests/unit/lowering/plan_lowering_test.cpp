@@ -915,6 +915,116 @@ TEST_F(ReadLoweringJoin, EmitsThreeOwnedSourcesWithoutRowIdOrFieldAliasing) {
   }
 }
 
+TEST_F(ReadLoweringJoin, RetainsSeparateRowIdsAndPrimaryKeyAliasesForJoinedRepresentatives) {
+  const auto global = Execute(
+      "SELECT a.id,a._rowid_,b.id,b._rowid_,max(b.id*10-a.id) "
+      "FROM items a CROSS JOIN items b");
+  ASSERT_EQ(1U, global.size());
+  const std::array<std::int64_t, 5> expected{1, 1, 3, 3, 29};
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(expected[index], global[0][index].integer_value());
+  }
+  const auto grouped = Execute(
+      "SELECT a.id,a._rowid_,b.id,b._rowid_,max(a.id) "
+      "FROM items a CROSS JOIN items b GROUP BY b.id ORDER BY b.id");
+  ASSERT_EQ(3U, grouped.size());
+  for (std::size_t index = 0; index < grouped.size(); ++index) {
+    EXPECT_EQ(3, grouped[index][0].integer_value());
+    EXPECT_EQ(3, grouped[index][1].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), grouped[index][2].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), grouped[index][3].integer_value());
+    EXPECT_EQ(3, grouped[index][4].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringJoin, FinalizesEmptyJoinedGlobalsButProducesNoEmptyGroups) {
+  const auto empty = Execute(
+      "SELECT count(),sum(a.id),total(b.id),min(a.id) "
+      "FROM items a CROSS JOIN items b WHERE a.id>99");
+  ASSERT_EQ(1U, empty.size());
+  EXPECT_EQ(0, empty[0][0].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, empty[0][1].type());
+  EXPECT_EQ(0.0, empty[0][2].real_value());
+  EXPECT_EQ(SqlValueType::kNull, empty[0][3].type());
+  EXPECT_TRUE(Execute("SELECT b.id,count() FROM items a CROSS JOIN items b WHERE 0 "
+                      "GROUP BY b.id ORDER BY b.id")
+                  .empty());
+  const auto rejected = Execute("SELECT count() FROM items a CROSS JOIN items b WHERE 0");
+  ASSERT_EQ(1U, rejected.size());
+  EXPECT_EQ(0, rejected[0][0].integer_value());
+}
+
+TEST_F(ReadLoweringJoin, ReusesJoinedModifierGroupingAndCompletedRowConsumers) {
+  const auto rows = Execute(
+      "SELECT b.id,count(DISTINCT a.id) FILTER (WHERE a.id>1),"
+      "group_concat(a.id ORDER BY a.id DESC) "
+      "FROM items a CROSS JOIN items b GROUP BY b.id HAVING count()>1 "
+      "ORDER BY b.id DESC LIMIT 2 OFFSET 1");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(2, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  for (const auto& row : rows) {
+    EXPECT_EQ(2, row[1].integer_value());
+    EXPECT_EQ("3,2,1", TextBytes(row[2]));
+  }
+}
+
+TEST_F(ReadLoweringJoin, RoutesJoinedAggregateSetAndDemandOneArmsThroughTheirLifecycle) {
+  for (const std::string_view sql : {
+           "SELECT count() FROM items a CROSS JOIN items b UNION SELECT 99 ORDER BY 1",
+           "SELECT 99 UNION SELECT count() FROM items a CROSS JOIN items b ORDER BY 1",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rows = Execute(sql);
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(9, rows[0][0].integer_value());
+    EXPECT_EQ(99, rows[1][0].integer_value());
+  }
+  const auto grouped = Execute(
+      "SELECT a.id FROM items a CROSS JOIN items b GROUP BY a.id "
+      "UNION SELECT 99 ORDER BY 1");
+  ASSERT_EQ(4U, grouped.size());
+  const CustomEnvironment custom;
+  callback_count = 0;
+  for (const std::string_view sql : {
+           "SELECT count() FROM items a CROSS JOIN items b UNION SELECT failing() LIMIT 1",
+           "SELECT max(a.id) FROM items a CROSS JOIN items b GROUP BY b.id "
+           "UNION SELECT failing() LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rows = Execute(sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(1U, rows.size());
+  }
+  const auto reverse =
+      Execute("SELECT 99 UNION SELECT count() FROM items a CROSS JOIN items b LIMIT 1");
+  ASSERT_EQ(1U, reverse.size());
+  EXPECT_EQ(99, reverse[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, KeepsAggregateFiltersAndOrderingAtCompleteJoinedRowPhase) {
+  const CustomEnvironment custom;
+  callback_trace.clear();
+  const auto rows = Execute(
+      "SELECT group_concat(trace_argument(a.id) ORDER BY trace_key(b.id)) "
+      "FILTER (WHERE trace_filter(a.id)>1) FROM items a CROSS JOIN items b",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(9U, std::ranges::count(callback_trace, "filter"));
+  EXPECT_EQ(6U, std::ranges::count(callback_trace, "argument"));
+  EXPECT_EQ(6U, std::ranges::count(callback_trace, "key"));
+  callback_count = 0;
+  EXPECT_TRUE(
+      Execute("SELECT count(failing()) FROM items a CROSS JOIN items b LIMIT 0 OFFSET failing()",
+              custom.Binder(), custom.Vm())
+          .empty());
+  const auto empty = Execute("SELECT count(failing()) FROM items a CROSS JOIN items b WHERE 0",
+                             custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, empty.size());
+  EXPECT_EQ(0, empty[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
+}
+
 TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
   EXPECT_EQ("invalid_input", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInvalidInput));
   EXPECT_EQ("unsupported_plan", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kUnsupportedPlan));

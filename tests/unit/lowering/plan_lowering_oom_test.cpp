@@ -451,7 +451,7 @@ int main() try {
       DistinctFixture(catalog,
                       "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
   };
-  const std::array<PhysicalPlan, 4> joined_plans{
+  const std::array<PhysicalPlan, 7> joined_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
                       "WHERE a.id>?1 AND b.id>?2 LIMIT ?3 OFFSET ?4"),
@@ -462,6 +462,15 @@ int main() try {
       DistinctFixture(catalog,
                       "SELECT a.Name FROM Items a CROSS JOIN Items b "
                       "UNION SELECT ?1 LIMIT 1"),
+      AggregateFixture(catalog,
+                       "SELECT a.id,a._rowid_,b.id,b._rowid_,max(b.id-a.id) "
+                       "FROM Items a CROSS JOIN Items b"),
+      AggregateFixture(catalog,
+                       "SELECT b.id,group_concat(a.Name ORDER BY a.id) "
+                       "FROM Items a CROSS JOIN Items b GROUP BY b.id ORDER BY 1"),
+      AggregateFixture(catalog,
+                       "SELECT count() FROM Items a CROSS JOIN Items b "
+                       "UNION SELECT count() FROM Items LIMIT 1"),
   };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
@@ -528,10 +537,10 @@ int main() try {
     if (!verify_oom(aggregate_plan, 256U)) {
       return 1;
     }
-    for (const PhysicalPlan& joined_plan : joined_plans) {
-      if (!verify_oom(joined_plan, 256U)) {
-        return 1;
-      }
+  }
+  for (const PhysicalPlan& joined_plan : joined_plans) {
+    if (!verify_oom(joined_plan, 256U)) {
+      return 1;
     }
   }
 
