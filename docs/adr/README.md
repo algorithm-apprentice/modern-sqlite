@@ -80,3 +80,4 @@ their corresponding implementation begins.
 74. [ADR-0074: Bounded Write Contract CI Execution](0074-bounded-write-contract-ci-execution.md)
 75. [ADR-0075: Joined Aggregate Consumer Integration](0075-joined-aggregate-consumer-integration.md)
 76. [ADR-0076: Typed NULL-Row Cursor Publication](0076-typed-null-row-cursor-publication.md)
+77. [ADR-0077: INNER and LEFT Join Execution](0077-inner-and-left-join-execution.md)
