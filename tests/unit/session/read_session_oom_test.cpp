@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -5,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <new>
@@ -270,6 +272,143 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
   return error.code() == modern_sqlite::ErrorCode::kOutOfMemory;
 }
 
+struct TemporaryConsumerCase {
+  std::string_view name;
+  std::string_view sql;
+};
+
+constexpr std::array<TemporaryConsumerCase, 13> kTemporaryConsumers{
+    TemporaryConsumerCase{.name = "aggregate_union_all",
+                          .sql =
+                              "SELECT count() FROM model_rows WHERE id<=?1 "
+                              "UNION ALL SELECT sum(id) FROM model_rows WHERE id<=?2 ORDER BY 1"},
+    TemporaryConsumerCase{.name = "aggregate_demand_one",
+                          .sql = "SELECT count(value) FROM model_rows WHERE id<=?1 GROUP BY id "
+                                 "UNION SELECT sum(id) FROM model_rows WHERE id<=?2 LIMIT 1"},
+    TemporaryConsumerCase{.name = "cross_order",
+                          .sql =
+                              "SELECT a.label||b.label FROM model_rows a CROSS JOIN model_rows b "
+                              "WHERE a.id<=?1/8 AND b.id<=?2/8 ORDER BY 1"},
+    TemporaryConsumerCase{
+        .name = "cross_demand_one",
+        .sql = "SELECT b.label FROM model_rows a,model_rows b WHERE a.id=1 AND b.id>=?1 "
+               "UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{
+        .name = "joined_ordered_aggregate",
+        .sql = "SELECT group_concat(a.label ORDER BY b.id,a.id) "
+               "FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=?1/8 AND b.id<=?2/8"},
+    TemporaryConsumerCase{
+        .name = "joined_grouping",
+        .sql = "SELECT group_concat(a.label ORDER BY a.id) "
+               "FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=?1/8 AND b.id<=?2/8 "
+               "GROUP BY b.id ORDER BY 1"},
+    TemporaryConsumerCase{
+        .name = "joined_distinct_set",
+        .sql = "SELECT count(DISTINCT a.value) FROM model_rows a CROSS JOIN model_rows b "
+               "WHERE a.id<=?1/8 AND b.id<=?2/8 UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{
+        .name = "left_grouping",
+        .sql =
+            "SELECT group_concat(b.label ORDER BY b.id) FROM model_rows a LEFT JOIN model_rows b "
+            "ON b.id=a.id+1 AND b.id<=?2/8 WHERE a.id<=?1/8 GROUP BY a.id ORDER BY a.id"},
+    TemporaryConsumerCase{
+        .name = "left_demand_one",
+        .sql = "SELECT count(b.id) FROM model_rows a LEFT JOIN model_rows b ON b.id=a.id+1 "
+               "WHERE a.id<=?1/8 AND b.id IS NULL UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{.name = "using_grouping",
+                          .sql = "SELECT group_concat(b.name ORDER BY b.id) FROM model_rows a LEFT "
+                                 "JOIN items b USING(id) "
+                                 "WHERE a.id<=?1 GROUP BY id ORDER BY id LIMIT ?2"},
+    TemporaryConsumerCase{.name = "natural_left_demand_one",
+                          .sql =
+                              "SELECT count(b.id) FROM model_rows a NATURAL LEFT JOIN model_rows b "
+                              "WHERE a.id<=?1 UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{.name = "right_grouping",
+                          .sql = "SELECT group_concat(a.name ORDER BY id) FROM items a RIGHT JOIN "
+                                 "model_rows b USING(id) "
+                                 "WHERE id<=?1 GROUP BY id ORDER BY id LIMIT ?2"},
+    TemporaryConsumerCase{
+        .name = "natural_right_demand_one",
+        .sql = "SELECT count(a.id) FROM model_rows a NATURAL RIGHT JOIN model_rows b "
+               "WHERE b.id<=?1 UNION SELECT ?2 LIMIT 1"},
+};
+
+[[nodiscard]] int RunTemporaryConsumer(const TemporaryConsumerCase& test_case) {
+  using namespace modern_sqlite;
+  std::cout << "OOM temporary consumer " << test_case.name << ": start\n" << std::flush;
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = ByteCount{1U << 20U},
+          },
+  };
+  const auto failed = [&](std::string_view phase) {
+    std::cerr << "OOM temporary consumer " << test_case.name << ": " << phase << '\n';
+    return 1;
+  };
+  std::size_t allocations = 0;
+  {
+    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), options);
+    if (!session.has_value()) {
+      return failed("baseline open failed");
+    }
+    ReadStatement statement = Prepare(*session, test_case.sql);
+    if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
+      return failed("baseline bind failed");
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto stepped = statement.Step();
+    if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 1U) {
+      return failed("baseline step failed");
+    }
+    allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (allocations == 0U || allocations > 1024U) {
+    return failed("baseline allocation range is invalid");
+  }
+  std::cout << "OOM temporary consumer " << test_case.name << ": " << allocations
+            << " allocation boundaries\n"
+            << std::flush;
+  for (std::size_t failure = 0; failure < allocations; ++failure) {
+    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), options);
+    if (!session.has_value()) {
+      return failed("injection setup open failed");
+    }
+    ReadStatement statement = Prepare(*session, test_case.sql);
+    if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
+        !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
+      return failed("injection setup bind failed");
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto stepped = statement.Step();
+      returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
+    } catch (...) {
+      inject_failure = false;
+      return failed("injected step escaped its typed result");
+    }
+    inject_failure = false;
+    if (!returned_oom) {
+      return failed("injected step did not report OOM");
+    }
+    const Status reset = statement.Reset();
+    if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+      return failed("reset did not preserve the injected OOM");
+    }
+    const auto recovered = statement.Step();
+    if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 1U) {
+      return failed("reset recovery did not reproduce a row");
+    }
+  }
+  std::cout << "OOM temporary consumer " << test_case.name << ": complete\n" << std::flush;
+  return 0;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -289,8 +428,22 @@ void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memo
 void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 
-int main() try {
+int main(int argc, char** argv) try {
   using namespace modern_sqlite;
+
+  if (argc != 1) {
+    if (argc != 3 || std::string_view{argv[1]} != "--temporary-consumer") {
+      std::cerr << "usage: read_session_oom_test [--temporary-consumer NAME]\n";
+      return 2;
+    }
+    const auto selected = std::ranges::find(kTemporaryConsumers, std::string_view{argv[2]},
+                                            &TemporaryConsumerCase::name);
+    if (selected == kTemporaryConsumers.end()) {
+      std::cerr << "unknown temporary consumer: " << argv[2] << '\n';
+      return 2;
+    }
+    return RunTemporaryConsumer(*selected);
+  }
 
   const std::vector<char> empty_bytes;
   const std::vector<char> v1 = ReadBytes(FixturePath("sqlite-3.54.0-session-v1.db"));
@@ -762,94 +915,6 @@ int main() try {
     const auto recovered = statement.Step();
     if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 5U) {
       return 1;
-    }
-  }
-
-  constexpr std::array<std::string_view, 13> kTemporaryConsumerSqls{
-      "SELECT count() FROM model_rows WHERE id<=?1 "
-      "UNION ALL SELECT sum(id) FROM model_rows WHERE id<=?2 ORDER BY 1",
-      "SELECT count(value) FROM model_rows WHERE id<=?1 GROUP BY id "
-      "UNION SELECT sum(id) FROM model_rows WHERE id<=?2 LIMIT 1",
-      "SELECT a.label||b.label FROM model_rows a CROSS JOIN model_rows b "
-      "WHERE a.id<=?1/8 AND b.id<=?2/8 ORDER BY 1",
-      "SELECT b.label FROM model_rows a,model_rows b WHERE a.id=1 AND b.id>=?1 "
-      "UNION SELECT ?2 LIMIT 1",
-      "SELECT group_concat(a.label ORDER BY b.id,a.id) "
-      "FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=?1/8 AND b.id<=?2/8",
-      "SELECT group_concat(a.label ORDER BY a.id) "
-      "FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=?1/8 AND b.id<=?2/8 "
-      "GROUP BY b.id ORDER BY 1",
-      "SELECT count(DISTINCT a.value) FROM model_rows a CROSS JOIN model_rows b "
-      "WHERE a.id<=?1/8 AND b.id<=?2/8 UNION SELECT ?2 LIMIT 1",
-      "SELECT group_concat(b.label ORDER BY b.id) FROM model_rows a LEFT JOIN model_rows b "
-      "ON b.id=a.id+1 AND b.id<=?2/8 WHERE a.id<=?1/8 GROUP BY a.id ORDER BY a.id",
-      "SELECT count(b.id) FROM model_rows a LEFT JOIN model_rows b ON b.id=a.id+1 "
-      "WHERE a.id<=?1/8 AND b.id IS NULL UNION SELECT ?2 LIMIT 1",
-      "SELECT group_concat(b.name ORDER BY b.id) FROM model_rows a LEFT JOIN items b USING(id) "
-      "WHERE a.id<=?1 GROUP BY id ORDER BY id LIMIT ?2",
-      "SELECT count(b.id) FROM model_rows a NATURAL LEFT JOIN model_rows b "
-      "WHERE a.id<=?1 UNION SELECT ?2 LIMIT 1",
-      "SELECT group_concat(a.name ORDER BY id) FROM items a RIGHT JOIN model_rows b USING(id) "
-      "WHERE id<=?1 GROUP BY id ORDER BY id LIMIT ?2",
-      "SELECT count(a.id) FROM model_rows a NATURAL RIGHT JOIN model_rows b "
-      "WHERE b.id<=?1 UNION SELECT ?2 LIMIT 1",
-  };
-  for (const std::string_view sql : kTemporaryConsumerSqls) {
-    std::size_t aggregate_compound_allocations = 0;
-    {
-      auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
-      if (!session.has_value()) {
-        return 1;
-      }
-      ReadStatement statement = Prepare(*session, sql);
-      if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
-          !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
-        return 1;
-      }
-      allocation_index.store(0, std::memory_order_relaxed);
-      const auto stepped = statement.Step();
-      if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 1U) {
-        return 1;
-      }
-      aggregate_compound_allocations = allocation_index.load(std::memory_order_relaxed);
-    }
-    if (aggregate_compound_allocations == 0U || aggregate_compound_allocations > 1024U) {
-      return 1;
-    }
-
-    for (std::size_t failure = 0; failure < aggregate_compound_allocations; ++failure) {
-      auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
-      if (!session.has_value()) {
-        return 1;
-      }
-      ReadStatement statement = Prepare(*session, sql);
-      if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
-          !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
-        return 1;
-      }
-      allocation_index.store(0, std::memory_order_relaxed);
-      failing_allocation = failure;
-      inject_failure = true;
-      bool returned_oom = false;
-      try {
-        const auto stepped = statement.Step();
-        returned_oom = !stepped.has_value() && IsOutOfMemory(stepped.error());
-      } catch (...) {
-        inject_failure = false;
-        return 1;
-      }
-      inject_failure = false;
-      if (!returned_oom) {
-        return 1;
-      }
-      const Status reset = statement.Reset();
-      if (reset.has_value() || !IsOutOfMemory(reset.error())) {
-        return 1;
-      }
-      const auto recovered = statement.Step();
-      if (!recovered.has_value() || *recovered != ReadStep::kRow || statement.row().size() != 1U) {
-        return 1;
-      }
     }
   }
 

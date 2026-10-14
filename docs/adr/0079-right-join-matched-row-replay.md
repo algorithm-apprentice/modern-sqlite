@@ -136,6 +136,13 @@ existing allocation budgets and frozen performance inputs intact where
 behavior is unchanged. Publish one coherent slice and squash merge only after
 all required local and hosted gates pass.
 
+Temporary-consumer allocation sweeps are independent CTest invocations of the
+same canonical OOM runner, selected by a strict case name. Each retains the
+existing ten-second bound, full measured allocation range, injected OOM
+checks, and reset recovery. The core lifecycle sweep remains separate.
+This prevents an expanding collection of otherwise independent cases from
+exceeding one shared parent timeout; selectors do not reduce failure coverage.
+
 ### Closure evidence
 
 The public-session test first failed at the unsupported RIGHT boundary before
@@ -175,6 +182,16 @@ initialize them before entry only when RIGHT continuations are present.
 Direct design, implementation, and incremental evidence review found no
 unresolved issue. No VM opcode, verifier relaxation, alternative identity
 store, unbounded match bitmap, or runtime plan interpreter is introduced.
+
+The first hosted sanitizer run reached the combined read-session OOM test's
+ten-second parent limit. The unchanged local combined sanitizer case took
+9.84 seconds. Extracting all 13 temporary consumers into named invocations
+preserves their exact SQL, bindings, measured failure range, typed errors, and
+reset checks. All 15 core/consumer/invalid-selector invocations pass on Debug,
+Release, ASan/UBSan, and GCC; the longest local sanitizer child takes 4.66
+seconds. The revised complete fast tier has 1,187 cases. Each child retains
+the original ten-second bound; no failure sampling or production change is
+part of this orchestration correction.
 
 ## Traceability
 
