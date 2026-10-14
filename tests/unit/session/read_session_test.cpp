@@ -872,6 +872,38 @@ TEST(ReadSession, RebindsFullMatchesAndSuppressesDefaultsOnBothMissingSides) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
+TEST(ReadSession, RebindsExactJoinedRowidKeysWithoutRestrictingFullReplay) {
+  struct Case {
+    SqlValue key;
+    bool matches = false;
+  };
+  const std::array cases{
+      Case{.key = SqlValue::Integer(2), .matches = true},
+      Case{.key = SqlValue::Real(2.0), .matches = true},
+      Case{.key = SqlValue::Text("02"), .matches = true},
+      Case{.key = SqlValue::Text("2.0"), .matches = true},
+      Case{.key = SqlValue::Text("2e0"), .matches = true},
+      Case{.key = SqlValue::Real(2.5)},
+      Case{.key = SqlValue::Text("2x")},
+      Case{.key = SqlValue{}},
+      Case{.key = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
+      Case{.key = SqlValue::Integer(std::numeric_limits<std::int64_t>::max())},
+      Case{.key = SqlValue::Integer(1), .matches = true},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT count(),count(a.id),count(b.id) FROM items a FULL JOIN items b ON b.id=?1");
+  for (const Case& test_case : cases) {
+    RequireStatus(statement.Bind(1, test_case.key));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test_case.matches ? 7 : 8, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(4, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(test_case.matches ? 7 : 4, IntegerValue(statement.row()[2]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+}
+
 TEST(ReadSession, ResetsRightReplayAndKeepsNullPrefixDefaultsOutOfOutput) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -949,6 +981,11 @@ TEST(ReadSession, CleansAndRecoversFullMatchRelationsAfterTemporaryWriteFailure)
   ExercisePreservedRightMatchFailure(
       "SELECT count(),count(a.rowid) FROM sqlite_schema a FULL JOIN items b ON a.name='items'",
       4100);
+}
+
+TEST(ReadSession, CleansAndRecoversParameterizedMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(),count(a.rowid) FROM items a FULL JOIN items b ON b.id=a.id", 4096);
 }
 
 TEST(ReadSession, PreservesBothFullSidesAcrossExternalOrderAndPmaFailureRecovery) {
@@ -1730,6 +1767,22 @@ TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSession, BoundsJoinedEqualityWorkByPointPositionedPrefixes) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT count() FROM model_rows a JOIN model_rows b ON b.id=a.id");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(32, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 1024U);
+}
+
 TEST(ReadSession, CapturesAggregateLifecycleAndSharedTemporaryPeaks) {
   using instrumentation::AggregateWorkMetric;
   using instrumentation::ProbeCollectionKind;

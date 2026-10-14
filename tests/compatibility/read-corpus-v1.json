@@ -2584,6 +2584,119 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-shifted-fallback",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206d6f64656c5f726f77732061204a4f494e206974656d732062204f4e20622e69643d612e69642b3120574845524520612e69643c3d34204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-full-null-key",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e6964204953204e554c4c204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-right-constant",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20622e69643d3220574845524520612e6964204953204e554c4c204f5220612e69643d31204f5244455220425920622e69642c612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-where-constant",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612043524f5353204a4f494e206974656d73206220574845524520612e69643d3220414e4420622e69643d612e6964204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-after-left-full",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206d6f64656c5f726f77732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e69642046554c4c204a4f494e206974656d732063204f4e20632e69643d622e696420574845524520612e69643c3d35204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-forward-fallback",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e69643d632e6964204c454654204a4f494e206974656d732063204f4e20632e69643d612e6964204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-null-prefix",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062204f4e20622e69643d612e6964204a4f494e206974656d732063204f4e20632e69643d612e696420574845524520622e69643c3d35204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-schema-rowid",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c732e726f7769642c732e6e616d652046524f4d206974656d732061204a4f494e2073716c6974655f736368656d612073204f4e20732e726f7769643d612e6964204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-text-fallback",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e69647c7c272027204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-fractional-fallback",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428622e6964292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e69643d612e69642b302e35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-constant-on-reject",
+      "operations": [{"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e203020414e4420622e69643d612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-prefix-on-reject",
+      "operations": [{"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e20612e69643c3020414e4420622e69643d612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "joined-rowid-access",
+      "id": "point-full-rebind",
+      "operations": [
+        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "2"}},
+        {"op": "step"}, {"op": "step"}, {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "real", "bits": "4004000000000000"}},
+        {"op": "step"}, {"op": "step"}, {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "null"}},
+        {"op": "step"}, {"op": "step"}, {"op": "reset"},
+        {"index": 1, "op": "bind", "value": {"type": "text", "hex": "3032"}},
+        {"op": "step"}, {"op": "step"}, {"op": "finalize"}
+      ],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428612e6964292c636f756e7428622e6964292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e69643d3f31"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "subquery",
       "id": "unsupported-subquery",
@@ -2681,6 +2794,7 @@
     "global-aggregate",
     "group-by",
     "joined-aggregate",
+    "joined-rowid-access",
     "limit-offset",
     "lifecycle",
     "metadata",

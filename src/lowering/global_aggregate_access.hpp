@@ -18,6 +18,7 @@ class GlobalAggregateAccessServices {
 
   [[nodiscard]] virtual LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                             RegisterId destination) = 0;
+  [[nodiscard]] virtual LoweringResult<RegisterId> EmitRowIdLookupKey(BoundExpressionId id) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitLimitInitialization(
       std::optional<Label> completion) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateGuards(Label empty_input) = 0;

@@ -1016,12 +1016,12 @@ void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& 
   const auto left_count = static_cast<std::int64_t>(words[0] % 9U);
   const auto right_count = static_cast<std::int64_t>(words[1] % 9U);
   const std::int64_t shift = static_cast<std::int64_t>(words[2] % 3U) - 1;
+  const std::string condition = shift == 0 ? "b.id=a.id AND ?3=0" : "b.id=a.id+?3";
   ReadStatement statement =
-      Prepare(session,
-              "SELECT a.id,b.id FROM model_rows a FULL JOIN model_rows b "
-              "ON b.id=a.id+?3 AND a.id<=?1 AND b.id<=?2 "
-              "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL) "
-              "ORDER BY a.id IS NULL,a.id,b.id");
+      Prepare(session, "SELECT a.id,b.id FROM model_rows a FULL JOIN model_rows b ON " + condition +
+                           " AND a.id<=?1 AND b.id<=?2 "
+                           "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL) "
+                           "ORDER BY a.id IS NULL,a.id,b.id");
   RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
   RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
   RequireStatus(statement.Bind(3, SqlValue::Integer(shift)));

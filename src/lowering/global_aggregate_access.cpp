@@ -543,9 +543,9 @@ class GlobalAggregateAccessEmitter final {
         return guards;
       }
     }
-    const RegisterId key = Home(lookup.key);
-    if (auto emitted = EmitExpression(lookup.key, key); !emitted.has_value()) {
-      return emitted;
+    auto key = services_.EmitRowIdLookupKey(lookup.key);
+    if (!key.has_value()) {
+      return std::unexpected(std::move(key.error()));
     }
     if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
         !opened.has_value()) {
@@ -563,8 +563,9 @@ class GlobalAggregateAccessEmitter final {
       }
       rejected = *label;
     }
-    auto sought = ConvertProgramResult(builder_->EmitSeekRowId(AssumeValue(cursor_), key, *missing),
-                                       "unable to emit global aggregate rowid seek");
+    auto sought =
+        ConvertProgramResult(builder_->EmitSeekRowId(AssumeValue(cursor_), *key, *missing),
+                             "unable to emit global aggregate rowid seek");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
