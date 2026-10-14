@@ -388,7 +388,7 @@ int main() try {
     return 1;
   }
 
-  const std::array<std::string_view, 7> advanced_sqls{
+  const std::array<std::string_view, 8> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -399,6 +399,7 @@ int main() try {
       "SELECT id,count(b.id) FROM Items a LEFT JOIN Items b USING(id) GROUP BY id ORDER BY 1",
       "SELECT id,count(a.id) FROM Items a RIGHT JOIN Items b USING(id) GROUP BY id ORDER BY 1",
       "SELECT id,count(a.id) FROM Items a FULL JOIN Items b USING(id) GROUP BY id ORDER BY 1",
+      "SELECT a.id,b.id FROM Items a JOIN Items b ON a.id>?1 AND b.id=a.id",
   };
   for (const std::string_view sql : advanced_sqls) {
     LogicalPlan compound_baseline_logical = LogicalCompoundFixture(catalog, sql);
