@@ -133,6 +133,42 @@ producer behavior, and evidence, publishing one coherent slice only after
 closure. Review corrections incrementally; perform final integrated gates once.
 Existing frozen workload, fixture, runner, and baseline inputs remain unchanged.
 
+### Closure evidence
+
+The public-session test first failed at the unsupported INNER syntax boundary.
+The completed implementation passes 1,152 fast unit cases and all 1,198 cases
+in each complete optimized and ASan/UBSan tier.
+
+Twenty-six independent pinned SQLite vectors bring the committed corpus to
+164 comparisons and six unsupported boundaries. All 144 previous oracle
+records remain byte-for-byte equivalent as JSON data. New vectors include
+forward/alias scope, NULL/default/rowid publication, mixed outer/inner chains,
+modifiers, DISTINCT/sets/demand-one, and reset/rebind/zero-limit behavior.
+Writable-session cases cover physically empty left and right tables.
+
+The deterministic vector model and grammar-aware generator exercise matched
+and missing right rows. The sanitized SQL fuzzer completed 20,000 inputs.
+Module-owned exhaustive allocation sweeps cover ON aliases, condition
+placement, match registers, retained NULL rows, grouping, and set consumers.
+Source-read and genuine PMA-flush failures retain their original typed errors,
+release all owned temporary files, and recover through the canonical reset.
+Memory/file parity includes 993 accepted physical/NULL-extended rows under the
+same 32 KiB file budget used by the joined correctness baseline.
+
+Two, eight, 32, and 64 source LEFT chains emit 33, 117, 453, and 901
+instructions respectively. Each has one readable result body, one acquired
+cursor per source, and one NULL-publication site per LEFT source. The
+physical-only ON probe observes nine candidate calls and three projections
+for three entirely unmatched left rows, not an extra ON call for each NULL
+extension.
+
+Direct design and implementation review covered the canonical source-owner
+visitor, ON namespace and readiness, immutable plan publication, match flags,
+shared-body backedges, consumer routing, and resource/error ownership. No
+unresolved review issue remains. GCC's stricter shadow diagnostic was resolved
+by naming the dependency callback argument `owner`, without a warning
+suppression or semantic change.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 slice 5.
