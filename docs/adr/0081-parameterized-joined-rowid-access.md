@@ -104,6 +104,43 @@ Stored-index and automatic-index integration follow this positioned-source
 prerequisite in separately reviewed slices. The advanced-SQL node remains
 active.
 
+### Closure evidence
+
+The physical-plan and fixed-work tests first failed before production changes.
+The unchanged 32-by-32 equality workload now executes 364 VM instructions
+instead of 5,260, with the same result count of 32. The instrumentation test
+retains its 1,024-instruction bound and records the actual count as a test
+property. This is a deterministic work reduction, not a wall-time claim.
+
+The final fast tier passes 1,212 unit cases. Complete Release and ASan/UBSan
+tiers pass 1,258 cases each; the independent GCC tier passes 1,256. Forty-seven
+focused instrumented cases and all 42 unchanged archived runner/work
+contracts pass. Existing allocation budgets, timing workloads, fixtures,
+thresholds, and baselines are unchanged.
+
+Thirteen new pinned vectors bring the committed matrix to 257 comparisons
+and six unsupported boundaries, preserving all 250 previous oracle records
+as JSON data. They include constant, source-owned, schema, missing and NULL
+keys; complete outer replay; forward/outer barriers; computed-key fallbacks;
+and integer/real/NULL/text reset/rebind. Four additional native probes execute
+complete 64-source INNER/LEFT/RIGHT/FULL point chains.
+
+The independent FULL model exercises point access for zero shifts and the
+existing scan for computed shifts. The grammar-aware ASan/UBSan campaign
+completed 20,000 inputs. Exhaustive optimizer and lowering allocation sweeps
+cover the new source access path. Eleven exact-key/rebinding inputs retain
+native lookup conversion. A 4,096-key self-FULL fixture proves actual
+matched-ledger migration, injected I/O failure, full cleanup, and reset
+recovery while its inner producer uses point seeks.
+
+The error-phase audit rejects speculative computed-key hoisting instead of
+adding another guard list. Computed and nondeterministic keys retain their
+existing candidate phases; ordinary and global-aggregate key emission retain
+their original cursor-open ordering. Direct design, implementation, and
+incremental evidence review found no unresolved issue within this admitted
+value-key scope. Changed-translation-unit clang-tidy, formatting, engineering
+discipline, and dependency-graph validation pass.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 join access/scaling slices.
