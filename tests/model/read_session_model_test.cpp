@@ -900,14 +900,55 @@ void RunJoinedAggregateModel(ReadSession& session, const std::array<std::uint64_
   RequireStatus(statement.Finalize());
 }
 
+void RunLeftJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto left_count = static_cast<std::int64_t>(words[0] % 8U);
+  const auto right_count = static_cast<std::int64_t>(words[1] % 8U);
+  const std::int64_t shift = static_cast<std::int64_t>(words[2] % 3U) - 1;
+  const bool only_missing = words[3] % 2U != 0U;
+  const std::string sql =
+      "SELECT a.id,b.id,b.value,b._rowid_ FROM model_rows a LEFT JOIN model_rows b "
+      "ON b.id=a.id+?3 AND b.id<=?2 WHERE a.id<=?1" +
+      std::string{only_missing ? " AND b.id IS NULL" : ""} + " ORDER BY a.id,b.id";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(shift)));
+  for (const ModelRow& left : kRows) {
+    if (left.id > left_count) {
+      continue;
+    }
+    const auto found = std::ranges::find_if(kRows, [&](const ModelRow& right) {
+      return right.id == left.id + shift && right.id <= right_count;
+    });
+    const bool matched = found != kRows.end();
+    if (only_missing && matched) {
+      continue;
+    }
+    ExpectRowStep(statement);
+    ASSERT_EQ(4U, statement.row().size());
+    ExpectInteger(statement.row()[0], left.id);
+    if (matched) {
+      ExpectInteger(statement.row()[1], found->id);
+      ExpectInteger(statement.row()[2], found->value);
+      ExpectInteger(statement.row()[3], found->id);
+    } else {
+      for (std::size_t field = 1; field < statement.row().size(); ++field) {
+        ExpectNullable(statement.row()[field], std::nullopt);
+      }
+    }
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};
-  constexpr std::array<std::string_view, 14> templates{
+  constexpr std::array<std::string_view, 15> templates{
       "predicate-scan",     "rowid-lookup",      "typed-rebinding",  "limit-offset",
       "repeated-execution", "ordered-scan",      "ordered-limit",    "values-compound",
       "mixed-compound",     "distinct-nullable", "global-aggregate", "grouped-aggregate",
-      "cross-join",         "joined-aggregate",
+      "cross-join",         "joined-aggregate",  "left-join",
   };
 
   for (std::size_t case_index = 0; case_index < kModelIterations + 32U; ++case_index) {
@@ -956,6 +997,9 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
         break;
       case 13:
         RunJoinedAggregateModel(session, words);
+        break;
+      case 14:
+        RunLeftJoinModel(session, words);
         break;
       default:
         FAIL() << "unreachable model template";

@@ -451,7 +451,7 @@ int main() try {
       DistinctFixture(catalog,
                       "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
   };
-  const std::array<PhysicalPlan, 7> joined_plans{
+  const std::array<PhysicalPlan, 9> joined_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
                       "WHERE a.id>?1 AND b.id>?2 LIMIT ?3 OFFSET ?4"),
@@ -471,6 +471,14 @@ int main() try {
       AggregateFixture(catalog,
                        "SELECT count() FROM Items a CROSS JOIN Items b "
                        "UNION SELECT count() FROM Items LIMIT 1"),
+      DistinctFixture(catalog,
+                      "SELECT a.Name,b.id FROM Items a LEFT JOIN Items b "
+                      "ON b.id=a.id+1 WHERE b.id IS NULL OR a.id>?1 "
+                      "ORDER BY a.Name LIMIT ?2"),
+      AggregateFixture(catalog,
+                       "SELECT a.id,count(b.id),group_concat(b.Name ORDER BY b.id) "
+                       "FROM Items a LEFT JOIN Items b ON b.id=a.id+1 "
+                       "GROUP BY a.id HAVING count()>?1 ORDER BY 1 LIMIT ?2"),
   };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
