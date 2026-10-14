@@ -1344,6 +1344,7 @@ class Parser final {
               (EqualsAsciiCaseInsensitive(Text(Peek()), "cross") ||
                EqualsAsciiCaseInsensitive(Text(Peek()), "inner") ||
                EqualsAsciiCaseInsensitive(Text(Peek()), "left") ||
+               EqualsAsciiCaseInsensitive(Text(Peek()), "right") ||
                EqualsAsciiCaseInsensitive(Text(Peek()), "natural")))) {
         const Token operation = Consume();
         const bool natural = operation.kind == TokenKind::kJoinKeyword &&
@@ -1353,7 +1354,8 @@ class Parser final {
           modifier = Consume();
           if (!EqualsAsciiCaseInsensitive(Text(modifier), "cross") &&
               !EqualsAsciiCaseInsensitive(Text(modifier), "inner") &&
-              !EqualsAsciiCaseInsensitive(Text(modifier), "left")) {
+              !EqualsAsciiCaseInsensitive(Text(modifier), "left") &&
+              !EqualsAsciiCaseInsensitive(Text(modifier), "right")) {
             return std::unexpected(Unsupported(modifier));
           }
         }
@@ -1361,11 +1363,13 @@ class Parser final {
             operation.kind == TokenKind::kComma                   ? SourceJoinKind::kComma
             : operation.kind == TokenKind::kJoin                  ? SourceJoinKind::kInner
             : EqualsAsciiCaseInsensitive(Text(modifier), "left")  ? SourceJoinKind::kLeft
+            : EqualsAsciiCaseInsensitive(Text(modifier), "right") ? SourceJoinKind::kRight
             : EqualsAsciiCaseInsensitive(Text(modifier), "cross") ? SourceJoinKind::kCross
                                                                   : SourceJoinKind::kInner;
         SourceSpan operator_span = operation.span;
         if (operation.kind == TokenKind::kJoinKeyword) {
-          if (kind == SourceJoinKind::kLeft && Peek().kind == TokenKind::kJoinKeyword &&
+          if ((kind == SourceJoinKind::kLeft || kind == SourceJoinKind::kRight) &&
+              Peek().kind == TokenKind::kJoinKeyword &&
               EqualsAsciiCaseInsensitive(Text(Peek()), "outer")) {
             static_cast<void>(Consume());
           }

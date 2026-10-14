@@ -863,6 +863,45 @@ TEST(Binder, UsesFirstVisibleLeftUsingColumnAndRejectsMissingOrIllegalClauses) {
             std::get<BoundColumnExpression>(ResultExpression(explicit_rowid, 0).payload).column);
 }
 
+TEST(Binder, PublishesRightMergedValuesWithoutChangingUniquePhysicalQualifiers) {
+  const BoundSelect bound =
+      BindOrThrow("SELECT id,a.id,b.id FROM Items a RIGHT JOIN Items b USING(id)", TestCatalog());
+  const auto right_begin = bound.table_sources()[1].source_column_begin;
+  ASSERT_TRUE(bound.source_columns()[0].joined_value.has_value());
+  const auto& merged = std::get<BoundAliasReferenceExpression>(ResultExpression(bound, 0).payload);
+  EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(right_begin)},
+            std::get<BoundColumnExpression>(bound.expression(merged.target).payload).column);
+  EXPECT_EQ(BoundSourceColumnId{0},
+            std::get<BoundColumnExpression>(ResultExpression(bound, 1).payload).column);
+  EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(right_begin)},
+            std::get<BoundColumnExpression>(ResultExpression(bound, 2).payload).column);
+  EXPECT_EQ("INTEGER", bound.result_columns()[0].declared_type);
+  const BoundSelect duplicate =
+      BindOrThrow("SELECT q.id FROM Items q RIGHT JOIN Items q USING(id)", TestCatalog());
+  EXPECT_EQ(BoundSourceColumnId{static_cast<std::uint32_t>(right_begin)},
+            std::get<BoundColumnExpression>(ResultExpression(duplicate, 0).payload).column);
+}
+
+TEST(Binder, RejectsForwardOnThroughoutRightCoresWithoutAffectingOtherArms) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "
+           "JOIN Items c ON a.id=c.id RIGHT JOIN Items d ON d.id=a.id",
+           "SELECT a.id FROM Items a RIGHT JOIN Items b ON a.id=b.id "
+           "JOIN Items c ON d.id=c.id JOIN Items d ON d.id=b.id",
+       }) {
+    const auto rejected = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kJoinConditionScope, rejected.error().code);
+    EXPECT_EQ("ON clause references tables to its right", rejected.error().detail);
+  }
+  const auto independent = BindOrThrow(
+      "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id JOIN Items c ON c.id=a.id "
+      "UNION ALL SELECT a.id FROM Items a RIGHT JOIN Items b ON a.id=b.id",
+      catalog);
+  EXPECT_EQ(2U, independent.query_cores().size());
+}
+
 TEST(Binder, EnforcesCombinedGeneratedJoinHeightAcrossSourcesAndWhere) {
   struct Case {
     std::size_t sources;

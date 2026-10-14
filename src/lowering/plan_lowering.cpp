@@ -685,6 +685,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<CursorId> cursor{};
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::optional<RegisterId> matched{};
+    std::optional<RegisterId> replay_mode{};
+    std::optional<RegisterId> right_key_first{};
+    std::uint32_t right_key_count = 0;
+    std::optional<RelationId> right_matches{};
+  };
+
+  struct RightJoinContinuation {
+    std::size_t depth;
+    Label published;
+    Label replay_candidate;
+    Label replay_done;
   };
 
   struct SourceCursorBinding {
@@ -2380,13 +2391,43 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     result_block_first_ = *result_block;
 
     for (StreamingCorePlan& core : streaming_cores_) {
-      for (JoinedSourcePlan& source : core.joined_sources) {
+      for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
+        JoinedSourcePlan& source = core.joined_sources[index];
         if (source.join != nullptr && source.join->join == SourceJoinKind::kLeft) {
           auto matched = AllocateRegisters(1);
           if (!matched.has_value()) {
             return std::unexpected(std::move(matched.error()));
           }
           source.matched = *matched;
+        }
+        if (source.join != nullptr && source.join->join == SourceJoinKind::kRight) {
+          const auto& select = std::get<BoundSelectCore>(*core.bound);
+          const BoundTableSource& bound_source = select.table_sources[index];
+          std::size_t key_count = 1;
+          if (bound_source.table.has_value()) {
+            const CatalogSnapshot& catalog = *bound_select_->catalog();
+            if (catalog.table(*bound_source.table).without_rowid) {
+              const auto primary = catalog.primary_key_index(*bound_source.table);
+              if (!primary.has_value()) {
+                return std::unexpected(InternalFailure("RIGHT source has no primary key"));
+              }
+              key_count = catalog.index(*primary).key_term_count;
+            }
+          }
+          if (key_count == 0U || key_count > std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(InternalFailure("RIGHT source identity width is invalid"));
+          }
+          auto mode = AllocateRegisters(1);
+          auto keys = AllocateRegisters(key_count);
+          if (!mode.has_value()) {
+            return std::unexpected(std::move(mode.error()));
+          }
+          if (!keys.has_value()) {
+            return std::unexpected(std::move(keys.error()));
+          }
+          source.replay_mode = *mode;
+          source.right_key_first = *keys;
+          source.right_key_count = static_cast<std::uint32_t>(key_count);
         }
       }
     }
@@ -3320,6 +3361,50 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> AddRightJoinDescriptor(JoinedSourcePlan& source,
+                                                            const BoundTableSource& bound_source) {
+    if (!source.replay_mode.has_value()) {
+      return {};
+    }
+    OrderingRecordDescriptor descriptor{
+        .field_count = source.right_key_count,
+        .key_field_count = source.right_key_count,
+        .key_columns = {},
+    };
+    descriptor.key_columns.reserve(source.right_key_count);
+    const CatalogSnapshot& catalog = *bound_select_->catalog();
+    const CatalogIndex* primary = nullptr;
+    if (bound_source.table.has_value() && catalog.table(*bound_source.table).without_rowid) {
+      const auto id = catalog.primary_key_index(*bound_source.table);
+      if (!id.has_value()) {
+        return std::unexpected(InternalFailure("RIGHT source has no primary key descriptor"));
+      }
+      primary = &catalog.index(*id);
+    }
+    for (std::uint32_t index = 0; index < source.right_key_count; ++index) {
+      const std::string_view name =
+          primary == nullptr ? std::string_view{"BINARY"} : primary->terms[index].collation_name;
+      auto collation = SymbolForName(name);
+      if (!collation.has_value()) {
+        return std::unexpected(std::move(collation.error()));
+      }
+      descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = *collation,
+          .order = primary != nullptr && primary->terms[index].order == SortOrder::kDescending
+                       ? BytecodeSortOrder::kDescending
+                       : BytecodeSortOrder::kAscending,
+          .null_placement = BytecodeNullPlacement::kFirst,
+      });
+    }
+    auto relation = ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(descriptor)),
+                                         "unable to add RIGHT matched-key relation");
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    source.right_matches = *relation;
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> AddStreamingDescriptors() {
     if (source_cursor_fields_.size() != bound_select_->source_columns().size()) {
       source_cursor_fields_.assign(bound_select_->source_columns().size(), std::nullopt);
@@ -3343,6 +3428,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               return added;
             }
             joined.cursor = cursor_;
+            if (auto added = AddRightJoinDescriptor(joined, source); !added.has_value()) {
+              return added;
+            }
           }
         }
         if (core.table_scan != nullptr && core.aggregate == nullptr) {
@@ -8611,17 +8699,68 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::unexpected(InternalFailure("joined output destination is invalid"));
   }
 
+  [[nodiscard]] LoweringResult<void> EmitRightJoinKey(const StreamingCorePlan& core,
+                                                      std::size_t depth) {
+    const JoinedSourcePlan& source = core.joined_sources[depth];
+    if (!source.cursor.has_value() || !source.right_key_first.has_value() ||
+        source.right_key_count == 0U) {
+      return std::unexpected(InternalFailure("RIGHT identity has no cursor or registers"));
+    }
+    const auto& select = std::get<BoundSelectCore>(*core.bound);
+    const BoundTableSource& bound_source = select.table_sources[depth];
+    const CatalogSnapshot& catalog = *bound_select_->catalog();
+    if (!bound_source.table.has_value() || !catalog.table(*bound_source.table).without_rowid) {
+      return Append(ReadRowIdInstruction{
+          .cursor = *source.cursor,
+          .output = *source.right_key_first,
+      });
+    }
+    const auto primary_id = catalog.primary_key_index(*bound_source.table);
+    if (!primary_id.has_value()) {
+      return std::unexpected(InternalFailure("RIGHT identity has no primary index"));
+    }
+    const CatalogIndex& primary = catalog.index(*primary_id);
+    for (std::uint32_t index = 0; index < source.right_key_count; ++index) {
+      const auto* column = std::get_if<ColumnId>(&primary.terms[index].target);
+      if (column == nullptr || column->value >= bound_source.source_column_count) {
+        return std::unexpected(InternalFailure("RIGHT identity has an invalid primary term"));
+      }
+      const std::size_t field = bound_source.source_column_begin + column->value;
+      if (field >= source_cursor_fields_.size()) {
+        return std::unexpected(InternalFailure("RIGHT identity has no source field"));
+      }
+      const auto& mapped_field = source_cursor_fields_[field];
+      if (!mapped_field.has_value()) {
+        return std::unexpected(InternalFailure("RIGHT identity has no source field"));
+      }
+      if (auto read = Append(ReadFieldInstruction{
+              .cursor = *source.cursor,
+              .field = *mapped_field,
+              .output = RegisterId{source.right_key_first->value() + index},
+          });
+          !read.has_value()) {
+        return read;
+      }
+    }
+    return {};
+  }
+
   template <typename RowConsumer>
-  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(const StreamingCorePlan& core,
-                                                    std::size_t depth, RowConsumer& consume,
-                                                    bool always_stops,
-                                                    std::optional<Label> stopped) {
+  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(
+      const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
+      std::optional<Label> stopped, std::span<const RightJoinContinuation> replays) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
     if (source.scan == nullptr || !source.cursor.has_value()) {
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
     }
     const bool has_inner = depth + 1U < core.joined_sources.size();
     const bool left = source.join != nullptr && source.join->join == SourceJoinKind::kLeft;
+    const bool right = source.join != nullptr && source.join->join == SourceJoinKind::kRight;
+    const auto replay = std::ranges::find(replays, depth, &RightJoinContinuation::depth);
+    if (right && (replay == replays.end() || !source.replay_mode.has_value() ||
+                  !source.right_matches.has_value() || !source.right_key_first.has_value())) {
+      return std::unexpected(InternalFailure("RIGHT source has no replay state"));
+    }
     const bool has_on =
         std::ranges::any_of(core.joined_sources, [&](const JoinedSourcePlan& candidate) {
           return candidate.join != nullptr && candidate.join->on.has_value() &&
@@ -8630,7 +8769,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const bool has_predicate =
         core.filter != nullptr &&
         std::ranges::contains(core.filter->predicate_sources, source.scan->source);
-    const bool can_advance = has_inner || has_predicate || has_on || !always_stops;
+    const bool can_advance = right || has_inner || has_predicate || has_on || !always_stops;
     auto row = CreateLabel();
     auto done = CreateLabel();
     if (!row.has_value()) {
@@ -8695,8 +8834,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return bound;
       }
     }
+    if (right) {
+      if (source.join->on.has_value()) {
+        if (auto on = EmitPredicate(*source.join->on, advance.value_or(*done)); !on.has_value()) {
+          return on;
+        }
+      }
+      if (auto key = EmitRightJoinKey(core, depth); !key.has_value()) {
+        return key;
+      }
+      auto inserted = ConvertProgramResult(
+          AssumeValue(builder_).EmitInsertRelation(
+              *source.right_matches, *source.right_key_first, source.right_key_count,
+              RelationInsertMode::kKeepExisting, replay->published),
+          "unable to record RIGHT match");
+      if (!inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+      if (auto bound = BindLabel(replay->published); !bound.has_value()) {
+        return bound;
+      }
+    }
     for (const JoinedSourcePlan& candidate : core.joined_sources) {
-      if (candidate.join != nullptr && candidate.join->join != SourceJoinKind::kLeft) {
+      if (candidate.join != nullptr && candidate.join->join != SourceJoinKind::kLeft &&
+          candidate.join->join != SourceJoinKind::kRight) {
         const auto& condition = candidate.join->on;
         if (condition.has_value() && candidate.join->condition_source == source.scan->source) {
           if (auto on = EmitPredicate(*condition, advance.value_or(*done)); !on.has_value()) {
@@ -8717,7 +8878,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (has_inner) {
-      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped);
+      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays);
           !inner.has_value()) {
         return inner;
       }
@@ -8728,6 +8889,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*advance); !bound.has_value()) {
         return bound;
       }
+      if (right) {
+        auto ordinary = CreateLabel();
+        if (!ordinary.has_value()) {
+          return std::unexpected(std::move(ordinary.error()));
+        }
+        if (auto normal = EmitJumpIf(*source.replay_mode, JumpCondition::kIfFalse, *ordinary);
+            !normal.has_value()) {
+          return normal;
+        }
+        auto next =
+            ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, replay->replay_candidate),
+                                 "unable to advance RIGHT replay");
+        if (!next.has_value()) {
+          return std::unexpected(std::move(next.error()));
+        }
+        if (auto finished = EmitJump(replay->replay_done); !finished.has_value()) {
+          return finished;
+        }
+        if (auto bound = BindLabel(*ordinary); !bound.has_value()) {
+          return bound;
+        }
+      }
       auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
                                        "unable to advance joined source");
       if (!next.has_value()) {
@@ -8736,6 +8919,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto bound = BindLabel(*done); !bound.has_value()) {
       return bound;
+    }
+    if (right) {
+      if (auto finished =
+              EmitJumpIf(*source.replay_mode, JumpCondition::kIfTrue, replay->replay_done);
+          !finished.has_value()) {
+        return finished;
+      }
     }
     if (left) {
       auto exhausted = CreateLabel();
@@ -8766,6 +8956,79 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitRightJoinReplay(const StreamingCorePlan& core,
+                                                         const RightJoinContinuation& replay) {
+    const JoinedSourcePlan& source = core.joined_sources[replay.depth];
+    auto one = EnsureOneConstant();
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto mode = Append(LoadConstantInstruction{
+            .constant = *one,
+            .output = AssumeValue(source.replay_mode),
+        });
+        !mode.has_value()) {
+      return mode;
+    }
+    for (std::size_t index = 0; index < replay.depth; ++index) {
+      if (auto null_row = Append(NullRowInstruction{
+              .cursor = AssumeValue(core.joined_sources[index].cursor),
+          });
+          !null_row.has_value()) {
+        return null_row;
+      }
+    }
+    auto rewound = ConvertProgramResult(
+        AssumeValue(builder_).EmitRewind(AssumeValue(source.cursor), replay.replay_done),
+        "unable to position RIGHT replay");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(replay.replay_candidate); !bound.has_value()) {
+      return bound;
+    }
+    if (auto key = EmitRightJoinKey(core, replay.depth); !key.has_value()) {
+      return key;
+    }
+    auto skipped = CreateLabel();
+    if (!skipped.has_value()) {
+      return std::unexpected(std::move(skipped.error()));
+    }
+    auto contains = ConvertProgramResult(
+        AssumeValue(builder_).EmitContainsRelation(AssumeValue(source.right_matches),
+                                                   AssumeValue(source.right_key_first),
+                                                   source.right_key_count, *skipped),
+        "unable to test RIGHT matched key");
+    if (!contains.has_value()) {
+      return std::unexpected(std::move(contains.error()));
+    }
+    if (auto publish = EmitJump(replay.published); !publish.has_value()) {
+      return publish;
+    }
+    if (auto bound = BindLabel(*skipped); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(
+        AssumeValue(builder_).EmitNext(AssumeValue(source.cursor), replay.replay_candidate),
+        "unable to skip matched RIGHT row");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(replay.replay_done); !bound.has_value()) {
+      return bound;
+    }
+    for (std::size_t index = 0; index < replay.depth; ++index) {
+      if (auto cleared = Append(NullRowInstruction{
+              .cursor = AssumeValue(core.joined_sources[index].cursor),
+              .enabled = false,
+          });
+          !cleared.has_value()) {
+        return cleared;
+      }
+    }
+    return {};
+  }
+
   template <typename RowConsumer>
   [[nodiscard]] LoweringResult<void> EmitJoinedSourceRows(const StreamingCorePlan& core,
                                                           RowConsumer& consume, bool always_stops,
@@ -8774,6 +9037,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (core.join == nullptr || core.joined_sources.size() < 2U ||
         core.joined_sources.size() > kMaximumSelectSources) {
       return std::unexpected(InternalFailure("joined core has invalid source shape"));
+    }
+    std::vector<RightJoinContinuation> replays;
+    for (std::size_t depth = 0; depth < core.joined_sources.size(); ++depth) {
+      if (!core.joined_sources[depth].right_matches.has_value()) {
+        continue;
+      }
+      auto published = CreateLabel();
+      auto candidate = CreateLabel();
+      auto done = CreateLabel();
+      if (!published.has_value()) {
+        return std::unexpected(std::move(published.error()));
+      }
+      if (!candidate.has_value()) {
+        return std::unexpected(std::move(candidate.error()));
+      }
+      if (!done.has_value()) {
+        return std::unexpected(std::move(done.error()));
+      }
+      replays.push_back(RightJoinContinuation{
+          .depth = depth,
+          .published = *published,
+          .replay_candidate = *candidate,
+          .replay_done = *done,
+      });
     }
     SetStreamingCoreContext(core);
     auto after = CreateLabel();
@@ -8793,9 +9080,39 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!source.cursor.has_value()) {
         return std::unexpected(InternalFailure("joined source has no cursor descriptor"));
       }
+      if (!replays.empty() && source.matched.has_value()) {
+        auto zero = EnsureZeroConstant();
+        if (!zero.has_value()) {
+          return std::unexpected(std::move(zero.error()));
+        }
+        if (auto initialized = Append(LoadConstantInstruction{
+                .constant = *zero,
+                .output = *source.matched,
+            });
+            !initialized.has_value()) {
+          return initialized;
+        }
+      }
       if (auto opened = Append(OpenReadCursorInstruction{.cursor = *source.cursor});
           !opened.has_value()) {
         return opened;
+      }
+      if (source.right_matches.has_value()) {
+        auto zero = EnsureZeroConstant();
+        if (!zero.has_value()) {
+          return std::unexpected(std::move(zero.error()));
+        }
+        if (auto initialized = Append(LoadConstantInstruction{
+                .constant = *zero,
+                .output = AssumeValue(source.replay_mode),
+            });
+            !initialized.has_value()) {
+          return initialized;
+        }
+        if (auto opened = Append(OpenRelationInstruction{.relation = *source.right_matches});
+            !opened.has_value()) {
+          return opened;
+        }
       }
     }
     std::optional<Label> stopped;
@@ -8806,11 +9123,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       stopped = *label;
     }
-    if (auto loop = EmitJoinedLoop(core, 0U, consume, always_stops, stopped); !loop.has_value()) {
+    if (auto loop = EmitJoinedLoop(core, 0U, consume, always_stops, stopped, replays);
+        !loop.has_value()) {
       return loop;
+    }
+    for (const RightJoinContinuation& replay : replays) {
+      if (auto emitted = EmitRightJoinReplay(core, replay); !emitted.has_value()) {
+        return emitted;
+      }
     }
     const auto close = [&]() -> LoweringResult<void> {
       for (const JoinedSourcePlan& source : std::views::reverse(core.joined_sources)) {
+        if (source.right_matches.has_value()) {
+          if (auto closed = Append(CloseRelationInstruction{.relation = *source.right_matches});
+              !closed.has_value()) {
+            return closed;
+          }
+        }
         if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(source.cursor)});
             !closed.has_value()) {
           return closed;

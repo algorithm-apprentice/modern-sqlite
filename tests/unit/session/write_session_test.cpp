@@ -139,6 +139,14 @@ TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
   ExecuteDone(session, "INSERT INTO a VALUES(2)");
   EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a INNER JOIN b ON a.id=b.id").empty());
   EXPECT_TRUE(QueryRows(session, "SELECT b.id,a.id FROM b LEFT JOIN a ON a.id=b.id").empty());
+  EXPECT_TRUE(QueryRows(session, "SELECT a.id,b.id FROM a RIGHT JOIN b ON a.id=b.id").empty());
+  const auto right_empty_prefix =
+      QueryRows(session, "SELECT b.id,a.id FROM b RIGHT JOIN a ON a.id=b.id ORDER BY a.id");
+  ASSERT_EQ(2U, right_empty_prefix.size());
+  for (std::size_t index = 0; index < right_empty_prefix.size(); ++index) {
+    EXPECT_EQ(SqlValueType::kNull, right_empty_prefix[index][0].type());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), right_empty_prefix[index][1].integer_value());
+  }
   for (const std::string_view condition : {"", " ON a.id=b.id", " USING(id)"}) {
     const auto rows = QueryRows(session, "SELECT a.id,b.id,b._rowid_ FROM a LEFT JOIN b" +
                                              std::string{condition} + " ORDER BY a.id");

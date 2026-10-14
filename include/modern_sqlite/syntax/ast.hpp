@@ -193,6 +193,7 @@ enum class SourceJoinKind : std::uint8_t {
   kCross,
   kInner,
   kLeft,
+  kRight,
 };
 
 struct JoinUsingClause {

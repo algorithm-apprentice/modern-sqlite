@@ -945,6 +945,18 @@ TEST(Parser, PreservesNaturalModifiersAndOrderedUsingNameSpans) {
   EXPECT_EQ(ParseErrorCode::kResourceLimitExceeded, excessive.error().code);
 }
 
+TEST(Parser, PreservesRightOuterAndNaturalRightOperators) {
+  for (const std::string_view operation :
+       {"RIGHT JOIN", "RIGHT OUTER JOIN", "NATURAL RIGHT JOIN", "NATURAL RIGHT OUTER JOIN"}) {
+    const auto parsed = ParseOrThrow("SELECT * FROM a " + std::string{operation} + " b");
+    const SyntaxTree& tree = RequiredTree(parsed);
+    const auto& source = FirstSelectCore(tree).from[1];
+    EXPECT_EQ(SourceJoinKind::kRight, source.join);
+    EXPECT_EQ(operation, SpanText(tree, RequiredOptional(source.join_span)));
+    EXPECT_EQ(operation.starts_with("NATURAL"), source.natural);
+  }
+}
+
 TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
   const std::array malformed{
       "SELECT * FROM a,",
@@ -968,6 +980,9 @@ TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
       "SELECT * FROM a JOIN b USING(id) ON 1",
       "SELECT * FROM a JOIN b ON 1 USING(id)",
       "SELECT * FROM a NATURAL LEFT",
+      "SELECT * FROM a RIGHT",
+      "SELECT * FROM a RIGHT OUTER",
+      "SELECT * FROM a RIGHT JOIN",
   };
   for (const std::string_view sql : malformed) {
     SCOPED_TRACE(sql);
@@ -976,9 +991,10 @@ TEST(Parser, RejectsIncompleteAndUnimplementedJoinFormsWithoutAPrefix) {
     EXPECT_EQ(ParseErrorCode::kUnexpectedToken, parsed.error().code);
   }
   const std::array unsupported{
-      "SELECT * FROM a RIGHT JOIN b",         "SELECT * FROM a FULL JOIN b",
-      "SELECT * FROM a NATURAL RIGHT JOIN b", "SELECT * FROM a NATURAL FULL JOIN b",
-      "SELECT * FROM a,(SELECT 1)",           "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
+      "SELECT * FROM a FULL JOIN b",
+      "SELECT * FROM a NATURAL FULL JOIN b",
+      "SELECT * FROM a,(SELECT 1)",
+      "SELECT * FROM a CROSS JOIN b INDEXED BY idx",
   };
   for (const std::string_view sql : unsupported) {
     SCOPED_TRACE(sql);
@@ -1558,7 +1574,7 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
     TokenKind first_unsupported;
   };
   constexpr std::array cases{
-      Case{.sql = "SELECT * FROM a RIGHT JOIN b", .first_unsupported = TokenKind::kJoinKeyword},
+      Case{.sql = "SELECT * FROM a FULL JOIN b", .first_unsupported = TokenKind::kJoinKeyword},
       Case{.sql = "SELECT * FROM f(1)", .first_unsupported = TokenKind::kLeftParenthesis},
       Case{
           .sql = "SELECT * FROM (SELECT 1)",

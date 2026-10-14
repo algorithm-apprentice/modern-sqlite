@@ -663,7 +663,8 @@ class Validator final {
         }
       } else {
         if ((source.join != SourceJoinKind::kComma && source.join != SourceJoinKind::kCross &&
-             source.join != SourceJoinKind::kInner && source.join != SourceJoinKind::kLeft) ||
+             source.join != SourceJoinKind::kInner && source.join != SourceJoinKind::kLeft &&
+             source.join != SourceJoinKind::kRight) ||
             !source.join_span.has_value()) {
           return Misuse("joined select source has an invalid operator");
         }

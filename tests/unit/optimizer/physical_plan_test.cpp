@@ -900,6 +900,26 @@ TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP INNER JOIN"));
 }
 
+TEST(PhysicalPlan, KeepsWhereAndSuffixOnAfterTheirRightNullExtensionBarriers) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON a.id=b.id "
+      "JOIN Items c ON a.id>0 WHERE a.id>1 AND b.id>0",
+      TestCatalog());
+  std::size_t joins = 0;
+  for (const PhysicalNode& node : plan.nodes()) {
+    if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+        join != nullptr) {
+      EXPECT_EQ(BoundSourceId{1}, join->condition_source);
+      ++joins;
+    } else if (const auto* filter = std::get_if<PhysicalFilterNode>(&node.payload);
+               filter != nullptr) {
+      EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{1}}), filter->predicate_sources);
+    }
+  }
+  EXPECT_EQ(2U, joins);
+  EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP RIGHT JOIN"));
+}
+
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());
