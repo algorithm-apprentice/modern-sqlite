@@ -293,14 +293,22 @@ template <typename Bound>
 
 [[nodiscard]] std::expected<std::vector<BoundSourceId>, OptimizerError> JoinPredicateSources(
     const BoundSelect& bound_select, const BoundSelectCore& core,
-    std::span<const BoundExpressionId> predicates) {
+    std::span<const BoundExpressionId> predicates,
+    std::optional<BoundSourceId> condition_owner = std::nullopt) {
   std::vector<BoundSourceId> sources;
   if (core.table_sources.size() < 2U) {
     return sources;
   }
   sources.reserve(predicates.size());
+  BoundSourceId floor = core.table_sources.front().id;
+  for (const BoundTableSource& source : core.table_sources) {
+    if (source.join == SourceJoinKind::kRight &&
+        (!condition_owner.has_value() || source.id <= *condition_owner)) {
+      floor = source.id;
+    }
+  }
   for (const BoundExpressionId predicate : predicates) {
-    BoundSourceId ready = core.table_sources.front().id;
+    BoundSourceId ready = floor;
     bool valid = true;
     auto visitor = [&](BoundSourceId source) {
       if (std::ranges::find(core.table_sources, source, &BoundTableSource::id) ==
@@ -329,14 +337,16 @@ template <typename Bound>
   const BoundSelect& bound = plan.bound_select();
   const auto& core = std::get<BoundSelectCore>(bound.query_cores()[join.core_index]);
   const std::array predicates{*join.on};
-  auto sources = JoinPredicateSources(bound, core, predicates);
+  auto sources = JoinPredicateSources(bound, core, predicates, right->source);
   if (!sources.has_value()) {
     return std::unexpected(std::move(sources.error()));
   }
   if (sources->size() != 1U) {
     return std::unexpected(InvariantFailure("join condition has invalid source placement"));
   }
-  return std::optional{join.join == SourceJoinKind::kLeft ? right->source : sources->front()};
+  return std::optional{join.join == SourceJoinKind::kLeft || join.join == SourceJoinKind::kRight
+                           ? right->source
+                           : sources->front()};
 }
 
 template <typename Bound>
@@ -3862,6 +3872,7 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
                     (join->join == SourceJoinKind::kComma   ? "COMMA"
                      : join->join == SourceJoinKind::kCross ? "CROSS JOIN"
                      : join->join == SourceJoinKind::kLeft  ? "LEFT JOIN"
+                     : join->join == SourceJoinKind::kRight ? "RIGHT JOIN"
                                                             : "INNER JOIN"));
       } else if (std::holds_alternative<PhysicalEmptyNode>(node.payload)) {
         append_line("EMPTY INPUT");

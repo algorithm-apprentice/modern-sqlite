@@ -119,6 +119,7 @@ struct BoundSourceColumn {
   std::optional<ColumnId> catalog_column{};
   // A direct link to the visible USING/NATURAL representative in this core.
   std::optional<BoundSourceColumnId> merged_into{};
+  std::optional<BoundExpressionId> joined_value{};
 };
 
 struct BoundCollation {

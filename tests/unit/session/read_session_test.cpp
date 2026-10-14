@@ -737,6 +737,142 @@ TEST(ReadSession, ExecutesMergedUsingAndNaturalOutputWithoutLosingQualifiedRight
   EXPECT_EQ(ReadStep::kDone, TakeValue(natural.Step()));
 }
 
+TEST(ReadSession, PreservesUnmatchedRightRowsAndNeverReplaysWhereRejectedMatches) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT a.id,b.id FROM items a RIGHT JOIN model_rows b ON a.id=b.id "
+                       "WHERE b.id<=5 ORDER BY b.id");
+  for (std::int64_t id = 1; id <= 5; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+    if (id == 5) {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+    } else {
+      EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  ReadStatement rejected =
+      PrepareStatement(session,
+                       "SELECT a.id,b.id FROM items a RIGHT JOIN items b ON a.id=b.id "
+                       "WHERE a.id IS NULL");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(rejected.Step()));
+}
+
+TEST(ReadSession, ResetsRightReplayAndKeepsNullPrefixDefaultsOutOfOutput) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id,a.id,a.text_default,b.id FROM altered a "
+                       "RIGHT JOIN model_rows b USING(id) WHERE id<=?1 ORDER BY id LIMIT ?2");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(5)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(-1)));
+  for (std::int64_t id = 1; id <= 5; ++id) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(id, IntegerValue(statement.row()[3]));
+    if (id <= 2) {
+      EXPECT_EQ("fallback", TextValue(statement.row()[2]));
+    } else if (id == 3) {
+      EXPECT_EQ("stored", TextValue(statement.row()[2]));
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[2].type());
+    }
+    if (id == 5) {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[1].type());
+    } else {
+      EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(32)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(2, SqlValue::Integer(0)));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, CleansAndRecoversRightMatchRelationsAfterTemporaryWriteFailure) {
+  const auto state = std::make_shared<TemporaryFileState>();
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kFile,
+              .sorter_memory_threshold = ByteCount{32U << 10U},
+          },
+  };
+  const auto fixture = ReadCompatibilityFixturePath().parent_path().parent_path() /
+                       "index_performance" / "indexed.db";
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state), fixture.string(), options));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT count(),count(a.rowid) FROM sqlite_schema a RIGHT JOIN items b "
+                       "ON a.name='items'");
+  state->writes_until_failure = 0U;
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_GT(state->open_count, 0U);
+  EXPECT_EQ(0U, state->live_count);
+  const auto reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(4096, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(4096, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_EQ(0U, state->live_count);
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, PreservesRightMatchedSetsAcrossMemoryAndGenuineExternalOrderSpill) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    const auto state = std::make_shared<TemporaryFileState>();
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = mode,
+                .sorter_memory_threshold =
+                    ByteCount{mode == TemporaryStoreMode::kFile ? 64U << 10U : 1U << 20U},
+            },
+    };
+    ReadSession session =
+        TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                    ReadCompatibilityFixturePath().string(), options));
+    ReadStatement statement =
+        PrepareStatement(session,
+                         "SELECT b.id FROM model_rows a RIGHT JOIN model_rows b ON 1 "
+                         "CROSS JOIN model_rows c WHERE a.id<=8 ORDER BY b.id DESC,a.id,c.id");
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::ProbeCounterCollection work{
+        instrumentation::ProbeCollectionKind::AggregateWork};
+    const instrumentation::ScopedProbeCounterCollection scope{work};
+#endif
+    for (std::size_t row = 0; row < 8192U; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(static_cast<std::int64_t>(32U - row / 256U), IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, state->open_count > 0U);
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile,
+              work.Value(instrumentation::AggregateWorkMetric::SorterSpillWrites) > 0U);
+#endif
+    EXPECT_LE(state->peak_live_count, 3U);
+    EXPECT_EQ(0U, state->live_count);
+    RequireStatus(statement.Reset());
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    RequireStatus(statement.Finalize());
+    EXPECT_EQ(0U, state->live_count);
+  }
+}
+
 TEST(ReadSession, RebindsMergedGroupingAcrossEarlyAndZeroLimits) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -868,6 +1004,11 @@ TEST(ReadSession, RecoversJoinedCursorReadFailureAndCleansOwnedState) {
            .second = 1},
       Case{.sql = "SELECT count(b.id) FROM Items a LEFT JOIN storage_values b USING(id)",
            .first = 4},
+      Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN storage_values b ON a.id=b.id LIMIT 1",
+           .first = 1,
+           .second = 1},
+      Case{.sql = "SELECT count() FROM Items a RIGHT JOIN storage_values b ON a.id=b.id",
+           .first = 11},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -1063,6 +1204,9 @@ TEST(ReadSession, BypassesAllSixtyFourSourcesForZeroLimit) {
       Case{.operation = " LEFT JOIN Items AS t", .condition = " ON 0"},
       Case{.operation = " LEFT JOIN Items AS t", .condition = " USING(id)"},
       Case{.operation = " NATURAL LEFT JOIN Items AS t", .condition = ""},
+      Case{.operation = " RIGHT JOIN Items AS t", .condition = " ON 0"},
+      Case{.operation = " RIGHT JOIN Items AS t", .condition = " USING(id)"},
+      Case{.operation = " NATURAL RIGHT JOIN Items AS t", .condition = ""},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.operation);

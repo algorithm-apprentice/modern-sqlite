@@ -451,7 +451,7 @@ int main() try {
       DistinctFixture(catalog,
                       "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
   };
-  const std::array<PhysicalPlan, 11> joined_plans{
+  const std::array<PhysicalPlan, 13> joined_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
                       "WHERE a.id>?1 AND b.id>?2 LIMIT ?3 OFFSET ?4"),
@@ -462,6 +462,12 @@ int main() try {
       DistinctFixture(catalog,
                       "SELECT a.Name FROM Items a CROSS JOIN Items b "
                       "UNION SELECT ?1 LIMIT 1"),
+      DistinctFixture(catalog,
+                      "SELECT id,a.Name FROM Items a RIGHT JOIN Items b USING(id) "
+                      "ORDER BY id LIMIT ?1"),
+      AggregateFixture(catalog,
+                       "SELECT b.id,count(a.id) FROM Items a RIGHT JOIN Items b ON a.id=b.id "
+                       "RIGHT JOIN Items c ON b.id=c.id GROUP BY b.id ORDER BY b.id"),
       AggregateFixture(catalog,
                        "SELECT a.id,a._rowid_,b.id,b._rowid_,max(b.id-a.id) "
                        "FROM Items a CROSS JOIN Items b"),

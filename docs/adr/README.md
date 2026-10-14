@@ -82,3 +82,4 @@ their corresponding implementation begins.
 76. [ADR-0076: Typed NULL-Row Cursor Publication](0076-typed-null-row-cursor-publication.md)
 77. [ADR-0077: INNER and LEFT Join Execution](0077-inner-and-left-join-execution.md)
 78. [ADR-0078: USING and NATURAL Joined-Column Namespaces](0078-using-and-natural-joined-column-namespaces.md)
+79. [ADR-0079: RIGHT Join Matched-Row Replay](0079-right-join-matched-row-replay.md)

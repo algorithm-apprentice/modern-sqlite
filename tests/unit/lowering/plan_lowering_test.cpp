@@ -1050,6 +1050,39 @@ TEST_F(ReadLoweringJoin, ExecutesLeftChainsAndNeverExtendsWhereRejectedMatches) 
   }
 }
 
+TEST_F(ReadLoweringJoin, ReplaysRightRowsAfterAnUnmatchedLeftPrefix) {
+  const auto rows = Execute(
+      "SELECT a.id,b.id,c.id FROM items a LEFT JOIN items b ON 0 "
+      "RIGHT JOIN items c ON b.id=c.id ORDER BY c.id");
+  ASSERT_EQ(3U, rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(SqlValueType::kNull, rows[index][0].type());
+    EXPECT_EQ(SqlValueType::kNull, rows[index][1].type());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][2].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringJoin, SharesOneReadableBodyAcrossSixtyFourRightReplays) {
+  for (const std::size_t sources : {2U, 8U, 32U, 64U}) {
+    SCOPED_TRACE(sources);
+    std::string sql = "SELECT 1 FROM Items t0";
+    for (std::size_t index = 1; index < sources; ++index) {
+      sql += " RIGHT JOIN Items t" + std::to_string(index) + " ON 0";
+    }
+    sql += " LIMIT 0";
+    const BytecodeProgram program = LowerOrThrow(sql, catalog());
+    const auto kinds = InstructionKinds(program);
+    EXPECT_EQ(sources,
+              static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenRead)));
+    EXPECT_EQ(sources - 1U,
+              static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenRelation)));
+    EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+    EXPECT_LE(program.instructions().size(), sources * sources * 2U + sources * 64U + 32U);
+    RecordProperty("instructions_for_" + std::to_string(sources) + "_right_sources",
+                   std::to_string(program.instructions().size()));
+  }
+}
+
 TEST_F(ReadLoweringJoin, AppliesInnerForwardConditionsAndConsumesLeftRowsInAllDestinations) {
   const auto forward = Execute(
       "SELECT a.id,b.id,c.id FROM items a JOIN items b ON c.id=b.id "
