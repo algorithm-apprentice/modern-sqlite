@@ -89,6 +89,45 @@ aggregate implementations. Keep all frozen SQL oracles, workloads, thresholds,
 and allocation budgets unchanged where behavior is unchanged. Resource-aware
 coroutines and actual SQL subquery syntax remain separate reviewed slices.
 
+### Closure evidence
+
+The private-read specification first failed at the unmodeled typed kind.
+A separate executable verifier red exposed a value routine indirectly calling
+a read routine; edge-level effect checking closes that escape before
+publication.
+
+The complete fast tier passes 1,240 unit cases. Complete Release and
+ASan/UBSan tiers pass 1,286 each; independent GCC passes 1,284. Seventeen
+focused ownership, lifecycle, execution, and exhaustive-OOM cases pass.
+All 257 frozen native comparisons, six unsupported boundaries, and 42
+archived runner/work contracts remain unchanged.
+
+Normal, empty, and repeated private table reads preserve the caller's logical
+NULL row. A canonical memory-VFS read fault verifies typed I/O failure,
+continuation/cursor cleanup, reset, and recovery. One-, eight-, 33-, and
+64-level read chains preserve parent capabilities across packed cursor-state
+word boundaries.
+
+Every sorter, top-N, relation, and aggregate family has private ownership and
+closed-return evidence, including forbidden cross-owner reuse after a prior
+owner closes. A 4,096-record private sorter proves real PMA spill, missing
+factory failure, injected write I/O failure, delete-on-error cleanup, reset
+recovery, and final halt cleanup through the canonical statement storage.
+No main-database transition is introduced.
+
+One thousand sanitized lifetime repetitions complete 18,000 VM executions,
+including 106,000 nested private cursor lifetimes. Another 100 repetitions
+of both source-read and PMA fault/recovery fixtures pass. Full measured
+program/VM creation allocation ranges and in-body OOM cleanup are covered
+through the existing canonical sweep helpers.
+
+Builder kind propagation, invalid declarations, unknown kinds, transitive
+effect mismatches, persistent-write/global/client operations, unclosed and
+finalized-but-not-closed resources, exact analysis budgets, and unchanged
+main halt policy are verified. Direct design, core, and incremental evidence
+review found no unresolved in-scope issue. Changed-translation-unit
+clang-tidy, formatting, engineering discipline, and graph validation pass.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 subquery-control prerequisite.
