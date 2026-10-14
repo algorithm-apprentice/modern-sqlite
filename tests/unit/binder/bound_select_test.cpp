@@ -863,6 +863,79 @@ TEST(Binder, UsesFirstVisibleLeftUsingColumnAndRejectsMissingOrIllegalClauses) {
             std::get<BoundColumnExpression>(ResultExpression(explicit_rowid, 0).payload).column);
 }
 
+TEST(Binder, EnforcesCombinedGeneratedJoinHeightAcrossSourcesAndWhere) {
+  struct Case {
+    std::size_t sources;
+    std::size_t names;
+    std::string_view where;
+    bool accepted;
+    std::string_view leading_on{};
+    std::string_view trailing_on{};
+  };
+  const std::array cases{
+      Case{.sources = 2, .names = 999, .where = "", .accepted = true},
+      Case{.sources = 2, .names = 1000, .where = "", .accepted = false},
+      Case{.sources = 3, .names = 499, .where = "", .accepted = true},
+      Case{.sources = 3, .names = 500, .where = "", .accepted = false},
+      Case{.sources = 2, .names = 998, .where = " WHERE 0", .accepted = true},
+      Case{.sources = 2, .names = 999, .where = " WHERE 0", .accepted = false},
+      Case{.sources = 2, .names = 997, .where = " WHERE t0.id>0", .accepted = true},
+      Case{.sources = 2, .names = 998, .where = " WHERE t0.id>0", .accepted = false},
+      Case{.sources = 2, .names = 998, .where = " WHERE id COLLATE BINARY>0", .accepted = true},
+      Case{.sources = 2, .names = 999, .where = " WHERE id COLLATE BINARY>0", .accepted = false},
+      Case{.sources = 10, .names = 111, .where = "", .accepted = true},
+      Case{.sources = 64, .names = 16, .where = "", .accepted = false},
+      Case{.sources = 2,
+           .names = 997,
+           .where = "",
+           .accepted = true,
+           .leading_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 998,
+           .where = "",
+           .accepted = false,
+           .leading_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 998,
+           .where = "",
+           .accepted = true,
+           .trailing_on = " JOIN Items extra ON t0.id=extra.id"},
+      Case{.sources = 2,
+           .names = 999,
+           .where = "",
+           .accepted = false,
+           .trailing_on = " JOIN Items extra ON t0.id=extra.id"},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sources);
+    SCOPED_TRACE(test_case.names);
+    SCOPED_TRACE(test_case.where);
+    SCOPED_TRACE(test_case.leading_on);
+    SCOPED_TRACE(test_case.trailing_on);
+    std::string sql = "SELECT count() FROM Items t0";
+    sql += test_case.leading_on;
+    for (std::size_t source = 1; source < test_case.sources; ++source) {
+      sql += " JOIN Items t" + std::to_string(source) + " USING(";
+      for (std::size_t name = 0; name < test_case.names; ++name) {
+        sql += name == 0U ? "id" : ",id";
+      }
+      sql += ')';
+    }
+    sql += test_case.trailing_on;
+    sql += test_case.where;
+    const auto bound = BindSelectStatement(ParseTree(sql), catalog);
+    if (test_case.accepted) {
+      ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+    } else {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+      EXPECT_EQ(ErrorCode::kGeneric, bound.error().base_error_code());
+      EXPECT_EQ("Expression tree is too large (maximum depth 1000)", bound.error().detail);
+    }
+  }
+}
+
 TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BoundSelect select =

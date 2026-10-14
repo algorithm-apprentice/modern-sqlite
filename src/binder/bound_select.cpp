@@ -3031,12 +3031,78 @@ class StatementBinder final {
     return {};
   }
 
+  [[nodiscard]] std::size_t JoinConditionSyntaxHeight(ExpressionId id) const {
+    return std::visit(
+        [this](const auto& payload) -> std::size_t {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, LiteralExpression> ||
+                        std::is_same_v<Payload, VariableExpression> ||
+                        std::is_same_v<Payload, WildcardExpression>) {
+            return 1;
+          } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
+            return payload.name.parts.size();
+          } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+            return JoinConditionSyntaxHeight(payload.inner);
+          } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
+            return JoinConditionSyntaxHeight(payload.operand);
+          } else {
+            std::size_t height = 0;
+            if constexpr (std::is_same_v<Payload, UnaryExpression>) {
+              height = JoinConditionSyntaxHeight(payload.operand);
+            } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+              height = std::max(JoinConditionSyntaxHeight(payload.left),
+                                JoinConditionSyntaxHeight(payload.right));
+            } else {
+              static_assert(std::is_same_v<Payload, FunctionCallExpression>);
+              for (const ExpressionId argument : payload.arguments) {
+                height = std::max(height, JoinConditionSyntaxHeight(argument));
+              }
+              for (const OrderingTerm& term : payload.order_by) {
+                height = std::max(height, JoinConditionSyntaxHeight(term.expression));
+              }
+              if (payload.filter.has_value()) {
+                height = std::max(height, JoinConditionSyntaxHeight(*payload.filter));
+              }
+            }
+            return std::min(height + 1U, kMaximumExpressionConstructionDepth + 1U);
+          }
+        },
+        tree_.expression(id).payload);
+  }
+
   [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core) {
+    if (core.from.size() < 2U) {
+      return {};
+    }
+    std::size_t height = 0;
+    const auto admit = [&](std::size_t added, SourceSpan span) -> BindExpected<void> {
+      height = height == 0U ? added : std::max(height, added) + 1U;
+      if (height > kMaximumExpressionConstructionDepth) {
+        return std::unexpected(BinderError(BindErrorCode::kExpressionDepthExceeded, span,
+                                           "Expression tree is too large (maximum depth " +
+                                               std::to_string(kMaximumExpressionConstructionDepth) +
+                                               ")"));
+      }
+      return {};
+    };
+    if (core.where.has_value()) {
+      if (auto admitted =
+              admit(JoinConditionSyntaxHeight(*core.where), tree_.expression(*core.where).span);
+          !admitted.has_value()) {
+        return admitted;
+      }
+    }
     for (std::size_t index = 1; index < core.from.size(); ++index) {
       const TableSource& source = core.from[index];
       if (source.natural && (source.on.has_value() || source.using_clause.has_value())) {
         return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, source.span,
                                            "a NATURAL join may not have an ON or USING clause"));
+      }
+      if (source.on.has_value()) {
+        if (auto admitted = admit(JoinConditionSyntaxHeight(*source.on), source.span);
+            !admitted.has_value()) {
+          return admitted;
+        }
       }
       if (source.using_clause.has_value()) {
         for (const SourceSpan column : source.using_clause->columns) {
@@ -3047,6 +3113,9 @@ class StatementBinder final {
           if (auto joined = BindUsingColumn(index, *name, column); !joined.has_value()) {
             return joined;
           }
+          if (auto admitted = admit(2U, column); !admitted.has_value()) {
+            return admitted;
+          }
         }
       } else if (source.natural) {
         const SourceState& right = source_states_[index];
@@ -3056,6 +3125,9 @@ class StatementBinder final {
           if (FindVisibleLeftColumn(name, right.source_column_begin).has_value()) {
             if (auto joined = BindUsingColumn(index, name, source.span); !joined.has_value()) {
               return joined;
+            }
+            if (auto admitted = admit(2U, source.span); !admitted.has_value()) {
+              return admitted;
             }
           }
         }
@@ -5255,6 +5327,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "indexed_table_unsupported";
     case BindErrorCode::kJoinConditionScope:
       return "join_condition_scope";
+    case BindErrorCode::kExpressionDepthExceeded:
+      return "expression_depth_exceeded";
     case BindErrorCode::kInternalInvariant:
       return "internal_invariant";
   }
@@ -5285,6 +5359,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kNoSuchColumn:
     case BindErrorCode::kAmbiguousColumn:
     case BindErrorCode::kJoinConditionScope:
+    case BindErrorCode::kExpressionDepthExceeded:
     case BindErrorCode::kNoTablesSpecified:
     case BindErrorCode::kNoSuchFunction:
     case BindErrorCode::kWrongFunctionArity:

@@ -22,6 +22,8 @@ struct ExpressionId {
   constexpr auto operator<=>(const ExpressionId&) const noexcept = default;
 };
 
+inline constexpr std::size_t kMaximumExpressionConstructionDepth = 1000;
+
 enum class SortOrder : std::uint8_t {
   kDefault,
   kAscending,

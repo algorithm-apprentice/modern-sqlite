@@ -103,6 +103,17 @@ multiple equalities through the same bound logical-AND builder. Retain the
 result in `BoundTableSource::on`, not a second condition representation.
 Explicit ON retains its alias-enabled binding phase and scope checks.
 
+The normalized combined predicate obeys SQLite's 1,000-level expression-height
+limit. Checking each source condition separately is insufficient: equality
+terms from consecutive USING/NATURAL clauses are appended directly to the
+original WHERE tree. Explicit ON contributes its own source-syntax subtree.
+Qualified names include their dot-node height; parentheses and COLLATE are
+transparent.
+Share the existing syntax construction limit through the AST contract and
+report an explicit typed binding error with SQLite's generic primary code.
+Compute this bounded height while binding source conditions, without another
+expression container or a recursive walk of synthesized conjunctions.
+
 Logical planning, physical readiness, LEFT match-before-WHERE, NULL extension,
 and every ordinary/aggregate destination consume the existing ON contract.
 No VM instruction, cursor representation, runtime namespace, source-row copy,
@@ -129,8 +140,9 @@ comparison.
 Pin duplicate names/lists/qualifiers, ambiguous prefixes, schema/wildcard
 quirks, hidden rowid exclusion, malformed spans/clauses, alias/group/order
 scope, compounds, all consumers, zero/early LIMIT, reset/rebind, and the
-64-source boundary. Add module-owned allocation sweeps and real source/spill
-failure cleanup using existing helpers.
+64-source boundary. Pin both sides of the combined predicate-height boundary
+with multiple sources, WHERE, and explicit ON. Add module-owned allocation
+sweeps and real source/spill failure cleanup using existing helpers.
 
 Add independently generated pinned SQLite vectors, deterministic merged-output
 models, and grammar-aware sanitizer fuzz. Run the focused and full fast tiers,

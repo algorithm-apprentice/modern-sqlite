@@ -423,6 +423,7 @@ enum class BindErrorCode : std::uint8_t {
   kObjectNameReserved,
   kIndexedTableUnsupported,
   kJoinConditionScope,
+  kExpressionDepthExceeded,
   kInternalInvariant,
 };
 
