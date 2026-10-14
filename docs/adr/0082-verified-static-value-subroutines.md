@@ -102,6 +102,42 @@ no SQL parser acceptance or persistent format changes are part of this
 package. Review design, core, and incremental evidence separately, then merge
 one coherent slice only after all required gates pass.
 
+### Closure evidence
+
+The focused multiple-caller specification first failed because the typed
+subroutine contract was unmodeled. It then passed through the shared verifier
+without merging caller-private registers. The final fast tier passes 1,225
+unit cases; complete Release and ASan/UBSan tiers pass 1,271 each, and the
+independent GCC tier passes 1,269. All 16 focused control/allocation cases also
+pass on Debug, Release, ASan/UBSan, and GCC after the derived-count-only lint
+correction.
+
+Executable one-, eight-, and 64-level chains establish the exact maximum
+depth, instruction counts, return continuations, and reset/rebinding behavior.
+A separate arithmetic contribution model checks 32 reproducible shared-call
+DAGs under three bindings, including a previously visited leaf before a deeper
+caller. One thousand sanitized repetitions complete 96,000 modeled execution
+lifetimes. A looping body uses the same definite-register lattice as main.
+
+Malformed IDs, empty/overlapping/out-of-range regions, cross-region branches,
+foreign labels, mismatched/main returns, self/mutual recursion, uncalled code,
+forbidden capabilities/results/halt, missing inputs, conditional outputs,
+and exact memory/work-budget boundaries are rejected.
+
+Program creation and VM creation cover every measured allocation failure.
+A failed builder declaration preserves its ID and an exact owned-byte budget.
+Eight thousand repeated calls and returns allocate nothing after preparation.
+Typed scalar errors, instruction-budget interruption, allocation failure,
+reset, and recovered execution retain the canonical VM lifecycle.
+
+All 257 existing native comparisons, six unsupported boundaries, and 42
+archived runner/work contracts remain unchanged. Existing statements retain
+their allocation budgets. No SQL syntax, runtime compiler, persistent format,
+private resource store, or capability-state relaxation is introduced.
+Direct design, core, and incremental evidence review has no unresolved issue
+in this value/control scope. Changed-translation-unit clang-tidy, formatting,
+engineering discipline, and dependency-graph validation pass.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 subquery-control prerequisite.
