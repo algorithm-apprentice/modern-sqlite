@@ -155,6 +155,13 @@ class ByteReader final {
   const std::size_t left_count = 1U + input.Next() % 8U;
   const std::size_t right_count = 1U + input.Next() % 8U;
   if (input.Next() % 4U == 0U) {
+    const bool natural = input.Next() % 2U != 0U;
+    return "SELECT id,a.id,b.id FROM model_rows a" +
+           std::string{natural ? " NATURAL LEFT JOIN " : " LEFT JOIN "} + "model_rows b" +
+           (natural ? "" : " USING(id)") + " WHERE id<=" + std::to_string(left_count) +
+           " ORDER BY id LIMIT " + std::to_string(input.Next() % 9U);
+  }
+  if (input.Next() % 4U == 0U) {
     return "SELECT a.id,b.id,b.nullable FROM model_rows a LEFT JOIN model_rows b "
            "ON b.id=a.id AND b.id<=" +
            std::to_string(right_count) + " WHERE a.id<=" + std::to_string(left_count) +

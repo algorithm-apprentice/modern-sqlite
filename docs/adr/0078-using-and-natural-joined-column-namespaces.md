@@ -151,6 +151,45 @@ unchanged archived work contracts. Review local design, core, and incremental
 evidence commits before publishing one coherent slice and squash merging only
 after all hosted gates pass.
 
+### Closure evidence
+
+The public-session test first failed at the unsupported USING boundary.
+The completed feature passes 1,163 fast unit cases and all 1,209 cases in each
+complete optimized and ASan/UBSan tier. The independent GCC tier passed 1,206
+cases before the isolated height correction; its 23 focused namespace,
+depth, model/fuzz, and allocation cases pass with that correction.
+
+Thirty-three new pinned SQLite vectors bring the committed matrix to 197
+comparisons and six unsupported boundaries. All 170 previous oracle records
+remain identical as JSON data. The vectors pin merged metadata/order,
+qualified NULLs, natural NULL comparisons, duplicate names/qualifiers,
+ambiguous prefixes, wildcard expansion, and explicit error boundaries.
+Independent models exercise ordinary and identically aliased merged sources.
+The grammar-aware sanitized SQL campaign completed 20,000 inputs.
+
+Normal and zero-limit paths cover 64 sources. Memory/file parity includes a
+1,024-row USING product and proves genuine spill by checking new file
+acquisition. Source-read and PMA-flush failures preserve typed errors, exact
+cleanup, and reset recovery. Grouped defaults, reset/rebind, completed-row
+limits, sets, VALUES cores, and demand-one reuse the existing consumers.
+Module-owned allocation sweeps cover generated names and conditions; previous
+exact allocation budgets and all 42 archived runner/work contracts pass
+without changing frozen inputs.
+
+Incremental review found a genuine combined-height discrepancy after the core
+was green: two sources with 999 duplicate USING names prepare successfully,
+but 1,000 names exceed SQLite's limit; three sources fail at 500 names per
+join. The independent red case preceded the correction. Forty-eight native
+boundary probes now agree for WHERE constants, qualified names, arithmetic,
+functions, COLLATE, and ON before/after generated terms. Persistent unit cases
+pin those source-order and transparent-wrapper rules under optimized and
+sanitized execution.
+
+Direct design, core, and correction review found no unresolved issue. The
+implementation retains one column namespace mechanism, one comparison builder,
+and one existing ON producer; it adds no runtime join interpreter or alternate
+row/value container.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 slice 5.
