@@ -176,11 +176,13 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 3> full_sweep_sqls{
+  const std::array<std::string_view, 4> full_sweep_sqls{
       kAggregateSql,
       "SELECT a.*,b.Name FROM Items a CROSS JOIN Items b WHERE a.id=?1 "
       "ORDER BY b.Name LIMIT ?2",
       "SELECT a.Name FROM Items a,Items b UNION SELECT ?1 ORDER BY 1",
+      "SELECT b.id,a._rowid_,max(a.id),group_concat(a.Name ORDER BY b.id) "
+      "FILTER (WHERE a.id>?1) FROM Items a CROSS JOIN Items b GROUP BY b.id ORDER BY 1",
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);

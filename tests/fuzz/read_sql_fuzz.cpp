@@ -154,6 +154,15 @@ class ByteReader final {
   const bool distinct = input.Next() % 2U != 0U;
   const std::size_t left_count = 1U + input.Next() % 8U;
   const std::size_t right_count = 1U + input.Next() % 8U;
+  if (input.Next() % 4U == 0U) {
+    return "SELECT b.id,count(DISTINCT a.value),max(a.oid),"
+           "group_concat(a.label ORDER BY a.id DESC) FILTER (WHERE a.nullable IS NOT NULL) "
+           "FROM model_rows a" +
+           std::string{cross ? " CROSS JOIN " : ","} +
+           "model_rows b WHERE a.id<=" + std::to_string(left_count) +
+           " AND b.id<=" + std::to_string(right_count) +
+           " GROUP BY b.id ORDER BY b.id DESC LIMIT " + std::to_string(input.Next() % 9U);
+  }
   std::string sql =
       "SELECT " + std::string{distinct ? "DISTINCT " : ""} +
       "a.id,b.id,a.nullable+b.nullable FROM model_rows a" + (cross ? " CROSS JOIN " : ",") +

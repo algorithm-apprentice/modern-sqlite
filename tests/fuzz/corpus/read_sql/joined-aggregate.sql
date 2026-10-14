@@ -1,0 +1,1 @@
+SELECT b.id,count(DISTINCT a.value),max(a.oid),group_concat(a.label ORDER BY a.id DESC) FILTER (WHERE a.nullable IS NOT NULL) FROM model_rows a CROSS JOIN model_rows b WHERE a.id<=4 AND b.id<=3 GROUP BY b.id HAVING count()>1 ORDER BY b.id DESC LIMIT 2 OFFSET 1;
