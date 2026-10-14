@@ -884,8 +884,11 @@ foreach(consumer_case IN ITEMS
     using_grouping
     natural_left_demand_one
     right_grouping
-    natural_right_demand_one)
-  if(consumer_case STREQUAL "natural_right_demand_one")
+    natural_right_demand_one
+    full_grouping
+    natural_full_demand_one)
+  if(consumer_case STREQUAL "natural_right_demand_one"
+     OR consumer_case STREQUAL "natural_full_demand_one")
     foreach(partition RANGE 0 3)
       add_test(
         NAME session.read_session_oom.${consumer_case}.${partition}

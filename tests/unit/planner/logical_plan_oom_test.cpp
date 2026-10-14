@@ -228,7 +228,7 @@ int main() try {
     return 1;
   }
 
-  const std::array<std::string_view, 6> advanced_sqls{
+  const std::array<std::string_view, 7> advanced_sqls{
       "VALUES(1) UNION ALL SELECT DISTINCT id FROM Items EXCEPT SELECT 3 ORDER BY 1 LIMIT 2",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -238,6 +238,7 @@ int main() try {
       "GROUP BY a.id ORDER BY 1",
       "SELECT id,count(b.id) FROM Items a LEFT JOIN Items b USING(id) GROUP BY id ORDER BY 1",
       "SELECT id,count(a.id) FROM Items a RIGHT JOIN Items b USING(id) GROUP BY id ORDER BY 1",
+      "SELECT id,count(a.id) FROM Items a FULL JOIN Items b USING(id) GROUP BY id ORDER BY 1",
   };
   for (const std::string_view sql : advanced_sqls) {
     BoundSelect compound_baseline_bound = BindCompoundFixture(catalog, sql);

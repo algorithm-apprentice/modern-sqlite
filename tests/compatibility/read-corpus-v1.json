@@ -1406,7 +1406,7 @@
       "operations": [
         {"op": "finalize"}
       ],
-      "sql_hex": "53454c45435420612e6e616d652046524f4d206974656d7320415320612046554c4c204a4f494e206974656d732041532062204f4e20612e69643d622e6964"
+      "sql_hex": "53454c45435420612e6e616d652046524f4d20286974656d73204153206129204a4f494e206974656d732041532062204f4e20612e69643d622e6964"
     },
     {
       "database": "core",
@@ -2376,6 +2376,214 @@
     },
     {
       "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-disjoint-counts",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428612e6964292c636f756e7428622e6964292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e2030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-matched",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20612e69643d622e6964204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-shifted-unmatched",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20612e69643d622e69642b31204f5244455220425920636f616c6573636528612e69642c622e6964292c612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-using",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c612e69642c622e69642046524f4d206974656d7320612046554c4c204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643c3d35204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-merged-affinity",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c69643d2735272c69643d352c747970656f66286964292046524f4d206974656d7320612046554c4c204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-where-rejected-match",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20612e69643d622e696420574845524520612e6964204953204e554c4c204f5220622e6964204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-replay-chain-limit",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20302046554c4c204a4f494e206974656d732063204f4e2030204f5244455220425920612e69642c622e69642c632e6964204c494d49542035"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-replay-chain-count",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428612e6964292c636f756e7428622e6964292c636f756e7428632e6964292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20302046554c4c204a4f494e206974656d732063204f4e2030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-suffix-inner",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e2030204a4f494e206974656d732063204f4e20612e69643d632e6964204f5244455220425920612e69642c632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-suffix-left",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e2030204c454654204a4f494e206974656d732063204f4e20636f616c6573636528612e69642c622e6964293d632e6964204f5244455220425920612e69642c622e69642c632e6964204c494d49542035"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "right-full-chain",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20302046554c4c204a4f494e206974656d732063204f4e2030204f5244455220425920612e69642c622e69642c632e6964204c494d49542035"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-right-chain",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e2030205249474854204a4f494e206974656d732063204f4e20622e69643d632e6964204f5244455220425920612e69642c622e69642c632e6964204c494d49542035"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-shared-qualified",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e69642046524f4d206974656d7320712046554c4c204a4f494e206d6f64656c5f726f77732071205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-qualifier-subgroup-left",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e69642c632e69642046524f4d206974656d732071204c454654204a4f494e206974656d732071205553494e47286964292046554c4c204a4f494e206d6f64656c5f726f77732063205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-qualifier-subgroup-full",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e69642c632e69642046524f4d206974656d7320712046554c4c204a4f494e206974656d732071205553494e47286964292046554c4c204a4f494e206d6f64656c5f726f77732063205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-unqualified-wildcard",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c454354202a2046524f4d206974656d7320612046554c4c204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643d35"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "natural-full-shared-wildcard",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420712e2a2046524f4d206974656d732071204e41545552414c2046554c4c204a4f494e206974656d732071204f52444552204259206964204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "natural-full-wildcard",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c454354202a2046524f4d206974656d732061204e41545552414c2046554c4c204a4f494e206974656d732062204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-left-nocase",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c454354206e616d652046524f4d206974656d7320612046554c4c204a4f494e2073716c6974655f736368656d612062205553494e47286e616d6529205748455245206e616d653d27414c50484127"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-left-binary",
+      "operations": [{"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c454354206e616d652046524f4d2073716c6974655f736368656d6120612046554c4c204a4f494e206974656d732062205553494e47286e616d6529205748455245206e616d653d27414c50484127"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-later-using",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c612e69642c622e69642c632e69642046524f4d206974656d7320612046554c4c204a4f494e206d6f64656c5f726f77732062205553494e4728696429204a4f494e206974656d732063205553494e4728696429204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-without-rowid",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c772e612c772e622046524f4d206974656d7320612046554c4c204a4f494e2077722077204f4e20612e69643d772e6220414e4420772e623c32204f5244455220425920612e69642c772e612c772e62"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "natural-full-grouped",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642c636f756e7428292c636f756e7428612e6964292c636f756e7428622e6964292046524f4d206974656d732061204e41545552414c2046554c4c204a4f494e206974656d7320622047524f5550204259206964204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-set",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c4543542069642046524f4d206974656d7320612046554c4c204a4f494e206d6f64656c5f726f77732062205553494e47286964292057484552452069643c3d3320554e494f4e2053454c454354203939204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-demand-one",
+      "operations": [{"op": "step"}, {"op": "step"}, {"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e203020554e494f4e2053454c4543542039392c3939204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "full-join",
+      "id": "full-forward-on-error",
+      "operations": [{"op": "finalize"}],
+      "sql_hex": "53454c45435420612e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e20632e69643d622e69642046554c4c204a4f494e206974656d732063204f4e20632e69643d612e6964"
+    },
+    {
+      "database": "core",
       "expectation": "unsupported",
       "feature": "subquery",
       "id": "unsupported-subquery",
@@ -2468,6 +2676,7 @@
     "distinct-select",
     "empty-input",
     "execution-errors",
+    "full-join",
     "expressions",
     "global-aggregate",
     "group-by",

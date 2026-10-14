@@ -277,7 +277,7 @@ struct TemporaryConsumerCase {
   std::string_view sql;
 };
 
-constexpr std::array<TemporaryConsumerCase, 13> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 15> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -331,6 +331,15 @@ constexpr std::array<TemporaryConsumerCase, 13> kTemporaryConsumers{
         .name = "natural_right_demand_one",
         .sql = "SELECT count(a.id) FROM model_rows a NATURAL RIGHT JOIN model_rows b "
                "WHERE b.id<=?1 UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{
+        .name = "full_grouping",
+        .sql =
+            "SELECT group_concat(a.name ORDER BY id) FROM items a FULL JOIN model_rows b USING(id) "
+            "WHERE id<=?1 GROUP BY id ORDER BY id LIMIT ?2"},
+    TemporaryConsumerCase{.name = "natural_full_demand_one",
+                          .sql =
+                              "SELECT count(a.id) FROM model_rows a NATURAL FULL JOIN model_rows b "
+                              "WHERE id<=?1 UNION SELECT ?2 LIMIT 1"},
 };
 
 inline constexpr std::size_t kAllocationPartitions = 4;
