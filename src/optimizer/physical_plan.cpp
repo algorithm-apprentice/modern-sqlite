@@ -280,42 +280,8 @@ template <typename Bound>
 template <typename Bound, typename Visitor>
 [[nodiscard]] bool VisitExpressionSources(const Bound& bound_select, BoundExpressionId id,
                                           Visitor& visitor) {
-  if (!IsValidExpressionId(bound_select, id)) {
-    return false;
-  }
-  const BoundExpression& expression = bound_select.expression(id);
-  if (const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
-      identity.has_value()) {
-    visitor(identity->source);
-    return true;
-  }
-  return std::visit(
-      [&](const auto& payload) -> bool {
-        using Payload = std::decay_t<decltype(payload)>;
-        if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
-                      std::is_same_v<Payload, BoundParameterExpression>) {
-          return true;
-        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                             std::is_same_v<Payload, BoundTruthTestExpression> ||
-                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                             std::is_same_v<Payload, BoundCollateExpression>) {
-          return VisitExpressionSources(bound_select, payload.operand, visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
-                             std::is_same_v<Payload, BoundComparisonExpression>) {
-          return VisitExpressionSources(bound_select, payload.left, visitor) &&
-                 VisitExpressionSources(bound_select, payload.right, visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return VisitExpressionSources(bound_select, payload.target, visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
-                             std::is_same_v<Payload, BoundCoalesceExpression> ||
-                             std::is_same_v<Payload, BoundConditionalExpression>) {
-          return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
-            return VisitExpressionSources(bound_select, argument, visitor);
-          });
-        }
-        return false;
-      },
-      expression.payload);
+  return binder_detail::VisitSourceOwners(bound_select.expressions(), bound_select.source_columns(),
+                                          id, visitor);
 }
 
 template <typename Bound>
@@ -349,6 +315,28 @@ template <typename Bound>
     sources.push_back(ready);
   }
   return sources;
+}
+
+[[nodiscard]] std::expected<std::optional<BoundSourceId>, OptimizerError> JoinConditionSource(
+    const LogicalPlan& plan, const LogicalJoinNode& join) {
+  if (!join.on.has_value()) {
+    return std::optional<BoundSourceId>{};
+  }
+  const auto* right = std::get_if<LogicalScanNode>(&plan.node(join.right).payload);
+  if (right == nullptr) {
+    return std::unexpected(InvariantFailure("join condition has no right source"));
+  }
+  const BoundSelect& bound = plan.bound_select();
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[join.core_index]);
+  const std::array predicates{*join.on};
+  auto sources = JoinPredicateSources(bound, core, predicates);
+  if (!sources.has_value()) {
+    return std::unexpected(std::move(sources.error()));
+  }
+  if (sources->size() != 1U) {
+    return std::unexpected(InvariantFailure("join condition has invalid source placement"));
+  }
+  return std::optional{join.join == SourceJoinKind::kLeft ? right->source : sources->front()};
 }
 
 template <typename Bound>
@@ -2495,9 +2483,11 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
                    value->direction == PhysicalScanDirection::kForward;
           } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
             const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
+            const auto ready = JoinConditionSource(logical_plan, node);
             return value != nullptr && value->core_index == node.core_index &&
                    value->left.value() == node.left.value() &&
-                   value->right.value() == node.right.value() && value->join == node.join;
+                   value->right.value() == node.right.value() && value->join == node.join &&
+                   value->on == node.on && ready.has_value() && value->condition_source == *ready;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
             if (value == nullptr || value->input.value() != node.input.value()) {
@@ -3216,6 +3206,16 @@ class PhysicalPlanBuilder final {
     std::size_t compound_index = 0;
     for (std::size_t logical_index = 0; logical_index < impl->logical_plan.nodes().size();
          ++logical_index) {
+      std::optional<BoundSourceId> condition_source;
+      if (const auto* join =
+              std::get_if<LogicalJoinNode>(&impl->logical_plan.nodes()[logical_index].payload);
+          join != nullptr) {
+        auto ready = JoinConditionSource(impl->logical_plan, *join);
+        if (!ready.has_value()) {
+          return std::unexpected(std::move(ready.error()));
+        }
+        condition_source = *ready;
+      }
       std::vector<BoundSourceId> predicate_sources;
       if (const auto* filter =
               std::get_if<LogicalFilterNode>(&impl->logical_plan.nodes()[logical_index].payload);
@@ -3303,6 +3303,8 @@ class PhysicalPlanBuilder final {
                   .right = mapped[node.right.value()],
                   .core_index = node.core_index,
                   .join = node.join,
+                  .on = node.on,
+                  .condition_source = condition_source,
               };
             } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
               const LogicalNodePayload& source =
@@ -3857,7 +3859,10 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
       } else if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
                  join != nullptr) {
         append_line("CORE " + std::to_string(join->core_index) + " NESTED LOOP " +
-                    (join->join == SourceJoinKind::kComma ? "COMMA" : "CROSS JOIN"));
+                    (join->join == SourceJoinKind::kComma   ? "COMMA"
+                     : join->join == SourceJoinKind::kCross ? "CROSS JOIN"
+                     : join->join == SourceJoinKind::kLeft  ? "LEFT JOIN"
+                                                            : "INNER JOIN"));
       } else if (std::holds_alternative<PhysicalEmptyNode>(node.payload)) {
         append_line("EMPTY INPUT");
       } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);

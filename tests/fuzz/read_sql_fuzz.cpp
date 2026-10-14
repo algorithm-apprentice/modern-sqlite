@@ -155,6 +155,12 @@ class ByteReader final {
   const std::size_t left_count = 1U + input.Next() % 8U;
   const std::size_t right_count = 1U + input.Next() % 8U;
   if (input.Next() % 4U == 0U) {
+    return "SELECT a.id,b.id,b.nullable FROM model_rows a LEFT JOIN model_rows b "
+           "ON b.id=a.id AND b.id<=" +
+           std::to_string(right_count) + " WHERE a.id<=" + std::to_string(left_count) +
+           " ORDER BY a.id,b.id LIMIT " + std::to_string(input.Next() % 9U);
+  }
+  if (input.Next() % 4U == 0U) {
     return "SELECT b.id,count(DISTINCT a.value),max(a.oid),"
            "group_concat(a.label ORDER BY a.id DESC) FILTER (WHERE a.nullable IS NOT NULL) "
            "FROM model_rows a" +

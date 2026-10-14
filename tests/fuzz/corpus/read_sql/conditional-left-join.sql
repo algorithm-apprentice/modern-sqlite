@@ -1,0 +1,1 @@
+SELECT a.id,b.id,count(),count(b.id),group_concat(b.label ORDER BY b.id) FROM model_rows a LEFT JOIN model_rows b ON b.id=a.id AND b.id<=4 WHERE a.id<=8 GROUP BY a.id HAVING count()>0 ORDER BY a.id LIMIT 6 OFFSET 1;

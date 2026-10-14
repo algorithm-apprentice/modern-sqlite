@@ -386,7 +386,7 @@ struct AdvancedOrderLayout {
           }
           const auto* join = std::get_if<LogicalJoinNode>(&nodes[index].payload);
           if (join == nullptr || join->core_index != core_index || join->left != input ||
-              join->right != right || join->join != source.join) {
+              join->right != right || join->join != source.join || join->on != source.on) {
             return std::unexpected{InvariantError("logical join does not match bound sources")};
           }
           input = LogicalNodeId{static_cast<std::uint32_t>(index++)};
@@ -885,6 +885,7 @@ class LogicalPlanBuilder final {
                         .right = scan,
                         .core_index = core_index,
                         .join = source.join,
+                        .on = source.on,
                     },
             });
           }

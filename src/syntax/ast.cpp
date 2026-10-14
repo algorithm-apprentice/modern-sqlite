@@ -661,7 +661,8 @@ class Validator final {
           return Misuse("first select source has a join operator");
         }
       } else {
-        if ((source.join != SourceJoinKind::kComma && source.join != SourceJoinKind::kCross) ||
+        if ((source.join != SourceJoinKind::kComma && source.join != SourceJoinKind::kCross &&
+             source.join != SourceJoinKind::kInner && source.join != SourceJoinKind::kLeft) ||
             !source.join_span.has_value()) {
           return Misuse("joined select source has an invalid operator");
         }
@@ -675,6 +676,17 @@ class Validator final {
         }
       }
       clause_end = source.span.end();
+      if (source.on.has_value()) {
+        const Status on_status = ReferenceExpression(*source.on, source.span, std::nullopt);
+        if (!on_status.has_value()) {
+          return on_status;
+        }
+        const ByteOffset source_name_end =
+            source.alias.has_value() ? source.alias->end() : source.name.span.end();
+        if (expressions_[source.on->value].span.begin() < source_name_end) {
+          return Misuse("source ON condition is out of order");
+        }
+      }
     }
     if (core.where.has_value()) {
       const Status where_status = ReferenceExpression(*core.where, core.span, std::nullopt);

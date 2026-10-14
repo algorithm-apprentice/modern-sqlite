@@ -155,6 +155,7 @@ struct LogicalJoinNode {
   LogicalNodeId right;
   std::size_t core_index = 0;
   SourceJoinKind join = SourceJoinKind::kCross;
+  std::optional<BoundExpressionId> on{};
 };
 
 using LogicalNodePayload =

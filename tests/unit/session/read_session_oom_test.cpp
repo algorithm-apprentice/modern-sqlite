@@ -765,7 +765,7 @@ int main() try {
     }
   }
 
-  constexpr std::array<std::string_view, 7> kTemporaryConsumerSqls{
+  constexpr std::array<std::string_view, 9> kTemporaryConsumerSqls{
       "SELECT count() FROM model_rows WHERE id<=?1 "
       "UNION ALL SELECT sum(id) FROM model_rows WHERE id<=?2 ORDER BY 1",
       "SELECT count(value) FROM model_rows WHERE id<=?1 GROUP BY id "
@@ -781,6 +781,10 @@ int main() try {
       "GROUP BY b.id ORDER BY 1",
       "SELECT count(DISTINCT a.value) FROM model_rows a CROSS JOIN model_rows b "
       "WHERE a.id<=?1/8 AND b.id<=?2/8 UNION SELECT ?2 LIMIT 1",
+      "SELECT group_concat(b.label ORDER BY b.id) FROM model_rows a LEFT JOIN model_rows b "
+      "ON b.id=a.id+1 AND b.id<=?2/8 WHERE a.id<=?1/8 GROUP BY a.id ORDER BY a.id",
+      "SELECT count(b.id) FROM model_rows a LEFT JOIN model_rows b ON b.id=a.id+1 "
+      "WHERE a.id<=?1/8 AND b.id IS NULL UNION SELECT ?2 LIMIT 1",
   };
   for (const std::string_view sql : kTemporaryConsumerSqls) {
     std::size_t aggregate_compound_allocations = 0;

@@ -683,6 +683,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   struct JoinedSourcePlan {
     const PhysicalTableScanNode* scan = nullptr;
     std::optional<CursorId> cursor{};
+    const PhysicalNestedLoopJoinNode* join = nullptr;
+    std::optional<RegisterId> matched{};
   };
 
   struct SourceCursorBinding {
@@ -839,6 +841,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(InternalFailure("join inputs do not share their core"));
         }
         StreamingCorePlan& core = streaming_cores_[join->core_index];
+        if (core.joined_sources.size() < 2U) {
+          return std::unexpected(InternalFailure("joined source has no preceding prefix"));
+        }
+        core.joined_sources.back().join = join;
         core.join = join;
         core.leaf = &physical;
         node_cores[index] = join->core_index;
@@ -2372,6 +2378,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(result_block.error()));
     }
     result_block_first_ = *result_block;
+
+    for (StreamingCorePlan& core : streaming_cores_) {
+      for (JoinedSourcePlan& source : core.joined_sources) {
+        if (source.join != nullptr && source.join->join == SourceJoinKind::kLeft) {
+          auto matched = AllocateRegisters(1);
+          if (!matched.has_value()) {
+            return std::unexpected(std::move(matched.error()));
+          }
+          source.matched = *matched;
+        }
+      }
+    }
 
     if (limit_ != nullptr) {
       auto limit_register = AllocateRegisters(1);
@@ -8603,10 +8621,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
     }
     const bool has_inner = depth + 1U < core.joined_sources.size();
+    const bool left = source.join != nullptr && source.join->join == SourceJoinKind::kLeft;
+    const bool has_on =
+        std::ranges::any_of(core.joined_sources, [&](const JoinedSourcePlan& candidate) {
+          return candidate.join != nullptr && candidate.join->on.has_value() &&
+                 candidate.join->condition_source == source.scan->source;
+        });
     const bool has_predicate =
         core.filter != nullptr &&
         std::ranges::contains(core.filter->predicate_sources, source.scan->source);
-    const bool can_advance = has_inner || has_predicate || !always_stops;
+    const bool can_advance = has_inner || has_predicate || has_on || !always_stops;
     auto row = CreateLabel();
     auto done = CreateLabel();
     if (!row.has_value()) {
@@ -8614,6 +8638,26 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!done.has_value()) {
       return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> published;
+    if (left) {
+      if (!source.matched.has_value()) {
+        return std::unexpected(InternalFailure("LEFT source has no match register"));
+      }
+      auto label = CreateLabel();
+      auto zero = EnsureZeroConstant();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      if (!zero.has_value()) {
+        return std::unexpected(std::move(zero.error()));
+      }
+      published = *label;
+      if (auto initialized =
+              Append(LoadConstantInstruction{.constant = *zero, .output = *source.matched});
+          !initialized.has_value()) {
+        return initialized;
+      }
     }
     std::optional<Label> advance;
     if (can_advance) {
@@ -8631,6 +8675,35 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
+    }
+    if (left) {
+      if (source.join->on.has_value()) {
+        if (auto on = EmitPredicate(*source.join->on, advance.value_or(*done)); !on.has_value()) {
+          return on;
+        }
+      }
+      auto one = EnsureOneConstant();
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      if (auto matched = Append(
+              LoadConstantInstruction{.constant = *one, .output = AssumeValue(source.matched)});
+          !matched.has_value()) {
+        return matched;
+      }
+      if (auto bound = BindLabel(AssumeValue(published)); !bound.has_value()) {
+        return bound;
+      }
+    }
+    for (const JoinedSourcePlan& candidate : core.joined_sources) {
+      if (candidate.join != nullptr && candidate.join->join != SourceJoinKind::kLeft) {
+        const auto& condition = candidate.join->on;
+        if (condition.has_value() && candidate.join->condition_source == source.scan->source) {
+          if (auto on = EmitPredicate(*condition, advance.value_or(*done)); !on.has_value()) {
+            return on;
+          }
+        }
+      }
     }
     if (core.filter != nullptr) {
       for (std::size_t index = 0; index < core.filter->predicates.size(); ++index) {
@@ -8661,7 +8734,36 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(next.error()));
       }
     }
-    return BindLabel(*done);
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return bound;
+    }
+    if (left) {
+      auto exhausted = CreateLabel();
+      if (!exhausted.has_value()) {
+        return std::unexpected(std::move(exhausted.error()));
+      }
+      if (auto skip = EmitJumpIf(AssumeValue(source.matched), JumpCondition::kIfTrue, *exhausted);
+          !skip.has_value()) {
+        return skip;
+      }
+      if (auto null_row = Append(NullRowInstruction{.cursor = cursor}); !null_row.has_value()) {
+        return null_row;
+      }
+      auto one = EnsureOneConstant();
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      if (auto consumed = Append(
+              LoadConstantInstruction{.constant = *one, .output = AssumeValue(source.matched)});
+          !consumed.has_value()) {
+        return consumed;
+      }
+      if (auto publish = EmitJump(AssumeValue(published)); !publish.has_value()) {
+        return publish;
+      }
+      return BindLabel(*exhausted);
+    }
+    return {};
   }
 
   template <typename RowConsumer>

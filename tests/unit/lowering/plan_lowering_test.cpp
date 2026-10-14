@@ -1025,6 +1025,111 @@ TEST_F(ReadLoweringJoin, KeepsAggregateFiltersAndOrderingAtCompleteJoinedRowPhas
   EXPECT_EQ(0U, callback_count);
 }
 
+TEST_F(ReadLoweringJoin, ExecutesLeftChainsAndNeverExtendsWhereRejectedMatches) {
+  const auto chain = Execute(
+      "SELECT a.id,b.id,c.id FROM items a LEFT JOIN items b ON a.id=b.id AND b.id<2 "
+      "LEFT JOIN items c ON b.id=c.id ORDER BY a.id");
+  ASSERT_EQ(3U, chain.size());
+  for (std::size_t index = 0; index < chain.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), chain[index][0].integer_value());
+    if (index == 0U) {
+      EXPECT_EQ(1, chain[index][1].integer_value());
+      EXPECT_EQ(1, chain[index][2].integer_value());
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, chain[index][1].type());
+      EXPECT_EQ(SqlValueType::kNull, chain[index][2].type());
+    }
+  }
+  EXPECT_TRUE(
+      Execute("SELECT a.id FROM items a LEFT JOIN items b ON a.id=b.id WHERE b.id>99").empty());
+  const auto unmatched = Execute(
+      "SELECT a.id,b.id FROM items a LEFT JOIN items b ON 0 WHERE b.id IS NULL ORDER BY a.id");
+  ASSERT_EQ(3U, unmatched.size());
+  for (const auto& row : unmatched) {
+    EXPECT_EQ(SqlValueType::kNull, row[1].type());
+  }
+}
+
+TEST_F(ReadLoweringJoin, AppliesInnerForwardConditionsAndConsumesLeftRowsInAllDestinations) {
+  const auto forward = Execute(
+      "SELECT a.id,b.id,c.id FROM items a JOIN items b ON c.id=b.id "
+      "JOIN items c ON a.id=c.id ORDER BY a.id");
+  ASSERT_EQ(3U, forward.size());
+  const auto grouped = Execute(
+      "SELECT a.id,count(),count(b.id),sum(b.id),b._rowid_ "
+      "FROM items a LEFT JOIN items b ON a.id=b.id AND b.id<2 "
+      "GROUP BY a.id ORDER BY a.id");
+  ASSERT_EQ(3U, grouped.size());
+  for (std::size_t index = 0; index < grouped.size(); ++index) {
+    EXPECT_EQ(1, grouped[index][1].integer_value());
+    EXPECT_EQ(index == 0U ? 1 : 0, grouped[index][2].integer_value());
+    if (index == 0U) {
+      EXPECT_EQ(1, grouped[index][3].integer_value());
+      EXPECT_EQ(1, grouped[index][4].integer_value());
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, grouped[index][3].type());
+      EXPECT_EQ(SqlValueType::kNull, grouped[index][4].type());
+    }
+  }
+  const auto distinct = Execute(
+      "SELECT DISTINCT b.id FROM items a LEFT JOIN items b ON a.id=b.id AND b.id<2 "
+      "ORDER BY b.id");
+  ASSERT_EQ(2U, distinct.size());
+  EXPECT_EQ(SqlValueType::kNull, distinct[0][0].type());
+  EXPECT_EQ(1, distinct[1][0].integer_value());
+  const auto demanded = Execute(
+      "SELECT a.id,b.id FROM items a LEFT JOIN items b ON 0 "
+      "UNION SELECT 99,99 LIMIT 1");
+  ASSERT_EQ(1U, demanded.size());
+  EXPECT_EQ(1, demanded[0][0].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, demanded[0][1].type());
+  const auto unconditional =
+      Execute("SELECT a.id,b.id FROM items a LEFT JOIN items b UNION SELECT 99,99 LIMIT 1");
+  ASSERT_EQ(1U, unconditional.size());
+}
+
+TEST_F(ReadLoweringJoin, EvaluatesLeftOnOnlyForPhysicalCandidates) {
+  const CustomEnvironment custom;
+  callback_trace.clear();
+  const auto rows = Execute(
+      "SELECT trace_argument(a.id),b.id FROM items a LEFT JOIN items b "
+      "ON trace_filter(b.id)>99",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(9U, std::ranges::count(callback_trace, "filter"));
+  EXPECT_EQ(3U, std::ranges::count(callback_trace, "argument"));
+  for (const auto& row : rows) {
+    EXPECT_EQ(SqlValueType::kNull, row[1].type());
+  }
+  callback_count = 0;
+  EXPECT_TRUE(Execute("SELECT failing() FROM items a LEFT JOIN items b ON failing() "
+                      "LIMIT 0 OFFSET failing()",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringJoin, SharesOneReadableBodyAcrossSixtyFourLeftSources) {
+  for (const std::size_t sources : {2U, 8U, 32U, 64U}) {
+    SCOPED_TRACE(sources);
+    std::string sql = "SELECT 1 FROM Items t0";
+    for (std::size_t index = 1; index < sources; ++index) {
+      sql += " LEFT JOIN Items t" + std::to_string(index) + " ON 0";
+    }
+    sql += " LIMIT 0";
+    const BytecodeProgram program = LowerOrThrow(sql, catalog());
+    const auto kinds = InstructionKinds(program);
+    EXPECT_EQ(sources,
+              static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenRead)));
+    EXPECT_EQ(sources - 1U,
+              static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kNullRow)));
+    EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+    EXPECT_LE(program.instructions().size(), sources * 48U + 32U);
+    RecordProperty("instructions_for_" + std::to_string(sources) + "_sources",
+                   std::to_string(program.instructions().size()));
+  }
+}
+
 TEST(PlanLoweringApi, ExposesStableErrorsAndBaseMappings) {
   EXPECT_EQ("invalid_input", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kInvalidInput));
   EXPECT_EQ("unsupported_plan", PlanLoweringErrorCodeName(PlanLoweringErrorCode::kUnsupportedPlan));
