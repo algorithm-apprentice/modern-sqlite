@@ -220,6 +220,9 @@ ADR-0073's later canonical source-to-cursor map adds one source-backed lowering
 allocation; the current exact budgets are 79 and 85. The package-14 counts
 above remain its historical evidence, not the amended current budget.
 
+ADR-0075 subsequently unifies retained-leaf register lookup and removes empty
+role-map allocations. Its measured current integration budgets are 77 and 82.
+
 ### 2. Pin the accepted SQL surface
 
 Ordinary SELECT cores gain:
