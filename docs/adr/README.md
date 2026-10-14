@@ -83,3 +83,4 @@ their corresponding implementation begins.
 77. [ADR-0077: INNER and LEFT Join Execution](0077-inner-and-left-join-execution.md)
 78. [ADR-0078: USING and NATURAL Joined-Column Namespaces](0078-using-and-natural-joined-column-namespaces.md)
 79. [ADR-0079: RIGHT Join Matched-Row Replay](0079-right-join-matched-row-replay.md)
+80. [ADR-0080: FULL Join Two-Sided Preservation](0080-full-join-two-sided-preservation.md)
