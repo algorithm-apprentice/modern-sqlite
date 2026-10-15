@@ -349,6 +349,7 @@ add_test(
     "${PROJECT_SOURCE_DIR}/tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db"
     "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/read_sql"
     "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus/read_database"
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db"
 )
 set_tests_properties(
   fuzz.read_smoke
@@ -889,7 +890,10 @@ foreach(consumer_case IN ITEMS
     natural_full_demand_one
     scalar_order
     scalar_grouped
-    exists_intersect)
+    exists_intersect
+    joined_index_full_aggregate
+    joined_index_scalar_group
+    joined_index_distinct_set)
   if(consumer_case STREQUAL "natural_right_demand_one"
      OR consumer_case STREQUAL "natural_full_demand_one")
     foreach(partition RANGE 0 3)

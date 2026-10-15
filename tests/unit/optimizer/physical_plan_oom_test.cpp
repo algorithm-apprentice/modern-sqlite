@@ -388,7 +388,7 @@ int main() try {
     return 1;
   }
 
-  const std::array<std::string_view, 8> advanced_sqls{
+  const std::array<std::string_view, 12> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -400,38 +400,47 @@ int main() try {
       "SELECT id,count(a.id) FROM Items a RIGHT JOIN Items b USING(id) GROUP BY id ORDER BY 1",
       "SELECT id,count(a.id) FROM Items a FULL JOIN Items b USING(id) GROUP BY id ORDER BY 1",
       "SELECT a.id,b.id FROM Items a JOIN Items b ON a.id>?1 AND b.id=a.id",
+      "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Name=a.Name",
+      "SELECT b.Name,count(a.id) FROM Items a FULL JOIN Items b ON b.Name IS a.Name "
+      "GROUP BY b.Name ORDER BY b.Name",
+      "SELECT a.id,b.id,c.id FROM Items a LEFT JOIN Items b ON b.Name=a.Name "
+      "FULL JOIN Items c ON c.Name=b.Name",
+      "SELECT (SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name ORDER BY b.id LIMIT 1)",
   };
-  for (const std::string_view sql : advanced_sqls) {
-    LogicalPlan compound_baseline_logical = LogicalCompoundFixture(catalog, sql);
-    allocation_index.store(0, std::memory_order_relaxed);
-    const OptimizeLogicalPlanResult compound_baseline =
-        OptimizeLogicalPlan(std::move(compound_baseline_logical));
-    if (!compound_baseline.has_value()) {
-      return 1;
-    }
-    const std::size_t compound_allocation_count = allocation_index.load(std::memory_order_relaxed);
-    if (compound_allocation_count == 0U || compound_allocation_count > 128U) {
-      return 1;
-    }
-    for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
-      LogicalPlan logical = LogicalCompoundFixture(catalog, sql);
+  for (const auto& fixture_catalog : {catalog, indexed_catalog}) {
+    for (const std::string_view sql : advanced_sqls) {
+      LogicalPlan compound_baseline_logical = LogicalCompoundFixture(fixture_catalog, sql);
       allocation_index.store(0, std::memory_order_relaxed);
-      failing_allocation = failure;
-      inject_failure = true;
-      bool threw = false;
-      try {
-        [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
-            OptimizeLogicalPlan(std::move(logical));
-      } catch (const std::bad_alloc&) {
-        threw = true;
-      }
-      inject_failure = false;
-      if (!threw) {
+      const OptimizeLogicalPlanResult compound_baseline =
+          OptimizeLogicalPlan(std::move(compound_baseline_logical));
+      if (!compound_baseline.has_value()) {
         return 1;
       }
-    }
-    if (!OptimizeLogicalPlan(LogicalCompoundFixture(catalog, sql)).has_value()) {
-      return 1;
+      const std::size_t compound_allocation_count =
+          allocation_index.load(std::memory_order_relaxed);
+      if (compound_allocation_count == 0U || compound_allocation_count > 128U) {
+        return 1;
+      }
+      for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
+        LogicalPlan logical = LogicalCompoundFixture(fixture_catalog, sql);
+        allocation_index.store(0, std::memory_order_relaxed);
+        failing_allocation = failure;
+        inject_failure = true;
+        bool threw = false;
+        try {
+          [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+              OptimizeLogicalPlan(std::move(logical));
+        } catch (const std::bad_alloc&) {
+          threw = true;
+        }
+        inject_failure = false;
+        if (!threw) {
+          return 1;
+        }
+      }
+      if (!OptimizeLogicalPlan(LogicalCompoundFixture(fixture_catalog, sql)).has_value()) {
+        return 1;
+      }
     }
   }
 

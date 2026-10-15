@@ -911,6 +911,154 @@ TEST(PhysicalPlan, SelectsSourceOwnedRowidSeeksForAlreadyPositionedJoinPrefixes)
   }
 }
 
+TEST(PhysicalPlan, SelectsCoveringStoredIndexPrefixesForJoinedSources) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id,b.Category,b.Score FROM Items a JOIN Items b "
+      "ON b.Category=a.Category AND b.Score=a.Score WHERE a.id=?1",
+      IndexedCatalog());
+  ASSERT_GE(plan.nodes().size(), 2U);
+  const auto* index = std::get_if<PhysicalIndexScanNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, index);
+  EXPECT_EQ(0U, index->core_index);
+  EXPECT_EQ(BoundSourceId{1}, index->source);
+  EXPECT_EQ(TableId{0}, index->table);
+  EXPECT_EQ(IndexId{0}, index->index);
+  EXPECT_EQ(RootPageId{10}, index->index_root_page);
+  EXPECT_TRUE(index->covering);
+  EXPECT_FALSE(index->range.has_value());
+  ASSERT_EQ(2U, index->equalities.size());
+  EXPECT_EQ(ColumnId{1}, index->equalities[0].column);
+  EXPECT_EQ(ColumnId{2}, index->equalities[1].column);
+  EXPECT_EQ(SortOrder::kDescending, index->equalities[1].order);
+  const BoundSelect& bound = plan.logical_plan().bound_select();
+  for (const PhysicalIndexEquality& equality : index->equalities) {
+    const auto& key = std::get<BoundColumnExpression>(bound.expression(equality.key).payload);
+    EXPECT_EQ(BoundSourceId{0}, bound.source_columns()[key.column.value()].source);
+    EXPECT_TRUE(equality.reject_null);
+  }
+  EXPECT_NE(std::string::npos,
+            ExplainPhysicalPlan(plan).find("SEARCH \"Items\" USING COVERING INDEX "
+                                           "\"items_category_score\""));
+}
+
+TEST(PhysicalPlan, DoesNotConstrainTextIndexesWithNumericComparisonAffinity) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT id,Category FROM Items "
+      "WHERE Category=(SELECT Score FROM Items WHERE id=1)",
+      IndexedCatalog());
+  ASSERT_FALSE(plan.candidates().empty());
+  for (const AccessPathCandidate& candidate : plan.candidates()) {
+    EXPECT_EQ(0U, candidate.equality_term_count);
+    EXPECT_EQ(0U, candidate.range_bound_count);
+  }
+}
+
+TEST(PhysicalPlan, KeepsJoinedCoveringAccessWithinSourceAndPreservationBarriers) {
+  struct Case {
+    std::string_view sql;
+    std::vector<BoundSourceId> indexes;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Category IS a.Category",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON a.Category=b.Category COLLATE NOCASE",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON b.Category=?1",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON b.Category='alpha'",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
+                  "ON b.Category=coalesce(a.Category,?1)",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                  "WHERE a.Category=?1 AND b.Category=a.Category",
+           .indexes = {BoundSourceId{0}, BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
+                  "ON 1 WHERE b.Category=?1",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b "
+                  "ON 1 WHERE b.Category=?1",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
+                  "ON 1 WHERE a.Category=?1",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.Category=c.Category "
+                  "LEFT JOIN Items c ON c.Category=a.Category",
+           .indexes = {BoundSourceId{2}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Category=b.Code", .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON +b.Category=a.Category",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.Category=abs(a.Score)",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.Category COLLATE BINARY=a.Category",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Category=a.Score",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.Payload FROM Items a JOIN Items b "
+                  "ON b.Category=a.Category",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Category=a.Category "
+                  "ORDER BY b.Payload",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.Category=a.Category "
+                  "JOIN Items c ON c.Code=b.Payload",
+           .indexes = {BoundSourceId{2}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.Category=a.Category AND b.Score>a.Score",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.id=a.id AND b.Category=a.Category",
+           .indexes = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Code=a.Code",
+           .indexes = {BoundSourceId{1}}},
+  };
+  const auto catalog = IndexedCatalog();
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test_case.sql, catalog);
+    std::vector<BoundSourceId> indexes;
+    for (const PhysicalNode& node : plan.nodes()) {
+      if (const auto* index = std::get_if<PhysicalIndexScanNode>(&node.payload); index != nullptr) {
+        EXPECT_TRUE(index->covering);
+        EXPECT_FALSE(index->range.has_value());
+        EXPECT_FALSE(index->equalities.empty());
+        indexes.push_back(index->source);
+      }
+    }
+    EXPECT_EQ(test_case.indexes, indexes);
+  }
+}
+
+TEST(PhysicalPlan, DiscoversJoinedCoveringFieldsInTheirActualCompoundCore) {
+  struct Case {
+    std::string_view sql;
+    std::size_t indexes;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT Payload FROM Items WHERE id=1 UNION ALL "
+                  "SELECT b.Category FROM Items a JOIN Items b ON b.Category=a.Category",
+           .indexes = 1},
+      Case{.sql = "SELECT Category FROM Items WHERE id=1 UNION ALL "
+                  "SELECT b.Payload FROM Items a JOIN Items b ON b.Category=a.Category",
+           .indexes = 0},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test_case.sql, IndexedCatalog());
+    std::size_t indexes = 0;
+    for (const PhysicalNode& node : plan.nodes()) {
+      if (const auto* index = std::get_if<PhysicalIndexScanNode>(&node.payload); index != nullptr) {
+        EXPECT_EQ(1U, index->core_index);
+        ++indexes;
+      }
+    }
+    EXPECT_EQ(test_case.indexes, indexes);
+  }
+}
+
 TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers) {
   struct Case {
     std::string_view sql;

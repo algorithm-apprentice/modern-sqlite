@@ -275,9 +275,10 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
 struct TemporaryConsumerCase {
   std::string_view name;
   std::string_view sql;
+  bool joined_index_fixture = false;
 };
 
-constexpr std::array<TemporaryConsumerCase, 18> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 21> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -350,6 +351,22 @@ constexpr std::array<TemporaryConsumerCase, 18> kTemporaryConsumers{
                           .sql = "SELECT EXISTS(SELECT label FROM model_rows WHERE id<=?1 "
                                  "INTERSECT SELECT label FROM model_rows WHERE id<=?2 "
                                  "LIMIT -1 OFFSET 1)"},
+    TemporaryConsumerCase{.name = "joined_index_full_aggregate",
+                          .sql = "SELECT group_concat(b.id ORDER BY b.id DESC) FROM probe_rows p "
+                                 "FULL JOIN key_rows b ON b.text_key=p.text_key "
+                                 "WHERE p.id<=?1 OR p.id IS NULL LIMIT ?2",
+                          .joined_index_fixture = true},
+    TemporaryConsumerCase{
+        .name = "joined_index_scalar_group",
+        .sql = "SELECT (SELECT group_concat(b.id ORDER BY b.id DESC) FROM probe_rows p "
+               "LEFT JOIN key_rows b ON b.text_key=p.text_key "
+               "WHERE p.id<=?1 GROUP BY p.id ORDER BY p.id LIMIT ?2)",
+        .joined_index_fixture = true},
+    TemporaryConsumerCase{.name = "joined_index_distinct_set",
+                          .sql = "SELECT count(DISTINCT b.numeric_key) FROM probe_rows p "
+                                 "JOIN key_rows b ON b.text_key=p.text_key WHERE p.id<=?1 "
+                                 "UNION SELECT ?2 LIMIT 1",
+                          .joined_index_fixture = true},
 };
 
 inline constexpr std::size_t kAllocationPartitions = 4;
@@ -369,9 +386,14 @@ inline constexpr std::size_t kAllocationPartitions = 4;
     std::cerr << "OOM temporary consumer " << test_case.name << ": " << phase << '\n';
     return 1;
   };
+  const std::string fixture =
+      (test_case.joined_index_fixture ? ReadCompatibilityFixturePath().parent_path().parent_path() /
+                                            "joined_index" / "sqlite-3.54.0-joined-index.db"
+                                      : ReadCompatibilityFixturePath())
+          .string();
   std::size_t allocations = 0;
   {
-    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), options);
+    auto session = ReadSession::Open(fixture, options);
     if (!session.has_value()) {
       return failed("baseline open failed");
     }
@@ -400,7 +422,7 @@ inline constexpr std::size_t kAllocationPartitions = 4;
   }
   const std::size_t stride = partition.has_value() ? kAllocationPartitions : 1U;
   for (std::size_t failure = partition.value_or(0U); failure < allocations; failure += stride) {
-    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), options);
+    auto session = ReadSession::Open(fixture, options);
     if (!session.has_value()) {
       return failed("injection setup open failed");
     }

@@ -1,3 +1,4 @@
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -229,6 +230,61 @@ class ByteReader final {
   return sql + " FROM model_rows WHERE id<=" + std::to_string(1U + input.Next() % 4U);
 }
 
+[[nodiscard]] bool IsJoinedIndexInput(std::span<const std::uint8_t> input) {
+  return !input.empty() && input.front() % 8U == 5U;
+}
+
+[[nodiscard]] std::string GenerateJoinedIndexSql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  constexpr std::array<std::string_view, 4> kJoins{
+      "JOIN",
+      "LEFT JOIN",
+      "RIGHT JOIN",
+      "FULL JOIN",
+  };
+  const std::string_view join = kJoins[input.Next() % kJoins.size()];
+  const std::string_view operation = input.Next() % 2U == 0U ? "=" : " IS ";
+  constexpr std::array<std::string_view, 4> kKeys{
+      "b.text_key",
+      "b.numeric_key",
+      "b.text_key",
+      "b.default_text",
+  };
+  constexpr std::array<std::string_view, 4> kValues{
+      "p.text_key",
+      "p.numeric_key",
+      "p.raw_key",
+      "p.text_key",
+  };
+  const std::size_t key = input.Next() % kKeys.size();
+  std::string predicate =
+      std::string{kKeys[key]} + std::string{operation} + std::string{kValues[key]};
+  if (input.Next() % 2U != 0U) {
+    predicate += " AND b.numeric_key IS p.numeric_key";
+  }
+  predicate += " AND b.id>" + std::to_string(input.Next() % 13U);
+  const std::string source = " FROM probe_rows p " + std::string{join} + " key_rows b ON " +
+                             predicate +
+                             " WHERE p.id IS NULL OR p.id<=" + std::to_string(input.Next() % 7U);
+  std::string sql;
+  switch (input.Next() % 3U) {
+    case 0:
+      sql = "SELECT p.id,b.id,b.numeric_key" + source + " ORDER BY p.id,b.id";
+      break;
+    case 1:
+      sql = "SELECT b.numeric_key,count(),count(b.rowid)" + source +
+            " GROUP BY b.numeric_key ORDER BY b.numeric_key";
+      break;
+    default:
+      sql = "SELECT DISTINCT b.id" + source + " ORDER BY b.id";
+      break;
+  }
+  sql += " LIMIT " + std::to_string(input.Next() % 13U) + " OFFSET " +
+         std::to_string(input.Next() % 4U);
+  return input.Next() % 4U == 0U ? "SELECT EXISTS(" + sql + ")" : sql;
+}
+
 void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
   if (!prepared.has_value() || !prepared->statement.has_value()) {
     return;
@@ -246,6 +302,9 @@ void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
 }  // namespace
 
 std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
+  if (IsJoinedIndexInput(input)) {
+    return GenerateJoinedIndexSql(input);
+  }
   ByteReader selector{input};
   const std::uint8_t selected = selector.Next();
   if (selected % 8U == 3U) {
@@ -260,11 +319,13 @@ std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
   return GenerateCompoundSql(input);
 }
 
-void RunReadSqlInput(std::span<const std::uint8_t> input, std::string_view database_path) {
+void RunReadSqlInput(std::span<const std::uint8_t> input, std::string_view database_path,
+                     std::string_view joined_index_path) {
   if (input.size() > kMaximumSqlBytes) {
     return;
   }
-  Result<ReadSession> opened = ReadSession::Open(database_path);
+  Result<ReadSession> opened =
+      ReadSession::Open(IsJoinedIndexInput(input) ? joined_index_path : database_path);
   if (!opened.has_value()) {
     return;
   }

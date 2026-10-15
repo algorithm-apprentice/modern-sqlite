@@ -60,6 +60,7 @@ class ReadCompatibilityTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
+            corpus = json.loads(self.arguments.corpus.read_text())
             relative_paths = [
                 pathlib.Path("tools/read_compatibility.py"),
                 pathlib.Path(
@@ -68,11 +69,11 @@ class ReadCompatibilityTest(unittest.TestCase):
                 pathlib.Path(
                     "tests/fixtures/read_compatibility/read-compatibility.sql"
                 ),
-                pathlib.Path(
-                    "tests/fixtures/read_compatibility/"
-                    "sqlite-3.54.0-read-compatibility.db"
-                ),
             ]
+            relative_paths.extend(
+                pathlib.Path(database["path"])
+                for database in corpus["databases"]
+            )
             for relative in relative_paths:
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +81,6 @@ class ReadCompatibilityTest(unittest.TestCase):
                     self.arguments.repository_root / relative, destination
                 )
 
-            corpus = json.loads(self.arguments.corpus.read_text())
             oracle = json.loads(self.arguments.oracle.read_text())
             scenarios = [
                 ("unsupported-join", "unsupported boundary regression"),
