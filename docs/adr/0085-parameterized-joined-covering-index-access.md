@@ -166,6 +166,16 @@ and grammar-aware sanitizer fuzz. Preserve all prior native records and run
 the complete fast tier, required compiler/sanitizer/quality gates, and
 unchanged archived performance contracts.
 
+The first hosted Linux sanitizer run reaches the unchanged combined session
+OOM test's 10-second limit without a sanitizer report. The merged base already
+takes 8.99 seconds. Reuse the existing four-way allocation-index partitioning
+for this combined test, preserving every measured failure position and
+allocation cap rather than increasing its timeout. Keep the no-argument
+invocation as a complete sweep. Register four individually bounded partitions
+and serialize them with one CTest resource lock because their temporary
+database names are process-local. Reject invalid partition selectors through
+the existing explicit diagnostic convention.
+
 Review this design before implementation and design/code closure before
 committing. Merge only after all local and hosted gates pass; then continue
 the next prerequisite-ready slice without completing node 43 prematurely.
@@ -176,9 +186,9 @@ The unchanged fixed-work query returns count 1 in 35 VM instructions rather
 than 20,503, excluding prepare. Its 256-instruction bound remains intact.
 This is a deterministic work reduction, not a wall-time speedup claim.
 
-The complete fast tier passes 1,288 unit cases. Complete Debug, Release, and
-ASan/UBSan presets pass 1,334 cases each; genuine GCC 16 Debug and Release
-configurations pass 1,332 each. All 58 existing performance-tool, archived-baseline,
+The complete fast tier passes 1,292 unit cases. Complete Debug, Release, and
+ASan/UBSan presets pass 1,338 cases each; genuine GCC 16 Debug and Release
+configurations pass 1,336 each. All 58 existing performance-tool, archived-baseline,
 CLI, diagnostic-work, and fixture contracts pass. Existing allocation budgets,
 timeouts, workloads, thresholds, profiles, and timing baselines are unchanged.
 
@@ -204,6 +214,8 @@ bounded bytecode without executing the preserved source chain.
 Optimizer and lowering sweeps fail every measured allocation boundary, and
 three named session sweeps cover indexed FULL aggregation, scalar grouping,
 and DISTINCT/set consumption. No previous allocation range is reduced.
+The combined session sweep also passes as four resource-locked partitions
+and as the original complete no-argument invocation.
 Read-SQL fuzz inputs with selector modulo eight equal to five use the indexed
 fixture for both raw and generated SQL; the comment-prefixed seed selects
 that family. Smoke coverage executes its generated join/key/consumer matrix.

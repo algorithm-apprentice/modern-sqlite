@@ -861,16 +861,19 @@ target_link_libraries(
 )
 modern_sqlite_set_project_warnings(modern_sqlite_read_session_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_oom_test)
-add_test(
-  NAME session.read_session_oom
-  COMMAND modern_sqlite_read_session_oom_test
-)
-set_tests_properties(
-  session.read_session_oom
-  PROPERTIES
-    LABELS unit
-    TIMEOUT 10
-)
+foreach(partition RANGE 0 3)
+  set(session_oom_test_name session.read_session_oom)
+  if(partition GREATER 0)
+    string(APPEND session_oom_test_name ".${partition}")
+  endif()
+  add_test(
+    NAME "${session_oom_test_name}"
+    COMMAND modern_sqlite_read_session_oom_test
+      --allocation-partition "${partition}"
+  )
+  set_tests_properties("${session_oom_test_name}"
+    PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases)
+endforeach()
 
 foreach(consumer_case IN ITEMS
     aggregate_union_all
@@ -928,6 +931,12 @@ add_test(
     --temporary-consumer natural_right_demand_one --allocation-partition 4
 )
 set_tests_properties(session.read_session_oom.invalid_partition
+  PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
+add_test(
+  NAME session.read_session_oom.invalid_combined_partition
+  COMMAND modern_sqlite_read_session_oom_test --allocation-partition 4
+)
+set_tests_properties(session.read_session_oom.invalid_combined_partition
   PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
 
 add_executable(

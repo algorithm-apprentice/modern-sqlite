@@ -481,10 +481,14 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main(int argc, char** argv) try {
   using namespace modern_sqlite;
 
-  if (argc != 1) {
+  const bool combined_partition =
+      argc == 3 && std::string_view{argv[1]} == "--allocation-partition";
+  const TemporaryConsumerCase* temporary_consumer = nullptr;
+  if (argc != 1 && !combined_partition) {
     if ((argc != 3 && argc != 5) || std::string_view{argv[1]} != "--temporary-consumer") {
       std::cerr << "usage: read_session_oom_test "
-                   "[--temporary-consumer NAME [--allocation-partition 0|1|2|3]]\n";
+                   "[--allocation-partition 0|1|2|3 | "
+                   "--temporary-consumer NAME [--allocation-partition 0|1|2|3]]\n";
       return 2;
     }
     const auto selected = std::ranges::find(kTemporaryConsumers, std::string_view{argv[2]},
@@ -493,18 +497,24 @@ int main(int argc, char** argv) try {
       std::cerr << "unknown temporary consumer: " << argv[2] << '\n';
       return 2;
     }
-    std::optional<std::size_t> partition;
-    if (argc == 5) {
-      const std::string_view number{argv[4]};
-      if (std::string_view{argv[3]} != "--allocation-partition" || number.size() != 1U ||
-          number[0] < '0' || number[0] > '3') {
-        std::cerr << "allocation partition must be one of 0, 1, 2, 3\n";
-        return 2;
-      }
-      partition = static_cast<std::size_t>(number[0] - '0');
-    }
-    return RunTemporaryConsumer(*selected, partition);
+    temporary_consumer = &*selected;
   }
+  std::optional<std::size_t> partition;
+  if (combined_partition || argc == 5) {
+    const std::string_view option{combined_partition ? argv[1] : argv[3]};
+    const std::string_view number{combined_partition ? argv[2] : argv[4]};
+    if (option != "--allocation-partition" || number.size() != 1U || number[0] < '0' ||
+        number[0] > '3') {
+      std::cerr << "allocation partition must be one of 0, 1, 2, 3\n";
+      return 2;
+    }
+    partition = static_cast<std::size_t>(number[0] - '0');
+  }
+  if (temporary_consumer != nullptr) {
+    return RunTemporaryConsumer(*temporary_consumer, partition);
+  }
+  const std::size_t first_failure = partition.value_or(0U);
+  const std::size_t failure_stride = partition.has_value() ? kAllocationPartitions : 1U;
 
   const std::vector<char> empty_bytes;
   const std::vector<char> v1 = ReadBytes(FixturePath("sqlite-3.54.0-session-v1.db"));
@@ -524,7 +534,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < open_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < open_allocations; failure += failure_stride) {
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = failure;
     inject_failure = true;
@@ -563,7 +573,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < prepare_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < prepare_allocations;
+       failure += failure_stride) {
     const auto locks = std::make_shared<LockTrackingState>();
     auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), prepare_path);
     if (!session.has_value()) {
@@ -611,7 +622,8 @@ int main(int argc, char** argv) try {
     if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
       return 1;
     }
-    for (std::size_t failure = 0; failure < joined_prepare_allocations; ++failure) {
+    for (std::size_t failure = first_failure; failure < joined_prepare_allocations;
+         failure += failure_stride) {
       const auto locks = std::make_shared<LockTrackingState>();
       auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
       if (!session.has_value()) {
@@ -658,7 +670,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < aggregate_prepare_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < aggregate_prepare_allocations;
+       failure += failure_stride) {
     const auto locks = std::make_shared<LockTrackingState>();
     auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), prepare_path);
     if (!session.has_value()) {
@@ -709,7 +722,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < sorter_step_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < sorter_step_allocations;
+       failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path, sorter_options);
     if (!session.has_value()) {
       return 1;
@@ -763,7 +777,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < compound_step_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < compound_step_allocations;
+       failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path, sorter_options);
     if (!session.has_value()) {
       return 1;
@@ -816,7 +831,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < aggregate_step_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < aggregate_step_allocations;
+       failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path);
     if (!session.has_value()) {
       return 1;
@@ -875,7 +891,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < modifier_step_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < modifier_step_allocations;
+       failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path);
     if (!session.has_value()) {
       return 1;
@@ -950,7 +967,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < integrated_aggregate_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < integrated_aggregate_allocations;
+       failure += failure_stride) {
     auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
     if (!session.has_value()) {
       return 1;
@@ -1052,7 +1070,8 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
-  for (std::size_t failure = 0; failure < reprepare_allocations; ++failure) {
+  for (std::size_t failure = first_failure; failure < reprepare_allocations;
+       failure += failure_stride) {
     TemporaryDatabase database(v1);
     auto session = ReadSession::Open(database.path().string());
     if (!session.has_value()) {
