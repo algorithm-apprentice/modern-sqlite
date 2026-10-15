@@ -33,8 +33,12 @@ using LoweringResult = lowering_internal::LoweringResult<T>;
 using lowering_internal::AssumeValue;
 using lowering_internal::ConvertProgramResult;
 using lowering_internal::EmitIndexTableLookup;
+using lowering_internal::EmitIndexTraversalEndCheck;
+using lowering_internal::EmitIndexTraversalSeek;
+using lowering_internal::IndexTraversal;
 using lowering_internal::InternalFailure;
 using lowering_internal::ProgramFailure;
+using lowering_internal::ResolveIndexTraversal;
 using lowering_internal::UnsupportedFailure;
 
 [[nodiscard]] bool NamesEqual(std::string_view left, std::string_view right) noexcept {
@@ -890,6 +894,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<CursorId> cursor{};
     std::optional<CursorId> table_cursor{};
     std::optional<RegisterId> index_key_first{};
+    std::uint32_t index_key_capacity = 0;
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::optional<RegisterId> matched{};
     std::optional<RegisterId> replay_mode{};
@@ -2651,15 +2656,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         if (const auto* scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
             scan != nullptr) {
-          if (scan->equalities.empty() || scan->range.has_value() ||
+          if ((scan->equalities.empty() && !scan->range.has_value()) ||
               scan->direction != PhysicalScanDirection::kForward) {
             return std::unexpected(InternalFailure("joined index prefix metadata is invalid"));
           }
-          auto keys = AllocateRegisters(scan->equalities.size());
+          const std::size_t capacity =
+              scan->equalities.size() + static_cast<std::size_t>(scan->range.has_value());
+          auto keys = AllocateRegisters(capacity);
           if (!keys.has_value()) {
             return std::unexpected(std::move(keys.error()));
           }
           source.index_key_first = *keys;
+          source.index_key_capacity = static_cast<std::uint32_t>(capacity);
           if (!scan->covering && !index_rowid_register_.has_value()) {
             auto rowid = AllocateRegisters(1);
             if (!rowid.has_value()) {
@@ -6739,22 +6747,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!cursor_.has_value()) {
       return std::unexpected(InternalFailure("covering index scan has no cursor"));
     }
-    const PhysicalIndexBound* forward_start = nullptr;
-    const PhysicalIndexBound* forward_end = nullptr;
-    if (index.range.has_value()) {
-      if (index.range->order == SortOrder::kDescending) {
-        forward_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-        forward_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      } else {
-        forward_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-        forward_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      }
-    }
+    const IndexTraversal traversal = ResolveIndexTraversal(index);
     const bool reverse = index.direction == PhysicalScanDirection::kReverse;
-    const PhysicalIndexBound* physical_start = reverse ? forward_end : forward_start;
-    const PhysicalIndexBound* physical_end = reverse ? forward_start : forward_end;
-    const bool has_start_key = !index.equalities.empty() || physical_start != nullptr;
-    const bool has_end_key = !index.equalities.empty() || physical_end != nullptr;
+    const bool has_start_key = traversal.has_start_key;
+    const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
@@ -6783,7 +6779,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t start_key_count = 0;
     if (has_start_key) {
-      auto key = EmitIndexKeyBlock(index, physical_start);
+      auto key = EmitIndexKeyBlock(index, traversal.start);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -6807,13 +6803,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(advance.error()));
     }
     if (has_start_key) {
-      const bool inclusive = physical_start == nullptr || physical_start->inclusive;
-      const IndexSeekMode mode =
-          reverse ? (inclusive ? IndexSeekMode::kLessOrEqual : IndexSeekMode::kLess)
-                  : (inclusive ? IndexSeekMode::kGreaterOrEqual : IndexSeekMode::kGreater);
       auto sought = ConvertProgramResult(
-          AssumeValue(builder_).EmitSeekIndex(AssumeValue(cursor_), AssumeValue(index_key_first_),
-                                              start_key_count, *unpositioned_completion, mode),
+          EmitIndexTraversalSeek(AssumeValue(builder_), index, traversal, AssumeValue(cursor_),
+                                 AssumeValue(index_key_first_), start_key_count,
+                                 *unpositioned_completion),
           "unable to emit covering index seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
@@ -6832,7 +6825,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, physical_end);
+      auto key = EmitIndexKeyBlock(index, traversal.end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -6851,16 +6844,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (has_end_key) {
-      const bool inclusive = physical_end == nullptr || physical_end->inclusive;
-      const IndexRangeEndMode mode =
-          reverse ? (inclusive ? IndexRangeEndMode::kReverseInclusive
-                               : IndexRangeEndMode::kReverseExclusive)
-                  : (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive);
-      auto checked =
-          ConvertProgramResult(AssumeValue(builder_).EmitCheckIndexRange(
-                                   AssumeValue(cursor_), AssumeValue(index_key_first_),
-                                   end_key_count, AssumeValue(positioned_completion), mode),
-                               "unable to emit covering index end check");
+      auto checked = ConvertProgramResult(
+          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, AssumeValue(cursor_),
+                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(positioned_completion)),
+          "unable to emit covering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
@@ -6946,22 +6934,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const CursorId index_cursor = AssumeValue(index_cursor_);
     const CursorId table_cursor = AssumeValue(cursor_);
-    const PhysicalIndexBound* forward_start = nullptr;
-    const PhysicalIndexBound* forward_end = nullptr;
-    if (index.range.has_value()) {
-      if (index.range->order == SortOrder::kDescending) {
-        forward_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-        forward_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      } else {
-        forward_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-        forward_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      }
-    }
+    const IndexTraversal traversal = ResolveIndexTraversal(index);
     const bool reverse = index.direction == PhysicalScanDirection::kReverse;
-    const PhysicalIndexBound* physical_start = reverse ? forward_end : forward_start;
-    const PhysicalIndexBound* physical_end = reverse ? forward_start : forward_end;
-    const bool has_start_key = !index.equalities.empty() || physical_start != nullptr;
-    const bool has_end_key = !index.equalities.empty() || physical_end != nullptr;
+    const bool has_start_key = traversal.has_start_key;
+    const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
@@ -6988,7 +6964,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t start_key_count = 0;
     if (has_start_key) {
-      auto key = EmitIndexKeyBlock(index, physical_start);
+      auto key = EmitIndexKeyBlock(index, traversal.start);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -7004,13 +6980,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(index_missing.error()));
     }
     if (has_start_key) {
-      const bool inclusive = physical_start == nullptr || physical_start->inclusive;
-      const IndexSeekMode mode =
-          reverse ? (inclusive ? IndexSeekMode::kLessOrEqual : IndexSeekMode::kLess)
-                  : (inclusive ? IndexSeekMode::kGreaterOrEqual : IndexSeekMode::kGreater);
       auto sought = ConvertProgramResult(
-          AssumeValue(builder_).EmitSeekIndex(index_cursor, AssumeValue(index_key_first_),
-                                              start_key_count, *index_missing, mode),
+          EmitIndexTraversalSeek(AssumeValue(builder_), index, traversal, index_cursor,
+                                 AssumeValue(index_key_first_), start_key_count, *index_missing),
           "unable to emit noncovering index seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
@@ -7028,7 +7000,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, physical_end);
+      auto key = EmitIndexKeyBlock(index, traversal.end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -7074,14 +7046,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     if (has_end_key) {
-      const bool inclusive = physical_end == nullptr || physical_end->inclusive;
-      const IndexRangeEndMode mode =
-          reverse ? (inclusive ? IndexRangeEndMode::kReverseInclusive
-                               : IndexRangeEndMode::kReverseExclusive)
-                  : (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive);
       auto checked = ConvertProgramResult(
-          AssumeValue(builder_).EmitCheckIndexRange(index_cursor, AssumeValue(index_key_first_),
-                                                    end_key_count, AssumeValue(first_end), mode),
+          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, index_cursor,
+                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(first_end)),
           "unable to emit first noncovering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
@@ -7100,16 +7068,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (has_end_key) {
-      const bool inclusive = physical_end == nullptr || physical_end->inclusive;
-      const IndexRangeEndMode mode =
-          reverse ? (inclusive ? IndexRangeEndMode::kReverseInclusive
-                               : IndexRangeEndMode::kReverseExclusive)
-                  : (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive);
-      auto checked =
-          ConvertProgramResult(AssumeValue(builder_).EmitCheckIndexRange(
-                                   index_cursor, AssumeValue(index_key_first_), end_key_count,
-                                   AssumeValue(positioned_completion), mode),
-                               "unable to emit noncovering index end check");
+      auto checked = ConvertProgramResult(
+          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, index_cursor,
+                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(positioned_completion)),
+          "unable to emit noncovering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
@@ -9174,15 +9137,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(done.error()));
     }
     std::optional<Label> index_end;
+    std::optional<IndexTraversal> index_traversal;
     if (index_scan != nullptr) {
-      if (!source.index_key_first.has_value()) {
+      if (!source.index_key_first.has_value() || source.index_key_capacity == 0U) {
         return std::unexpected(InternalFailure("joined index has no retained prefix registers"));
       }
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
+      index_traversal = ResolveIndexTraversal(*index_scan);
+      if (index_traversal->has_end_key) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        index_end = *label;
       }
-      index_end = *label;
     }
     std::optional<Label> published;
     if (right) {
@@ -9218,6 +9185,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       advance = *label;
     }
     const CursorId cursor = *source.cursor;
+    std::uint32_t end_key_count = 0;
     if (lookup != nullptr) {
       auto key = EmitRowIdLookupKey(lookup->key);
       if (!key.has_value()) {
@@ -9233,17 +9201,36 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return keys;
       }
       const RegisterId first = AssumeValue(source.index_key_first);
-      auto count = EmitIndexKeyBlock(*index_scan, nullptr, first,
-                                     static_cast<std::uint32_t>(index_scan->equalities.size()));
-      if (!count.has_value()) {
-        return std::unexpected(std::move(count.error()));
+      const IndexTraversal& traversal = AssumeValue(index_traversal);
+      if (traversal.has_start_key) {
+        auto count =
+            EmitIndexKeyBlock(*index_scan, traversal.start, first, source.index_key_capacity);
+        if (!count.has_value()) {
+          return std::unexpected(std::move(count.error()));
+        }
+        auto sought =
+            ConvertProgramResult(EmitIndexTraversalSeek(AssumeValue(builder_), *index_scan,
+                                                        traversal, cursor, first, *count, *done),
+                                 "unable to position joined index prefix");
+        if (!sought.has_value()) {
+          return std::unexpected(std::move(sought.error()));
+        }
+      } else {
+        auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+                                            "unable to position joined source");
+        if (!rewound.has_value()) {
+          return std::unexpected(std::move(rewound.error()));
+        }
       }
-      auto sought =
-          ConvertProgramResult(AssumeValue(builder_).EmitSeekIndex(cursor, first, *count, *done,
-                                                                   IndexSeekMode::kGreaterOrEqual),
-                               "unable to position joined index prefix");
-      if (!sought.has_value()) {
-        return std::unexpected(std::move(sought.error()));
+      if (traversal.end != nullptr) {
+        auto count =
+            EmitIndexKeyBlock(*index_scan, traversal.end, first, source.index_key_capacity);
+        if (!count.has_value()) {
+          return std::unexpected(std::move(count.error()));
+        }
+        end_key_count = *count;
+      } else {
+        end_key_count = static_cast<std::uint32_t>(index_scan->equalities.size());
       }
     } else {
       auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
@@ -9255,13 +9242,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
-    if (index_scan != nullptr) {
-      auto checked =
-          ConvertProgramResult(AssumeValue(builder_).EmitCheckIndexRange(
-                                   cursor, AssumeValue(source.index_key_first),
-                                   static_cast<std::uint32_t>(index_scan->equalities.size()),
-                                   AssumeValue(index_end), IndexRangeEndMode::kInclusive),
-                               "unable to check joined index prefix");
+    if (index_scan != nullptr && index_end.has_value()) {
+      auto checked = ConvertProgramResult(
+          EmitIndexTraversalEndCheck(
+              AssumeValue(builder_), *index_scan, AssumeValue(index_traversal), cursor,
+              AssumeValue(source.index_key_first), end_key_count, *index_end),
+          "unable to check joined index prefix");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
@@ -9603,10 +9589,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!null.has_value()) {
           return std::unexpected(std::move(null.error()));
         }
-        for (std::size_t term = 0; term < index->equalities.size(); ++term) {
+        for (std::uint32_t term = 0; term < source.index_key_capacity; ++term) {
           if (auto initialized = Append(LoadConstantInstruction{
                   .constant = *null,
-                  .output = RegisterId{first.value() + static_cast<std::uint32_t>(term)},
+                  .output = RegisterId{first.value() + term},
               });
               !initialized.has_value()) {
             return initialized;

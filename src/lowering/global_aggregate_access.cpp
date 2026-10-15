@@ -333,19 +333,9 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(
           InternalFailure("global aggregate covering index metadata is invalid"));
     }
-    const PhysicalIndexBound* physical_start = nullptr;
-    const PhysicalIndexBound* physical_end = nullptr;
-    if (index.range.has_value()) {
-      if (index.range->order == SortOrder::kDescending) {
-        physical_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-        physical_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      } else {
-        physical_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-        physical_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      }
-    }
-    const bool has_start_key = !index.equalities.empty() || physical_start != nullptr;
-    const bool has_end_key = !index.equalities.empty() || physical_end != nullptr;
+    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    const bool has_start_key = traversal.has_start_key;
+    const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
@@ -387,7 +377,7 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t start_key_count = 0;
     if (has_start_key) {
-      auto key = EmitIndexKeyBlock(index, physical_start);
+      auto key = EmitIndexKeyBlock(index, traversal.start);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -410,12 +400,9 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(std::move(advance.error()));
     }
     if (has_start_key) {
-      const IndexSeekMode mode = physical_start == nullptr || physical_start->inclusive
-                                     ? IndexSeekMode::kGreaterOrEqual
-                                     : IndexSeekMode::kGreater;
       auto sought = ConvertProgramResult(
-          builder_->EmitSeekIndex(AssumeValue(cursor_), AssumeValue(index_key_first_),
-                                  start_key_count, *unpositioned, mode),
+          EmitIndexTraversalSeek(*builder_, index, traversal, AssumeValue(cursor_),
+                                 AssumeValue(index_key_first_), start_key_count, *unpositioned),
           "unable to emit global aggregate index seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
@@ -430,7 +417,7 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, physical_end);
+      auto key = EmitIndexKeyBlock(index, traversal.end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -448,12 +435,10 @@ class GlobalAggregateAccessEmitter final {
       return bound;
     }
     if (has_end_key) {
-      const IndexRangeEndMode mode = physical_end == nullptr || physical_end->inclusive
-                                         ? IndexRangeEndMode::kInclusive
-                                         : IndexRangeEndMode::kExclusive;
       auto checked = ConvertProgramResult(
-          builder_->EmitCheckIndexRange(AssumeValue(cursor_), AssumeValue(index_key_first_),
-                                        end_key_count, AssumeValue(positioned_end), mode),
+          EmitIndexTraversalEndCheck(*builder_, index, traversal, AssumeValue(cursor_),
+                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(positioned_end)),
           "unable to emit global aggregate index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
@@ -633,19 +618,9 @@ class GlobalAggregateAccessEmitter final {
     }
     const CursorId index_cursor = AssumeValue(index_cursor_);
     const CursorId table_cursor = AssumeValue(cursor_);
-    const PhysicalIndexBound* physical_start = nullptr;
-    const PhysicalIndexBound* physical_end = nullptr;
-    if (index.range.has_value()) {
-      if (index.range->order == SortOrder::kDescending) {
-        physical_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-        physical_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      } else {
-        physical_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-        physical_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      }
-    }
-    const bool has_start_key = !index.equalities.empty() || physical_start != nullptr;
-    const bool has_end_key = !index.equalities.empty() || physical_end != nullptr;
+    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    const bool has_start_key = traversal.has_start_key;
+    const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
@@ -685,7 +660,7 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t start_key_count = 0;
     if (has_start_key) {
-      auto key = EmitIndexKeyBlock(index, physical_start);
+      auto key = EmitIndexKeyBlock(index, traversal.start);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -700,13 +675,10 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(std::move(index_missing.error()));
     }
     if (has_start_key) {
-      const IndexSeekMode mode = physical_start == nullptr || physical_start->inclusive
-                                     ? IndexSeekMode::kGreaterOrEqual
-                                     : IndexSeekMode::kGreater;
-      auto sought =
-          ConvertProgramResult(builder_->EmitSeekIndex(index_cursor, AssumeValue(index_key_first_),
-                                                       start_key_count, *index_missing, mode),
-                               "unable to emit global aggregate noncovering seek");
+      auto sought = ConvertProgramResult(
+          EmitIndexTraversalSeek(*builder_, index, traversal, index_cursor,
+                                 AssumeValue(index_key_first_), start_key_count, *index_missing),
+          "unable to emit global aggregate noncovering seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
       }
@@ -720,7 +692,7 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, physical_end);
+      auto key = EmitIndexKeyBlock(index, traversal.end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -758,13 +730,11 @@ class GlobalAggregateAccessEmitter final {
     }
 
     if (has_end_key) {
-      const IndexRangeEndMode mode = physical_end == nullptr || physical_end->inclusive
-                                         ? IndexRangeEndMode::kInclusive
-                                         : IndexRangeEndMode::kExclusive;
-      auto checked = ConvertProgramResult(
-          builder_->EmitCheckIndexRange(index_cursor, AssumeValue(index_key_first_), end_key_count,
-                                        AssumeValue(first_end), mode),
-          "unable to emit first global aggregate noncovering end check");
+      auto checked =
+          ConvertProgramResult(EmitIndexTraversalEndCheck(*builder_, index, traversal, index_cursor,
+                                                          AssumeValue(index_key_first_),
+                                                          end_key_count, AssumeValue(first_end)),
+                               "unable to emit first global aggregate noncovering end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
@@ -782,12 +752,10 @@ class GlobalAggregateAccessEmitter final {
       return bound;
     }
     if (has_end_key) {
-      const IndexRangeEndMode mode = physical_end == nullptr || physical_end->inclusive
-                                         ? IndexRangeEndMode::kInclusive
-                                         : IndexRangeEndMode::kExclusive;
       auto checked = ConvertProgramResult(
-          builder_->EmitCheckIndexRange(index_cursor, AssumeValue(index_key_first_), end_key_count,
-                                        AssumeValue(positioned_end), mode),
+          EmitIndexTraversalEndCheck(*builder_, index, traversal, index_cursor,
+                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(positioned_end)),
           "unable to emit global aggregate noncovering end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
@@ -882,13 +850,6 @@ class GlobalAggregateAccessEmitter final {
     return {};
   }
 
-  struct IndexedMinMaxTraversal {
-    const PhysicalIndexBound* start = nullptr;
-    const PhysicalIndexBound* end = nullptr;
-    bool has_start_key = false;
-    bool has_end_key = false;
-  };
-
   struct IndexedMinMaxRuntime {
     BoundAggregateInvocationId invocation;
     BoundExpressionId argument;
@@ -920,30 +881,6 @@ class GlobalAggregateAccessEmitter final {
     std::optional<Label> exhausted{};
     std::optional<Label> positioned_end{};
   };
-
-  [[nodiscard]] IndexedMinMaxTraversal ResolveIndexedMinMaxTraversal(
-      const PhysicalIndexScanNode& index) const noexcept {
-    const PhysicalIndexBound* forward_start = nullptr;
-    const PhysicalIndexBound* forward_end = nullptr;
-    if (index.range.has_value()) {
-      if (index.range->order == SortOrder::kDescending) {
-        forward_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-        forward_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      } else {
-        forward_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-        forward_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      }
-    }
-    const bool reverse = index.direction == PhysicalScanDirection::kReverse;
-    const PhysicalIndexBound* start = reverse ? forward_end : forward_start;
-    const PhysicalIndexBound* end = reverse ? forward_start : forward_end;
-    return IndexedMinMaxTraversal{
-        .start = start,
-        .end = end,
-        .has_start_key = !index.equalities.empty() || start != nullptr,
-        .has_end_key = !index.equalities.empty() || end != nullptr,
-    };
-  }
 
   [[nodiscard]] LoweringResult<IndexedMinMaxRuntime> ResolveIndexedMinMaxRuntime() const {
     if (aggregate_ == nullptr || !aggregate_->min_max.has_value()) {
@@ -1033,28 +970,19 @@ class GlobalAggregateAccessEmitter final {
     };
   }
 
-  [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxPosition(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
-      CursorId index_cursor, Label missing) {
+  [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxPosition(const PhysicalIndexScanNode& index,
+                                                               const IndexTraversal& traversal,
+                                                               CursorId index_cursor,
+                                                               Label missing) {
     if (traversal.has_start_key) {
       auto key_count = EmitIndexKeyBlock(index, traversal.start);
       if (!key_count.has_value()) {
         return std::unexpected(std::move(key_count.error()));
       }
-      IndexSeekMode mode = IndexSeekMode::kGreaterOrEqual;
-      if (index.direction == PhysicalScanDirection::kForward) {
-        mode = traversal.start == nullptr || traversal.start->inclusive
-                   ? IndexSeekMode::kGreaterOrEqual
-                   : IndexSeekMode::kGreater;
-      } else {
-        mode = traversal.start == nullptr || traversal.start->inclusive
-                   ? IndexSeekMode::kLessOrEqual
-                   : IndexSeekMode::kLess;
-      }
-      auto sought =
-          ConvertProgramResult(builder_->EmitSeekIndex(index_cursor, AssumeValue(index_key_first_),
-                                                       *key_count, missing, mode),
-                               "unable to emit indexed MIN/MAX seek");
+      auto sought = ConvertProgramResult(
+          EmitIndexTraversalSeek(*builder_, index, traversal, index_cursor,
+                                 AssumeValue(index_key_first_), *key_count, missing),
+          "unable to emit indexed MIN/MAX seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
       }
@@ -1077,7 +1005,7 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexedMinMaxEndKey(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal) {
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal) {
     if (!traversal.has_end_key) {
       return 0U;
     }
@@ -1130,7 +1058,7 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxNonNullPosition(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
       const IndexedMinMaxRuntime& runtime, CursorId index_cursor, Label missing) {
     if (runtime.extremum == BoundAggregateExtremumKind::kMaximum) {
       return EmitIndexedMinMaxPosition(index, traversal, index_cursor, missing);
@@ -1155,23 +1083,18 @@ class GlobalAggregateAccessEmitter final {
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxEndCheck(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
-      CursorId index_cursor, std::uint32_t key_count, Label end) {
+  [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxEndCheck(const PhysicalIndexScanNode& index,
+                                                               const IndexTraversal& traversal,
+                                                               CursorId index_cursor,
+                                                               std::uint32_t key_count, Label end) {
     if (!traversal.has_end_key) {
       return {};
     }
 
-    const bool inclusive = traversal.end == nullptr || traversal.end->inclusive;
-    const IndexRangeEndMode mode =
-        index.direction == PhysicalScanDirection::kForward
-            ? (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive)
-            : (inclusive ? IndexRangeEndMode::kReverseInclusive
-                         : IndexRangeEndMode::kReverseExclusive);
-    auto checked =
-        ConvertProgramResult(builder_->EmitCheckIndexRange(
-                                 index_cursor, AssumeValue(index_key_first_), key_count, end, mode),
-                             "unable to emit indexed MIN/MAX end check");
+    auto checked = ConvertProgramResult(
+        EmitIndexTraversalEndCheck(*builder_, index, traversal, index_cursor,
+                                   AssumeValue(index_key_first_), key_count, end),
+        "unable to emit indexed MIN/MAX end check");
     if (!checked.has_value()) {
       return std::unexpected(std::move(checked.error()));
     }
@@ -1179,7 +1102,7 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxNonNullEndCheck(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
       const IndexedMinMaxRuntime& runtime, CursorId index_cursor, std::uint32_t key_count,
       Label end) {
     if (runtime.extremum == BoundAggregateExtremumKind::kMinimum) {
@@ -1218,7 +1141,7 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<void> EmitIndexedMinMaxPassEndCheck(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
       const IndexedMinMaxRuntime& runtime, CursorId index_cursor, std::uint32_t key_count,
       Label end, IndexedMinMaxPassRegion region) {
     if (region == IndexedMinMaxPassRegion::kNull) {
@@ -1301,7 +1224,7 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<IndexedMinMaxPassExits> EmitIndexedMinMaxIndexPass(
-      const PhysicalIndexScanNode& index, const IndexedMinMaxTraversal& traversal,
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
       const IndexedMinMaxRuntime& runtime, CursorId index_cursor,
       std::optional<CursorId> table_cursor, std::optional<JumpCondition> skipped_value,
       IndexedMinMaxPassRegion region) {
@@ -1520,7 +1443,7 @@ class GlobalAggregateAccessEmitter final {
         index.covering ? AssumeValue(cursor_) : AssumeValue(index_cursor_);
     const std::optional<CursorId> table_cursor =
         index.covering ? std::nullopt : std::optional<CursorId>{AssumeValue(cursor_)};
-    const IndexedMinMaxTraversal traversal = ResolveIndexedMinMaxTraversal(index);
+    const IndexTraversal traversal = ResolveIndexTraversal(index);
     auto runtime = ResolveIndexedMinMaxRuntime();
     if (!runtime.has_value()) {
       return std::unexpected(std::move(runtime.error()));

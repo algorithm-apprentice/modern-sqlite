@@ -244,22 +244,19 @@ class ByteReader final {
       "FULL JOIN",
   };
   const std::string_view join = kJoins[input.Next() % kJoins.size()];
-  const std::string_view operation = input.Next() % 2U == 0U ? "=" : " IS ";
-  constexpr std::array<std::string_view, 4> kKeys{
-      "b.text_key",
-      "b.numeric_key",
-      "b.text_key",
-      "b.default_text",
+  constexpr std::array<std::string_view, 6> kOperations{
+      "=", " IS ", ">", ">=", "<", "<=",
   };
-  constexpr std::array<std::string_view, 4> kValues{
-      "p.text_key",
-      "p.numeric_key",
-      "p.raw_key",
-      "p.text_key",
+  const std::string_view operation = kOperations[input.Next() % kOperations.size()];
+  constexpr std::array<std::string_view, 5> kKeys{
+      "b.text_key", "b.numeric_key", "b.text_key", "b.default_text", "b.numeric_key",
+  };
+  constexpr std::array<std::string_view, 5> kValues{
+      "p.text_key", "p.numeric_key", "p.raw_key", "p.text_key", "p.numeric_key",
   };
   const std::size_t key = input.Next() % kKeys.size();
-  std::string predicate =
-      std::string{kKeys[key]} + std::string{operation} + std::string{kValues[key]};
+  std::string predicate = key == 4U ? "b.text_key IS p.text_key AND " : "";
+  predicate += std::string{kKeys[key]} + std::string{operation} + std::string{kValues[key]};
   if (input.Next() % 2U != 0U) {
     predicate += " AND b.numeric_key IS p.numeric_key";
   }

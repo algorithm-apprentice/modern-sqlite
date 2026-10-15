@@ -178,6 +178,42 @@ gate passes, clean only that merged branch, and continue automatic-index
 integration and the remaining prerequisite-ready ADR-0053 slices.
 This package does not complete node 43.
 
+### Local closure evidence
+
+Four focused tests fail against the unchanged merged production base before
+implementation. Both public range workloads return count 1 while executing
+36,888 instructions. After integration, covering range execution uses 44
+instructions and noncovering range execution uses 49, below the unchanged
+exclusive bound of 256. Equality controls remain 35 covering, 41 noncovering,
+and 364 rowid instructions. These are execution-only fixed-work observations,
+not wall-time speedup claims.
+
+The expanded focused suite passes 44 tests. The independent preservation
+model retains its original equality/IS coverage and now checks 432
+combinations. Module evidence includes nested retained end keys and backedge
+placement, shared rowid scratch across joined/ordinary/MIN/MAX consumers,
+complete covering and table-backed replay, real empty inputs, suffix
+corruption, selected-root read failures, typed reset/rebind, external
+matched-ledger failure/recovery, and bounded 64-source execution. Existing
+OOM sweeps retain their allocation positions, caps, and timeouts.
+
+The pinned corpus adds 62 comparisons for 470 comparisons and six unchanged
+unsupported boundaries. All 414 inherited corpus cases and oracle records,
+frozen provenance, and fixture bytes remain unchanged. The complete
+Modern/native comparison passes.
+
+Complete Debug, Release, and ASan/UBSan tiers each pass 1,361 tests; genuine
+GCC 16 Debug and Release each pass 1,359. The complete instrumented fast unit
+tier passes 1,326 tests. All 58 archived performance contracts pass without
+changing frozen inputs, baselines, budgets, or thresholds. The final
+ASan/UBSan grammar campaign completes 20,000 inputs with seed 87, maximum
+input length 4,096, and the unchanged ten-second per-input limit. Required
+unfiltered production clang-tidy, pinned formatting, engineering discipline,
+and dependency-graph validation pass.
+
+Final review and exact-head hosted gates remain mandatory before merge.
+This evidence does not complete `implement-advanced-sql`.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, ADR-0053 joined access/scaling prerequisites.
