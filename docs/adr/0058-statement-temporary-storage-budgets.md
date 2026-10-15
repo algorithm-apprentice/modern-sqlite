@@ -283,6 +283,13 @@ File-mode top-N keeps ADR-0055's eager file-backend semantics: opening the
 top-N creates its root immediately, but through the shared relation arena.
 Candidate-pending buffers still use retained-memory accounting.
 
+ADR-0089 narrowly adds lookup-purpose keyed relations for automatic covering
+sources. Their first file-mode insertion acquires a root directly in this
+same arena; it does not first build an ordered memory array. Empty logical
+handles remain file-free. Ordinary membership relations retain the
+memory-first policy above. Sealed lookup sources remain file-backed and do
+not strand a non-reclaimable memory array outside writable-owner pressure.
+
 `Reset()` clears one root and preserves its sequence/root ownership.
 `Close()` performs no fallible I/O: it releases cursors and moves the root
 lease, including its current writer/comparison columns, into an arena-owned

@@ -11828,6 +11828,2373 @@
         }
       ],
       "sql_hex": "53454c45435420622e69642c622e7061796c6f61642046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e746578745f6b6579204953203f3120414e4420622e6e756d657269635f6b65793e3d3f3220574845524520702e69643d32204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-integer-equality",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-nullable-is-duplicates",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c65204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-nullable-equality",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c653d612e6e756c6c61626c65204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-left-null-publication",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204c454654204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c653d612e6e756c6c61626c6520574845524520612e69643c3d34204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-left-matched-before-where",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206d6f64656c5f726f77732061204c454654204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c6520574845524520612e69643c3d3420414e4420622e6964204953204e554c4c204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-left-rejected-on",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204c454654204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c6520414e4420622e69643c3020574845524520612e69643c3d34204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-cross-where",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206d6f64656c5f726f777320612043524f5353204a4f494e206d6f64656c5f726f7773206220574845524520622e76616c75653d612e76616c7565204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-comma-where",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206d6f64656c5f726f777320612c6d6f64656c5f726f7773206220574845524520622e76616c756520495320612e76616c7565204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-using-nonrowid",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542076616c75652c612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062205553494e472876616c756529204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-natural-left-nonrowid",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420772e612c692e69642c692e6e616d652046524f4d2077722077204e41545552414c204c454654204a4f494e206974656d732069204f5244455220425920772e61"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-mixed-storage-is",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c747970656f6628622e76616c7565292c622e76616c75652046524f4d2073746f726167655f76616c7565732061204a4f494e2073746f726167655f76616c7565732062204f4e20622e76616c756520495320612e76616c7565204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-mixed-storage-equality",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c747970656f6628622e76616c7565292c622e76616c75652046524f4d2073746f726167655f76616c7565732061204a4f494e2073746f726167655f76616c7565732062204f4e20622e76616c75653d612e76616c7565204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-overflow-covering",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c6c656e67746828622e76616c7565292c622e76616c75652046524f4d2073746f726167655f76616c7565732061204a4f494e2073746f726167655f76616c7565732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643e3d3130204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-nocase-real-and-blob-fields",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6e616d652c747970656f6628622e73636f7265292c622e73636f72652c622e7061796c6f61642046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e6e616d653d612e6e616d6520434f4c4c415445204e4f43415345204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-effective-binary",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6e616d652046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e6e616d653d612e6e616d6520434f4c4c4154452042494e415259204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-effective-rtrim",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6e6f74652c622e7061796c6f61642046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e6e6f74653d612e6e6f746520434f4c4c41544520525452494d204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-missing-default-fields",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e746578745f64656661756c742c747970656f6628622e7265616c5f64656661756c74292c622e7265616c5f64656661756c742c622e6e756c6c5f64656661756c742c622e696e74656765725f64656661756c742046524f4d20616c74657265642061204a4f494e20616c74657265642062204f4e20622e6578697374696e673d612e6578697374696e67204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-default-prefix-and-null",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6578697374696e672c622e7265616c5f64656661756c742c622e696e74656765725f64656661756c742046524f4d20616c74657265642061204a4f494e20616c74657265642062204f4e20622e746578745f64656661756c7420495320612e746578745f64656661756c74204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-multiple-live-sources",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c632e69642c622e6c6162656c2c632e6c6162656c2c622e76616c75652046524f4d206d6f64656c5f726f77732061204c454654204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c65204c454654204a4f494e206d6f64656c5f726f77732063204f4e20632e6c6162656c3d622e6c6162656c20434f4c4c415445204e4f4341534520574845524520612e69643c3d34204f5244455220425920612e69642c622e69642c632e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-top-n-offset",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565204f5244455220425920612e696420444553432c622e6964204c494d49542033204f46465345542032"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542044495354494e435420622e6e756c6c61626c652046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c6520574845524520612e69643c3d38204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-global-aggregate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428622e6964292c73756d28622e76616c7565292c6d696e28622e6c6162656c292046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-grouped-aggregate-modifiers",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6e756c6c61626c652c636f756e7428622e6964292c636f756e742844495354494e435420622e6c6162656c292c67726f75705f636f6e6361742844495354494e435420622e6c6162656c204f5244455220425920622e6c6162656c2044455343292046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c6520495320612e6e756c6c61626c652047524f555020425920612e6e756c6c61626c65204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520554e494f4e2053454c45435420277461696c27204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565204558434550542053454c454354206c6162656c2046524f4d206d6f64656c5f726f77732057484552452069643c3d32204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520494e544552534543542053454c454354206c6162656c2046524f4d206d6f64656c5f726f77732057484552452069643c3d33204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-private-scalar-offset",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565204f5244455220425920622e69642044455343204c494d49542031204f4646534554203229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-private-exists-skips-projection",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420616273282d39323233333732303336383534373735383038292046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643c3d3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-zero-limit-skips-offset",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c7565204c494d49542030204f464653455420616273282d3932323333373230333638353437373538303829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-unentered-source",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273282d39323233333732303336383534373735383038292046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643c30"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-empty-inner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792046524f4d2070726f62655f726f77732070204a4f494e20656d7074795f70726f62655f726f77732062204f4e20622e746578745f6b657920495320702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-empty-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792046524f4d2070726f62655f726f77732070204c454654204a4f494e20656d7074795f70726f62655f726f77732062204f4e20622e746578745f6b657920495320702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-typed-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "2"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "text",
+            "hex": "3230"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "blob",
+            "hex": "3230"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "20"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "real",
+            "bits": "4034000000000000"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e76616c75652c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e6e756c6c61626c65204953203f3120574845524520612e69643c3d3f32204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-composite-affinity-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642c702e69642c702e7261775f6b65792c702e626c6f625f6b65792046524f4d206b65795f726f77732062204c454654204a4f494e2070726f62655f726f77732070204f4e20702e746578745f6b65793d622e746578745f6b657920434f4c4c415445204e4f4341534520414e4420702e6e756d657269635f6b657920495320622e6e756d657269635f6b6579204f5244455220425920622e69642c702e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-one-point-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "automatic-join-index",
+      "id": "automatic-join-full-preservation-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c622e6c6162656c2046524f4d206d6f64656c5f726f777320612046554c4c204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520414e4420612e69643c3d34204f5244455220425920612e69642c622e6964"
     }
   ],
   "databases": [
@@ -11897,6 +14264,7 @@
     "without-rowid",
     "joined-covering-index",
     "joined-noncovering-index",
-    "joined-index-range"
+    "joined-index-range",
+    "automatic-join-index"
   ]
 }

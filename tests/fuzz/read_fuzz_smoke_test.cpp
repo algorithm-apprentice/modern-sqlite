@@ -150,6 +150,19 @@ namespace {
       return false;
     }
   }
+  for (std::uint8_t kind = 0; kind < 4U; ++kind) {
+    for (std::uint8_t key = 0; key < 6U; ++key) {
+      for (std::uint8_t consumer = 0; consumer < 6U; ++consumer) {
+        const std::array<std::uint8_t, 8> input{0x07, kind, key, 0x07, consumer, 0x0c, 0x00, 0x01};
+        const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+        if (sql.find("model_rows b") == std::string::npos ||
+            (consumer == 3U && sql.find("model_rows c") == std::string::npos) ||
+            !ExecuteSql(*session, sql)) {
+          return false;
+        }
+      }
+    }
+  }
   auto indexed = modern_sqlite::ReadSession::Open(joined_fixture);
   if (!indexed.has_value()) {
     return false;

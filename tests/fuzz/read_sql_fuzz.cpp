@@ -293,6 +293,45 @@ class ByteReader final {
   return input.Next() % 4U == 0U ? "SELECT EXISTS(" + sql + ")" : sql;
 }
 
+[[nodiscard]] std::string GenerateAutomaticJoinSql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  constexpr std::array<std::string_view, 4> kJoins{" JOIN ", " LEFT JOIN ", " CROSS JOIN ", ","};
+  constexpr std::array<std::string_view, 6> kPredicates{
+      "b.value=a.value",    "b.nullable IS a.nullable",      "b.label=a.label COLLATE NOCASE",
+      "b.value=a.nullable", "b.label=a.label COLLATE RTRIM", "b.nullable IS NULL",
+  };
+  const std::size_t join = input.Next() % kJoins.size();
+  const std::string_view predicate = kPredicates[input.Next() % kPredicates.size()];
+  const std::string bound = "a.id<=" + std::to_string(1U + input.Next() % 8U);
+  const std::size_t consumer = input.Next() % 6U;
+  std::string source = " FROM model_rows a" + std::string{kJoins[join]} + "model_rows b";
+  if (join < 2U) {
+    source += " ON " + std::string{predicate};
+  }
+  if (consumer == 3U) {
+    source += " LEFT JOIN model_rows c ON c.value=b.value";
+  }
+  source += " WHERE " + (join < 2U ? bound : std::string{predicate} + " AND " + bound);
+  const std::string limit = " LIMIT " + std::to_string(input.Next() % 13U) + " OFFSET " +
+                            std::to_string(input.Next() % 4U);
+  switch (consumer) {
+    case 0:
+      return "SELECT a.id,b.id,b.label" + source + " ORDER BY a.id,b.id" + limit;
+    case 1:
+      return "SELECT a.id,count(b.id),sum(b.value),group_concat(b.label ORDER BY b.id DESC)" +
+             source + " GROUP BY a.id ORDER BY a.id" + limit;
+    case 2:
+      return "SELECT DISTINCT b.nullable,b.label" + source + " ORDER BY 1,2" + limit;
+    case 3:
+      return "SELECT a.id,b.id,c.id,b.label,c.label" + source + " ORDER BY a.id,b.id,c.id" + limit;
+    case 4:
+      return "SELECT (SELECT b.label" + source + " ORDER BY a.id,b.id" + limit + ")";
+    default:
+      return "SELECT EXISTS(SELECT b.label" + source + limit + ")";
+  }
+}
+
 void ConsumePrepared(Result<ReadPrepareOutput> prepared) {
   if (!prepared.has_value() || !prepared->statement.has_value()) {
     return;
@@ -315,6 +354,9 @@ std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
   }
   ByteReader selector{input};
   const std::uint8_t selected = selector.Next();
+  if (selected % 8U == 7U) {
+    return GenerateAutomaticJoinSql(input);
+  }
   if (selected % 8U == 3U) {
     return GenerateSubquerySql(input);
   }

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -73,7 +74,8 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
   };
 }
 
-[[nodiscard]] CatalogSnapshotPtr TestCatalog(std::string item_name = "Items") {
+[[nodiscard]] CatalogSnapshotPtr TestCatalog(std::string item_name = "Items",
+                                             std::uint64_t item_rows = 100) {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 23, .generation = 11},
@@ -107,7 +109,7 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
       .statistics =
           TableStatistics{
               .has_stat1 = true,
-              .estimated_rows = 100,
+              .estimated_rows = item_rows,
               .average_row_size = 24,
           },
   });
@@ -535,12 +537,13 @@ class ReverseCollation final : public Collation {
 }
 
 [[nodiscard]] PhysicalPlan OptimizeOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
-                                           BindEnvironment environment = BindEnvironment::Core()) {
+                                           BindEnvironment environment = BindEnvironment::Core(),
+                                           OptimizerOptions options = {}) {
   BuildLogicalPlanResult logical = BuildLogicalPlan(BindOrThrow(sql, catalog, environment));
   if (!logical.has_value()) {
     throw std::runtime_error{logical.error().detail};
   }
-  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical), options);
   if (!physical.has_value()) {
     throw std::runtime_error{physical.error().detail};
   }
@@ -569,7 +572,7 @@ class ReverseCollation final : public Collation {
 
 [[nodiscard]] PhysicalStatementPlan OptimizeStatementOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
-    BindEnvironment environment = BindEnvironment::Core()) {
+    BindEnvironment environment = BindEnvironment::Core(), OptimizerOptions options = {}) {
   BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment);
   if (!bound.has_value()) {
     throw std::runtime_error{bound.error().detail};
@@ -578,7 +581,8 @@ class ReverseCollation final : public Collation {
   if (!logical.has_value()) {
     throw std::runtime_error{logical.error().detail};
   }
-  OptimizeLogicalStatementPlanResult physical = OptimizeLogicalStatementPlan(std::move(*logical));
+  OptimizeLogicalStatementPlanResult physical =
+      OptimizeLogicalStatementPlan(std::move(*logical), options);
   if (!physical.has_value()) {
     throw std::runtime_error{physical.error().detail};
   }
@@ -909,6 +913,151 @@ TEST(PhysicalPlan, SelectsSourceOwnedRowidSeeksForAlreadyPositionedJoinPrefixes)
     const auto& key = std::get<BoundColumnExpression>(bound.expression(lookup->key).payload);
     EXPECT_EQ(BoundSourceId{0}, bound.source_columns()[key.column.value()].source);
   }
+}
+
+TEST(PhysicalPlan, SelectsAutomaticCoveringEqualityWithCompleteSourceMetadata) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT b.Name,b.Value,b.id FROM Items a JOIN Items b ON b.Name=a.Name", TestCatalog(),
+      BindEnvironment::Core(), OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  ASSERT_GE(plan.nodes().size(), 2U);
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
+  const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, automatic);
+  EXPECT_EQ(0U, automatic->core_index);
+  EXPECT_EQ(BoundSourceId{1}, automatic->source);
+  EXPECT_EQ(TableId{0}, automatic->table);
+  EXPECT_EQ(RootPageId{2}, automatic->table_root_page);
+  EXPECT_EQ(PhysicalScanDirection::kForward, automatic->direction);
+  ASSERT_EQ(1U, automatic->equalities.size());
+  const PhysicalIndexEquality& equality = automatic->equalities.front();
+  EXPECT_EQ(ColumnId{1}, equality.column);
+  EXPECT_EQ(TypeAffinity::kText, equality.affinity);
+  EXPECT_EQ("NOCASE", equality.collation_name);
+  EXPECT_EQ(SortOrder::kAscending, equality.order);
+  EXPECT_TRUE(equality.reject_null);
+  EXPECT_EQ((std::vector{ColumnId{2}}), automatic->covering_columns);
+  EXPECT_EQ("automatic_index", PhysicalNodeKindName(PhysicalNodeKindOf(plan.nodes()[1])));
+  EXPECT_EQ("automatic_index", PhysicalAccessKindName(PhysicalAccessKind::kAutomaticIndex));
+  EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("USING AUTOMATIC COVERING INDEX"));
+}
+
+TEST(PhysicalPlan, ThreadsAutomaticBackendPermissionThroughEveryQueryAndStatementOwner) {
+  for (const bool enabled : {false, true}) {
+    const OptimizerOptions options{.allow_file_backed_automatic_indexes = enabled};
+    for (const std::string_view sql :
+         {"SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name",
+          "SELECT (SELECT count(b.Value) FROM Items a JOIN Items b ON b.Name=a.Name)"}) {
+      SCOPED_TRACE(sql);
+      SCOPED_TRACE(enabled);
+      const PhysicalPlan plan =
+          OptimizeOrThrow(sql, TestCatalog(), BindEnvironment::Core(), options);
+      EXPECT_EQ(options, plan.options());
+      std::size_t automatic_sources = 0;
+      for (std::size_t query = 0; query < plan.logical_plan().bound_select().query_count();
+           ++query) {
+        const PhysicalQueryView view{plan, BoundQueryId{static_cast<std::uint32_t>(query)}};
+        EXPECT_EQ(options, view.options());
+        automatic_sources += static_cast<std::size_t>(
+            std::ranges::count_if(view.nodes(), [](const PhysicalNode& node) {
+              return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+            }));
+      }
+      EXPECT_EQ(enabled ? 1U : 0U, automatic_sources);
+      const PhysicalStatementPlan statement =
+          OptimizeStatementOrThrow(sql, TestCatalog(), BindEnvironment::Core(), options);
+      EXPECT_EQ(options, std::get<PhysicalPlan>(statement).options());
+    }
+  }
+}
+
+TEST(PhysicalPlan, DoesNotAssumeTemporaryStoragePermissionForDefaultOptimization) {
+  constexpr std::string_view sql = "SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name";
+  const PhysicalPlan plan = OptimizeOrThrow(sql, TestCatalog());
+  EXPECT_FALSE(plan.options().allow_file_backed_automatic_indexes);
+  EXPECT_FALSE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+  }));
+  const PhysicalStatementPlan statement = OptimizeStatementOrThrow(sql, TestCatalog());
+  EXPECT_FALSE(std::get<PhysicalPlan>(statement).options().allow_file_backed_automatic_indexes);
+}
+
+TEST(PhysicalPlan, KeepsAutomaticSourcesBehindCostReadinessAndPreservationBarriers) {
+  for (const std::string_view sql :
+       {"SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name WHERE a.id=1",
+        "SELECT b.Value FROM Tiny a JOIN Items b ON b.Name='x'",
+        "SELECT b.Value FROM Items a JOIN Items b ON b.Name>a.Name",
+        "SELECT b.Value FROM Items a JOIN Items b ON b.Name=upper(a.Name)",
+        "SELECT b.Value FROM Items a JOIN Items b ON +b.Name=a.Name",
+        "SELECT b.Value FROM Items a JOIN Items b ON b.Name=b.Value",
+        "SELECT b.Value FROM Items a LEFT JOIN Items b ON 1 WHERE b.Name=a.Name",
+        "SELECT b.Value FROM Items a RIGHT JOIN Items b ON b.Name=a.Name",
+        "SELECT b.Value FROM Items a FULL JOIN Items b ON b.Name=a.Name",
+        "SELECT b.Value FROM Items a JOIN Items b ON b.Name=c.Name CROSS JOIN Items c",
+        "SELECT c.Value FROM Items a JOIN Items b ON b.id=a.id "
+        "JOIN Items c ON c.Name=b.Name WHERE a.id=1"}) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan =
+        OptimizeOrThrow(sql, TestCatalog(), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    EXPECT_FALSE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+    }));
+  }
+  for (const std::uint64_t rows : {std::uint64_t{10}, std::numeric_limits<std::uint64_t>::max()}) {
+    SCOPED_TRACE(rows);
+    const PhysicalPlan plan = OptimizeOrThrow(
+        "SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name", TestCatalog("Items", rows),
+        BindEnvironment::Core(), OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    EXPECT_FALSE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+    }));
+  }
+}
+
+TEST(PhysicalPlan, DiscoversAutomaticCoveringValuesInTheirActualCompoundCore) {
+  struct Case {
+    std::string_view sql;
+    std::vector<ColumnId> covering;
+  };
+  for (const Case& test_case : {
+           Case{.sql = "SELECT Value FROM Items WHERE id=1 UNION ALL "
+                       "SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name",
+                .covering = {}},
+           Case{.sql = "SELECT Name FROM Items WHERE id=1 UNION ALL "
+                       "SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name",
+                .covering = {ColumnId{2}}},
+           Case{.sql = "SELECT Value FROM Items WHERE id=1 UNION ALL "
+                       "SELECT b.id FROM Items a JOIN Items b "
+                       "ON b.Name=a.Name AND b.Value>0",
+                .covering = {ColumnId{2}}},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan =
+        OptimizeOrThrow(test_case.sql, TestCatalog(), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    std::size_t count = 0;
+    for (const PhysicalNode& node : plan.nodes()) {
+      if (const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&node.payload);
+          automatic != nullptr) {
+        EXPECT_EQ(1U, automatic->core_index);
+        EXPECT_EQ(test_case.covering, automatic->covering_columns);
+        ++count;
+      }
+    }
+    EXPECT_EQ(1U, count);
+  }
+}
+
+TEST(PhysicalPlan, PreservesStoredAndRowidPriorityOverAutomaticSources) {
+  const PhysicalPlan indexed = OptimizeOrThrow(
+      "SELECT a.id,b.Payload FROM Items a JOIN Items b ON b.Category=a.Category", IndexedCatalog(),
+      BindEnvironment::Core(), OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  EXPECT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(indexed.nodes()[1].payload));
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(indexed.nodes()[1].payload).covering);
+  const PhysicalPlan rowid = OptimizeOrThrow(
+      "SELECT a.id,b.Value FROM Items a JOIN Items b ON b.id=a.id AND b.Name=a.Name", TestCatalog(),
+      BindEnvironment::Core(), OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(rowid.nodes()[1].payload));
 }
 
 TEST(PhysicalPlan, SelectsCoveringStoredIndexPrefixesForJoinedSources) {

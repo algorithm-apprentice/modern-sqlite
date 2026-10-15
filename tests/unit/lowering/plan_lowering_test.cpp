@@ -364,7 +364,8 @@ void RequireStatus(Status status) {
 }
 
 [[nodiscard]] PhysicalPlan OptimizeOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
-                                           BindEnvironment environment = BindEnvironment::Core()) {
+                                           BindEnvironment environment = BindEnvironment::Core(),
+                                           OptimizerOptions options = {}) {
   BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog, environment);
   if (!bound.has_value()) {
     throw std::runtime_error{bound.error().detail};
@@ -373,7 +374,7 @@ void RequireStatus(Status status) {
   if (!logical.has_value()) {
     throw std::runtime_error{logical.error().detail};
   }
-  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical), options);
   if (!physical.has_value()) {
     throw std::runtime_error{physical.error().detail};
   }
@@ -402,8 +403,9 @@ void RequireStatus(Status status) {
 }
 
 [[nodiscard]] BytecodeProgram LowerOrThrow(std::string_view sql, const CatalogSnapshotPtr& catalog,
-                                           BindEnvironment environment = BindEnvironment::Core()) {
-  const PhysicalPlan plan = OptimizeOrThrow(sql, catalog, environment);
+                                           BindEnvironment environment = BindEnvironment::Core(),
+                                           OptimizerOptions options = {}) {
+  const PhysicalPlan plan = OptimizeOrThrow(sql, catalog, environment, options);
   LowerPlanResult lowered = LowerPlan(plan);
   if (!lowered.has_value()) {
     std::string detail = lowered.error().detail;
@@ -476,6 +478,11 @@ void RequireStatus(Status status) {
 [[nodiscard]] std::filesystem::path JoinedIndexFixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "joined_index" / "sqlite-3.54.0-joined-index.db";
+}
+
+[[nodiscard]] std::filesystem::path ReadCompatibilityFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "read_compatibility" / "sqlite-3.54.0-read-compatibility.db";
 }
 
 [[nodiscard]] std::filesystem::path AlterDefaultsFixturePath() {
@@ -794,12 +801,13 @@ struct CustomEnvironment {
 
 class ReadLoweringAggregateIntegration : public ::testing::Test {
  protected:
-  void SetUp() override {
-    pager_ = TakeValue(Pager::Open(vfs_, FixturePath().string()));
+  void SetUp() override { OpenFixture(FixturePath()); }
+
+  void OpenFixture(const std::filesystem::path& path) {
+    pager_ = TakeValue(Pager::Open(vfs_, path.string()));
     RequireStatus(pager_->BeginRead());
     catalog_ = TakeValue(LoadCatalog(*pager_, CatalogLoadOptions{.generation = 141}));
-    memory_.emplace(TakeValue(TemporaryStorageFactory::Create(
-        vfs_, *pager_, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory})));
+    UseTemporaryStorage(TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory});
     callback_count = 0;
   }
 
@@ -807,9 +815,20 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
       std::string_view sql, BindEnvironment binding = BindEnvironment::Core(),
       VmEnvironment environment = VmEnvironment::Core(),
       std::span<const SqlValue> parameters = {}) {
-    const BytecodeProgram program = LowerOrThrow(sql, catalog_, binding);
-    return ExecuteRows(program, *pager_, catalog_->version().generation, environment, &*memory_,
+    const BytecodeProgram program = LowerOrThrow(
+        sql, catalog_, binding,
+        OptimizerOptions{.allow_file_backed_automatic_indexes = temporary_->file_spill_enabled()});
+    if (temporary_->file_spill_enabled()) {
+      EXPECT_TRUE(std::ranges::any_of(program.relations(), [](const auto& relation) {
+        return relation.relation_purpose == RelationPurpose::kLookup;
+      })) << sql;
+    }
+    return ExecuteRows(program, *pager_, catalog_->version().generation, environment, &*temporary_,
                        parameters);
+  }
+
+  void UseTemporaryStorage(TemporaryStorageOptions options) {
+    temporary_.emplace(TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_, options)));
   }
 
   [[nodiscard]] const CatalogSnapshotPtr& catalog() const noexcept { return catalog_; }
@@ -818,10 +837,84 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
   PosixVfs vfs_;
   std::unique_ptr<Pager> pager_;
   CatalogSnapshotPtr catalog_;
-  std::optional<TemporaryStorageFactory> memory_;
+  std::optional<TemporaryStorageFactory> temporary_;
 };
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
+
+class ReadLoweringAutomaticJoin : public ReadLoweringAggregateIntegration {
+ protected:
+  void SetUp() override {
+    OpenFixture(ReadCompatibilityFixturePath());
+    UseTemporaryStorage(TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                                                .sorter_memory_threshold = ByteCount{1024}});
+  }
+};
+
+TEST_F(ReadLoweringAutomaticJoin,
+       PreservesAutomaticSourcesAcrossOrderingDistinctAndAggregateConsumers) {
+  const auto ordered = Execute(
+      "SELECT a.id,b.id,c.id,b.score,c.name FROM items a JOIN items b ON b.score IS a.score "
+      "JOIN items c ON c.score IS b.score WHERE a.id<=3 ORDER BY a.id DESC LIMIT 2 OFFSET 1");
+  ASSERT_EQ(2U, ordered.size());
+  for (std::size_t row = 0; row < ordered.size(); ++row) {
+    const auto id = static_cast<std::int64_t>(2U - row);
+    for (std::size_t field = 0; field < 3U; ++field) {
+      EXPECT_EQ(id, ordered[row][field].integer_value());
+    }
+    EXPECT_EQ(SqlValueType::kReal, ordered[row][3].type());
+    EXPECT_EQ(row == 0U ? 3.0 : 1.5, ordered[row][3].real_value());
+    EXPECT_EQ(row == 0U ? "beta" : "alpha", TextBytes(ordered[row][4]));
+  }
+  const auto distinct = Execute(
+      "SELECT DISTINCT b.name FROM items a JOIN items b ON b.score IS a.score WHERE a.id<=3 "
+      "UNION SELECT 'tail' ORDER BY 1");
+  ASSERT_EQ(4U, distinct.size());
+  const std::array<std::string_view, 4> names{"alpha", "beta", "gamma", "tail"};
+  for (std::size_t row = 0; row < distinct.size(); ++row) {
+    EXPECT_EQ(names[row], TextBytes(distinct[row][0]));
+  }
+  const auto grouped = Execute(
+      "SELECT a.id,count(DISTINCT b.score),group_concat(c.name ORDER BY c.id) "
+      "FROM items a LEFT JOIN items b ON b.score IS a.score "
+      "JOIN items c ON c.score IS b.score WHERE a.id<=3 GROUP BY a.id ORDER BY a.id");
+  ASSERT_EQ(3U, grouped.size());
+  for (std::size_t row = 0; row < grouped.size(); ++row) {
+    EXPECT_EQ(static_cast<std::int64_t>(row + 1U), grouped[row][0].integer_value());
+    EXPECT_EQ(row == 2U ? 0 : 1, grouped[row][1].integer_value());
+    EXPECT_EQ(names[row], TextBytes(grouped[row][2]));
+  }
+  const auto global = Execute(
+      "SELECT count(b.id),sum(b.score) FROM items a JOIN items b ON b.score IS a.score "
+      "WHERE a.id<=3");
+  ASSERT_EQ(1U, global.size());
+  EXPECT_EQ(3, global[0][0].integer_value());
+  EXPECT_EQ(4.5, global[0][1].real_value());
+}
+
+TEST_F(ReadLoweringAutomaticJoin, KeepsAutomaticPrivateDemandAndUnenteredSourcesLazy) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT (SELECT b.name FROM items a JOIN items b ON b.score IS a.score "
+      "WHERE a.id<=3 ORDER BY b.id DESC LIMIT 1 OFFSET 1),"
+      "EXISTS(SELECT failing() FROM items a JOIN items b ON b.score IS a.score),"
+      "coalesce(9,(SELECT failing() FROM items a JOIN items b ON b.score IS a.score))",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("beta", TextBytes(rows[0][0]));
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(9, rows[0][2].integer_value());
+  EXPECT_EQ(0U, callback_count);
+  EXPECT_TRUE(Execute("SELECT failing() FROM items a JOIN items b ON b.score IS a.score "
+                      "LIMIT 0 OFFSET failing()",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_TRUE(Execute("SELECT failing() FROM items a JOIN items b ON b.score IS a.score "
+                      "WHERE a.id<0 AND failing()",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+}
 
 TEST(PlanLowering, UsesTypedReadRegionsForFlatNestedQueryCalls) {
   const BytecodeProgram program = LowerOrThrow(
@@ -2437,6 +2530,118 @@ TEST_F(ReadLoweringAggregateIntegration, SkipsAggregateRightArmOfEmptyIntersect)
                       custom.Binder(), custom.Vm())
                   .empty());
   EXPECT_EQ(0U, callback_count);
+}
+
+TEST(ReadLowering, BuildsCanonicalLookupAndRetainedProbeForEachAutomaticJoinedSource) {
+  const auto catalog = TestCatalog();
+  const PhysicalPlan physical = OptimizeOrThrow(
+      "SELECT a.id,b.id,c.id,b.score,c.score FROM items a JOIN items b ON b.name=a.name "
+      "JOIN items c ON c.name=b.name",
+      catalog, BindEnvironment::Core(),
+      OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  ASSERT_EQ(2, std::ranges::count_if(physical.nodes(), [](const PhysicalNode& node) {
+              return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+            }));
+  auto lowered = LowerPlan(physical);
+  ASSERT_TRUE(lowered.has_value());
+  const BytecodeProgram& program = *lowered;
+  ASSERT_EQ(2U, program.relations().size());
+  ASSERT_EQ(5U, program.cursors().size());
+  const auto kinds = InstructionKinds(program);
+  for (const InstructionKind kind :
+       {InstructionKind::kCheckRelationLookup, InstructionKind::kSealRelation,
+        InstructionKind::kSeekRelationPrefix, InstructionKind::kNextRelationPrefix}) {
+    EXPECT_EQ(2, std::ranges::count(kinds, kind));
+  }
+  std::vector<const SeekRelationPrefixInstruction*> probes;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* seek = std::get_if<SeekRelationPrefixInstruction>(&instruction);
+        seek != nullptr) {
+      probes.push_back(seek);
+    }
+    if (const auto* rowid = std::get_if<ReadRowIdInstruction>(&instruction); rowid != nullptr) {
+      EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursor(rowid->cursor).storage);
+    }
+  }
+
+  ASSERT_EQ(2U, probes.size());
+  EXPECT_LE(probes[0]->first_key.value() + probes[0]->key_count, probes[1]->first_key.value());
+  for (const SeekRelationPrefixInstruction* probe : probes) {
+    EXPECT_EQ(1U, probe->key_count);
+    const ReadCursorDescriptor& view = program.cursor(probe->cursor);
+    EXPECT_EQ(CursorStorageKind::kEphemeralIndex, view.storage);
+    EXPECT_EQ(RootPageNumber(0), view.root_page);
+    ASSERT_TRUE(view.relation.has_value());
+    EXPECT_EQ(probe->cursor, program.relation_borrower(*view.relation));
+    const OrderingRecordDescriptor& owner = program.relation(*view.relation);
+    EXPECT_EQ(RelationPurpose::kLookup, owner.relation_purpose);
+    EXPECT_EQ(3U, owner.field_count);
+    EXPECT_EQ(owner.field_count, owner.key_field_count);
+    EXPECT_EQ(owner.field_count, owner.key_columns.size());
+    EXPECT_TRUE(view.index_columns.empty());
+    const auto next =
+        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+          const auto* operation = std::get_if<NextRelationPrefixInstruction>(&instruction);
+          return operation != nullptr && operation->cursor == probe->cursor;
+        });
+    ASSERT_NE(program.instructions().end(), next);
+    const auto& advance = std::get<NextRelationPrefixInstruction>(*next);
+    EXPECT_EQ(probe->first_key, advance.first_key);
+    EXPECT_EQ(probe->key_count, advance.key_count);
+  }
+}
+
+TEST(ReadLowering, PreservesLiveOuterAutomaticRecordsWithOneSharedCachePage) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, ReadCompatibilityFixturePath().string(),
+                                     PagerOptions{.cache_capacity_pages = 1}));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 142}));
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                              .sorter_memory_threshold = ByteCount{1024}}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT a.id,b.name,c.name,b.score,c.score,b.name FROM items a "
+      "JOIN items b ON b.score IS a.score JOIN items c ON c.score IS b.score "
+      "WHERE a.id<=3 ORDER BY a.id",
+      catalog, BindEnvironment::Core(),
+      OptimizerOptions{.allow_file_backed_automatic_indexes = factory.file_spill_enabled()});
+  ASSERT_EQ(2U, program.relations().size());
+  const auto rows =
+      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &factory);
+  ASSERT_EQ(3U, rows.size());
+  const std::array<std::string_view, 3> names{"alpha", "beta", "gamma"};
+  for (std::size_t row = 0; row < rows.size(); ++row) {
+    EXPECT_EQ(static_cast<std::int64_t>(row + 1U), rows[row][0].integer_value());
+    for (const std::size_t field : {1U, 2U, 5U}) {
+      EXPECT_EQ(names[row], TextBytes(rows[row][field]));
+    }
+    for (const std::size_t field : {3U, 4U}) {
+      EXPECT_EQ(row == 2U ? SqlValueType::kNull : SqlValueType::kReal, rows[row][field].type());
+    }
+  }
+}
+
+TEST(ReadLowering, CompilesSixtyFourDeclaredSourcesWithBoundedAutomaticAdmission) {
+  std::string sql = "SELECT t0.id,t63.name FROM items t0";
+  for (std::size_t source = 1; source < 64U; ++source) {
+    sql += " JOIN items t" + std::to_string(source) + " ON t" + std::to_string(source) + ".name=t" +
+           std::to_string(source - 1U) + ".name";
+  }
+  sql += " LIMIT 1";
+  const PhysicalPlan physical =
+      OptimizeOrThrow(sql, TestCatalog(), BindEnvironment::Core(),
+                      OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  const auto automatic = static_cast<std::size_t>(
+      std::ranges::count_if(physical.nodes(), [](const PhysicalNode& node) {
+        return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+      }));
+  ASSERT_GT(automatic, 0U);
+  const auto lowered = LowerPlan(physical);
+  ASSERT_TRUE(lowered.has_value());
+  EXPECT_EQ(automatic, lowered->relations().size());
+  EXPECT_EQ(64U + automatic, lowered->cursors().size());
 }
 
 TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {

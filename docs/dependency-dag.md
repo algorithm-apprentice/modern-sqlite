@@ -138,7 +138,9 @@ ADR-0086 extends the same producer with noncovering equality access and
 table-backed outer replay. ADR-0087 integrates parameterized ranges through
 the same producer and canonical traversal emission. ADR-0088 defines the
 bounded canonical record-prefix comparison prerequisite for shared
-automatic-index integration. Persistent constraints,
+automatic-index integration. ADR-0089 defines that integration through
+configured-backend admission, canonical lookup relations, and borrowed
+source cursors. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

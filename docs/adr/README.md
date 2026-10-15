@@ -92,3 +92,4 @@ their corresponding implementation begins.
 86. [ADR-0086: Parameterized Joined Noncovering Index Access](0086-parameterized-joined-noncovering-index-access.md)
 87. [ADR-0087: Parameterized Joined Index Range Access](0087-parameterized-joined-index-range-access.md)
 88. [ADR-0088: Bounded Index Record-Prefix Comparison](0088-bounded-index-record-prefix-comparison.md)
+89. [ADR-0089: Automatic Covering Join Indexes](0089-automatic-covering-join-indexes.md)

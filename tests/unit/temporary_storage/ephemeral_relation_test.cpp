@@ -90,6 +90,14 @@ class RelationEnvironment final {
   };
 }
 
+[[nodiscard]] EphemeralRelationDescriptor LookupDescriptor() {
+  EphemeralRelationDescriptor descriptor = Descriptor();
+  descriptor.key_field_count = descriptor.field_count;
+  descriptor.key_columns.emplace_back(BinaryCollation());
+  descriptor.purpose = EphemeralRelationPurpose::kLookup;
+  return descriptor;
+}
+
 [[nodiscard]] ByteBuffer Encode(std::span<const SqlValue> values) {
   return TakeValue(EncodeRecord(values));
 }
@@ -296,6 +304,120 @@ TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {
     environment.ResetStorage();
     EXPECT_FALSE(environment.vfs().pathless_file_present());
   }
+}
+
+TEST(EphemeralRelation, PreservesPositionedRowsWhileAnotherSharedRootIsBuilt) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{1}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EphemeralRelation second = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  ASSERT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(IntegerRow(1, 10), EphemeralInsertMode::kKeepExisting)));
+  RequireStatus(first.Rewind());
+  const RecordView current = TakeValue(first.current_record());
+  ASSERT_EQ(10, Field(current, 1).integer_value());
+  ASSERT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(IntegerRow(2, 20), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(10, Field(current, 1).integer_value());
+  EXPECT_EQ(10, Field(TakeValue(first.current_record()), 1).integer_value());
+  EXPECT_FALSE(TakeValue(first.Next()));
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+}
+
+TEST(EphemeralRelation, ReprobesTheFirstEquivalentPrefixInBothBackends) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
+    RelationEnvironment environment{mode, ByteCount{4096}};
+    EphemeralRelation relation =
+        TakeValue(environment.storage().CreateEphemeralRelation(LookupDescriptor()));
+    const std::array<SqlValue, 1> first_key{SqlValue::Integer(1)};
+    EXPECT_FALSE(relation.SeekPrefix(first_key).has_value());
+    RequireStatus(relation.ClearPosition());
+    EXPECT_EQ(EphemeralRelationState::kWriting, relation.state());
+    for (const auto& [key, payload] :
+         {std::pair{1, 20}, std::pair{2, 30}, std::pair{1, 10}, std::pair{1, 15}}) {
+      EXPECT_EQ(
+          EphemeralInsertResult::kInserted,
+          TakeValue(relation.Insert(IntegerRow(key, payload), EphemeralInsertMode::kKeepExisting)));
+    }
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, relation.file_backed());
+    EXPECT_FALSE(relation.Rewind().has_value());
+    RequireStatus(relation.SealForLookup());
+    EXPECT_EQ(EphemeralRelationState::kLookupReady, relation.state());
+    EXPECT_FALSE(relation.current_record().has_value());
+    EXPECT_FALSE(relation.Contains(IntegerKey(1).view()).has_value());
+    EXPECT_FALSE(
+        relation.Insert(IntegerRow(3, 40), EphemeralInsertMode::kKeepExisting).has_value());
+    ASSERT_TRUE(TakeValue(relation.SeekPrefix(first_key)));
+    EXPECT_EQ(EphemeralRelationState::kLookupPositioned, relation.state());
+    EXPECT_EQ(10, Field(TakeValue(relation.current_record()), 1).integer_value());
+    ASSERT_TRUE(TakeValue(relation.NextPrefix(first_key)));
+    EXPECT_EQ(15, Field(TakeValue(relation.current_record()), 1).integer_value());
+    ASSERT_TRUE(TakeValue(relation.NextPrefix(first_key)));
+    EXPECT_EQ(20, Field(TakeValue(relation.current_record()), 1).integer_value());
+    EXPECT_FALSE(TakeValue(relation.NextPrefix(first_key)));
+    EXPECT_EQ(EphemeralRelationState::kLookupReady, relation.state());
+    EXPECT_FALSE(relation.current_record().has_value());
+    const std::array<SqlValue, 1> missing{SqlValue::Integer(0)};
+    EXPECT_FALSE(TakeValue(relation.SeekPrefix(missing)));
+    const std::array<SqlValue, 2> complete{SqlValue::Integer(1), SqlValue::Integer(20)};
+    ASSERT_TRUE(TakeValue(relation.SeekPrefix(complete)));
+    EXPECT_EQ(20, Field(TakeValue(relation.current_record()), 1).integer_value());
+    EXPECT_FALSE(TakeValue(relation.NextPrefix(complete)));
+    ASSERT_TRUE(TakeValue(relation.SeekPrefix(first_key)));
+    RequireStatus(relation.ClearPosition());
+    EXPECT_EQ(EphemeralRelationState::kLookupReady, relation.state());
+    RequireStatus(relation.Reset());
+    EXPECT_EQ(EphemeralRelationState::kWriting, relation.state());
+    EXPECT_EQ(0U, relation.record_count());
+    RequireStatus(relation.SealForLookup());
+    EXPECT_FALSE(TakeValue(relation.SeekPrefix(first_key)));
+  }
+}
+
+TEST(EphemeralRelation, BuildsLookupRecordsDirectlyInTheSharedFileArena) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{4096}};
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(LookupDescriptor()));
+  EXPECT_FALSE(relation.file_backed());
+  EXPECT_EQ(0U, environment.storage().live_file_count());
+  for (std::int64_t key = 32; key != 0; --key) {
+    ASSERT_EQ(
+        EphemeralInsertResult::kInserted,
+        TakeValue(relation.Insert(IntegerRow(key, key * 10), EphemeralInsertMode::kKeepExisting)));
+    EXPECT_TRUE(relation.file_backed());
+    EXPECT_EQ(ByteCount{0}, relation.memory_usage());
+  }
+  EXPECT_EQ(ByteCount{0}, environment.storage().peak_retained_bytes());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+  RequireStatus(relation.SealForLookup());
+  const std::array<SqlValue, 1> key{SqlValue::Integer(17)};
+  ASSERT_TRUE(TakeValue(relation.SeekPrefix(key)));
+  EXPECT_EQ(170, Field(TakeValue(relation.current_record()), 1).integer_value());
+}
+
+TEST(EphemeralRelation, KeepsEmptyLookupLazyAndRejectsInvalidPrefixLifecycles) {
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{1}};
+  EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(LookupDescriptor()));
+  const std::array<SqlValue, 1> key{SqlValue::Integer(1)};
+  EXPECT_FALSE(relation.NextPrefix(key).has_value());
+  RequireStatus(relation.SealForLookup());
+  EXPECT_FALSE(TakeValue(relation.SeekPrefix(key)));
+  EXPECT_FALSE(relation.SeekPrefix({}).has_value());
+  const std::array<SqlValue, 3> too_wide{SqlValue::Integer(1), SqlValue::Integer(2),
+                                         SqlValue::Integer(3)};
+  EXPECT_FALSE(relation.SeekPrefix(too_wide).has_value());
+  EXPECT_EQ(EphemeralRelationState::kLookupReady, relation.state());
+  EXPECT_FALSE(relation.SealForLookup().has_value());
+  EXPECT_FALSE(relation.Rewind().has_value());
+  EXPECT_EQ(0U, environment.storage().live_file_count());
+  relation.Close();
+  EXPECT_FALSE(relation.ClearPosition().has_value());
+  EXPECT_FALSE(relation.SeekPrefix(key).has_value());
+  EphemeralRelation member = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_FALSE(member.SealForLookup().has_value());
+  RequireStatus(member.ClearPosition());
+  EXPECT_EQ(EphemeralRelationState::kWriting, member.state());
 }
 
 TEST(EphemeralRelation, HonorsMultiColumnDirectionNullAndRtrimMetadata) {

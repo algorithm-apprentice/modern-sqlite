@@ -62,16 +62,24 @@ void RequireStatus(modern_sqlite::Status status) {
   }
 }
 
-[[nodiscard]] modern_sqlite::EphemeralRelationDescriptor Descriptor() {
+[[nodiscard]] modern_sqlite::EphemeralRelationDescriptor Descriptor(
+    modern_sqlite::EphemeralRelationPurpose purpose =
+        modern_sqlite::EphemeralRelationPurpose::kMembership) {
   using namespace modern_sqlite;
-  return EphemeralRelationDescriptor{
+  EphemeralRelationDescriptor descriptor{
       .field_count = 2,
       .key_field_count = 1,
       .key_columns =
           {
               IndexColumnOrder{BinaryCollation()},
           },
+      .purpose = purpose,
   };
+  if (purpose == EphemeralRelationPurpose::kLookup) {
+    descriptor.key_field_count = descriptor.field_count;
+    descriptor.key_columns.push_back(IndexColumnOrder{BinaryCollation()});
+  }
+  return descriptor;
 }
 
 [[nodiscard]] modern_sqlite::ByteBuffer Key(std::int64_t key) {
@@ -111,6 +119,10 @@ enum class FileOperation : std::uint8_t {
   kRewind,
   kNext,
   kReset,
+  kCreateLookup,
+  kSealLookup,
+  kSeekLookupPrefix,
+  kNextLookupPrefix,
 };
 
 [[nodiscard]] Outcome RunMemoryCreate(std::optional<std::size_t> failure) {
@@ -197,9 +209,14 @@ enum class FileOperation : std::uint8_t {
                                                 }));
   std::optional<StatementTemporaryStorage> storage;
   storage.emplace(TakeValue(factory.CreateStatementStorage()));
-  const EphemeralRelationDescriptor descriptor = Descriptor();
+  const bool lookup = operation == FileOperation::kCreateLookup ||
+                      operation == FileOperation::kSealLookup ||
+                      operation == FileOperation::kSeekLookupPrefix ||
+                      operation == FileOperation::kNextLookupPrefix;
+  const EphemeralRelationDescriptor descriptor = Descriptor(
+      lookup ? EphemeralRelationPurpose::kLookup : EphemeralRelationPurpose::kMembership);
 
-  if (operation == FileOperation::kCreate) {
+  if (operation == FileOperation::kCreate || operation == FileOperation::kCreateLookup) {
     allocation_index.store(0, std::memory_order_relaxed);
     if (failure.has_value()) {
       failing_allocation = *failure;
@@ -228,7 +245,9 @@ enum class FileOperation : std::uint8_t {
     if (!first.has_value() || *first != EphemeralInsertResult::kInserted) {
       return {};
     }
-    auto second = relation.Insert(Row(RowSpec{.key = 2}), EphemeralInsertMode::kKeepExisting);
+    auto second =
+        relation.Insert(Row(RowSpec{.key = lookup ? 1 : 2, .payload_size = lookup ? 901U : 900U}),
+                        EphemeralInsertMode::kKeepExisting);
     if (!second.has_value() || *second != EphemeralInsertResult::kInserted) {
       return {};
     }
@@ -243,6 +262,14 @@ enum class FileOperation : std::uint8_t {
       .payload_size = operation == FileOperation::kInsert ? 1100U : 900U,
   });
   const ByteBuffer key = Key(1);
+  const std::array<SqlValue, 1> prefix{SqlValue::Integer(1)};
+  if (operation == FileOperation::kSeekLookupPrefix ||
+      operation == FileOperation::kNextLookupPrefix) {
+    RequireStatus(relation.SealForLookup());
+  }
+  if (operation == FileOperation::kNextLookupPrefix && !TakeValue(relation.SeekPrefix(prefix))) {
+    return {};
+  }
 
   allocation_index.store(0, std::memory_order_relaxed);
   if (failure.has_value()) {
@@ -253,6 +280,7 @@ enum class FileOperation : std::uint8_t {
   ErrorCode error = ErrorCode::kGeneric;
   switch (operation) {
     case FileOperation::kCreate:
+    case FileOperation::kCreateLookup:
       std::terminate();
     case FileOperation::kInsert: {
       auto result = relation.Insert(std::move(row), EphemeralInsertMode::kKeepExisting);
@@ -294,6 +322,20 @@ enum class FileOperation : std::uint8_t {
       const Status result = relation.Reset();
       succeeded = result.has_value() && relation.state() == EphemeralRelationState::kWriting &&
                   relation.record_count() == 0U;
+      error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
+      break;
+    }
+    case FileOperation::kSealLookup: {
+      const Status result = relation.SealForLookup();
+      succeeded = result.has_value() && relation.state() == EphemeralRelationState::kLookupReady;
+      error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
+      break;
+    }
+    case FileOperation::kSeekLookupPrefix:
+    case FileOperation::kNextLookupPrefix: {
+      auto result = operation == FileOperation::kSeekLookupPrefix ? relation.SeekPrefix(prefix)
+                                                                  : relation.NextPrefix(prefix);
+      succeeded = result.has_value() && *result;
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
@@ -366,9 +408,10 @@ enum class FileOperation : std::uint8_t {
 }
 
 template <typename Runner>
-[[nodiscard]] bool ExhaustAllocations(Runner&& runner) {
+[[nodiscard]] bool ExhaustAllocations(Runner&& runner, bool require_allocations = true) {
   const Outcome baseline = runner(std::nullopt);
-  if (!baseline.succeeded || !baseline.cleaned || baseline.allocations == 0U) {
+  if (!baseline.succeeded || !baseline.cleaned ||
+      (require_allocations && baseline.allocations == 0U)) {
     return false;
   }
   for (std::size_t failure = 0; failure < baseline.allocations; ++failure) {
@@ -422,6 +465,22 @@ int main() try {
   }
   if (!ExhaustAllocations(RunFileReuse)) {
     return 30;
+  }
+  const std::array lookup_operations{
+      FileOperation::kCreateLookup,
+      FileOperation::kSealLookup,
+      FileOperation::kSeekLookupPrefix,
+      FileOperation::kNextLookupPrefix,
+  };
+  for (std::size_t index = 0; index < lookup_operations.size(); ++index) {
+    const FileOperation operation = lookup_operations[index];
+    if (!ExhaustAllocations(
+            [operation](std::optional<std::size_t> failure) {
+              return RunFileOperation(operation, failure);
+            },
+            operation != FileOperation::kSealLookup)) {
+      return static_cast<int>(40U + index);
+    }
   }
   return 0;
 } catch (...) {

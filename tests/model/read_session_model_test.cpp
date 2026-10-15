@@ -941,6 +941,60 @@ void RunLeftJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& 
   RequireStatus(statement.Finalize());
 }
 
+void RunAutomaticJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+  const auto left_count = static_cast<std::int64_t>(words[0] % 9U);
+  const auto right_count = static_cast<std::int64_t>(words[1] % 9U);
+  const bool match_null = words[2] % 2U != 0U;
+  const bool only_missing = words[3] % 2U != 0U;
+  const std::string sql =
+      "SELECT a.id,b.id,b.value,b.label,c.id,c.label FROM model_rows a "
+      "LEFT JOIN model_rows b ON b.nullable" +
+      std::string{match_null ? " IS " : "="} +
+      "a.nullable AND b.id<=?2 LEFT JOIN model_rows c ON c.label=b.label COLLATE NOCASE "
+      "WHERE a.id<=?1" +
+      std::string{only_missing ? " AND b.id IS NULL" : ""} + " ORDER BY a.id,b.id,c.id";
+  ReadStatement statement = Prepare(session, sql);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(left_count)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(right_count)));
+  const auto emit = [&](const ModelRow& left, const ModelRow* right) {
+    ExpectRowStep(statement);
+    ASSERT_EQ(6U, statement.row().size());
+    ExpectInteger(statement.row()[0], left.id);
+    if (right == nullptr) {
+      for (std::size_t field = 1; field < statement.row().size(); ++field) {
+        ExpectNullable(statement.row()[field], std::nullopt);
+      }
+    } else {
+      ExpectInteger(statement.row()[1], right->id);
+      ExpectInteger(statement.row()[2], right->value);
+      ExpectText(statement.row()[3], right->label);
+      ExpectInteger(statement.row()[4], right->id);
+      ExpectText(statement.row()[5], right->label);
+    }
+  };
+  for (const ModelRow& left : kRows) {
+    if (left.id > left_count) {
+      continue;
+    }
+    bool matched = false;
+    for (const ModelRow& right : kRows) {
+      const bool key_matches =
+          left.nullable == right.nullable && (match_null || left.nullable.has_value());
+      if (right.id <= right_count && key_matches) {
+        matched = true;
+        if (!only_missing) {
+          emit(left, &right);
+        }
+      }
+    }
+    if (!matched) {
+      emit(left, nullptr);
+    }
+  }
+  ExpectDoneStep(statement);
+  RequireStatus(statement.Finalize());
+}
+
 void RunMergedJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
   const std::size_t kind = static_cast<std::size_t>(words[0] % 3U);
   const bool natural = kind != 0U;
@@ -1133,6 +1187,16 @@ TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
       default:
         FAIL() << "unreachable model template";
     }
+  }
+
+  for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
+    const std::array words{random.Next(), random.Next(), random.Next(), random.Next()};
+    const std::string bindings = "left_count=" + std::to_string(words[0] % 9U) +
+                                 ",right_count=" + std::to_string(words[1] % 9U) +
+                                 ",match_null=" + std::to_string(words[2] % 2U) +
+                                 ",only_missing=" + std::to_string(words[3] % 2U);
+    SCOPED_TRACE(Trace(case_index, "automatic-null-prefix", words, bindings));
+    RunAutomaticJoinModel(session, words);
   }
 
   const std::array<std::uint64_t, 4> empty_aggregate_words{

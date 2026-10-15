@@ -2361,6 +2361,23 @@ TEST(ReadSession, BypassesBothNoncoveringRootsForZeroLimitAndRecoversEitherReadF
   }
 }
 
+TEST(ReadSession, RetainsJoinedScanWhenMemoryTemporaryBudgetIsOneByte) {
+  const ReadSessionOptions options{
+      .temporary_storage =
+          TemporaryStorageOptions{
+              .mode = TemporaryStoreMode::kMemory,
+              .sorter_memory_threshold = ByteCount{1},
+          },
+  };
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string(), options));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT count(b.id) FROM items a JOIN items b "
+                                             "ON b.payload=a.payload WHERE a.id<=32");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(32, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
 TEST(ReadSession, ExecutesSixtyFourJoinedCoveringPrefixesInOneSourcePipeline) {
   ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
   std::string sql = "SELECT t0.id,t63.id FROM items t0";
@@ -2483,6 +2500,23 @@ TEST(ReadSession, RecordsUnindexedJoinedEqualityScalingBaseline) {
     RecordProperty("vm_instructions_" + std::to_string(outer_rows),
                    std::to_string(work.Value(instrumentation::Counter::kVmInstructions)));
   }
+}
+
+TEST(ReadSession, BoundsAutomaticJoinedEqualityWorkByOneMaterialization) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT count(b.id) FROM items a JOIN items b "
+                                             "ON b.payload=a.payload WHERE a.id<=32");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(32, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 100000U);
 }
 
 TEST(ReadSession, CapturesAggregateLifecycleAndSharedTemporaryPeaks) {

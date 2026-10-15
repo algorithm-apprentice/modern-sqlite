@@ -1955,9 +1955,10 @@ class StatementBinder final {
 
   void RegisterActiveSourceCollations() {
     if (!impl_->registered_collations.empty() ||
-        !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
-          return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
-        })) {
+        (impl_->table_sources.size() < 2U &&
+         !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
+           return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
+         }))) {
       return;
     }
     impl_->registered_collations.reserve(environment_.collations().size());

@@ -153,12 +153,18 @@ struct RecordSorterDescriptor {
   RecordCodecOptions record_options{};
 };
 
+enum class EphemeralRelationPurpose : std::uint8_t {
+  kMembership,
+  kLookup,
+};
+
 struct EphemeralRelationDescriptor {
   std::size_t field_count = 0;
   std::size_t key_field_count = 0;
   // Referenced collations must outlive every relation created from the descriptor.
   std::vector<IndexColumnOrder> key_columns{};
   RecordCodecOptions record_options{};
+  EphemeralRelationPurpose purpose = EphemeralRelationPurpose::kMembership;
 };
 
 enum class EphemeralInsertMode : std::uint8_t {
@@ -177,6 +183,8 @@ enum class EphemeralRelationState : std::uint8_t {
   kPositioned,
   kExhausted,
   kClosed,
+  kLookupReady,
+  kLookupPositioned,
 };
 
 [[nodiscard]] std::string_view EphemeralRelationStateName(EphemeralRelationState state) noexcept;
@@ -198,8 +206,12 @@ class EphemeralRelation final {
   [[nodiscard]] Result<EphemeralInsertResult> Insert(ByteBuffer record, EphemeralInsertMode mode);
   [[nodiscard]] Result<bool> Contains(ByteView key);
   [[nodiscard]] Result<bool> Erase(ByteView key);
+  [[nodiscard]] Status SealForLookup();
+  [[nodiscard]] Result<bool> SeekPrefix(std::span<const SqlValue> key);
+  [[nodiscard]] Result<bool> NextPrefix(std::span<const SqlValue> key);
+  [[nodiscard]] Status ClearPosition();
   [[nodiscard]] Status Rewind();
-  // The returned view remains valid until Next(), Reset(), Close(), move
+  // The view is invalidated by seek, advance, clear, reset, close, move
   // assignment, or destruction.
   [[nodiscard]] Result<RecordView> current_record() const;
   [[nodiscard]] Result<bool> Next();

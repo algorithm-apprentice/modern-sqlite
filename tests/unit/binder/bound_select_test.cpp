@@ -489,6 +489,23 @@ TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
   }
 }
 
+TEST(Binder, PublishesRegisteredCollationsForUnindexedJoinedScopes) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql :
+       {"SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name",
+        "SELECT (SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name LIMIT 1)"}) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    const std::span<const std::string> registered = bound.registered_collations();
+    ASSERT_EQ(3U, registered.size());
+    EXPECT_EQ("BINARY", registered[0]);
+    EXPECT_EQ("NOCASE", registered[1]);
+    EXPECT_EQ("RTRIM", registered[2]);
+  }
+  const BoundSelect single = BindOrThrow("SELECT Name FROM Items", catalog);
+  EXPECT_TRUE(single.registered_collations().empty());
+}
+
 TEST(Binder, KeepsNestedQueriesInReservedCoreRangesAndStatementGlobalArenas) {
   const BoundSelect bound = BindOrThrow(
       "SELECT (SELECT id FROM Items WHERE id=:one) AS x,(SELECT 7) AS y FROM Items AS parent "

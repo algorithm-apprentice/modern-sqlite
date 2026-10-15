@@ -264,7 +264,11 @@ struct ReadSession::State final {
     if (!logical.has_value()) {
       return std::unexpected(LogicalFailure(logical.error()));
     }
-    auto physical = OptimizeLogicalPlan(std::move(*logical));
+    auto physical = OptimizeLogicalPlan(
+        std::move(*logical),
+        OptimizerOptions{
+            .allow_file_backed_automatic_indexes = temporary_storage.file_spill_enabled(),
+        });
     if (!physical.has_value()) {
       return std::unexpected(OptimizerFailure(physical.error()));
     }

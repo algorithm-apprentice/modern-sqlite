@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -452,6 +453,53 @@ int main() try {
       if (!OptimizeLogicalPlan(LogicalCompoundFixture(fixture_catalog, sql)).has_value()) {
         return 1;
       }
+    }
+  }
+
+  constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
+  constexpr std::array<std::string_view, 4> kAutomaticSqls{
+      "SELECT a.id,b.Payload,c.Payload FROM Items a JOIN Items b ON b.Name=a.Name "
+      "JOIN Items c ON c.Name=b.Name",
+      "SELECT a.id,count(b.id),max(b.Payload) FROM Items a LEFT JOIN Items b "
+      "ON b.Name IS a.Name GROUP BY a.id ORDER BY 1 LIMIT ?1",
+      "SELECT DISTINCT b.Name,b.Payload FROM Items a JOIN Items b ON b.Name=a.Name",
+      "SELECT b.Payload FROM Items a JOIN Items b ON b.Name=a.Name "
+      "UNION SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3",
+  };
+  for (const std::string_view sql : kAutomaticSqls) {
+    LogicalPlan automatic_logical = LogicalCompoundFixture(catalog, sql);
+    allocation_index.store(0, std::memory_order_relaxed);
+    const OptimizeLogicalPlanResult automatic =
+        OptimizeLogicalPlan(std::move(automatic_logical), kAutomaticOptions);
+    if (!automatic.has_value() ||
+        !std::ranges::any_of(automatic->nodes(), [](const PhysicalNode& node) {
+          return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+        })) {
+      return 2;
+    }
+    const std::size_t automatic_allocation_count = allocation_index.load(std::memory_order_relaxed);
+    if (automatic_allocation_count == 0U || automatic_allocation_count > 128U) {
+      return 2;
+    }
+    for (std::size_t failure = 0; failure < automatic_allocation_count; ++failure) {
+      LogicalPlan logical = LogicalCompoundFixture(catalog, sql);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
+            OptimizeLogicalPlan(std::move(logical), kAutomaticOptions);
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return 2;
+      }
+    }
+    if (!OptimizeLogicalPlan(LogicalCompoundFixture(catalog, sql), kAutomaticOptions).has_value()) {
+      return 2;
     }
   }
 

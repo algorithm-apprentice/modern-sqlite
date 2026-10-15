@@ -113,10 +113,11 @@ class TemporaryDirectory final {
 };
 
 struct SessionFixture {
-  SessionFixture() {
+  explicit SessionFixture(WriteSessionOptions options = {}) {
     auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
     vfs = owned.get();
-    session.emplace(TakeValue(WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath)));
+    session.emplace(
+        TakeValue(WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath, options)));
   }
 
   [[nodiscard]] WriteSession& Get() {
@@ -129,6 +130,83 @@ struct SessionFixture {
   test::WritePagerFixedVfs* vfs = nullptr;
   std::optional<WriteSession> session;
 };
+
+TEST(WriteSession, UsesConfiguredAutomaticLookupAndReleasesItAcrossResetAndFinalize) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kFile, TemporaryStoreMode::kMemory}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{
+        WriteSessionOptions{
+            .temporary_storage =
+                TemporaryStorageOptions{
+                    .mode = mode,
+                    .sorter_memory_threshold =
+                        mode == TemporaryStoreMode::kFile ? ByteCount{1024} : ByteCount{1},
+                },
+        },
+    };
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE p(id INTEGER PRIMARY KEY,k TEXT)");
+    ExecuteDone(session,
+                "CREATE TABLE r(id INTEGER PRIMARY KEY,k TEXT,payload TEXT,v REAL DEFAULT 2)");
+    ExecuteDone(session, "INSERT INTO p VALUES(1,'A')");
+    ExecuteDone(session, "INSERT INTO p VALUES(2,'missing')");
+    ExecuteDone(session, "INSERT INTO p VALUES(3,NULL)");
+    ExecuteDone(session, "INSERT INTO r(id,k,payload) VALUES(10,'a','first')");
+    ExecuteDone(session, "INSERT INTO r(id,k,payload) VALUES(11,'A','second')");
+    ExecuteDone(session, "INSERT INTO r(id,k,payload) VALUES(12,NULL,'null-key')");
+    ASSERT_FALSE(fixture.vfs->pathless_file_present());
+    WriteStatement statement = PrepareOne(session,
+                                          "SELECT p.id,r.id,r.payload,r.v FROM p LEFT JOIN r "
+                                          "ON r.k=p.k COLLATE NOCASE WHERE p.id<=?1");
+    RequireStatus(statement.Bind(1, SqlValue::Integer(3)));
+    ASSERT_EQ(WriteStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, statement.row()[0].integer_value());
+    EXPECT_EQ(10, statement.row()[1].integer_value());
+    EXPECT_EQ("first", Text(statement.row()[2]));
+    EXPECT_EQ(SqlValueType::kReal, statement.row()[3].type());
+    EXPECT_EQ(2.0, statement.row()[3].real_value());
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, fixture.vfs->pathless_file_present());
+    const SqlValue retained = statement.row()[2].Clone();
+    ASSERT_EQ(WriteStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(11, statement.row()[1].integer_value());
+    EXPECT_EQ("second", Text(statement.row()[2]));
+    for (const std::int64_t id : {2, 3}) {
+      ASSERT_EQ(WriteStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(id, statement.row()[0].integer_value());
+      for (std::size_t field = 1; field < statement.row().size(); ++field) {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[field].type());
+      }
+    }
+    EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    EXPECT_EQ("first", Text(retained));
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+    ASSERT_EQ(WriteStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(10, statement.row()[1].integer_value());
+    RequireStatus(statement.Reset());
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+    EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    RequireStatus(statement.Finalize());
+
+    const auto unmatched = QueryRows(session,
+                                     "SELECT p.id FROM p LEFT JOIN r ON r.k=p.k COLLATE NOCASE "
+                                     "WHERE r.id IS NULL OR r.id<0");
+    ASSERT_EQ(2U, unmatched.size());
+    EXPECT_EQ(2, unmatched[0][0].integer_value());
+    EXPECT_EQ(3, unmatched[1][0].integer_value());
+    const auto nulls = QueryRows(
+        session, "SELECT count(r.id),sum(r.v) FROM p LEFT JOIN r ON r.k IS p.k COLLATE NOCASE");
+    ASSERT_EQ(1U, nulls.size());
+    EXPECT_EQ(3, nulls[0][0].integer_value());
+    EXPECT_EQ(SqlValueType::kReal, nulls[0][1].type());
+    EXPECT_EQ(6.0, nulls[0][1].real_value());
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
 
 TEST(WriteSession, JoinsEmptyAndNewlyWrittenSourcesWithoutInventingRows) {
   SessionFixture fixture;
