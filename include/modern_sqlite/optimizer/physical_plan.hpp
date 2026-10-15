@@ -335,6 +335,14 @@ struct OptimizerError {
 
 [[nodiscard]] std::string_view OptimizerErrorCodeName(OptimizerErrorCode code) noexcept;
 
+struct PhysicalQueryPlan {
+  BoundQueryId query{0};
+  std::vector<PhysicalNode> nodes;
+  std::vector<AccessPathCandidate> candidates;
+  std::size_t selected_candidate = 0;
+  PhysicalNodeId root{0};
+};
+
 class PhysicalPlan final {
  public:
   PhysicalPlan(const PhysicalPlan&) = delete;
@@ -351,6 +359,7 @@ class PhysicalPlan final {
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept;
   [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept;
   [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept;
+  [[nodiscard]] const PhysicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
 
  private:
   friend class optimizer_detail::PhysicalPlanBuilder;
@@ -360,6 +369,43 @@ class PhysicalPlan final {
   explicit PhysicalPlan(std::unique_ptr<Impl> impl) noexcept;
 
   std::unique_ptr<Impl> impl_;
+};
+
+class PhysicalQueryView final {
+ public:
+  explicit PhysicalQueryView(const PhysicalPlan& owner,
+                             BoundQueryId query = BoundQueryId{0}) noexcept
+      : owner_(&owner), query_(query) {}
+
+  [[nodiscard]] bool valid() const noexcept {
+    return owner_->valid() && query_.value() < owner_->logical_plan().bound_select().query_count();
+  }
+  [[nodiscard]] LogicalQueryView logical_plan() const noexcept {
+    return LogicalQueryView{owner_->logical_plan(), query_};
+  }
+  [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept {
+    return owner_->query_plan(query_).nodes;
+  }
+  [[nodiscard]] const PhysicalNode& node(PhysicalNodeId id) const noexcept {
+    return nodes()[id.value()];
+  }
+  [[nodiscard]] PhysicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
+  [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept {
+    return owner_->query_plan(query_).candidates;
+  }
+  [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept {
+    return candidates().empty()
+               ? std::nullopt
+               : std::optional<std::size_t>{owner_->query_plan(query_).selected_candidate};
+  }
+  [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept {
+    const auto selected = selected_candidate_index();
+    return selected.has_value() ? &candidates()[*selected] : nullptr;
+  }
+
+ private:
+  const PhysicalPlan* owner_;
+  BoundQueryId query_;
 };
 
 using OptimizeLogicalPlanResult = std::expected<PhysicalPlan, OptimizerError>;

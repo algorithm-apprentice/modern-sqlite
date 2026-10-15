@@ -1846,7 +1846,7 @@ class GlobalAggregateAccessEmitter final {
 
   GlobalAggregateAccessServices& services_;
   ProgramBuilder* builder_;
-  const BoundSelect* bound_select_;
+  const BoundQueryView* bound_select_;
   std::span<const BoundExpression> expressions_;
   std::span<const BoundAggregateFunction> aggregate_functions_;
   std::span<const BoundAggregateInvocation> aggregate_invocations_;

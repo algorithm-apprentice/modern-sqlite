@@ -886,7 +886,10 @@ foreach(consumer_case IN ITEMS
     right_grouping
     natural_right_demand_one
     full_grouping
-    natural_full_demand_one)
+    natural_full_demand_one
+    scalar_order
+    scalar_grouped
+    exists_intersect)
   if(consumer_case STREQUAL "natural_right_demand_one"
      OR consumer_case STREQUAL "natural_full_demand_one")
     foreach(partition RANGE 0 3)

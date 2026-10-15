@@ -44,6 +44,7 @@ using TokenResult = std::expected<Token, ParseError>;
 using NameResult = std::expected<QualifiedName, ParseError>;
 using ExpressionResult = std::expected<ExpressionId, ParseError>;
 using StatementResult = std::expected<Statement, ParseError>;
+using SelectQueryResult = std::expected<SelectStatement, ParseError>;
 
 struct ParsedQueryCore {
   QueryCore core;
@@ -225,8 +226,8 @@ class Parser final {
     std::string owned_source{
         source_.bytes().substr(0, source_end),
     };
-    auto tree =
-        SyntaxTree::Create(std::move(owned_source), std::move(expressions_), std::move(*statement));
+    auto tree = SyntaxTree::Create(std::move(owned_source), std::move(expressions_),
+                                   std::move(*statement), std::move(select_queries_));
     if (!tree.has_value()) {
       return std::unexpected(ParseError{
           .code = ParseErrorCode::kInternalInvariant,
@@ -649,13 +650,13 @@ class Parser final {
 
   [[nodiscard]] ExpressionResult ParseParenthesized(std::size_t recursion_depth) {
     const Token left_parenthesis = Peek();
-    if (recursion_depth >= kMaximumParserRecursionDepth) {
+    if (recursion_depth >= RemainingParserDepth()) {
       return std::unexpected(ParserDepth(left_parenthesis));
     }
-    static_cast<void>(Consume());
-    if (Peek().kind == TokenKind::kSelect) {
-      return std::unexpected(Unsupported(Peek()));
+    if (Peek(1).kind == TokenKind::kSelect || Peek(1).kind == TokenKind::kValues) {
+      return ParseSubquery(SubqueryKind::kScalar, recursion_depth);
     }
+    static_cast<void>(Consume());
     ExpressionResult inner = ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U);
     if (!inner.has_value()) {
       return std::unexpected(inner.error());
@@ -711,7 +712,7 @@ class Parser final {
 
   [[nodiscard]] ExpressionResult ParsePrefix(ExpressionOptions options,
                                              std::size_t recursion_depth) {
-    if (recursion_depth > kMaximumParserRecursionDepth) {
+    if (recursion_depth > RemainingParserDepth()) {
       return std::unexpected(ParserDepth(Peek()));
     }
     const Token token = Peek();
@@ -722,8 +723,11 @@ class Parser final {
     if (token.kind == TokenKind::kCurrentTimeKeyword) {
       return ParseLiteral();
     }
-    if (token.kind == TokenKind::kCase || token.kind == TokenKind::kExists ||
-        token.kind == TokenKind::kSelect || token.kind == TokenKind::kValues ||
+    if (token.kind == TokenKind::kExists) {
+      return ParseSubquery(SubqueryKind::kExists, recursion_depth);
+    }
+    if (token.kind == TokenKind::kCase || token.kind == TokenKind::kSelect ||
+        token.kind == TokenKind::kValues ||
         ((token.kind == TokenKind::kCast || token.kind == TokenKind::kRaise) &&
          Peek(1).kind == TokenKind::kLeftParenthesis)) {
       return std::unexpected(Unsupported(token));
@@ -759,7 +763,7 @@ class Parser final {
     }
     if (token.kind == TokenKind::kPlus || token.kind == TokenKind::kMinus ||
         token.kind == TokenKind::kBitwiseNot || token.kind == TokenKind::kNot) {
-      if (recursion_depth >= kMaximumParserRecursionDepth) {
+      if (recursion_depth >= RemainingParserDepth()) {
         return std::unexpected(ParserDepth(token));
       }
       static_cast<void>(Consume());
@@ -969,7 +973,7 @@ class Parser final {
 
   [[nodiscard]] ExpressionResult ParseExpression(int minimum_binding, ExpressionOptions options,
                                                  std::size_t recursion_depth) {
-    if (recursion_depth > kMaximumParserRecursionDepth) {
+    if (recursion_depth > RemainingParserDepth()) {
       return std::unexpected(ParserDepth(Peek()));
     }
     ExpressionResult left = ParsePrefix(options, recursion_depth);
@@ -1025,7 +1029,7 @@ class Parser final {
       if (!operation.has_value() || operation->binding < minimum_binding) {
         break;
       }
-      if (recursion_depth >= kMaximumParserRecursionDepth) {
+      if (recursion_depth >= RemainingParserDepth()) {
         return std::unexpected(ParserDepth(token));
       }
 
@@ -1571,7 +1575,7 @@ class Parser final {
     return std::visit([](const auto& value) { return value.span; }, core);
   }
 
-  [[nodiscard]] StatementResult ParseSelect() {
+  [[nodiscard]] SelectQueryResult ParseSelectQuery() {
     if (options_.maximum_compound_terms == 0U) {
       return std::unexpected(ResourceLimit(Peek()));
     }
@@ -1610,13 +1614,54 @@ class Parser final {
       limit = core->limit;
     }
 
-    return Statement{SelectStatement{
+    return SelectStatement{
         .span = MakeSpan(begin, last_consumed_end_),
         .first = std::move(first_core),
         .compounds = std::move(compounds),
         .order_by = std::move(order_by),
         .limit = limit,
-    }};
+    };
+  }
+
+  [[nodiscard]] StatementResult ParseSelect() {
+    auto query = ParseSelectQuery();
+    if (!query.has_value()) {
+      return std::unexpected(query.error());
+    }
+    return Statement{std::move(*query)};
+  }
+
+  [[nodiscard]] ExpressionResult ParseSubquery(SubqueryKind kind, std::size_t recursion_depth) {
+    const Token start = Consume();
+    if (recursion_depth >= RemainingParserDepth()) {
+      return std::unexpected(ParserDepth(start));
+    }
+    if (kind == SubqueryKind::kExists) {
+      auto left = Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
+      if (!left.has_value()) {
+        return std::unexpected(left.error());
+      }
+    }
+    query_recursion_depth_ += recursion_depth;
+    auto query = ParseSelectQuery();
+    query_recursion_depth_ -= recursion_depth;
+    if (!query.has_value()) {
+      return std::unexpected(query.error());
+    }
+    auto right = Expect(TokenKind::kRightParenthesis, ParseExpectation::kRightParenthesis);
+    if (!right.has_value()) {
+      return std::unexpected(right.error());
+    }
+    const std::size_t depth =
+        SelectExpressionHeight(*query, [this](ExpressionId id) { return Depth(id); }) + 1U;
+    const SelectQueryId id{select_queries_.size()};
+    select_queries_.push_back(std::move(*query));
+    return AppendExpression(MakeSpan(start.span.begin(), right->span.end()),
+                            SubqueryExpression{.query = id, .kind = kind}, depth, start);
+  }
+
+  [[nodiscard]] std::size_t RemainingParserDepth() const noexcept {
+    return kMaximumParserRecursionDepth - query_recursion_depth_;
   }
 
   [[nodiscard]] StatementResult ParseInsert() {
@@ -2694,6 +2739,8 @@ class Parser final {
   ByteOffset last_consumed_end_;
   std::vector<Expression> expressions_;
   std::vector<std::size_t> expression_depths_;
+  std::vector<SelectStatement> select_queries_;
+  std::size_t query_recursion_depth_ = 0;
   ParseOptions options_;
 };
 

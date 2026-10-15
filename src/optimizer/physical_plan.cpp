@@ -73,7 +73,7 @@ struct ReadAccessCandidate {
 };
 
 [[nodiscard]] std::uint64_t DerivedTableRowSize(const CatalogTable& table) noexcept;
-[[nodiscard]] bool IsNullLiteral(const BoundSelect& bound_select, BoundExpressionId id) noexcept;
+[[nodiscard]] bool IsNullLiteral(const BoundQueryView& bound_select, BoundExpressionId id) noexcept;
 
 [[nodiscard]] OptimizerError OptimizerFailure(OptimizerErrorCode code, std::string_view detail) {
   return OptimizerError{.code = code, .detail = std::string{detail}};
@@ -292,7 +292,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] std::expected<std::vector<BoundSourceId>, OptimizerError> JoinPredicateSources(
-    const BoundSelect& bound_select, const BoundSelectCore& core,
+    const BoundQueryView& bound_select, const BoundSelectCore& core,
     std::span<const BoundExpressionId> predicates,
     std::optional<BoundSourceId> condition_owner = std::nullopt) {
   std::vector<BoundSourceId> sources;
@@ -326,7 +326,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] std::expected<std::optional<BoundSourceId>, OptimizerError> JoinConditionSource(
-    const LogicalPlan& plan, const LogicalJoinNode& join) {
+    const LogicalQueryView& plan, const LogicalJoinNode& join) {
   if (!join.on.has_value()) {
     return std::optional<BoundSourceId>{};
   }
@@ -334,7 +334,7 @@ template <typename Bound>
   if (right == nullptr) {
     return std::unexpected(InvariantFailure("join condition has no right source"));
   }
-  const BoundSelect& bound = plan.bound_select();
+  const BoundQueryView& bound = plan.bound_select();
   const auto& core = std::get<BoundSelectCore>(bound.query_cores()[join.core_index]);
   const std::array predicates{*join.on};
   auto sources = JoinPredicateSources(bound, core, predicates, right->source);
@@ -404,7 +404,7 @@ struct AdvancedPredicateParts {
   std::vector<BoundExpressionId> guards{};
 };
 
-[[nodiscard]] AdvancedPredicateParts SplitAdvancedPredicate(const BoundSelect& bound_select,
+[[nodiscard]] AdvancedPredicateParts SplitAdvancedPredicate(const BoundQueryView& bound_select,
                                                             BoundExpressionId predicate) {
   AdvancedPredicateParts parts;
   const auto visit = [&](BoundExpressionId conjunct) {
@@ -492,7 +492,7 @@ template <typename Bound>
   return key;
 }
 
-[[nodiscard]] SourceInfo ResolveTableSource(const BoundSelect& bound_select,
+[[nodiscard]] SourceInfo ResolveTableSource(const BoundQueryView& bound_select,
                                             const BoundTableSource& source) {
   if (source.kind == BoundSourceKind::kSchemaTable) {
     return SourceInfo{
@@ -521,7 +521,7 @@ template <typename Bound>
   };
 }
 
-[[nodiscard]] SourceInfo ResolveCoreSource(const BoundSelect& bound_select,
+[[nodiscard]] SourceInfo ResolveCoreSource(const BoundQueryView& bound_select,
                                            std::size_t core_index) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
   if (core.table_sources.empty()) {
@@ -538,11 +538,11 @@ template <typename Bound>
   return ResolveTableSource(bound_select, core.table_sources.front());
 }
 
-[[nodiscard]] SourceInfo ResolveSource(const LogicalPlan& logical_plan) {
+[[nodiscard]] SourceInfo ResolveSource(const LogicalQueryView& logical_plan) {
   return ResolveCoreSource(logical_plan.bound_select(), 0);
 }
 
-[[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalPlan& logical_plan) {
+[[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalQueryView& logical_plan) {
   return std::ranges::any_of(logical_plan.nodes(), [](const LogicalNode& node) {
     return std::holds_alternative<LogicalValuesNode>(node.payload) ||
            std::holds_alternative<LogicalDistinctNode>(node.payload) ||
@@ -554,36 +554,18 @@ template <typename Bound>
   });
 }
 
-[[nodiscard]] bool IsIntegerOne(const BoundSelect& bound_select, BoundExpressionId id,
-                                std::int64_t sign = 1) {
-  const BoundExpression& expression = bound_select.expression(id);
-  if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
-      literal != nullptr) {
-    if (literal->boolean_keyword) {
-      return false;
-    }
-    const std::optional<std::int64_t> value = literal->value.integer_value();
-    return value.has_value() && (sign == 1 ? *value == 1 : *value == -1);
-  }
-  const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-  if (unary == nullptr || (unary->operation != BoundUnaryOperation::kPositive &&
-                           unary->operation != BoundUnaryOperation::kNegative)) {
-    return false;
-  }
-  return IsIntegerOne(bound_select, unary->operand,
-                      unary->operation == BoundUnaryOperation::kNegative ? -sign : sign);
-}
-
-[[nodiscard]] bool IsUnionLimitOne(const BoundSelect& bound_select) {
+[[nodiscard]] bool IsUnionLimitOne(const BoundQueryView& bound_select) {
   const BoundLimit* limit = bound_select.limit();
-  return limit != nullptr && !limit->offset.has_value() && IsIntegerOne(bound_select, limit->limit);
+  return limit != nullptr && !limit->offset.has_value() &&
+         BoundExpressionIsIntegerOne(bound_select.expressions(), limit->limit);
 }
 
 [[nodiscard]] bool IsSetBarrier(CompoundOperator operation) noexcept {
   return operation == CompoundOperator::kExcept || operation == CompoundOperator::kIntersect;
 }
 
-[[nodiscard]] bool UsesUnionLimitOne(const BoundSelect& bound_select, std::size_t compound_index) {
+[[nodiscard]] bool UsesUnionLimitOne(const BoundQueryView& bound_select,
+                                     std::size_t compound_index) {
   const std::span<const CompoundOperator> operations = bound_select.compound_operators();
   if (!bound_select.order_by().empty() || !IsUnionLimitOne(bound_select) ||
       compound_index >= operations.size() ||
@@ -594,7 +576,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] std::optional<std::size_t> OrderedUnionLimitOneCoreStart(
-    const BoundSelect& bound_select, bool set_then_order) {
+    const BoundQueryView& bound_select, bool set_then_order) {
   if (set_then_order || bound_select.order_by().empty() || !IsUnionLimitOne(bound_select)) {
     return std::nullopt;
   }
@@ -616,7 +598,7 @@ template <typename Bound>
   return core_start;
 }
 
-[[nodiscard]] bool UsesOrderedUnionAllRuntimeLimit(const BoundSelect& bound_select,
+[[nodiscard]] bool UsesOrderedUnionAllRuntimeLimit(const BoundQueryView& bound_select,
                                                    bool set_then_order) {
   const std::span<const CompoundOperator> operations = bound_select.compound_operators();
   return !set_then_order && !bound_select.order_by().empty() && bound_select.limit() != nullptr &&
@@ -625,7 +607,8 @@ template <typename Bound>
          });
 }
 
-[[nodiscard]] const LogicalOrderNode* LogicalOrderOf(const LogicalPlan& logical_plan) noexcept {
+[[nodiscard]] const LogicalOrderNode* LogicalOrderOf(
+    const LogicalQueryView& logical_plan) noexcept {
   if (logical_plan.bound_select().order_by().empty()) {
     return nullptr;
   }
@@ -755,7 +738,7 @@ template <typename Bound>
   return analysis;
 }
 
-[[nodiscard]] ReadPredicateAnalysis AnalyzeReadPredicate(const BoundSelect& bound_select,
+[[nodiscard]] ReadPredicateAnalysis AnalyzeReadPredicate(const BoundQueryView& bound_select,
                                                          const SourceInfo& source,
                                                          std::optional<BoundExpressionId> where) {
   ReadPredicateAnalysis analysis;
@@ -864,14 +847,15 @@ template <typename Bound>
   return SaturatingMultiply(units, 4);
 }
 
-[[nodiscard]] bool IsRegisteredCollation(const BoundSelect& bound_select,
+[[nodiscard]] bool IsRegisteredCollation(const BoundQueryView& bound_select,
                                          std::string_view name) noexcept {
   return std::ranges::any_of(
       bound_select.registered_collations(),
       [name](const std::string& registered) { return CatalogNamesEqual(registered, name); });
 }
 
-[[nodiscard]] bool IsSupportedIndexShape(const BoundSelect& bound_select, const CatalogTable& table,
+[[nodiscard]] bool IsSupportedIndexShape(const BoundQueryView& bound_select,
+                                         const CatalogTable& table,
                                          const CatalogIndex& index) noexcept {
   if (table.without_rowid || index.partial_predicate.has_value() || index.key_term_count == 0U ||
       index.key_term_count > std::numeric_limits<std::uint32_t>::max() ||
@@ -895,7 +879,7 @@ template <typename Bound>
   return true;
 }
 
-[[nodiscard]] bool IsIndexedColumnReference(const BoundSelect& bound_select,
+[[nodiscard]] bool IsIndexedColumnReference(const BoundQueryView& bound_select,
                                             BoundSourceId source_id,
                                             std::size_t source_column_begin,
                                             std::size_t source_column_count, ColumnId column_id,
@@ -951,7 +935,7 @@ struct IndexConstraintMatch {
 };
 
 [[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
-    const BoundSelect& bound_select, BoundSourceId source_id, std::size_t source_column_begin,
+    const BoundQueryView& bound_select, BoundSourceId source_id, std::size_t source_column_begin,
     std::size_t source_column_count, const CatalogIndexTerm& term,
     const ReadPredicateTerm& predicate) {
   const auto* indexed_column = std::get_if<ColumnId>(&term.target);
@@ -1026,7 +1010,7 @@ struct IndexConstraintMatch {
   return std::nullopt;
 }
 
-void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId source_id,
+void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId source_id,
                               BoundExpressionId id, std::vector<bool>* columns, bool* rowid) {
   if (!IsValidExpressionId(bound_select, id)) {
     return;
@@ -1072,7 +1056,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
       expression.payload);
 }
 
-[[nodiscard]] bool IsCoveringIndex(const BoundSelect& bound_select, BoundSourceId source_id,
+[[nodiscard]] bool IsCoveringIndex(const BoundQueryView& bound_select, BoundSourceId source_id,
                                    const CatalogTable& table, const CatalogIndex& index,
                                    std::span<const ReadPredicateTerm> predicates,
                                    const std::vector<bool>& selected_terms,
@@ -1138,7 +1122,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
   return !required_rowid || covered_rowid;
 }
 
-[[nodiscard]] bool IsNullLiteral(const BoundSelect& bound_select, BoundExpressionId id) noexcept {
+[[nodiscard]] bool IsNullLiteral(const BoundQueryView& bound_select,
+                                 BoundExpressionId id) noexcept {
   id = TransparentPredicateId(bound_select, id);
   if (!IsValidExpressionId(bound_select, id)) {
     return false;
@@ -1160,7 +1145,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
   return table_rows;
 }
 
-[[nodiscard]] std::uint64_t EstimateIndexOutput(const BoundSelect& bound_select,
+[[nodiscard]] std::uint64_t EstimateIndexOutput(const BoundQueryView& bound_select,
                                                 const CatalogIndex& index,
                                                 const PhysicalIndexScanNode& node,
                                                 std::uint64_t index_rows) noexcept {
@@ -1213,9 +1198,8 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
   };
 }
 
-[[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(const BoundSelect& bound_select,
-                                                                    std::size_t core_index,
-                                                                    BoundSourceId source_id) {
+[[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(
+    const BoundQueryView& bound_select, std::size_t core_index, BoundSourceId source_id) {
   const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[core_index]);
   if (core == nullptr || core->table_sources.size() < 2U) {
     return std::nullopt;
@@ -1249,7 +1233,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
 }
 
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
-    const BoundSelect& bound_select, BoundSourceId source_id, TableId table_id,
+    const BoundQueryView& bound_select, BoundSourceId source_id, TableId table_id,
     std::size_t source_column_begin, std::size_t source_column_count, IndexId index_id,
     std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* aggregate_core = nullptr,
     bool allow_noncovering_full_scan = false) {
@@ -1387,7 +1371,7 @@ void MarkRequiredSourceValues(const BoundSelect& bound_select, BoundSourceId sou
   return candidate;
 }
 
-[[nodiscard]] AccessPathCandidate PublishIndexCandidate(const BoundSelect& bound_select,
+[[nodiscard]] AccessPathCandidate PublishIndexCandidate(const BoundQueryView& bound_select,
                                                         const SourceInfo& source,
                                                         const IndexCandidatePlan& plan) noexcept {
   const CatalogSnapshot& catalog = *bound_select.catalog();
@@ -1487,7 +1471,7 @@ struct AggregateCorePlan {
 };
 
 [[nodiscard]] std::optional<DirectSourceIdentity> ResolveDirectSourceIdentity(
-    const BoundSelect& bound_select, const SourceInfo& source, BoundExpressionId id) noexcept {
+    const BoundQueryView& bound_select, const SourceInfo& source, BoundExpressionId id) noexcept {
   id = TransparentRowIdOperandId(bound_select, id);
   if (!IsValidExpressionId(bound_select, id)) {
     return std::nullopt;
@@ -1508,11 +1492,11 @@ struct AggregateCorePlan {
   return DirectSourceIdentity{.rowid = false, .column = catalog_column};
 }
 
-[[nodiscard]] bool BoundExpressionsEquivalent(const BoundSelect& bound_select,
+[[nodiscard]] bool BoundExpressionsEquivalent(const BoundQueryView& bound_select,
                                               BoundExpressionId left_id,
                                               BoundExpressionId right_id);
 
-[[nodiscard]] bool BoundArgumentListsEquivalent(const BoundSelect& bound_select,
+[[nodiscard]] bool BoundArgumentListsEquivalent(const BoundQueryView& bound_select,
                                                 std::span<const BoundExpressionId> left,
                                                 std::span<const BoundExpressionId> right) {
   if (left.size() != right.size()) {
@@ -1548,7 +1532,7 @@ struct AggregateCorePlan {
 }
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
-[[nodiscard]] bool BoundExpressionsEquivalent(const BoundSelect& bound_select,
+[[nodiscard]] bool BoundExpressionsEquivalent(const BoundQueryView& bound_select,
                                               BoundExpressionId left_id,
                                               BoundExpressionId right_id) {
   const BoundExpression& left = bound_select.expression(left_id);
@@ -1628,6 +1612,10 @@ struct AggregateCorePlan {
     return likelihood->probability == other.probability &&
            BoundExpressionsEquivalent(bound_select, likelihood->operand, other.operand);
   }
+  if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
+      subquery != nullptr) {
+    return subquery->query == std::get<BoundSubqueryExpression>(right.payload).query;
+  }
   const auto& collate = std::get<BoundCollateExpression>(left.payload);
   const auto& other = std::get<BoundCollateExpression>(right.payload);
   return collate.collation == other.collation &&
@@ -1640,7 +1628,7 @@ struct AggregateCorePlan {
                                                                       : BoundNullPlacement::kFirst);
 }
 
-[[nodiscard]] bool OrderMatchesGrouping(const BoundSelect& bound_select,
+[[nodiscard]] bool OrderMatchesGrouping(const BoundQueryView& bound_select,
                                         const BoundAggregateProgram& aggregate) {
   if (bound_select.order_by().size() != aggregate.group_by.size()) {
     return false;
@@ -1665,7 +1653,7 @@ struct AggregateCorePlan {
   return true;
 }
 
-[[nodiscard]] bool GroupTermFixedByCandidate(const BoundSelect& bound_select,
+[[nodiscard]] bool GroupTermFixedByCandidate(const BoundQueryView& bound_select,
                                              const SourceInfo& source,
                                              const BoundGroupingTerm& group_term,
                                              const ReadAccessCandidate& candidate);
@@ -1683,7 +1671,7 @@ void ConfigureSortedGrouping(const BoundAggregateProgram& aggregate, AggregateCo
   }
 }
 
-void ConfigureAggregateOrder(const BoundSelect& bound_select,
+void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                              const BoundAggregateProgram& aggregate, AggregateCorePlan* plan) {
   if (bound_select.query_cores().size() != 1U || !bound_select.compound_operators().empty() ||
       bound_select.order_by().empty()) {
@@ -1767,7 +1755,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
   }
 }
 
-[[nodiscard]] bool CandidateHasExactOneRow(const BoundSelect& bound_select,
+[[nodiscard]] bool CandidateHasExactOneRow(const BoundQueryView& bound_select,
                                            const ReadAccessCandidate& candidate) noexcept {
   if (candidate.published.kind == PhysicalAccessKind::kRowIdLookup) {
     return true;
@@ -1786,7 +1774,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
          });
 }
 
-[[nodiscard]] bool GroupTermFixedByCandidate(const BoundSelect& bound_select,
+[[nodiscard]] bool GroupTermFixedByCandidate(const BoundQueryView& bound_select,
                                              const SourceInfo& source,
                                              const BoundGroupingTerm& group_term,
                                              const ReadAccessCandidate& candidate) {
@@ -1814,7 +1802,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::optional<AggregateGroupingChoice> AnalyzeGroupingCandidate(
-    const BoundSelect& bound_select, const SourceInfo& source,
+    const BoundQueryView& bound_select, const SourceInfo& source,
     const BoundAggregateProgram& aggregate, const ReadAccessCandidate& candidate) {
   std::vector<bool> fixed(aggregate.group_by.size(), false);
   bool all_fixed = true;
@@ -1922,7 +1910,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::optional<AggregateMinMaxChoice> AnalyzeMinMaxCandidate(
-    const BoundSelect& bound_select, const SourceInfo& source,
+    const BoundQueryView& bound_select, const SourceInfo& source,
     const BoundAggregateProgram& aggregate, const ReadAccessCandidate& candidate) {
   if (aggregate.having.has_value() || aggregate.invocations.size() != 1U) {
     return std::nullopt;
@@ -2002,7 +1990,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
   };
 }
 
-[[nodiscard]] AggregateCorePlan BuildAggregateCorePlan(const BoundSelect& bound_select,
+[[nodiscard]] AggregateCorePlan BuildAggregateCorePlan(const BoundQueryView& bound_select,
                                                        std::size_t core_index) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
   const BoundAggregateProgram& aggregate = AssumePresent(core.aggregate);
@@ -2198,7 +2186,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidateCandidates(
-    const BoundSelect& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
+    const BoundQueryView& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
   const auto matches = [&](std::size_t index, PhysicalAccessKind kind, AccessPathCost cost) {
     return index < candidates.size() && candidates[index].kind == kind &&
@@ -2295,7 +2283,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidatePredicates(
-    const BoundSelect& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
+    const BoundQueryView& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
     std::span<const BoundExpressionId> guard_predicates,
     std::span<const BoundExpressionId> filter_predicates) {
   const bool empty_access = std::holds_alternative<PhysicalEmptyNode>(leaf.payload);
@@ -2395,7 +2383,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
-    const LogicalPlan& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
+    const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
   if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value()) {
     return std::unexpected{InvariantFailure("advanced physical plan arena is invalid")};
@@ -2564,8 +2552,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
                 SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
             std::vector<BoundSourceId> placements;
             if (core_index.has_value()) {
-              const auto& core =
-                  std::get<BoundSelectCore>(logical_plan.bound_select().query_cores()[*core_index]);
+              const auto query_cores = logical_plan.bound_select().query_cores();
+              const auto& core = std::get<BoundSelectCore>(query_cores[*core_index]);
               auto ready =
                   JoinPredicateSources(logical_plan.bound_select(), core, expected.predicates);
               if (!ready.has_value()) {
@@ -2707,7 +2695,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidatePhysicalPlan(
-    const LogicalPlan& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
+    const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
   if (!logical_plan.valid()) {
     return std::unexpected{InvariantFailure("physical plan retained an invalid logical plan")};
@@ -2724,7 +2712,7 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
     return std::unexpected{InvariantFailure("physical access candidates are invalid")};
   }
 
-  const BoundSelect& bound_select = logical_plan.bound_select();
+  const BoundQueryView& bound_select = logical_plan.bound_select();
   const SourceInfo source = ResolveSource(logical_plan);
   const PhysicalNode& leaf = nodes.front();
   if (std::expected<void, OptimizerError> validated =
@@ -2925,7 +2913,8 @@ void ConfigureAggregateOrder(const BoundSelect& bound_select,
   return {};
 }
 
-[[nodiscard]] std::string_view SourceName(const PhysicalPlan& plan, BoundSourceKind source_kind,
+[[nodiscard]] std::string_view SourceName(const PhysicalQueryView& plan,
+                                          BoundSourceKind source_kind,
                                           std::optional<TableId> table) {
   if (source_kind == BoundSourceKind::kSchemaTable) {
     return "sqlite_schema";
@@ -2958,10 +2947,8 @@ struct PhysicalPlan::Impl {
   explicit Impl(LogicalPlan input) noexcept : logical_plan(std::move(input)) {}
 
   LogicalPlan logical_plan;
-  std::vector<PhysicalNode> nodes;
-  std::vector<AccessPathCandidate> candidates;
-  std::size_t selected_candidate = 0;
-  PhysicalNodeId root{0};
+  PhysicalQueryPlan root_query;
+  std::vector<PhysicalQueryPlan> nested_queries;
 };
 
 struct PhysicalMutationPlan::Impl {
@@ -2981,8 +2968,26 @@ class PhysicalPlanBuilder final {
       return std::unexpected{
           OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical plan is invalid")};
     }
+    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
+    const std::size_t count = impl->logical_plan.bound_select().query_count();
+    impl->nested_queries.resize(count - 1U);
+    for (std::size_t index = 0; index < count; ++index) {
+      const BoundQueryId id{static_cast<std::uint32_t>(index)};
+      PhysicalQueryPlan& query = index == 0U ? impl->root_query : impl->nested_queries[index - 1U];
+      query.query = id;
+      if (auto built = BuildQuery(LogicalQueryView{impl->logical_plan, id}, &query);
+          !built.has_value()) {
+        return std::unexpected(std::move(built.error()));
+      }
+    }
+    return PhysicalPlan{std::move(impl)};
+  }
+
+ private:
+  [[nodiscard]] static std::expected<void, OptimizerError> BuildQuery(
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl) {
     if (IsAdvancedLogicalPlan(logical_plan)) {
-      return BuildAdvanced(std::move(logical_plan));
+      return BuildAdvanced(logical_plan, impl);
     }
 
     const SourceInfo source = ResolveSource(logical_plan);
@@ -3081,7 +3086,6 @@ class PhysicalPlanBuilder final {
         static_cast<std::size_t>(!residuals.empty()) +
         static_cast<std::size_t>(logical_plan.bound_select().limit() != nullptr) +
         static_cast<std::size_t>(ordered);
-    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
     impl->nodes.reserve(node_count);
 
     if (predicates.empty) {
@@ -3159,7 +3163,7 @@ class PhysicalPlanBuilder final {
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
     if (ordered) {
-      const LogicalOrderNode* logical_order = LogicalOrderOf(impl->logical_plan);
+      const LogicalOrderNode* logical_order = LogicalOrderOf(logical_plan);
       if (logical_order == nullptr) {
         return std::unexpected{InvariantFailure("ordered logical plan has no order node")};
       }
@@ -3171,7 +3175,7 @@ class PhysicalPlanBuilder final {
                   .payload_expressions = logical_order->payload_expressions,
                   .output_fields = logical_order->output_fields,
                   .schedule = logical_order->schedule,
-                  .strategy = impl->logical_plan.bound_select().limit() == nullptr
+                  .strategy = logical_plan.bound_select().limit() == nullptr
                                   ? PhysicalSortStrategy::kExternal
                                   : PhysicalSortStrategy::kRuntimeLimit,
                   .input_order_satisfied = false,
@@ -3179,7 +3183,7 @@ class PhysicalPlanBuilder final {
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
-    if (const BoundLimit* limit = impl->logical_plan.bound_select().limit(); limit != nullptr) {
+    if (const BoundLimit* limit = logical_plan.bound_select().limit(); limit != nullptr) {
       impl->nodes.push_back(PhysicalNode{
           .payload =
               PhysicalLimitNode{
@@ -3195,7 +3199,7 @@ class PhysicalPlanBuilder final {
           .payload =
               PhysicalOutputNode{
                   .input = input,
-                  .logical_output = impl->logical_plan.root(),
+                  .logical_output = logical_plan.root(),
               },
       });
     } else {
@@ -3203,7 +3207,7 @@ class PhysicalPlanBuilder final {
           .payload =
               PhysicalProjectionNode{
                   .input = input,
-                  .logical_projection = impl->logical_plan.root(),
+                  .logical_projection = logical_plan.root(),
               },
       });
     }
@@ -3211,33 +3215,32 @@ class PhysicalPlanBuilder final {
 
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
     if (std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
-            impl->logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
+            logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork,
                                  1U + impl->candidates.size());
-    return PhysicalPlan{std::move(impl)};
+    return {};
   }
 
- private:
-  [[nodiscard]] static OptimizeLogicalPlanResult BuildAdvanced(LogicalPlan logical_plan) {
-    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
-    impl->nodes.reserve(impl->logical_plan.nodes().size());
+  [[nodiscard]] static std::expected<void, OptimizerError> BuildAdvanced(
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl) {
+    impl->nodes.reserve(logical_plan.nodes().size());
     std::vector<PhysicalNodeId> mapped;
-    mapped.reserve(impl->logical_plan.nodes().size());
+    mapped.reserve(logical_plan.nodes().size());
     std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
-        impl->logical_plan.bound_select().query_cores().size());
+        logical_plan.bound_select().query_cores().size());
     for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
       const auto* select =
-          std::get_if<BoundSelectCore>(&impl->logical_plan.bound_select().query_cores()[core]);
+          std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
       if (select != nullptr && select->aggregate.has_value()) {
-        aggregate_plans[core] = BuildAggregateCorePlan(impl->logical_plan.bound_select(), core);
+        aggregate_plans[core] = BuildAggregateCorePlan(logical_plan.bound_select(), core);
       }
     }
 
     const LogicalAdvancedOrderNode* advanced_order = nullptr;
-    for (const LogicalNode& node : impl->logical_plan.nodes()) {
+    for (const LogicalNode& node : logical_plan.nodes()) {
       if (const auto* order = std::get_if<LogicalAdvancedOrderNode>(&node.payload);
           order != nullptr) {
         advanced_order = order;
@@ -3245,22 +3248,22 @@ class PhysicalPlanBuilder final {
       }
     }
     const std::optional<std::size_t> ordered_union_limit_one_core =
-        advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(impl->logical_plan.bound_select(),
+        advanced_order != nullptr ? OrderedUnionLimitOneCoreStart(logical_plan.bound_select(),
                                                                   advanced_order->set_then_order)
                                   : std::nullopt;
     const bool ordered_union_all_runtime_limit =
         advanced_order != nullptr &&
-        UsesOrderedUnionAllRuntimeLimit(impl->logical_plan.bound_select(),
+        UsesOrderedUnionAllRuntimeLimit(logical_plan.bound_select(),
                                         advanced_order->set_then_order);
 
     std::size_t compound_index = 0;
-    for (std::size_t logical_index = 0; logical_index < impl->logical_plan.nodes().size();
+    for (std::size_t logical_index = 0; logical_index < logical_plan.nodes().size();
          ++logical_index) {
       std::optional<BoundSourceId> condition_source;
       if (const auto* join =
-              std::get_if<LogicalJoinNode>(&impl->logical_plan.nodes()[logical_index].payload);
+              std::get_if<LogicalJoinNode>(&logical_plan.nodes()[logical_index].payload);
           join != nullptr) {
-        auto ready = JoinConditionSource(impl->logical_plan, *join);
+        auto ready = JoinConditionSource(logical_plan, *join);
         if (!ready.has_value()) {
           return std::unexpected(std::move(ready.error()));
         }
@@ -3268,25 +3271,24 @@ class PhysicalPlanBuilder final {
       }
       std::vector<BoundSourceId> predicate_sources;
       if (const auto* filter =
-              std::get_if<LogicalFilterNode>(&impl->logical_plan.nodes()[logical_index].payload);
+              std::get_if<LogicalFilterNode>(&logical_plan.nodes()[logical_index].payload);
           filter != nullptr) {
-        const auto* join =
-            std::get_if<LogicalJoinNode>(&impl->logical_plan.node(filter->input).payload);
+        const auto* join = std::get_if<LogicalJoinNode>(&logical_plan.node(filter->input).payload);
         if (join != nullptr) {
           const auto predicates =
-              SplitAdvancedPredicate(impl->logical_plan.bound_select(), filter->predicate);
-          auto ready = JoinPredicateSources(
-              impl->logical_plan.bound_select(),
-              std::get<BoundSelectCore>(
-                  impl->logical_plan.bound_select().query_cores()[join->core_index]),
-              predicates.predicates);
+              SplitAdvancedPredicate(logical_plan.bound_select(), filter->predicate);
+          auto ready =
+              JoinPredicateSources(logical_plan.bound_select(),
+                                   std::get<BoundSelectCore>(
+                                       logical_plan.bound_select().query_cores()[join->core_index]),
+                                   predicates.predicates);
           if (!ready.has_value()) {
             return std::unexpected(std::move(ready.error()));
           }
           predicate_sources = std::move(*ready);
         }
       }
-      const LogicalNode& logical = impl->logical_plan.nodes()[logical_index];
+      const LogicalNode& logical = logical_plan.nodes()[logical_index];
       PhysicalNodePayload payload = std::visit(
           [&](const auto& node) -> PhysicalNodePayload {
             using Node = std::decay_t<decltype(node)>;
@@ -3337,10 +3339,9 @@ class PhysicalPlanBuilder final {
               }
               RootPageId root_page{1};
               if (node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()) {
-                root_page =
-                    impl->logical_plan.bound_select().catalog()->table(*node.table).root_page;
+                root_page = logical_plan.bound_select().catalog()->table(*node.table).root_page;
               }
-              if (const auto key = JoinedRowIdLookupKey(impl->logical_plan.bound_select(),
+              if (const auto key = JoinedRowIdLookupKey(logical_plan.bound_select(),
                                                         node.core_index, node.source);
                   key.has_value()) {
                 return PhysicalRowIdLookupNode{
@@ -3369,8 +3370,7 @@ class PhysicalPlanBuilder final {
                   .condition_source = condition_source,
               };
             } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
-              const LogicalNodePayload& source =
-                  impl->logical_plan.nodes()[node.input.value()].payload;
+              const LogicalNodePayload& source = logical_plan.nodes()[node.input.value()].payload;
               std::optional<std::size_t> core_index;
               if (const auto* scan = std::get_if<LogicalScanNode>(&source); scan != nullptr) {
                 core_index = scan->core_index;
@@ -3391,7 +3391,7 @@ class PhysicalPlanBuilder final {
                 };
               }
               AdvancedPredicateParts predicates =
-                  SplitAdvancedPredicate(impl->logical_plan.bound_select(), node.predicate);
+                  SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
               return PhysicalFilterNode{
                   .input = mapped[node.input.value()],
                   .predicates = std::move(predicates.predicates),
@@ -3420,7 +3420,7 @@ class PhysicalPlanBuilder final {
                   .payload_expressions = node.payload_expressions,
                   .output_fields = node.output_fields,
                   .schedule = node.schedule,
-                  .strategy = impl->logical_plan.bound_select().limit() == nullptr
+                  .strategy = logical_plan.bound_select().limit() == nullptr
                                   ? PhysicalSortStrategy::kExternal
                                   : PhysicalSortStrategy::kRuntimeLimit,
                   .input_order_satisfied = input_order_satisfied,
@@ -3447,7 +3447,7 @@ class PhysicalPlanBuilder final {
                 strategy = PhysicalCompoundStrategy::kConcatenate;
               } else if (advanced_order != nullptr && advanced_order->set_then_order) {
                 strategy = PhysicalCompoundStrategy::kSetThenOrder;
-              } else if (UsesUnionLimitOne(impl->logical_plan.bound_select(), current_compound)) {
+              } else if (UsesUnionLimitOne(logical_plan.bound_select(), current_compound)) {
                 strategy = PhysicalCompoundStrategy::kUnionLimitOne;
               }
               return PhysicalCompoundNode{
@@ -3479,7 +3479,7 @@ class PhysicalPlanBuilder final {
                   .core_plans = std::move(core_plans),
                   .set_then_order = node.set_then_order,
                   .final_strategy =
-                      node.set_then_order && impl->logical_plan.bound_select().limit() != nullptr
+                      node.set_then_order && logical_plan.bound_select().limit() != nullptr
                           ? PhysicalSortStrategy::kRuntimeLimit
                           : PhysicalSortStrategy::kExternal,
                   .input_order_satisfied = aggregate_plans.size() == 1U &&
@@ -3511,7 +3511,7 @@ class PhysicalPlanBuilder final {
       mapped.emplace_back(static_cast<std::uint32_t>(impl->nodes.size() - 1U));
     }
 
-    impl->root = mapped[impl->logical_plan.root().value()];
+    impl->root = mapped[logical_plan.root().value()];
     if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value() &&
         !AssumePresent(aggregate_plans.front()).joined) {
       const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans.front());
@@ -3540,12 +3540,12 @@ class PhysicalPlanBuilder final {
     }
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
     std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
-        impl->logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
+        logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
     if (!validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork, impl->nodes.size());
-    return PhysicalPlan{std::move(impl)};
+    return {};
   }
 };
 
@@ -3830,33 +3830,42 @@ bool PhysicalPlan::valid() const noexcept { return impl_ != nullptr; }
 const LogicalPlan& PhysicalPlan::logical_plan() const noexcept { return impl_->logical_plan; }
 
 std::span<const PhysicalNode> PhysicalPlan::nodes() const noexcept {
-  return impl_ != nullptr ? std::span<const PhysicalNode>{impl_->nodes}
+  return impl_ != nullptr ? std::span<const PhysicalNode>{impl_->root_query.nodes}
                           : std::span<const PhysicalNode>{};
 }
 
 const PhysicalNode& PhysicalPlan::node(PhysicalNodeId id) const noexcept {
-  return impl_->nodes[id.value()];
+  return impl_->root_query.nodes[id.value()];
 }
 
-PhysicalNodeId PhysicalPlan::root() const noexcept { return impl_->root; }
+PhysicalNodeId PhysicalPlan::root() const noexcept { return impl_->root_query.root; }
 
 std::span<const AccessPathCandidate> PhysicalPlan::candidates() const noexcept {
-  return impl_ != nullptr ? std::span<const AccessPathCandidate>{impl_->candidates}
+  return impl_ != nullptr ? std::span<const AccessPathCandidate>{impl_->root_query.candidates}
                           : std::span<const AccessPathCandidate>{};
 }
 
 std::optional<std::size_t> PhysicalPlan::selected_candidate_index() const noexcept {
-  if (impl_ == nullptr || impl_->selected_candidate >= impl_->candidates.size()) {
+  if (impl_ == nullptr ||
+      impl_->root_query.selected_candidate >= impl_->root_query.candidates.size()) {
     return std::nullopt;
   }
-  return impl_->selected_candidate;
+  return impl_->root_query.selected_candidate;
 }
 
 const AccessPathCandidate* PhysicalPlan::selected_candidate() const noexcept {
-  if (impl_ == nullptr || impl_->selected_candidate >= impl_->candidates.size()) {
+  if (impl_ == nullptr ||
+      impl_->root_query.selected_candidate >= impl_->root_query.candidates.size()) {
     return nullptr;
   }
-  return &impl_->candidates[impl_->selected_candidate];
+  return &impl_->root_query.candidates[impl_->root_query.selected_candidate];
+}
+
+const PhysicalQueryPlan& PhysicalPlan::query_plan(BoundQueryId id) const noexcept {
+  if (impl_ == nullptr || id.value() >= impl_->logical_plan.bound_select().query_count()) {
+    std::terminate();
+  }
+  return id.value() == 0U ? impl_->root_query : impl_->nested_queries[id.value() - 1U];
 }
 
 OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan) {
@@ -3886,7 +3895,9 @@ OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(LogicalStatement
   return optimizer_detail::PhysicalStatementPlanBuilder::Build(std::move(logical_plan));
 }
 
-std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
+namespace {
+
+[[nodiscard]] std::string ExplainPhysicalQuery(const PhysicalQueryView& plan) {
   const std::span<const PhysicalNode> nodes = plan.nodes();
   if (nodes.empty()) {
     std::terminate();
@@ -3909,8 +3920,8 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
                  scan != nullptr) {
         std::string line = "CORE " + std::to_string(scan->core_index) + " SCAN ";
         AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &line);
-        const auto& core = std::get<BoundSelectCore>(
-            plan.logical_plan().bound_select().query_cores()[scan->core_index]);
+        const auto query_cores = plan.logical_plan().bound_select().query_cores();
+        const auto& core = std::get<BoundSelectCore>(query_cores[scan->core_index]);
         if (core.table_sources.size() > 1U) {
           line.append(" SOURCE ").append(std::to_string(scan->source.value()));
         }
@@ -4019,7 +4030,7 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
     AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &explain);
   } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&access.payload);
              index_scan != nullptr) {
-    const BoundSelect& bound_select = plan.logical_plan().bound_select();
+    const BoundQueryView bound_select = plan.logical_plan().bound_select();
     const CatalogSnapshot& catalog = *bound_select.catalog();
     const CatalogTable& table = catalog.table(index_scan->table);
     const CatalogIndex& index = catalog.index(index_scan->index);
@@ -4059,7 +4070,7 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
     explain.append(" USING INTEGER PRIMARY KEY (rowid=?)");
   }
 
-  const BoundSelect& bound_select = plan.logical_plan().bound_select();
+  const BoundQueryView bound_select = plan.logical_plan().bound_select();
   for (const PhysicalNode& node : nodes) {
     const auto* sort = std::get_if<PhysicalSortNode>(&node.payload);
     if (sort == nullptr) {
@@ -4081,6 +4092,22 @@ std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
     }
     explain.append(sort->input_order_satisfied ? ") USING INPUT ORDER" : ") USING SORTER");
     break;
+  }
+  return explain;
+}
+
+}  // namespace
+
+std::string ExplainPhysicalPlan(const PhysicalPlan& plan) {
+  std::string explain = ExplainPhysicalQuery(PhysicalQueryView{plan});
+  const BoundSelect& bound = plan.logical_plan().bound_select();
+  for (std::size_t index = 1; index < bound.query_count(); ++index) {
+    const BoundQueryId id{static_cast<std::uint32_t>(index)};
+    explain.append(bound.query(id).destination == BoundQueryDestination::kExists
+                       ? "\nEXISTS SUBQUERY "
+                       : "\nSCALAR SUBQUERY ");
+    explain.append(std::to_string(index)).push_back('\n');
+    explain.append(ExplainPhysicalQuery(PhysicalQueryView{plan, id}));
   }
   return explain;
 }

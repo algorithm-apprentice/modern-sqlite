@@ -25,6 +25,7 @@ static_assert(!std::is_copy_constructible_v<SyntaxTree>);
 static_assert(!std::is_copy_assignable_v<SyntaxTree>);
 static_assert(std::is_nothrow_move_constructible_v<SyntaxTree>);
 static_assert(std::is_nothrow_move_assignable_v<SyntaxTree>);
+static_assert(!std::is_convertible_v<SelectQueryId, ExpressionId>);
 
 [[nodiscard]] SourceSpan Span(std::size_t begin, std::size_t end) {
   const auto span = SourceSpan::FromBounds(ByteOffset{begin}, ByteOffset{end});
@@ -48,6 +49,55 @@ static_assert(std::is_nothrow_move_assignable_v<SyntaxTree>);
       .span = span,
       .parts = std::vector<SourceSpan>{parts},
   };
+}
+
+TEST(SyntaxTree, OwnsFlatNestedQueriesAndRejectsMalformedOwnership) {
+  constexpr std::string_view source = "SELECT (SELECT 7)";
+  const SourceSpan literal = FindSpan(source, "7");
+  const SourceSpan expression = Span(7, source.size());
+  const SourceSpan query_span = Span(8, literal.end().value());
+  for (std::size_t fault = 0; fault < 6U; ++fault) {
+    SCOPED_TRACE(fault);
+    std::vector<Expression> expressions{
+        Expression{.span = literal,
+                   .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = literal}},
+        Expression{
+            .span = expression,
+            .payload = SubqueryExpression{.query = SelectQueryId{fault == 1U ? 1U : 0U},
+                                          .kind = fault == 4U ? static_cast<SubqueryKind>(255)
+                                                              : SubqueryKind::kScalar}},
+    };
+    SelectStatement child{
+        .span = fault == 5U ? Span(0, source.size()) : query_span,
+        .first =
+            SelectCore{
+                .span = query_span,
+                .result_columns = {ResultColumn{.span = literal,
+                                                .expression = ExpressionId{fault == 2U ? 1U : 0U}}},
+            },
+    };
+    std::vector<SelectStatement> queries{child};
+    if (fault == 3U) {
+      queries.push_back(child);
+    }
+    auto tree = SyntaxTree::Create(
+        std::string{source}, std::move(expressions),
+        SelectStatement{
+            .span = Span(0, source.size()),
+            .first = SelectCore{.span = Span(0, source.size()),
+                                .result_columns = {ResultColumn{.span = expression,
+                                                                .expression = ExpressionId{1}}}},
+        },
+        std::move(queries));
+    if (fault == 0U) {
+      ASSERT_TRUE(tree.has_value()) << tree.error().ToString();
+      ASSERT_EQ(1U, tree->select_queries().size());
+      EXPECT_EQ(query_span, tree->select_query(SelectQueryId{0}).span);
+    } else {
+      ASSERT_FALSE(tree.has_value());
+      EXPECT_EQ(ErrorCode::kMisuse, tree.error().code());
+    }
+  }
 }
 
 TEST(SyntaxTree, RejectsInvalidJoinOwnershipAndOperatorOrdering) {

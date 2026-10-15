@@ -203,6 +203,12 @@ struct LogicalPlanError {
 
 [[nodiscard]] std::string_view LogicalPlanErrorCodeName(LogicalPlanErrorCode code) noexcept;
 
+struct LogicalQueryPlan {
+  BoundQueryId query{0};
+  std::vector<LogicalNode> nodes;
+  LogicalNodeId root{0};
+};
+
 class LogicalPlan final {
  public:
   LogicalPlan(const LogicalPlan&) = delete;
@@ -216,6 +222,7 @@ class LogicalPlan final {
   [[nodiscard]] std::span<const LogicalNode> nodes() const noexcept;
   [[nodiscard]] const LogicalNode& node(LogicalNodeId id) const noexcept;
   [[nodiscard]] LogicalNodeId root() const noexcept;
+  [[nodiscard]] const LogicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
 
  private:
   friend class planner_detail::LogicalPlanBuilder;
@@ -225,6 +232,30 @@ class LogicalPlan final {
   explicit LogicalPlan(std::unique_ptr<Impl> impl) noexcept;
 
   std::unique_ptr<Impl> impl_;
+};
+
+class LogicalQueryView final {
+ public:
+  explicit LogicalQueryView(const LogicalPlan& owner, BoundQueryId query = BoundQueryId{0}) noexcept
+      : owner_(&owner), query_(query) {}
+
+  [[nodiscard]] bool valid() const noexcept {
+    return owner_->valid() && query_.value() < owner_->bound_select().query_count();
+  }
+  [[nodiscard]] BoundQueryView bound_select() const noexcept {
+    return BoundQueryView{owner_->bound_select(), query_};
+  }
+  [[nodiscard]] std::span<const LogicalNode> nodes() const noexcept {
+    return owner_->query_plan(query_).nodes;
+  }
+  [[nodiscard]] const LogicalNode& node(LogicalNodeId id) const noexcept {
+    return nodes()[id.value()];
+  }
+  [[nodiscard]] LogicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
+
+ private:
+  const LogicalPlan* owner_;
+  BoundQueryId query_;
 };
 
 using BuildLogicalPlanResult = std::expected<LogicalPlan, LogicalPlanError>;

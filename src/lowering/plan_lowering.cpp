@@ -8,6 +8,7 @@
 #include <exception>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -39,13 +40,54 @@ using lowering_internal::UnsupportedFailure;
   return CatalogNamesEqual(left, right);
 }
 
+struct NamedSymbol {
+  std::string name;
+  SymbolId id;
+};
+
+struct SubqueryCallBinding {
+  RegisterId result{0};
+  RegisterId ready{0};
+  std::optional<Label> entry;
+  std::optional<Label> last;
+  std::optional<SubroutineId> subroutine;
+};
+
+struct StatementLoweringState {
+  std::size_t next_register = 0;
+  bool expression_layout_initialized = false;
+  std::vector<std::optional<RegisterId>> call_argument_blocks;
+  std::optional<ProgramBuilder> builder;
+  std::vector<std::optional<ConstantId>> literal_constants;
+  std::optional<ConstantId> null_constant;
+  std::optional<ConstantId> zero_constant;
+  std::optional<ConstantId> one_constant;
+  std::optional<ConstantId> maximum_integer_constant;
+  std::vector<SymbolId> collation_symbols;
+  std::vector<SymbolId> function_symbols;
+  std::vector<SymbolId> aggregate_function_symbols;
+  std::vector<NamedSymbol> symbol_names;
+  std::optional<SymbolId> binary_symbol;
+  std::vector<SubqueryCallBinding> subqueries;
+};
+
 class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServices,
                           private lowering_internal::GroupedAggregateServices {
  public:
-  PlanLowerer(const PhysicalPlan& plan, ProgramLimits limits) noexcept
-      : read_plan_(&plan),
-        logical_plan_(&plan.logical_plan()),
-        bound_select_(&logical_plan_->bound_select()),
+  PlanLowerer(const PlanLowerer&) = delete;
+  PlanLowerer& operator=(const PlanLowerer&) = delete;
+  PlanLowerer(PlanLowerer&&) = delete;
+  PlanLowerer& operator=(PlanLowerer&&) = delete;
+
+  PlanLowerer(const PhysicalPlan& plan, ProgramLimits limits, StatementLoweringState& state,
+              BoundQueryId query = BoundQueryId{0}) noexcept
+      : read_query_(std::in_place, plan, query),
+        logical_query_(std::in_place, plan.logical_plan(), query),
+        bound_query_(std::in_place, plan.logical_plan().bound_select(), query),
+        read_owner_(&plan),
+        read_plan_(&*read_query_),
+        logical_plan_(&*logical_query_),
+        bound_select_(&*bound_query_),
         expressions_(bound_select_->expressions()),
         parameters_(bound_select_->parameters()),
         collations_(bound_select_->collations()),
@@ -53,10 +95,45 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         aggregate_functions_(bound_select_->aggregate_functions()),
         aggregate_invocations_(bound_select_->aggregate_invocations()),
         limits_(limits),
-        active_source_column_count_(bound_select_->source_columns().size()) {}
+        statement_(state),
+        next_register_(state.next_register),
+        call_argument_blocks_(state.call_argument_blocks),
+        builder_(state.builder),
+        literal_constants_(state.literal_constants),
+        null_constant_(state.null_constant),
+        zero_constant_(state.zero_constant),
+        one_constant_(state.one_constant),
+        maximum_integer_constant_(state.maximum_integer_constant),
+        collation_symbols_(state.collation_symbols),
+        function_symbols_(state.function_symbols),
+        aggregate_function_symbols_(state.aggregate_function_symbols),
+        symbol_names_(state.symbol_names),
+        binary_symbol_(state.binary_symbol) {
+    if (const auto* core = std::get_if<BoundSelectCore>(&bound_select_->query_cores().front());
+        core != nullptr) {
+      active_source_column_begin_ = core->source_column_begin;
+      active_source_column_count_ = core->source_column_count;
+    }
+  }
 
-  PlanLowerer(const PhysicalMutationPlan& plan, ProgramLimits limits) noexcept
-      : mutation_plan_(&plan), limits_(limits) {
+  PlanLowerer(const PhysicalMutationPlan& plan, ProgramLimits limits,
+              StatementLoweringState& state) noexcept
+      : mutation_plan_(&plan),
+        limits_(limits),
+        statement_(state),
+        next_register_(state.next_register),
+        call_argument_blocks_(state.call_argument_blocks),
+        builder_(state.builder),
+        literal_constants_(state.literal_constants),
+        null_constant_(state.null_constant),
+        zero_constant_(state.zero_constant),
+        one_constant_(state.one_constant),
+        maximum_integer_constant_(state.maximum_integer_constant),
+        collation_symbols_(state.collation_symbols),
+        function_symbols_(state.function_symbols),
+        aggregate_function_symbols_(state.aggregate_function_symbols),
+        symbol_names_(state.symbol_names),
+        binary_symbol_(state.binary_symbol) {
     bound_insert_ = std::get_if<BoundInsert>(&plan.logical_plan().bound_statement());
     if (bound_insert_ != nullptr) {
       expressions_ = bound_insert_->expressions();
@@ -96,7 +173,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
  private:
-  [[nodiscard]] LowerPlanResult RunRead() {
+  [[nodiscard]] LoweringResult<void> PrepareReadLayout() {
     if (bound_select_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound SELECT does not retain a catalog"));
     }
@@ -132,6 +209,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
+    return {};
+  }
+
+  [[nodiscard]] bool RequiresReadSnapshot() const noexcept {
+    return streaming_requires_snapshot_ ||
+           (!streaming_query_ && !set_query_ && !bound_select_->table_sources().empty());
+  }
+
+  [[nodiscard]] LowerPlanResult RunRead() {
+    if (auto prepared = PrepareReadLayout(); !prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
+    const std::size_t nested_count = bound_select_->owner().query_count() - 1U;
+    std::vector<std::unique_ptr<PlanLowerer>> children;
+    children.reserve(nested_count);
+    statement_.subqueries.resize(nested_count);
+    bool snapshot = RequiresReadSnapshot();
+    for (std::size_t index = 0; index < nested_count; ++index) {
+      auto registers = AllocateRegisters(2);
+      if (!registers.has_value()) {
+        return std::unexpected(std::move(registers.error()));
+      }
+      statement_.subqueries[index].result = *registers;
+      statement_.subqueries[index].ready = RegisterId{registers->value() + 1U};
+      auto child = std::make_unique<PlanLowerer>(
+          *read_owner_, limits_, statement_, BoundQueryId{static_cast<std::uint32_t>(index + 1U)});
+      if (auto prepared = child->PrepareReadLayout(); !prepared.has_value()) {
+        return std::unexpected(std::move(prepared.error()));
+      }
+      snapshot = snapshot || child->RequiresReadSnapshot();
+      children.push_back(std::move(child));
+    }
+    if (auto layout = FinishRegisterLayout(); !layout.has_value()) {
+      return std::unexpected(std::move(layout.error()));
+    }
 
     const CatalogVersion version = bound_select_->catalog()->version();
     auto created = ConvertProgramResult(ProgramBuilder::Create(
@@ -150,8 +262,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     builder_.emplace(std::move(*created));
 
-    if (streaming_requires_snapshot_ ||
-        (!streaming_query_ && !set_query_ && !bound_select_->table_sources().empty())) {
+    if (snapshot) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
                                            "unable to require a database snapshot");
       if (!required.has_value()) {
@@ -164,6 +275,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto symbols = AddBoundSymbols(); !symbols.has_value()) {
       return std::unexpected(std::move(symbols.error()));
     }
+    if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
+      return std::unexpected(std::move(descriptors.error()));
+    }
+    if (auto caches = EmitSubqueryCacheInitialization(); !caches.has_value()) {
+      return std::unexpected(std::move(caches.error()));
+    }
+    if (auto emitted = EmitReadPlan(); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+    for (const auto& child : children) {
+      if (auto emitted = child->EmitReadSubroutine(); !emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+    }
+
+    std::vector<ResultColumnMetadata> result_columns;
+    result_columns.reserve(bound_select_->result_columns().size());
+    for (const BoundResultColumn& column : bound_select_->result_columns()) {
+      result_columns.push_back(ResultColumnMetadata{
+          .name = column.name,
+          .declared_type = column.declared_type,
+          .affinity = column.affinity,
+      });
+    }
+
+    auto built =
+        ConvertProgramResult(std::move(AssumeValue(builder_)).Build(std::move(result_columns)),
+                             "lowered bytecode failed verification");
+    if (!built.has_value()) {
+      return std::unexpected(std::move(built.error()));
+    }
+    return std::move(*built);
+  }
+
+  [[nodiscard]] LoweringResult<void> AddReadDescriptors() {
     if (global_aggregate_query_ || grouped_aggregate_query_) {
       if (auto descriptors = AddGlobalAggregateDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
@@ -207,36 +353,93 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(cursor.error()));
       }
     }
-    LoweringResult<void> emitted =
-        grouped_aggregate_query_  ? EmitGroupedAggregatePlan()
-        : global_aggregate_query_ ? EmitGlobalAggregatePlan()
-        : ordered_compound_
-            ? EmitOrderedCompoundPlan()
-            : (set_query_
-                   ? EmitSetPlan()
-                   : (streaming_query_ ? EmitStreamingPlan()
-                                       : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan())));
-    if (!emitted.has_value()) {
-      return std::unexpected(std::move(emitted.error()));
-    }
+    return {};
+  }
 
-    std::vector<ResultColumnMetadata> result_columns;
-    result_columns.reserve(bound_select_->result_columns().size());
-    for (const BoundResultColumn& column : bound_select_->result_columns()) {
-      result_columns.push_back(ResultColumnMetadata{
-          .name = column.name,
-          .declared_type = column.declared_type,
-          .affinity = column.affinity,
-      });
-    }
+  [[nodiscard]] LoweringResult<void> EmitReadPlan() {
+    return grouped_aggregate_query_  ? EmitGroupedAggregatePlan()
+           : global_aggregate_query_ ? EmitGlobalAggregatePlan()
+           : ordered_compound_
+               ? EmitOrderedCompoundPlan()
+               : (set_query_ ? EmitSetPlan()
+                             : (streaming_query_
+                                    ? EmitStreamingPlan()
+                                    : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan())));
+  }
 
-    auto built =
-        ConvertProgramResult(std::move(AssumeValue(builder_)).Build(std::move(result_columns)),
-                             "lowered bytecode failed verification");
-    if (!built.has_value()) {
-      return std::unexpected(std::move(built.error()));
+  [[nodiscard]] LoweringResult<void> EmitSubqueryCacheInitialization() {
+    if (statement_.subqueries.empty()) {
+      return {};
     }
-    return std::move(*built);
+    auto null = EnsureNullConstant();
+    auto zero = EnsureZeroConstant();
+    if (!null.has_value()) {
+      return std::unexpected(std::move(null.error()));
+    }
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    for (const SubqueryCallBinding& call : statement_.subqueries) {
+      if (auto initialized =
+              Append(LoadConstantInstruction{.constant = *null, .output = call.result});
+          !initialized.has_value()) {
+        return initialized;
+      }
+      if (auto initialized =
+              Append(LoadConstantInstruction{.constant = *zero, .output = call.ready});
+          !initialized.has_value()) {
+        return initialized;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitReadSubroutine() {
+    const BoundQueryId query = bound_select_->query().id;
+    SubqueryCallBinding& call = statement_.subqueries[query.value() - 1U];
+    if (!call.subroutine.has_value()) {
+      return {};
+    }
+    if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
+      return descriptors;
+    }
+    auto completed = CreateLabel();
+    if (!completed.has_value()) {
+      return std::unexpected(std::move(completed.error()));
+    }
+    subquery_completion_ = *completed;
+    if (auto bound = BindLabel(AssumeValue(call.entry)); !bound.has_value()) {
+      return bound;
+    }
+    auto initial = bound_select_->query().destination == BoundQueryDestination::kExists
+                       ? EnsureZeroConstant()
+                       : EnsureNullConstant();
+    if (!initial.has_value()) {
+      return std::unexpected(std::move(initial.error()));
+    }
+    if (auto initialized =
+            Append(LoadConstantInstruction{.constant = *initial, .output = call.result});
+        !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto emitted = EmitReadPlan(); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto bound = BindLabel(*completed); !bound.has_value()) {
+      return bound;
+    }
+    auto one = EnsureOneConstant();
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto ready = Append(LoadConstantInstruction{.constant = *one, .output = call.ready});
+        !ready.has_value()) {
+      return ready;
+    }
+    if (auto bound = BindLabel(AssumeValue(call.last)); !bound.has_value()) {
+      return bound;
+    }
+    return Append(ReturnSubroutineInstruction{.subroutine = *call.subroutine});
   }
 
   [[nodiscard]] LowerPlanResult RunMutation() {
@@ -761,6 +964,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     Materialized,
     DemandOne,
   };
+
+  [[nodiscard]] LoweringResult<void> EmitProjectionValue(
+      BoundExpressionId expression, RegisterId destination,
+      SelectOutputMode mode = SelectOutputMode::Streaming) {
+    if (bound_select_->query().destination == BoundQueryDestination::kExists &&
+        (mode == SelectOutputMode::Streaming || mode == SelectOutputMode::DemandOne)) {
+      return {};
+    }
+    return EmitExpression(expression, destination);
+  }
 
   struct SelectOutputContext {
     SelectOutputMode mode = SelectOutputMode::Streaming;
@@ -1576,6 +1789,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> BeginExpressionRegisterLayout() {
+    if (statement_.expression_layout_initialized) {
+      return {};
+    }
     const std::size_t expression_count = expressions_.size();
     if (expression_count > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(
@@ -1597,6 +1813,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       call_argument_blocks_[index] = *block;
     }
+    statement_.expression_layout_initialized = true;
     return {};
   }
 
@@ -1641,22 +1858,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> AllocateAllAggregateInvocationRegisters() {
+  [[nodiscard]] LoweringResult<void> AllocateQueryAggregateInvocationRegisters() {
     aggregate_argument_blocks_.resize(aggregate_invocations_.size());
     aggregate_result_registers_.resize(aggregate_invocations_.size());
     aggregate_descriptors_.resize(aggregate_invocations_.size());
-    for (std::size_t index = 0; index < aggregate_invocations_.size(); ++index) {
-      const BoundAggregateInvocation& invocation = aggregate_invocations_[index];
-      auto arguments = AllocateRegisters(invocation.arguments.size());
-      auto result = AllocateRegisters(1);
-      if (!arguments.has_value()) {
-        return std::unexpected(std::move(arguments.error()));
+    for (const BoundQueryCore& query_core : bound_select_->query_cores()) {
+      const auto* core = std::get_if<BoundSelectCore>(&query_core);
+      if (core == nullptr || !core->aggregate.has_value()) {
+        continue;
       }
-      if (!result.has_value()) {
-        return std::unexpected(std::move(result.error()));
+      for (const BoundAggregateInvocationId id : core->aggregate->invocations) {
+        const BoundAggregateInvocation& invocation = aggregate_invocations_[id.value()];
+        auto arguments = AllocateRegisters(invocation.arguments.size());
+        auto result = AllocateRegisters(1);
+        if (!arguments.has_value()) {
+          return std::unexpected(std::move(arguments.error()));
+        }
+        if (!result.has_value()) {
+          return std::unexpected(std::move(result.error()));
+        }
+        aggregate_argument_blocks_[id.value()] = *arguments;
+        aggregate_result_registers_[id.value()] = *result;
       }
-      aggregate_argument_blocks_[index] = *arguments;
-      aggregate_result_registers_[index] = *result;
     }
     return {};
   }
@@ -2691,7 +2914,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!streaming_aggregate_query_) {
       return {};
     }
-    if (auto invocations = AllocateAllAggregateInvocationRegisters(); !invocations.has_value()) {
+    if (auto invocations = AllocateQueryAggregateInvocationRegisters(); !invocations.has_value()) {
       return invocations;
     }
 
@@ -3543,6 +3766,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         bound_select_->result_columns().size() > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(InternalFailure("compound relation descriptor shape is invalid"));
     }
+    const bool materializes =
+        std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
+          const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload);
+          return compound != nullptr &&
+                 (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
+                  compound->strategy == PhysicalCompoundStrategy::kSetThenOrder);
+        });
+    if (!materializes) {
+      return {};
+    }
     for (std::optional<RelationId>& relation : set_relations_) {
       OrderingRecordDescriptor descriptor{
           .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
@@ -4050,7 +4283,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                          std::optional<CursorFieldId> rowid_field) {
     if (source_cursor_bindings_.empty()) {
       std::size_t source_count = 0;
-      for (const BoundQueryCore& core : bound_select_->query_cores()) {
+      for (const BoundQueryCore& core : bound_select_->owner().query_cores()) {
         if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
           source_count += select->table_sources.size();
         }
@@ -4546,6 +4779,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> Append(Instruction instruction) {
+    if (bound_select_ != nullptr &&
+        bound_select_->query().destination != BoundQueryDestination::kClient) {
+      if (const auto* row = std::get_if<ResultRowInstruction>(&instruction); row != nullptr) {
+        const SubqueryCallBinding& call =
+            statement_.subqueries[bound_select_->query().id.value() - 1U];
+        if (bound_select_->query().destination == BoundQueryDestination::kScalar) {
+          if (row->count != 1U) {
+            return std::unexpected(InternalFailure("scalar result destination has invalid width"));
+          }
+          instruction = CopyInstruction{.input = row->first, .output = call.result};
+        } else {
+          auto one = EnsureOneConstant();
+          if (!one.has_value()) {
+            return std::unexpected(std::move(one.error()));
+          }
+          instruction = LoadConstantInstruction{.constant = *one, .output = call.result};
+        }
+      } else if (std::holds_alternative<HaltInstruction>(instruction)) {
+        if (!subquery_completion_.has_value()) {
+          return std::unexpected(InternalFailure("subquery has no private completion target"));
+        }
+        return EmitJump(*subquery_completion_);
+      }
+    }
     auto appended = ConvertProgramResult(AssumeValue(builder_).Append(instruction),
                                          "unable to append a bytecode instruction");
     if (!appended.has_value()) {
@@ -4589,6 +4846,54 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] RegisterId Home(BoundExpressionId id) const noexcept {
     return RegisterId{id.value()};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSubqueryValue(BoundQueryId query, RegisterId destination) {
+    if (query.value() == 0U || query.value() > statement_.subqueries.size()) {
+      return std::unexpected(InternalFailure("subquery expression has invalid query ownership"));
+    }
+    const BoundQuery& target = bound_select_->owner().query(query);
+    if (target.destination == BoundQueryDestination::kScalar &&
+        target.output_columns.size() != 1U) {
+      return std::unexpected(UnsupportedFailure("sub-select returns " +
+                                                std::to_string(target.output_columns.size()) +
+                                                " columns - expected 1"));
+    }
+    SubqueryCallBinding& call = statement_.subqueries[query.value() - 1U];
+    if (!call.subroutine.has_value()) {
+      auto entry = CreateLabel();
+      auto last = CreateLabel();
+      if (!entry.has_value()) {
+        return std::unexpected(std::move(entry.error()));
+      }
+      if (!last.has_value()) {
+        return std::unexpected(std::move(last.error()));
+      }
+      auto subroutine = ConvertProgramResult(
+          AssumeValue(builder_).AddSubroutine(*entry, *last, SubroutineKind::kRead),
+          "unable to register a private query subroutine");
+      if (!subroutine.has_value()) {
+        return std::unexpected(std::move(subroutine.error()));
+      }
+      call.entry = *entry;
+      call.last = *last;
+      call.subroutine = *subroutine;
+    }
+    auto cached = CreateLabel();
+    if (!cached.has_value()) {
+      return std::unexpected(std::move(cached.error()));
+    }
+    if (auto ready = EmitJumpIf(call.ready, JumpCondition::kIfTrue, *cached); !ready.has_value()) {
+      return ready;
+    }
+    if (auto called = Append(CallSubroutineInstruction{.subroutine = *call.subroutine});
+        !called.has_value()) {
+      return called;
+    }
+    if (auto bound = BindLabel(*cached); !bound.has_value()) {
+      return bound;
+    }
+    return Append(CopyInstruction{.input = call.result, .output = destination});
   }
 
   [[nodiscard]] const BoundExpression& Expression(BoundExpressionId id) const noexcept {
@@ -4842,6 +5147,182 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return RetainedAggregateRegister(BoundSourceLeafIdentity{.source = source});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitColumnValue(const BoundColumnExpression& column,
+                                                     RegisterId destination) {
+    if ((grouped_aggregate_query_ || global_representative_query_) &&
+        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+      const std::optional<RegisterId> source = GroupedColumnRegister(column.column);
+      if (!source.has_value()) {
+        return std::unexpected(InternalFailure("grouped column has no retained source register"));
+      }
+      return Append(CopyInstruction{.input = *source, .output = destination});
+    }
+    if (!source_snapshot_registers_.empty()) {
+      if (column.column.value() >= source_snapshot_registers_.size() ||
+          column.column.value() >= source_field_real_affinity_.size()) {
+        return std::unexpected(InternalFailure("bound column has no source snapshot field"));
+      }
+      if (auto copied = Append(CopyInstruction{
+              .input = source_snapshot_registers_[column.column.value()],
+              .output = destination,
+          });
+          !copied.has_value()) {
+        return copied;
+      }
+      if (source_field_real_affinity_[column.column.value()]) {
+        return Append(RealAffinityInstruction{.input = destination, .output = destination});
+      }
+      return {};
+    }
+    if (column.column.value() >= source_field_real_affinity_.size() ||
+        column.column.value() >= source_cursor_fields_.size() ||
+        !source_cursor_fields_[column.column.value()].has_value()) {
+      return std::unexpected(InternalFailure("bound column has no cursor field"));
+    }
+    auto binding = SourceCursor(bound_select_->source_columns()[column.column.value()].source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    if (auto read = Append(ReadFieldInstruction{
+            .cursor = binding->cursor,
+            .field = AssumeValue(source_cursor_fields_[column.column.value()]),
+            .output = destination,
+        });
+        !read.has_value()) {
+      return read;
+    }
+    if (source_field_real_affinity_[column.column.value()]) {
+      return Append(RealAffinityInstruction{.input = destination, .output = destination});
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitRowIdValue(const BoundRowIdExpression& rowid,
+                                                    RegisterId destination) {
+    if ((grouped_aggregate_query_ || global_representative_query_) &&
+        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+      const std::optional<RegisterId> source = GroupedRowIdRegister(rowid.source);
+      if (!source.has_value()) {
+        return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
+      }
+      return Append(CopyInstruction{.input = *source, .output = destination});
+    }
+    if (source_rowid_register_.has_value()) {
+      return Append(CopyInstruction{
+          .input = AssumeValue(source_rowid_register_),
+          .output = destination,
+      });
+    }
+    auto binding = SourceCursor(rowid.source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    if (binding->rowid_field.has_value()) {
+      return Append(ReadFieldInstruction{
+          .cursor = binding->cursor, .field = *binding->rowid_field, .output = destination});
+    }
+    return Append(ReadRowIdInstruction{.cursor = binding->cursor, .output = destination});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUnaryValue(const BoundUnaryExpression& unary,
+                                                    RegisterId destination) {
+    if (auto emitted = EmitExpression(unary.operand, destination); !emitted.has_value()) {
+      return emitted;
+    }
+    if (unary.operation == BoundUnaryOperation::kPositive) {
+      return {};
+    }
+    return Append(UnaryInstruction{.operation = ToUnaryOperation(unary.operation),
+                                   .input = destination,
+                                   .output = destination});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitBinaryValue(const BoundBinaryExpression& binary,
+                                                     RegisterId destination) {
+    if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(binary);
+        selected.has_value()) {
+      if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
+        return emitted;
+      }
+      return Append(BinaryInstruction{
+          .operation = ToBinaryOperation(binary.operation),
+          .left = destination,
+          .right = destination,
+          .output = destination,
+      });
+    }
+    const RegisterId left = Home(binary.left);
+    const RegisterId right = Home(binary.right);
+    if (auto emitted = EmitExpression(binary.left, left); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto emitted = EmitExpression(binary.right, right); !emitted.has_value()) {
+      return emitted;
+    }
+    return Append(BinaryInstruction{
+        .operation = ToBinaryOperation(binary.operation),
+        .left = left,
+        .right = right,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitComparisonValue(
+      const BoundComparisonExpression& comparison, RegisterId destination) {
+    const RegisterId left = Home(comparison.left);
+    const RegisterId right = Home(comparison.right);
+    if (auto emitted = EmitExpression(comparison.left, left); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto emitted = EmitExpression(comparison.right, right); !emitted.has_value()) {
+      return emitted;
+    }
+    auto collation = CollationSymbol(comparison.collation);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return Append(CompareInstruction{
+        .comparison = comparison.comparison,
+        .affinity = comparison.affinity,
+        .collation = *collation,
+        .left = left,
+        .right = right,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitScalarCallValue(BoundExpressionId id,
+                                                         const BoundScalarCallExpression& call,
+                                                         RegisterId destination) {
+    const std::optional<RegisterId>& argument_block = call_argument_blocks_[id.value()];
+    if (!argument_block.has_value()) {
+      return std::unexpected(InternalFailure("scalar call has no argument block"));
+    }
+    const RegisterId first = *argument_block;
+    for (std::size_t index = 0; index < call.arguments.size(); ++index) {
+      if (auto emitted = EmitExpression(
+              call.arguments[index], RegisterId{first.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    auto function = FunctionSymbol(call.function);
+    auto collation = CollationSymbol(call.collation);
+    if (!function.has_value()) {
+      return std::unexpected(std::move(function.error()));
+    }
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return Append(CallScalarInstruction{
+        .function = *function,
+        .collation = *collation,
+        .first_argument = first,
+        .argument_count = static_cast<std::uint32_t>(call.arguments.size()),
+        .output = destination,
+    });
+  }
+
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                     RegisterId destination) override {
     if (id.value() >= expressions_.size()) {
@@ -4878,162 +5359,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
         column != nullptr) {
-      if ((grouped_aggregate_query_ || global_representative_query_) &&
-          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
-        const std::optional<RegisterId> source = GroupedColumnRegister(column->column);
-        if (!source.has_value()) {
-          return std::unexpected(InternalFailure("grouped column has no retained source register"));
-        }
-        return Append(CopyInstruction{
-            .input = *source,
-            .output = destination,
-        });
-      }
-      if (!source_snapshot_registers_.empty()) {
-        if (column->column.value() >= source_snapshot_registers_.size() ||
-            column->column.value() >= source_field_real_affinity_.size()) {
-          return std::unexpected(InternalFailure("bound column has no source snapshot field"));
-        }
-        if (auto copied = Append(CopyInstruction{
-                .input = source_snapshot_registers_[column->column.value()],
-                .output = destination,
-            });
-            !copied.has_value()) {
-          return copied;
-        }
-        if (source_field_real_affinity_[column->column.value()]) {
-          return Append(RealAffinityInstruction{
-              .input = destination,
-              .output = destination,
-          });
-        }
-        return {};
-      }
-      if (column->column.value() >= source_field_real_affinity_.size() ||
-          column->column.value() >= source_cursor_fields_.size() ||
-          !source_cursor_fields_[column->column.value()].has_value()) {
-        return std::unexpected(InternalFailure("bound column has no cursor field"));
-      }
-      auto binding = SourceCursor(bound_select_->source_columns()[column->column.value()].source);
-      if (!binding.has_value()) {
-        return std::unexpected(std::move(binding.error()));
-      }
-      if (auto read = Append(ReadFieldInstruction{
-              .cursor = binding->cursor,
-              .field = AssumeValue(source_cursor_fields_[column->column.value()]),
-              .output = destination,
-          });
-          !read.has_value()) {
-        return read;
-      }
-      if (source_field_real_affinity_[column->column.value()]) {
-        return Append(RealAffinityInstruction{
-            .input = destination,
-            .output = destination,
-        });
-      }
-      return {};
+      return EmitColumnValue(*column, destination);
     }
     if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
         rowid != nullptr) {
-      if ((grouped_aggregate_query_ || global_representative_query_) &&
-          aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
-        const std::optional<RegisterId> source = GroupedRowIdRegister(rowid->source);
-        if (!source.has_value()) {
-          return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
-        }
-        return Append(CopyInstruction{
-            .input = *source,
-            .output = destination,
-        });
-      }
-      if (source_rowid_register_.has_value()) {
-        return Append(CopyInstruction{
-            .input = AssumeValue(source_rowid_register_),
-            .output = destination,
-        });
-      }
-      auto binding = SourceCursor(rowid->source);
-      if (!binding.has_value()) {
-        return std::unexpected(std::move(binding.error()));
-      }
-      if (binding->rowid_field.has_value()) {
-        return Append(ReadFieldInstruction{
-            .cursor = binding->cursor,
-            .field = *binding->rowid_field,
-            .output = destination,
-        });
-      }
-      return Append(ReadRowIdInstruction{
-          .cursor = binding->cursor,
-          .output = destination,
-      });
+      return EmitRowIdValue(*rowid, destination);
     }
     if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
         unary != nullptr) {
-      if (auto emitted = EmitExpression(unary->operand, destination); !emitted.has_value()) {
-        return emitted;
-      }
-      if (unary->operation == BoundUnaryOperation::kPositive) {
-        return {};
-      }
-      return Append(UnaryInstruction{
-          .operation = ToUnaryOperation(unary->operation),
-          .input = destination,
-          .output = destination,
-      });
+      return EmitUnaryValue(*unary, destination);
     }
     if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
         binary != nullptr) {
-      if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(*binary);
-          selected.has_value()) {
-        if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
-          return emitted;
-        }
-        return Append(BinaryInstruction{
-            .operation = ToBinaryOperation(binary->operation),
-            .left = destination,
-            .right = destination,
-            .output = destination,
-        });
-      }
-      const RegisterId left = Home(binary->left);
-      const RegisterId right = Home(binary->right);
-      if (auto emitted = EmitExpression(binary->left, left); !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto emitted = EmitExpression(binary->right, right); !emitted.has_value()) {
-        return emitted;
-      }
-      return Append(BinaryInstruction{
-          .operation = ToBinaryOperation(binary->operation),
-          .left = left,
-          .right = right,
-          .output = destination,
-      });
+      return EmitBinaryValue(*binary, destination);
     }
     if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
         comparison != nullptr) {
-      const RegisterId left = Home(comparison->left);
-      const RegisterId right = Home(comparison->right);
-      if (auto emitted = EmitExpression(comparison->left, left); !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto emitted = EmitExpression(comparison->right, right); !emitted.has_value()) {
-        return emitted;
-      }
-      auto collation = CollationSymbol(comparison->collation);
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return Append(CompareInstruction{
-          .comparison = comparison->comparison,
-          .affinity = comparison->affinity,
-          .collation = *collation,
-          .left = left,
-          .right = right,
-          .output = destination,
-      });
+      return EmitComparisonValue(*comparison, destination);
     }
     if (const auto* truth_test = std::get_if<BoundTruthTestExpression>(&expression.payload);
         truth_test != nullptr) {
@@ -5045,34 +5387,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
         call != nullptr) {
-      const std::optional<RegisterId>& argument_block = call_argument_blocks_[id.value()];
-      if (!argument_block.has_value()) {
-        return std::unexpected(InternalFailure("scalar call has no argument block"));
-      }
-      const RegisterId first = AssumeValue(argument_block);
-      for (std::size_t index = 0; index < call->arguments.size(); ++index) {
-        if (auto emitted =
-                EmitExpression(call->arguments[index],
-                               RegisterId{first.value() + static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      auto function = FunctionSymbol(call->function);
-      auto collation = CollationSymbol(call->collation);
-      if (!function.has_value()) {
-        return std::unexpected(std::move(function.error()));
-      }
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return Append(CallScalarInstruction{
-          .function = *function,
-          .collation = *collation,
-          .first_argument = first,
-          .argument_count = static_cast<std::uint32_t>(call->arguments.size()),
-          .output = destination,
-      });
+      return EmitScalarCallValue(id, *call, destination);
     }
     if (const auto* call = std::get_if<BoundAggregateCallExpression>(&expression.payload);
         call != nullptr) {
@@ -5101,6 +5416,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
         collate != nullptr) {
       return EmitExpression(collate->operand, destination);
+    }
+    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
+        subquery != nullptr) {
+      return EmitSubqueryValue(subquery->query, destination);
     }
     return std::unexpected(InternalFailure("bound expression kind is unsupported"));
   }
@@ -5592,9 +5911,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("aggregate core projection width is invalid"));
     }
     for (std::size_t index = 0; index < aggregate_core_->result_columns.size(); ++index) {
-      if (auto emitted = EmitExpression(
+      if (auto emitted = EmitProjectionValue(
               aggregate_core_->result_columns[index].expression,
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+              active_aggregate_output_.has_value() ? active_aggregate_output_->mode
+                                                   : SelectOutputMode::Streaming);
           !emitted.has_value()) {
         return emitted;
       }
@@ -5844,16 +6165,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitGroupedEarlyStopCompletion(
       bool source_row_active) override {
+    if (source_row_active &&
+        (active_aggregate_output_.has_value() ||
+         bound_select_->query().destination != BoundQueryDestination::kClient)) {
+      if (auto closed = EmitCloseReadCursors(cursor_, index_cursor_); !closed.has_value()) {
+        return closed;
+      }
+    }
     if (active_aggregate_output_.has_value()) {
       if (!aggregate_core_stopped_label_.has_value()) {
         return std::unexpected(InternalFailure("active grouped early-stop label is unavailable"));
       }
       const Label stopped = *aggregate_core_stopped_label_;
-      if (source_row_active) {
-        if (auto closed = EmitCloseReadCursors(cursor_, index_cursor_); !closed.has_value()) {
-          return closed;
-        }
-      }
       return EmitJump(stopped);
     }
     return Append(HaltInstruction{});
@@ -6025,12 +6348,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitReadCompletion(std::optional<CursorId> cursor = {},
                                                         std::optional<CursorId> index_cursor = {}) {
-    if (grouped_aggregate_query_) {
-      if (active_aggregate_output_.has_value()) {
-        if (auto closed = EmitCloseReadCursors(cursor, index_cursor); !closed.has_value()) {
-          return closed;
-        }
+    if ((grouped_aggregate_query_ && active_aggregate_output_.has_value()) ||
+        bound_select_->query().destination != BoundQueryDestination::kClient) {
+      if (auto closed = EmitCloseReadCursors(cursor, index_cursor); !closed.has_value()) {
+        return closed;
       }
+    }
+    if (grouped_aggregate_query_) {
       auto input = MakeGroupedAggregateInput();
       if (!input.has_value()) {
         return std::unexpected(std::move(input.error()));
@@ -6200,7 +6524,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("logical projection shape is invalid"));
     }
     for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
-      if (auto emitted = EmitExpression(
+      if (auto emitted = EmitProjectionValue(
               projection->expressions[index],
               RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
           !emitted.has_value()) {
@@ -8595,14 +8919,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitStreamingProjection(const BoundSelectCore& select) {
+  [[nodiscard]] LoweringResult<void> EmitStreamingProjection(
+      const BoundSelectCore& select, SelectOutputMode mode = SelectOutputMode::Streaming) {
     if (select.result_columns.size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("streaming projection width is invalid"));
     }
     for (std::size_t index = 0; index < select.result_columns.size(); ++index) {
-      if (auto emitted = EmitExpression(
+      if (auto emitted = EmitProjectionValue(
               select.result_columns[index].expression,
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)}, mode);
           !emitted.has_value()) {
         return emitted;
       }
@@ -8693,7 +9018,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(InternalFailure("joined ordering destination is incomplete"));
         }
         if (OrderedLayoutUsesInputFields(*output.ordered_layout)) {
-          if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          if (auto projected = EmitStreamingProjection(select, output.mode);
+              !projected.has_value()) {
             return projected;
           }
           if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
@@ -8707,7 +9033,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!output.materialized_target.has_value()) {
           return std::unexpected(InternalFailure("joined set destination is incomplete"));
         }
-        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        if (auto projected = EmitStreamingProjection(select, output.mode); !projected.has_value()) {
           return projected;
         }
         return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
@@ -9495,7 +9821,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitExpression(
+        if (auto emitted = EmitProjectionValue(
                 row[index],
                 RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
@@ -9875,7 +10201,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return filters;
       }
       if (complete_row) {
-        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Ordered);
+            !projected.has_value()) {
           return projected;
         }
         if (auto membership = EmitStreamingMembership(core, *advance); !membership.has_value()) {
@@ -9906,7 +10233,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return filters;
       }
       if (complete_row) {
-        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Ordered);
+            !projected.has_value()) {
           return projected;
         }
         if (auto membership = EmitStreamingMembership(core, *skipped); !membership.has_value()) {
@@ -12087,7 +12415,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
         return filters;
       }
-      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+      if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
+          !projected.has_value()) {
         return projected;
       }
       if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
@@ -12112,7 +12441,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto filters = EmitStreamingFilters(core, *after); !filters.has_value()) {
         return filters;
       }
-      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+      if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
+          !projected.has_value()) {
         return projected;
       }
       if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
@@ -12638,7 +12968,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       const std::vector<BoundExpressionId>& row = values->rows.front();
       for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitExpression(
+        if (auto emitted = EmitProjectionValue(
                 row[index],
                 RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
@@ -13732,20 +14062,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return table_scan_ != nullptr || rowid_lookup_ != nullptr || index_scan_ != nullptr;
   }
 
-  struct NamedSymbol {
-    std::string name;
-    SymbolId id;
-  };
-
   enum class OrderingRuntime : std::uint8_t {
     kNone,
     kSorter,
     kTopN,
   };
 
-  const PhysicalPlan* read_plan_ = nullptr;
-  const LogicalPlan* logical_plan_ = nullptr;
-  const BoundSelect* bound_select_ = nullptr;
+  std::optional<PhysicalQueryView> read_query_;
+  std::optional<LogicalQueryView> logical_query_;
+  std::optional<BoundQueryView> bound_query_;
+  const PhysicalPlan* read_owner_ = nullptr;
+  const PhysicalQueryView* read_plan_ = nullptr;
+  const LogicalQueryView* logical_plan_ = nullptr;
+  const BoundQueryView* bound_select_ = nullptr;
   const PhysicalMutationPlan* mutation_plan_ = nullptr;
   const BoundInsert* bound_insert_ = nullptr;
   const BoundDelete* bound_delete_ = nullptr;
@@ -13761,6 +14090,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::span<const BoundAggregateInvocation> aggregate_invocations_;
   std::span<const BoundSourceColumn> source_columns_;
   ProgramLimits limits_;
+  StatementLoweringState& statement_;
+  std::optional<Label> subquery_completion_;
 
   const PhysicalNode* leaf_ = nullptr;
   const PhysicalTableScanNode* table_scan_ = nullptr;
@@ -13802,11 +14133,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<RecordComparisonId> ordered_comparison_;
   std::optional<RecordComparisonId> ordered_full_comparison_;
 
-  std::size_t next_register_ = 0;
+  std::size_t& next_register_;
   std::uint32_t register_count_ = 0;
   std::uint32_t parameter_count_ = 0;
   RegisterId result_block_first_{0};
-  std::vector<std::optional<RegisterId>> call_argument_blocks_;
+  std::vector<std::optional<RegisterId>>& call_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_result_registers_;
   std::vector<std::optional<AggregateId>> aggregate_descriptors_;
@@ -13855,20 +14186,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::vector<RegisterId> global_representative_registers_;
   std::vector<AggregateLeafRegister> global_representative_register_map_;
 
-  std::optional<ProgramBuilder> builder_;
-  std::vector<std::optional<ConstantId>> literal_constants_;
-  std::optional<ConstantId> null_constant_;
-  std::optional<ConstantId> zero_constant_;
-  std::optional<ConstantId> one_constant_;
-  std::optional<ConstantId> maximum_integer_constant_;
+  std::optional<ProgramBuilder>& builder_;
+  std::vector<std::optional<ConstantId>>& literal_constants_;
+  std::optional<ConstantId>& null_constant_;
+  std::optional<ConstantId>& zero_constant_;
+  std::optional<ConstantId>& one_constant_;
+  std::optional<ConstantId>& maximum_integer_constant_;
   std::optional<ConstantId> indexed_min_max_null_constant_;
   std::optional<ConstantId> grouped_representative_replace_constant_;
   std::optional<ConstantId> global_representative_replace_constant_;
-  std::vector<SymbolId> collation_symbols_;
-  std::vector<SymbolId> function_symbols_;
-  std::vector<SymbolId> aggregate_function_symbols_;
-  std::vector<NamedSymbol> symbol_names_;
-  std::optional<SymbolId> binary_symbol_;
+  std::vector<SymbolId>& collation_symbols_;
+  std::vector<SymbolId>& function_symbols_;
+  std::vector<SymbolId>& aggregate_function_symbols_;
+  std::vector<NamedSymbol>& symbol_names_;
+  std::optional<SymbolId>& binary_symbol_;
   std::optional<CursorId> cursor_;
   std::optional<CursorId> index_cursor_;
   std::optional<SorterId> sorter_;
@@ -13942,7 +14273,8 @@ LowerPlanResult LowerPlan(const PhysicalPlan& plan, ProgramLimits limits) {
         .detail = "physical plan is invalid",
     });
   }
-  return PlanLowerer(plan, limits).Run();
+  StatementLoweringState state;
+  return PlanLowerer(plan, limits, state).Run();
 }
 
 LowerPlanResult LowerPlan(const PhysicalMutationPlan& plan, ProgramLimits limits) {
@@ -13952,7 +14284,8 @@ LowerPlanResult LowerPlan(const PhysicalMutationPlan& plan, ProgramLimits limits
         .detail = "physical mutation plan is invalid",
     });
   }
-  return PlanLowerer(plan, limits).Run();
+  StatementLoweringState state;
+  return PlanLowerer(plan, limits, state).Run();
 }
 
 }  // namespace modern_sqlite

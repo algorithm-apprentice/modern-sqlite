@@ -37,7 +37,7 @@ class GlobalAggregateAccessServices {
 
 struct GlobalAggregateAccessInput {
   ProgramBuilder* builder = nullptr;
-  const BoundSelect* bound_select = nullptr;
+  const BoundQueryView* bound_select = nullptr;
   std::span<const BoundExpression> expressions{};
   std::span<const BoundAggregateFunction> aggregate_functions{};
   std::span<const BoundAggregateInvocation> aggregate_invocations{};

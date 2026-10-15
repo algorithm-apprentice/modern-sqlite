@@ -886,32 +886,32 @@ TEST(VfsContracts, ValidatesSleepAndForwardsCurrentTime) {
 TEST(VfsContracts, PreservesBackendFailures) {
   const Error injected = IoError();
 
-  FakeVfs open_vfs;
+  FakeVfs open_vfs{};
   open_vfs.open_error = injected;
   const auto open = open_vfs.Open("database.sqlite", ReadWriteMainDatabaseOptions());
 
-  FakeVfs delete_vfs;
+  FakeVfs delete_vfs{};
   delete_vfs.delete_error = injected;
   const auto deleted = delete_vfs.Delete("database.sqlite", DirectorySync::kNo);
 
-  FakeVfs access_vfs;
+  FakeVfs access_vfs{};
   access_vfs.access_error = injected;
   const auto access = access_vfs.Access("database.sqlite", FileAccessQuery::kExists);
 
-  FakeVfs path_vfs;
+  FakeVfs path_vfs{};
   path_vfs.full_path_error = injected;
   const auto full_path = path_vfs.FullPath("database.sqlite");
 
-  FakeVfs randomness_vfs;
+  FakeVfs randomness_vfs{};
   randomness_vfs.randomness_error = injected;
   ByteBuffer random_bytes{ByteCount{4}};
   const auto randomness = randomness_vfs.RandomBytes(random_bytes.mutable_view());
 
-  FakeVfs sleep_vfs;
+  FakeVfs sleep_vfs{};
   sleep_vfs.sleep_error = injected;
   const auto sleep = sleep_vfs.SleepFor(std::chrono::microseconds{1});
 
-  FakeVfs time_vfs;
+  FakeVfs time_vfs{};
   time_vfs.time_error = injected;
   const auto time = time_vfs.CurrentTime();
 

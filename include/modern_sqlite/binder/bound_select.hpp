@@ -50,6 +50,7 @@ struct BoundCollationIdTag;
 struct BoundFunctionIdTag;
 struct BoundAggregateFunctionIdTag;
 struct BoundAggregateInvocationIdTag;
+struct BoundQueryIdTag;
 
 using BoundExpressionId = BoundId<BoundExpressionIdTag>;
 using BoundSourceId = BoundId<BoundSourceIdTag>;
@@ -59,6 +60,7 @@ using BoundCollationId = BoundId<BoundCollationIdTag>;
 using BoundFunctionId = BoundId<BoundFunctionIdTag>;
 using BoundAggregateFunctionId = BoundId<BoundAggregateFunctionIdTag>;
 using BoundAggregateInvocationId = BoundId<BoundAggregateInvocationIdTag>;
+using BoundQueryId = BoundId<BoundQueryIdTag>;
 
 enum class BoundSourceKind : std::uint8_t {
   kCatalogTable,
@@ -213,6 +215,10 @@ struct BoundAggregateCallExpression {
   BoundAggregateInvocationId invocation;
 };
 
+struct BoundSubqueryExpression {
+  BoundQueryId query;
+};
+
 struct BoundCoalesceExpression {
   std::vector<BoundExpressionId> arguments{};
 };
@@ -236,7 +242,8 @@ using BoundExpressionPayload =
                  BoundParameterExpression, BoundUnaryExpression, BoundBinaryExpression,
                  BoundComparisonExpression, BoundTruthTestExpression, BoundAliasReferenceExpression,
                  BoundScalarCallExpression, BoundCoalesceExpression, BoundConditionalExpression,
-                 BoundLikelihoodExpression, BoundCollateExpression, BoundAggregateCallExpression>;
+                 BoundLikelihoodExpression, BoundCollateExpression, BoundAggregateCallExpression,
+                 BoundSubqueryExpression>;
 
 struct BoundExpression {
   SourceSpan span{};
@@ -256,6 +263,9 @@ struct BoundSourceLeafIdentity {
 [[nodiscard]] std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
     const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept;
 
+[[nodiscard]] bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
+                                               BoundExpressionId id) noexcept;
+
 namespace binder_detail {
 template <typename Visitor>
 [[nodiscard]] bool VisitSourceOwners(std::span<const BoundExpression> expressions,
@@ -273,7 +283,8 @@ template <typename Visitor>
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
-                      std::is_same_v<Payload, BoundParameterExpression>) {
+                      std::is_same_v<Payload, BoundParameterExpression> ||
+                      std::is_same_v<Payload, BoundSubqueryExpression>) {
           return true;
         } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                              std::is_same_v<Payload, BoundTruthTestExpression> ||
@@ -315,6 +326,7 @@ enum class BoundExpressionKind : std::uint8_t {
   kLikelihood,
   kCollate,
   kAggregateCall,
+  kSubquery,
 };
 
 [[nodiscard]] BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept;
@@ -392,6 +404,24 @@ using BoundQueryCore = std::variant<BoundSelectCore, BoundValuesCore>;
 struct BoundLimit {
   BoundExpressionId limit;
   std::optional<BoundExpressionId> offset{};
+};
+
+enum class BoundQueryDestination : std::uint8_t {
+  kClient,
+  kScalar,
+  kExists,
+};
+
+struct BoundQuery {
+  BoundQueryId id{0};
+  BoundQueryDestination destination = BoundQueryDestination::kClient;
+  std::size_t core_begin = 0;
+  std::size_t core_count = 0;
+  std::vector<CompoundOperator> compound_operators{};
+  std::vector<BoundCollationId> compound_collations{};
+  std::vector<BoundResultColumn> output_columns{};
+  std::vector<BoundOrderingTerm> order_by{};
+  std::optional<BoundLimit> limit{};
 };
 
 enum class BindErrorCode : std::uint8_t {
@@ -491,6 +521,9 @@ class BoundSelect final {
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] const BoundQuery& root_query() const noexcept;
+  [[nodiscard]] const BoundQuery& query(BoundQueryId id) const noexcept;
+  [[nodiscard]] std::size_t query_count() const noexcept;
   [[nodiscard]] std::span<const BoundQueryCore> query_cores() const noexcept;
   [[nodiscard]] std::span<const CompoundOperator> compound_operators() const noexcept;
   [[nodiscard]] std::span<const BoundCollationId> compound_collations() const noexcept;
@@ -507,6 +540,78 @@ class BoundSelect final {
   explicit BoundSelect(std::unique_ptr<Impl> impl) noexcept;
 
   std::unique_ptr<Impl> impl_;
+};
+
+class BoundQueryView final {
+ public:
+  explicit BoundQueryView(const BoundSelect& owner, BoundQueryId id = BoundQueryId{0}) noexcept
+      : owner_(&owner), id_(id) {}
+
+  [[nodiscard]] bool valid() const noexcept {
+    return owner_->valid() && id_.value() < owner_->query_count();
+  }
+  [[nodiscard]] const BoundSelect& owner() const noexcept { return *owner_; }
+  [[nodiscard]] const BoundQuery& query() const noexcept { return owner_->query(id_); }
+  [[nodiscard]] Utf8View source() const noexcept { return owner_->source(); }
+  [[nodiscard]] const CatalogSnapshot* catalog() const noexcept { return owner_->catalog(); }
+  [[nodiscard]] std::span<const BoundQueryCore> query_cores() const noexcept {
+    return owner_->query_cores().subspan(query().core_begin, query().core_count);
+  }
+  [[nodiscard]] std::span<const BoundTableSource> table_sources() const noexcept {
+    const auto* core = std::get_if<BoundSelectCore>(&query_cores().front());
+    return core != nullptr ? std::span<const BoundTableSource>{core->table_sources}
+                           : std::span<const BoundTableSource>{};
+  }
+  [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept {
+    const auto* core = std::get_if<BoundSelectCore>(&query_cores().front());
+    return core != nullptr ? core->where : std::nullopt;
+  }
+  [[nodiscard]] std::span<const BoundSourceColumn> source_columns() const noexcept {
+    return owner_->source_columns();
+  }
+  [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept {
+    return owner_->parameters();
+  }
+  [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept {
+    return owner_->expressions();
+  }
+  [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept {
+    return owner_->expression(id);
+  }
+  [[nodiscard]] std::span<const std::string> registered_collations() const noexcept {
+    return owner_->registered_collations();
+  }
+  [[nodiscard]] std::span<const BoundCollation> collations() const noexcept {
+    return owner_->collations();
+  }
+  [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept {
+    return owner_->functions();
+  }
+  [[nodiscard]] std::span<const BoundAggregateFunction> aggregate_functions() const noexcept {
+    return owner_->aggregate_functions();
+  }
+  [[nodiscard]] std::span<const BoundAggregateInvocation> aggregate_invocations() const noexcept {
+    return owner_->aggregate_invocations();
+  }
+  [[nodiscard]] std::span<const CompoundOperator> compound_operators() const noexcept {
+    return query().compound_operators;
+  }
+  [[nodiscard]] std::span<const BoundCollationId> compound_collations() const noexcept {
+    return query().compound_collations;
+  }
+  [[nodiscard]] std::span<const BoundResultColumn> result_columns() const noexcept {
+    return query().output_columns;
+  }
+  [[nodiscard]] std::span<const BoundOrderingTerm> order_by() const noexcept {
+    return query().order_by;
+  }
+  [[nodiscard]] const BoundLimit* limit() const noexcept {
+    return query().limit.has_value() ? &*query().limit : nullptr;
+  }
+
+ private:
+  const BoundSelect* owner_;
+  BoundQueryId id_;
 };
 
 using BindSelectResult = std::expected<BoundSelect, BindError>;

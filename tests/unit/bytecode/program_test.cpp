@@ -528,7 +528,8 @@ TEST(BytecodeProgramTest, MergesPhysicalAndPublishedNullRowsWithoutWeakeningUnpo
   };
 }
 
-[[nodiscard]] ProgramInput PrivateCapabilitySubroutineInput(std::span<const Instruction> body) {
+[[nodiscard]] ProgramInput PrivateCapabilitySubroutineInput(
+    std::span<const Instruction> body, std::span<const Instruction> caller_body = {}) {
   ProgramInput input;
   input.register_count = 1;
   input.constants.push_back(SqlValue::Integer(1));
@@ -538,15 +539,16 @@ TEST(BytecodeProgramTest, MergesPhysicalAndPublishedNullRowsWithoutWeakeningUnpo
   input.relations.push_back(OrderingDescriptor());
   input.aggregates.push_back(
       AggregateDescriptor{.function = Symbol(1), .collation = Symbol(0), .argument_count = 0});
-  input.instructions = {
-      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
-      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
-      HaltInstruction{},
-  };
+  input.instructions.reserve(4U + caller_body.size() + body.size());
+  input.instructions.push_back(LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)});
+  input.instructions.insert(input.instructions.end(), caller_body.begin(), caller_body.end());
+  input.instructions.push_back(CallSubroutineInstruction{.subroutine = SubroutineId{0}});
+  input.instructions.push_back(HaltInstruction{});
+  const auto entry = static_cast<std::uint32_t>(input.instructions.size());
   input.instructions.insert(input.instructions.end(), body.begin(), body.end());
   input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
   input.subroutines.push_back(SubroutineDescriptor{
-      .entry = Address(3),
+      .entry = Address(entry),
       .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
       .kind = SubroutineKind::kRead,
   });
@@ -571,11 +573,7 @@ TEST(BytecodeProgramTest, AppliesPrivateOwnershipAndClosedReturnToEveryTemporary
     const auto valid = PrivateCapabilitySubroutineInput(body);
     EXPECT_TRUE(BytecodeProgram::Create(valid).has_value());
 
-    auto shared = PrivateCapabilitySubroutineInput(body);
-    shared.instructions.insert(shared.instructions.begin() + 1, body.begin(), body.end());
-    const auto added = static_cast<std::uint32_t>(body.size());
-    shared.subroutines[0].entry = Address(shared.subroutines[0].entry.value() + added);
-    shared.subroutines[0].end = Address(shared.subroutines[0].end.value() + added);
+    const auto shared = PrivateCapabilitySubroutineInput(body, body);
     const auto cross_owner = BytecodeProgram::Create(shared);
     ASSERT_FALSE(cross_owner.has_value());
     EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, cross_owner.error().code);

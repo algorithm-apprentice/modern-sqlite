@@ -87,3 +87,4 @@ their corresponding implementation begins.
 81. [ADR-0081: Parameterized Joined Rowid Access](0081-parameterized-joined-rowid-access.md)
 82. [ADR-0082: Verified Static Value Subroutines](0082-verified-static-value-subroutines.md)
 83. [ADR-0083: Private Read Subroutine Capabilities](0083-private-read-subroutine-capabilities.md)
+84. [ADR-0084: Bound Query Ownership for Nested SELECT](0084-bound-query-ownership-for-nested-select.md)

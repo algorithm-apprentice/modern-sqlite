@@ -1,0 +1,1 @@
+SELECT (SELECT id FROM model_rows ORDER BY id DESC LIMIT 2 OFFSET 1),EXISTS(SELECT sum(value) FROM model_rows WHERE id<5),(VALUES((SELECT 7)))

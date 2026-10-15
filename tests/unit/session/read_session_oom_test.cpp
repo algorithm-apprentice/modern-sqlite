@@ -277,7 +277,7 @@ struct TemporaryConsumerCase {
   std::string_view sql;
 };
 
-constexpr std::array<TemporaryConsumerCase, 15> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 18> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -340,6 +340,16 @@ constexpr std::array<TemporaryConsumerCase, 15> kTemporaryConsumers{
                           .sql =
                               "SELECT count(a.id) FROM model_rows a NATURAL FULL JOIN model_rows b "
                               "WHERE id<=?1 UNION SELECT ?2 LIMIT 1"},
+    TemporaryConsumerCase{.name = "scalar_order",
+                          .sql = "SELECT (SELECT label FROM model_rows WHERE id<=?1 "
+                                 "ORDER BY label DESC LIMIT 2 OFFSET ?2/8)"},
+    TemporaryConsumerCase{.name = "scalar_grouped",
+                          .sql = "SELECT (SELECT group_concat(label ORDER BY id DESC) "
+                                 "FROM model_rows WHERE id<=?1 GROUP BY id%3 ORDER BY 1 LIMIT ?2)"},
+    TemporaryConsumerCase{.name = "exists_intersect",
+                          .sql = "SELECT EXISTS(SELECT label FROM model_rows WHERE id<=?1 "
+                                 "INTERSECT SELECT label FROM model_rows WHERE id<=?2 "
+                                 "LIMIT -1 OFFSET 1)"},
 };
 
 inline constexpr std::size_t kAllocationPartitions = 4;
@@ -554,50 +564,56 @@ int main(int argc, char** argv) try {
     }
   }
 
-  constexpr std::string_view kJoinedPrepareSql =
-      "SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
-      "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3";
+  constexpr std::array kArenaPrepareSql{
+      std::string_view{"SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
+                       "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3"},
+      std::string_view{
+          "SELECT (SELECT (SELECT label FROM model_rows ORDER BY label DESC LIMIT ?1)),"
+          "EXISTS(SELECT sum(id) FROM model_rows HAVING sum(id)>?2)"},
+  };
   const std::string joined_path = ReadCompatibilityFixturePath().string();
-  std::size_t joined_prepare_allocations = 0;
-  {
-    auto session = ReadSession::Open(joined_path);
-    if (!session.has_value()) {
+  for (const std::string_view prepare_sql : kArenaPrepareSql) {
+    std::size_t joined_prepare_allocations = 0;
+    {
+      auto session = ReadSession::Open(joined_path);
+      if (!session.has_value()) {
+        return 1;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      const auto prepared = session->Prepare(Utf8View{prepare_sql});
+      if (!prepared.has_value() || !prepared->statement.has_value()) {
+        return 1;
+      }
+      joined_prepare_allocations = allocation_index.load(std::memory_order_relaxed);
+    }
+    if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
       return 1;
     }
-    allocation_index.store(0, std::memory_order_relaxed);
-    const auto prepared = session->Prepare(Utf8View{kJoinedPrepareSql});
-    if (!prepared.has_value() || !prepared->statement.has_value()) {
-      return 1;
-    }
-    joined_prepare_allocations = allocation_index.load(std::memory_order_relaxed);
-  }
-  if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < joined_prepare_allocations; ++failure) {
-    const auto locks = std::make_shared<LockTrackingState>();
-    auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
-    if (!session.has_value()) {
-      return 1;
-    }
-    allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool returned_oom = false;
-    try {
-      const auto prepared = session->Prepare(Utf8View{kJoinedPrepareSql});
-      returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
-    } catch (...) {
+    for (std::size_t failure = 0; failure < joined_prepare_allocations; ++failure) {
+      const auto locks = std::make_shared<LockTrackingState>();
+      auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
+      if (!session.has_value()) {
+        return 1;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool returned_oom = false;
+      try {
+        const auto prepared = session->Prepare(Utf8View{prepare_sql});
+        returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
+      } catch (...) {
+        inject_failure = false;
+        return 1;
+      }
       inject_failure = false;
-      return 1;
-    }
-    inject_failure = false;
-    if (!returned_oom || locks->shared_lock_held) {
-      return 1;
-    }
-    const auto recovered = session->Prepare(Utf8View{kJoinedPrepareSql});
-    if (!recovered.has_value() || !recovered->statement.has_value()) {
-      return 1;
+      if (!returned_oom || locks->shared_lock_held) {
+        return 1;
+      }
+      const auto recovered = session->Prepare(Utf8View{prepare_sql});
+      if (!recovered.has_value() || !recovered->statement.has_value()) {
+        return 1;
+      }
     }
   }
 

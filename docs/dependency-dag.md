@@ -130,8 +130,9 @@ ADR-0053. The shared spill-capable sorter and specialized bounded ordering
 relation arrive with ORDER BY. The general keyed membership/materialization
 relation arrives with DISTINCT and compounds, then these capabilities are
 reused by grouping, automatic join indexes, recursive CTEs, and windows.
-Multi-source and joined-output scopes precede joins; verified subroutines and
-coroutines precede subqueries, views, CTEs, and triggers. Persistent
+Multi-source and joined-output scopes precede joins. Verified subroutines
+precede scalar and EXISTS queries; coroutine prerequisites remain attached to
+streaming derived-query, view, and CTE consumers. Persistent
 constraints, generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

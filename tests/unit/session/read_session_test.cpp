@@ -787,6 +787,222 @@ TEST(ReadSession, PreservesBothFullJoinSidesAndPublishesMergedKeys) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(merged.Step()));
 }
 
+TEST(ReadSession, ExecutesScalarAndExistsQueriesThroughPrivateReadCalls) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT (SELECT id FROM items ORDER BY id DESC),"
+                                             "EXISTS(SELECT abs(-9223372036854775808) FROM items)");
+  ASSERT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("INTEGER", statement.result_columns()[0].declared_type);
+  EXPECT_EQ(std::nullopt, statement.result_columns()[1].declared_type);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(4, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(4, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+}
+
+TEST(ReadSession, IgnoresExistsDistinctProjectionWithoutIgnoringBinding) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT EXISTS(SELECT DISTINCT abs(-9223372036854775808) FROM items),"
+                       "EXISTS(SELECT DISTINCT 1 COLLATE missing FROM items)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_FALSE(session.Prepare(Utf8View{"SELECT EXISTS(SELECT missing FROM items)"}).has_value());
+}
+
+TEST(ReadSession, BindsButDoesNotExecuteIgnoredExistsOrdering) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT EXISTS(SELECT 1 FROM items ORDER BY abs(-9223372036854775808)),"
+                       "EXISTS(SELECT 1 FROM items WHERE 0 ORDER BY sum(9223372036854775807)),"
+                       "EXISTS(SELECT 1 ORDER BY 1 COLLATE missing)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(0, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_FALSE(session.Prepare(Utf8View{"SELECT EXISTS(SELECT 1 ORDER BY missing)"}).has_value());
+}
+
+TEST(ReadSession, OnlyNameBindsDiscardedNestedExistsExpressions) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT EXISTS(SELECT (SELECT 1,2)),"
+                       "EXISTS(SELECT (SELECT 1 ORDER BY 1 COLLATE missing)),"
+                       "EXISTS(SELECT (SELECT DISTINCT 1 COLLATE missing)),"
+                       "EXISTS(SELECT 1 ORDER BY (SELECT 1,2)),"
+                       "EXISTS(SELECT 1 FROM items ORDER BY sum((SELECT 1,2))),"
+                       "EXISTS(SELECT (1 COLLATE missing)=2)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(6U, statement.row().size());
+  for (const SqlValue& value : statement.row()) {
+    EXPECT_EQ(1, IntegerValue(value));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  for (const std::string_view sql : {
+           "SELECT EXISTS(SELECT (SELECT missing))",
+           "SELECT EXISTS(SELECT sum((SELECT 1,2)) FROM items)",
+           "SELECT EXISTS(SELECT (SELECT 1,2) AS x FROM items GROUP BY x)",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+}
+
+TEST(ReadSession, PreservesScalarEmptyGroupingSetLimitAndOffsetSemantics) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT (SELECT id FROM items WHERE 0),"
+                       "(SELECT count() FROM items WHERE 0),"
+                       "EXISTS(SELECT count() FROM items WHERE 0),"
+                       "EXISTS(SELECT count() FROM items WHERE 0 GROUP BY name),"
+                       "(SELECT id FROM model_rows ORDER BY id DESC LIMIT 2 OFFSET 1),"
+                       "(SELECT 1 UNION SELECT 2 ORDER BY 1 DESC),"
+                       "(SELECT 8 LIMIT 0),(VALUES((SELECT id FROM items)))");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+  EXPECT_EQ(0, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(0, IntegerValue(statement.row()[3]));
+  EXPECT_EQ(31, IntegerValue(statement.row()[4]));
+  EXPECT_EQ(2, IntegerValue(statement.row()[5]));
+  EXPECT_EQ(SqlValueType::kNull, statement.row()[6].type());
+  EXPECT_EQ(1, IntegerValue(statement.row()[7]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, KeepsUnreachedSubqueryCallsLazyAndResetsBoundValues) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement lazy =
+      PrepareStatement(session, "SELECT coalesce(5,(SELECT abs(-9223372036854775808))) FROM items");
+  for (std::size_t row = 0; row < 4U; ++row) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(lazy.Step()));
+    EXPECT_EQ(5, IntegerValue(lazy.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(lazy.Step()));
+  ReadStatement empty = PrepareStatement(
+      session, "SELECT id FROM items WHERE 0 AND (SELECT abs(-9223372036854775808))");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(empty.Step()));
+  ReadStatement bound = PrepareStatement(session, "SELECT (SELECT ?1) FROM items");
+  RequireStatus(bound.Bind(1, SqlValue::Integer(9)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(bound.Step()));
+  EXPECT_EQ(9, IntegerValue(bound.row()[0]));
+  RequireStatus(bound.Reset());
+  RequireStatus(bound.Bind(1, SqlValue::Integer(17)));
+  for (std::size_t row = 0; row < 4U; ++row) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(bound.Step()));
+    EXPECT_EQ(17, IntegerValue(bound.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(bound.Step()));
+}
+
+TEST(ReadSession, KeepsParentAndChildAggregateCursorScopesDisjoint) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT sum((SELECT id FROM items WHERE id=2)),"
+                                             "(SELECT sum(id) FROM items),count() FROM model_rows");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(64, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(10, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(32, IntegerValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  ReadStatement grouped =
+      PrepareStatement(session, "SELECT (SELECT count() FROM items) FROM model_rows GROUP BY id%3");
+  for (std::size_t group = 0; group < 3U; ++group) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(grouped.Step()));
+    EXPECT_EQ(4, IntegerValue(grouped.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(grouped.Step()));
+}
+
+TEST(ReadSession, UsesThePinnedScalarCompoundMetadataExpression) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT (SELECT id FROM items UNION ALL SELECT abs(-9223372036854775808))");
+  ASSERT_EQ(1U, statement.result_columns().size());
+  EXPECT_EQ(std::nullopt, statement.result_columns()[0].declared_type);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, DoesNotRequireUnusedScalarUnionComparisonCollations) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT (SELECT 1 COLLATE missing UNION SELECT 2),"
+                                             "EXISTS(SELECT 1 COLLATE missing UNION SELECT 2)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, ExecutesTheAcceptedNestedJoinExpressionDepthBoundary) {
+  constexpr std::size_t kAcceptedOnTerms = 998;
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  std::string sql = "SELECT (SELECT 1 FROM items a JOIN items b ON 1";
+  for (std::size_t term = 1; term < kAcceptedOnTerms; ++term) {
+    sql.append(" AND 1");
+  }
+  sql.push_back(')');
+  ReadStatement statement = PrepareStatement(session, sql);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  sql.insert(sql.size() - 1U, " AND 1");
+  const auto rejected = session.Prepare(Utf8View{sql});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
+TEST(ReadSession, MatchesIndependentScalarAndExistsRangeModelsAcrossRebindings) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const bool reverse : {false, true}) {
+    ReadStatement statement = PrepareStatement(
+        session, std::string{"SELECT (SELECT id FROM model_rows WHERE id>=?1 ORDER BY id "} +
+                     (reverse ? "DESC" : "ASC") +
+                     " LIMIT ?2 OFFSET ?3),"
+                     "EXISTS(SELECT label FROM model_rows WHERE id>=?1 LIMIT ?2 OFFSET ?3)");
+    for (const std::int64_t threshold : {0, 1, 2, 31, 32, 33}) {
+      for (const std::int64_t limit : {0, 1, 5, -1}) {
+        for (const std::int64_t offset : {-3, 0, 1, 32}) {
+          SCOPED_TRACE(::testing::Message{} << reverse << '/' << threshold << '/' << limit << '/'
+                                            << offset);
+          RequireStatus(statement.Reset());
+          RequireStatus(statement.Bind(1, SqlValue::Integer(threshold)));
+          RequireStatus(statement.Bind(2, SqlValue::Integer(limit)));
+          RequireStatus(statement.Bind(3, SqlValue::Integer(offset)));
+          const std::int64_t first = threshold > 1 ? threshold : 1;
+          const std::int64_t count = first <= 32 ? 33 - first : 0;
+          const std::int64_t skipped = offset > 0 ? offset : 0;
+          const bool produces = limit != 0 && skipped < count;
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          if (produces) {
+            EXPECT_EQ(reverse ? 32 - skipped : first + skipped, IntegerValue(statement.row()[0]));
+          } else {
+            EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+          }
+          EXPECT_EQ(produces ? 1 : 0, IntegerValue(statement.row()[1]));
+          EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+        }
+      }
+    }
+  }
+}
+
 TEST(ReadSession, PreservesFullMergedAffinityCollationAndPhysicalSubgroups) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement affinity =
