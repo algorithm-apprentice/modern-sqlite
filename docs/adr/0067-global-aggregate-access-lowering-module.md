@@ -107,6 +107,11 @@ ADR-0086 shares the stateless index-rowid/table-position emission through
 that existing internal helper boundary. Access selection, traversal, cursor
 ownership, and this service interface remain in their current modules.
 
+ADR-0087 also shares existing borrowed traversal normalization and typed
+seek/end-check emission through this boundary. The global module retains
+its access schedule and specialized MIN/MAX NULL policy; the service
+interface and cursor ownership do not expand.
+
 Virtual dispatch is confined to compile-time plan lowering. The interface and
 input record allocate no memory, so existing allocation and OOM contracts
 remain exact.

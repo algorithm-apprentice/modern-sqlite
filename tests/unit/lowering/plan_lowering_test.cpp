@@ -2470,6 +2470,93 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   }
 }
 
+TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 173}));
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT p.id,b.id,c.id,b.payload,c.payload FROM probe_rows p JOIN key_rows b "
+      "ON b.numeric_key>=p.numeric_key AND b.numeric_key<=3 "
+      "JOIN key_rows c ON c.numeric_key>b.numeric_key AND c.numeric_key<=4 "
+      "ORDER BY p.id,b.id,c.id",
+      catalog);
+  std::vector<const SeekIndexInstruction*> seeks;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
+      seeks.push_back(seek);
+    }
+  }
+  ASSERT_EQ(2U, seeks.size());
+  ASSERT_EQ(5U, program.cursors().size());
+  EXPECT_LE(seeks[0]->first_key.value() + seeks[0]->key_count, seeks[1]->first_key.value());
+  for (const SeekIndexInstruction* seek : seeks) {
+    ASSERT_EQ(1U, seek->key_count);
+    const auto start =
+        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+          const auto* candidate = std::get_if<SeekIndexInstruction>(&instruction);
+          return candidate != nullptr && candidate->cursor == seek->cursor;
+        });
+    const auto end =
+        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+          const auto* candidate = std::get_if<CheckIndexRangeInstruction>(&instruction);
+          return candidate != nullptr && candidate->cursor == seek->cursor;
+        });
+    ASSERT_NE(program.instructions().end(), end);
+    const auto& check = std::get<CheckIndexRangeInstruction>(*end);
+    EXPECT_EQ(seek->first_key, check.first_key);
+    EXPECT_EQ(1U, check.key_count);
+    const auto start_position =
+        static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), start));
+    const auto end_position =
+        static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), end));
+    ASSERT_LT(start_position, end_position);
+    EXPECT_TRUE(std::ranges::any_of(
+        program.instructions().subspan(start_position + 1U, end_position - start_position - 1U),
+        [&](const Instruction& instruction) {
+          const auto* copy = std::get_if<CopyInstruction>(&instruction);
+          return copy != nullptr && copy->output == seek->first_key;
+        }));
+    const auto next =
+        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+          const auto* candidate = std::get_if<NextInstruction>(&instruction);
+          return candidate != nullptr && candidate->cursor == seek->cursor;
+        });
+    ASSERT_NE(program.instructions().end(), next);
+    EXPECT_EQ(end_position, std::get<NextInstruction>(*next).next_target.value());
+  }
+  constexpr std::array<std::array<std::int64_t, 3>, 15> kExpected{{
+      {1, 1, 4},
+      {1, 1, 5},
+      {1, 1, 7},
+      {1, 2, 4},
+      {1, 2, 5},
+      {1, 2, 7},
+      {1, 3, 4},
+      {1, 3, 5},
+      {1, 3, 7},
+      {1, 4, 5},
+      {1, 4, 7},
+      {1, 5, 7},
+      {2, 4, 5},
+      {2, 4, 7},
+      {2, 5, 7},
+  }};
+  const auto rows =
+      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  ASSERT_EQ(kExpected.size(), rows.size());
+  for (std::size_t row = 0; row < rows.size(); ++row) {
+    ASSERT_EQ(5U, rows[row].size());
+    for (std::size_t column = 0; column < kExpected[row].size(); ++column) {
+      EXPECT_EQ(kExpected[row][column], rows[row][column].integer_value());
+    }
+    EXPECT_EQ(SqlValueType::kText, rows[row][3].type());
+    EXPECT_EQ(SqlValueType::kText, rows[row][4].type());
+  }
+}
+
 TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
   PosixVfs vfs;
   auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
@@ -2602,16 +2689,19 @@ TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
-    SCOPED_TRACE(join);
-    const BytecodeProgram program = LowerOrThrow(
-        "SELECT a.Name,b.Score FROM Items a " + std::string{join} + " Items b ON b.Name=a.Name",
-        catalog);
-    ASSERT_EQ(3U, program.cursors().size());
-    EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
-    EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
-    EXPECT_TRUE(
-        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory)
-            .empty());
+    for (const std::string_view operation : {"=", ">", "<"}) {
+      SCOPED_TRACE(::testing::Message() << join << " " << operation);
+      const BytecodeProgram program =
+          LowerOrThrow("SELECT a.Name,b.Score FROM Items a " + std::string{join} +
+                           " Items b ON b.Name" + std::string{operation} + "a.Name",
+                       catalog);
+      ASSERT_EQ(3U, program.cursors().size());
+      EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+      EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
+      EXPECT_TRUE(ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(),
+                              &memory)
+                      .empty());
+    }
   }
 }
 
@@ -2622,24 +2712,52 @@ TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateCo
   const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 161}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  for (const std::string_view predicate : {"b.text_key=p.text_key", "b.numeric_key>p.id"}) {
+    for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
+      SCOPED_TRACE(::testing::Message() << join << " " << predicate);
+      const std::string source = " FROM empty_probe_rows p " + std::string{join} +
+                                 " key_rows b ON " + std::string{predicate};
+      const BytecodeProgram aggregate =
+          LowerOrThrow("SELECT group_concat(b.payload)" + source, catalog);
+      const auto rows = ExecuteRows(aggregate, *pager, catalog->version().generation,
+                                    VmEnvironment::Core(), &memory);
+      ASSERT_EQ(1U, rows.size());
+      EXPECT_EQ(
+          "one,zero-one,zeros-one,alpha,upper-alpha,null-one,null-two,"
+          "beta-null,beta-five,same-one,same-two,null-three",
+          TextBytes(rows[0][0]));
+      const BytecodeProgram scalar =
+          LowerOrThrow("SELECT (SELECT b.payload" + source + ")", catalog);
+      const auto first = ExecuteRows(scalar, *pager, catalog->version().generation,
+                                     VmEnvironment::Core(), &memory);
+      ASSERT_EQ(1U, first.size());
+      EXPECT_EQ("one", TextBytes(first[0][0]));
+    }
+  }
+}
+
+TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsumers) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 175}));
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
-    SCOPED_TRACE(join);
     const std::string source =
-        " FROM empty_probe_rows p " + std::string{join} + " key_rows b ON b.text_key=p.text_key";
-    const BytecodeProgram aggregate =
-        LowerOrThrow("SELECT group_concat(b.payload)" + source, catalog);
+        " FROM empty_probe_rows p " + std::string{join} + " key_rows b ON b.numeric_key>p.id";
+    const BytecodeProgram aggregate = LowerOrThrow("SELECT group_concat(b.id)" + source, catalog);
+    ASSERT_EQ(2U, aggregate.cursors().size());
+    EXPECT_EQ(CursorStorageKind::kIndex, aggregate.cursors()[1].storage);
     const auto rows = ExecuteRows(aggregate, *pager, catalog->version().generation,
                                   VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, rows.size());
-    EXPECT_EQ(
-        "one,zero-one,zeros-one,alpha,upper-alpha,null-one,null-two,"
-        "beta-null,beta-five,same-one,same-two,null-three",
-        TextBytes(rows[0][0]));
-    const BytecodeProgram scalar = LowerOrThrow("SELECT (SELECT b.payload" + source + ")", catalog);
+    EXPECT_EQ("10,11,9,7,5,4,1,2,3,12,6,8", TextBytes(rows[0][0]));
+    const BytecodeProgram scalar = LowerOrThrow("SELECT (SELECT b.id" + source + ")", catalog);
     const auto first =
         ExecuteRows(scalar, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, first.size());
-    EXPECT_EQ("one", TextBytes(first[0][0]));
+    EXPECT_EQ(10, first[0][0].integer_value());
   }
 }
 
@@ -2672,28 +2790,19 @@ TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggreg
   EXPECT_EQ(2, rows[1][0].integer_value());
 }
 
-TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
+TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMinMax) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 165}));
-  constexpr std::size_t kSources = 64;
-  std::string sql = "SELECT t0.id,t63.id,t63.payload FROM items t0";
-  for (std::size_t source = 1; source < kSources; ++source) {
-    const std::string current = "t" + std::to_string(source);
-    const std::string previous = "t" + std::to_string(source - 1U);
-    sql += " JOIN items " + current + " ON " + current + ".category=" + previous +
-           ".category AND " + current + ".payload=" + previous + ".payload";
-  }
-  sql += " WHERE t0.id=1";
-  const BytecodeProgram program = LowerOrThrow(sql, catalog);
-  const auto kinds = InstructionKinds(program);
-  EXPECT_EQ(kSources * 2U - 1U, program.cursors().size());
-  EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekIndex));
-  EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekTableRowId));
-  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
-  EXPECT_LE(program.instructions().size(), kSources * 32U + 128U);
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 177}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT count(b.payload) FROM probe_rows p JOIN key_rows b "
+      "ON b.numeric_key>=p.numeric_key AND b.numeric_key<=5 "
+      "UNION ALL SELECT count(payload) FROM key_rows WHERE text_key>'alpha' "
+      "UNION ALL SELECT max(real_key) FROM key_rows WHERE numeric_key=1 AND payload!='none'",
+      catalog);
   std::optional<RegisterId> rowid;
+  std::size_t lookups = 0;
   for (const Instruction& instruction : program.instructions()) {
     if (const auto* lookup = std::get_if<SeekTableRowIdInstruction>(&instruction);
         lookup != nullptr) {
@@ -2702,24 +2811,74 @@ TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScr
       } else {
         rowid = lookup->key;
       }
+      ++lookups;
     }
   }
+  EXPECT_EQ(7U, lookups);
   const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
-  ASSERT_EQ(1U, rows.size());
-  ASSERT_EQ(3U, rows[0].size());
-  EXPECT_EQ(1, rows[0][0].integer_value());
-  EXPECT_EQ(1, rows[0][1].integer_value());
-  EXPECT_EQ(128U, BlobBytes(rows[0][2]).size());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(12, rows[0][0].integer_value());
+  EXPECT_EQ(4, rows[1][0].integer_value());
+  EXPECT_EQ(SqlValueType::kReal, rows[2][0].type());
+  EXPECT_EQ(1.0, rows[2][0].real_value());
 }
 
-TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
+TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 165}));
+  constexpr std::size_t kSources = 64;
+  for (const bool range : {false, true}) {
+    SCOPED_TRACE(range);
+    std::string sql = "SELECT t0.id,t63.id,t63.payload FROM items t0";
+    for (std::size_t source = 1; source < kSources; ++source) {
+      const std::string current = "t" + std::to_string(source);
+      const std::string previous = "t" + std::to_string(source - 1U);
+      sql += " JOIN items " + current + " ON " + current + ".category" + (range ? ">=" : "=") +
+             previous + ".category";
+      if (range) {
+        sql += " AND " + current + ".category<=" + previous + ".category";
+      }
+      sql += " AND " + current + ".payload=" + previous + ".payload";
+    }
+    sql += " WHERE t0.id=1";
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    const auto kinds = InstructionKinds(program);
+    EXPECT_EQ(kSources * 2U - 1U, program.cursors().size());
+    EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekIndex));
+    EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekTableRowId));
+    EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+    EXPECT_LE(program.instructions().size(), kSources * 32U + 128U);
+    std::optional<RegisterId> rowid;
+    for (const Instruction& instruction : program.instructions()) {
+      if (const auto* lookup = std::get_if<SeekTableRowIdInstruction>(&instruction);
+          lookup != nullptr) {
+        if (rowid.has_value()) {
+          EXPECT_EQ(*rowid, lookup->key);
+        } else {
+          rowid = lookup->key;
+        }
+      }
+    }
+    const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(3U, rows[0].size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(1, rows[0][1].integer_value());
+    EXPECT_EQ(128U, BlobBytes(rows[0][2]).size());
+  }
+}
+
+void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
   PosixVfs source_vfs;
   auto source = TakeValue(Pager::Open(source_vfs, JoinedIndexFixturePath().string()));
   RequireStatus(source->BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*source, CatalogLoadOptions{.generation = 167}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT p.id,b.payload FROM probe_rows p JOIN key_rows b "
-      "ON b.text_key=p.text_key WHERE p.id=2",
+      "ON " +
+          std::string{predicate} + " WHERE p.id=2",
       catalog);
   ASSERT_EQ(3U, program.cursors().size());
   ASSERT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
@@ -2795,6 +2954,14 @@ TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
     }
     RequireStatus(vm.DetachExecutionContext());
     RequireStatus(pager->EndRead());
+  }
+}
+
+TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
+  for (const std::string_view predicate :
+       {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key"}) {
+    SCOPED_TRACE(predicate);
+    ExerciseJoinedIndexSuffixFailures(predicate);
   }
 }
 
