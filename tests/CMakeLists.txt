@@ -224,6 +224,26 @@ foreach(kind allocation oom)
 endforeach()
 
 add_executable(
+  modern_sqlite_btree_cursor_allocation_test
+  unit/storage/btree/cursor_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_btree_cursor_allocation_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+target_include_directories(
+  modern_sqlite_btree_cursor_allocation_test
+  PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+modern_sqlite_set_project_warnings(modern_sqlite_btree_cursor_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_btree_cursor_allocation_test)
+add_test(
+  NAME btree.cursor_allocation
+  COMMAND modern_sqlite_btree_cursor_allocation_test
+)
+set_tests_properties(btree.cursor_allocation PROPERTIES LABELS unit TIMEOUT 10)
+
+add_executable(
   modern_sqlite_btree_writer_internal_oom_test
   unit/storage/btree/writer_internal_oom_test.cpp
 )

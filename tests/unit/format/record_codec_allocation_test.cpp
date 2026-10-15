@@ -88,6 +88,26 @@ int main() try {
 
   fail_allocations.store(true, std::memory_order_relaxed);
   for (std::size_t iteration = 0; iteration < 1024U; ++iteration) {
+    const auto header_size =
+        RecordPrefixView::RequiredHeaderSize(left_encoded->view().first(1), left_encoded->size());
+    const auto prefix_size = RecordPrefixView::RequiredPrefixSize(
+        left_encoded->view(), left_encoded->size(), search_key.size());
+    if (!header_size.has_value() || !prefix_size.has_value()) {
+      fail_allocations.store(false, std::memory_order_relaxed);
+      return 1;
+    }
+    const auto prefix = RecordPrefixView::Parse(left_encoded->view().first(prefix_size->value()),
+                                                left_encoded->size(), search_key.size());
+    if (!prefix.has_value()) {
+      fail_allocations.store(false, std::memory_order_relaxed);
+      return 1;
+    }
+    const auto prefix_index = CompareIndexRecord(*prefix, search_key, columns);
+    if (!prefix_index.has_value() || prefix_index->ordering != std::weak_ordering::greater ||
+        prefix_index->equivalent_prefix) {
+      fail_allocations.store(false, std::memory_order_relaxed);
+      return 1;
+    }
     const Result<std::weak_ordering> records = CompareRecordPrefixes(*left, *right, columns);
     if (!records.has_value() || *records != std::weak_ordering::greater) {
       fail_allocations.store(false, std::memory_order_relaxed);

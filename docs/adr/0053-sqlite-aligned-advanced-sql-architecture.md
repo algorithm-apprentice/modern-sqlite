@@ -323,7 +323,9 @@ introduced without a later measured requirement.
 The initial join slice records a scaling baseline before optimization. A
 later slice in this same node builds SQLite-aligned automatic covering
 indexes in the shared ephemeral relation when fixed-work evidence shows the
-repeated inner scan gap. Bloom filtering is added only with that measured
+repeated inner scan gap. ADR-0088 defines the bounded canonical record-prefix
+comparison prerequisite exposed by automatic-source design review. Bloom
+filtering is added only with that measured
 automatic-index path; a hash join is not substituted for it.
 
 ### 7. Use one aggregate-function contract

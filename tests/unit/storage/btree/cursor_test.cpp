@@ -28,12 +28,15 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
+#include "modern_sqlite/storage/btree/writer.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -738,6 +741,307 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesOverflowBackedCurrentIndexPrefixes)
   std::array<SqlValue, 1> key{SqlValue::Text(std::string(3000, 'm'))};
   EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
   EXPECT_EQ(42, CurrentIndexRowid(cursor));
+}
+
+class BtreePrefixComparisonTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    pager_ =
+        TakeValue(Pager::OpenEphemeral(vfs_, PagerOptions{
+                                                 .empty_database_page_size = ByteCount{kPageSize},
+                                                 .cache_capacity_pages = 4,
+                                             }));
+    RequireStatus(pager_->BeginRead());
+    RequireStatus(pager_->BeginWrite());
+  }
+
+  [[nodiscard]] PageNumber CreateIndex(std::span<const SqlValue> fields) {
+    const ByteBuffer record = TakeValue(EncodeRecord(fields));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns_));
+    RequireStatus(index.InsertEncoded(record.view()));
+    return index.root_page();
+  }
+
+  [[nodiscard]] std::vector<PageNumber> OverflowPages(PageNumber root) {
+    std::optional<PageNumber> next;
+    std::size_t remaining = 0;
+    {
+      const ReadPagePin pin = TakeValue(pager_->ReadPage(root));
+      const BtreePageView page =
+          TakeValue(BtreePageView::Parse(pin.frame().bytes(), root, TestGeometry()));
+      const BtreeCellView cell = TakeValue(page.cell(0));
+      next = cell.first_overflow_page();
+      remaining = cell.payload_size().value() - cell.local_payload().size();
+    }
+    std::vector<PageNumber> pages;
+    const std::size_t capacity = TestGeometry().overflow_payload_capacity().value();
+    while (remaining > 0) {
+      const PageNumber page = TakeOptional(next, "test overflow chain ended early");
+      pages.push_back(page);
+      remaining -= std::min(remaining, capacity);
+      if (remaining > 0) {
+        const ReadPagePin pin = TakeValue(pager_->ReadPage(page));
+        next = TakeValue(OverflowPageView::Parse(pin.frame().bytes(), TestGeometry())).next_page();
+      }
+    }
+    return pages;
+  }
+
+  template <typename Operation>
+  void ExpectCopyBound([[maybe_unused]] std::string_view property,
+                       [[maybe_unused]] std::uint64_t maximum, Operation&& operation) {
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection work;
+    {
+      const instrumentation::ScopedCounterCollection scope{work};
+      std::forward<Operation>(operation)();
+    }
+    const std::uint64_t copied = work.Value(instrumentation::Counter::kBytesCopied);
+    RecordProperty(std::string{property}, std::to_string(copied));
+    EXPECT_LE(copied, maximum);
+    EXPECT_GT(work.Value(instrumentation::Counter::kBtreeComparisons), 0U);
+#else
+    std::forward<Operation>(operation)();
+#endif
+  }
+
+  test::WritePagerFixedVfs vfs_{false};
+  std::unique_ptr<Pager> pager_;
+  const std::array<IndexColumnOrder, 1> columns_{IndexColumnOrder{BinaryCollation()}};
+};
+
+TEST_F(BtreePrefixComparisonTest, DoesNotCopyUncomparedOverflowCoveringFields) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_FALSE(TakeValue(cursor.payload()).is_fully_local());
+
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  for (const bool seek : {false, true}) {
+    SCOPED_TRACE(seek);
+    ExpectCopyBound(seek ? "seek_bytes_copied" : "current_bytes_copied", 8U, [&] {
+      if (seek) {
+        EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+      } else {
+        EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+      }
+    });
+  }
+}
+
+TEST_F(BtreePrefixComparisonTest, BoundsCopiedBytesWhenTheCompleteHeaderIsNotLocal) {
+  std::vector<SqlValue> fields(200);
+  fields.front() = SqlValue::Integer(7);
+  fields.back() = SqlValue::Blob(ByteBuffer{ByteCount{8192}});
+  const ByteBuffer encoded = TakeValue(EncodeRecord(fields));
+  const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
+  const PageNumber root = CreateIndex(fields);
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_GT(complete.header_size().value(), TakeValue(cursor.payload()).local_bytes().size());
+
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  ExpectCopyBound("current_bytes_copied", 2U * complete.header_size().value() + 1U, [&] {
+    EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+  });
+  EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+}
+
+TEST_F(BtreePrefixComparisonTest, CopiesCompleteComparedTextWithoutTheCoveringSuffix) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Text(std::string(1500, 'x')),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const ByteBuffer encoded = TakeValue(EncodeRecord(fields));
+  const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
+  const PageNumber root = CreateIndex(fields);
+  const std::array<IndexColumnOrder, 1> columns{IndexColumnOrder{NoCaseCollation()}};
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const std::array<SqlValue, 1> key{SqlValue::Text(std::string(1500, 'X'))};
+  for (const bool seek : {false, true}) {
+    SCOPED_TRACE(seek);
+    ExpectCopyBound(
+        seek ? "seek_bytes_copied" : "current_bytes_copied", complete.header_size().value() + 1500U,
+        [&] {
+          if (seek) {
+            EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+          } else {
+            EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+          }
+        });
+  }
+  RequireStatus(cursor.ClearPosition());
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+  RequireStatus(cursor.ClearPosition());
+}
+
+TEST_F(BtreePrefixComparisonTest, KeepsFullChainValidationSeparateFromOrdinaryRangeReads) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  const std::vector<PageNumber> pages = OverflowPages(root);
+  ASSERT_GT(pages.size(), 3U);
+  {
+    WritePagePin page = TakeValue(pager_->WritePage(pages[pages.size() - 2U]));
+    Write32(page.mutable_bytes(), 0, 0);
+  }
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const BtreePayloadView payload = TakeValue(cursor.payload());
+  std::array<std::byte, 1> first_byte{};
+  const std::size_t reads_before = vfs_.total_pathless_reads();
+  RequireStatus(cursor.ReadPayload(ByteOffset{0}, first_byte));
+  RequireStatus(cursor.ReadPayload(ByteOffset{payload.size().value()}, {}));
+  EXPECT_EQ(payload.local_bytes()[0], first_byte[0]);
+  EXPECT_EQ(reads_before, vfs_.total_pathless_reads());
+
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  const auto comparison = cursor.CompareCurrent(key);
+  ASSERT_FALSE(comparison.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, comparison.error().code());
+  EXPECT_TRUE(cursor.valid());
+  const auto copied = cursor.CopyPayload();
+  ASSERT_FALSE(copied.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, copied.error().code());
+  const auto seek = cursor.Seek(key, BtreeSeekMode::kEqual);
+  ASSERT_FALSE(seek.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, seek.error().code());
+  EXPECT_FALSE(cursor.valid());
+}
+
+TEST_F(BtreePrefixComparisonTest, ReportsLateReadFailuresEvenWhenTheComparedKeyIsLocal) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  for (const bool seek : {false, true}) {
+    SCOPED_TRACE(seek);
+    const std::size_t reads_before = vfs_.total_pathless_reads();
+    vfs_.FailPathlessReadAfter(2, ErrorCode::kIo);
+    if (seek) {
+      const auto result = cursor.Seek(key, BtreeSeekMode::kEqual);
+      ASSERT_FALSE(result.has_value());
+      EXPECT_EQ(ErrorCode::kIo, result.error().code());
+    } else {
+      const auto result = cursor.CompareCurrent(key);
+      ASSERT_FALSE(result.has_value());
+      EXPECT_EQ(ErrorCode::kIo, result.error().code());
+    }
+    EXPECT_EQ(reads_before + 3U, vfs_.total_pathless_reads());
+    EXPECT_EQ(!seek, cursor.valid());
+  }
+}
+
+TEST_F(BtreePrefixComparisonTest, PrioritizesLateReadFailuresOverStagedFormatErrors) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  ByteBuffer original;
+  {
+    const ReadPagePin pin = TakeValue(pager_->ReadPage(root));
+    original = ByteBuffer::CopyOf(pin.frame().bytes());
+  }
+  const BtreePageView original_page =
+      TakeValue(BtreePageView::Parse(original.view(), root, TestGeometry()));
+  const BtreeCellView original_cell = TakeValue(original_page.cell(0));
+  const auto payload_offset =
+      static_cast<std::size_t>(original_cell.local_payload().data() - original.view().data());
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  const std::array<std::pair<std::size_t, std::byte>, 3> mutations{
+      std::pair{0U, std::byte{0}},
+      std::pair{1U, std::byte{0}},
+      std::pair{2U, std::byte{10}},
+  };
+  for (const auto& [offset, replacement] : mutations) {
+    SCOPED_TRACE(offset);
+    {
+      WritePagePin pin = TakeValue(pager_->WritePage(root));
+      std::ranges::copy(original.view(), pin.mutable_bytes().begin());
+      pin.mutable_bytes()[payload_offset + offset] = replacement;
+    }
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    const auto malformed = cursor.CompareCurrent(key);
+    ASSERT_FALSE(malformed.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed.error().code());
+    for (const bool seek : {false, true}) {
+      SCOPED_TRACE(seek);
+      const std::size_t reads_before = vfs_.total_pathless_reads();
+      vfs_.FailPathlessReadAfter(2, ErrorCode::kIo);
+      if (seek) {
+        const auto result = cursor.Seek(key, BtreeSeekMode::kEqual);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(ErrorCode::kIo, result.error().code());
+      } else {
+        const auto result = cursor.CompareCurrent(key);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(ErrorCode::kIo, result.error().code());
+      }
+      EXPECT_EQ(reads_before + 3U, vfs_.total_pathless_reads());
+      EXPECT_EQ(!seek, cursor.valid());
+    }
+  }
+}
+
+TEST_F(BtreePrefixComparisonTest, AcceptsInvalidAndCyclicUnusedFinalOverflowLinks) {
+  const std::array<SqlValue, 2> fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  const std::vector<PageNumber> pages = OverflowPages(root);
+  ASSERT_FALSE(pages.empty());
+  const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
+  for (const std::uint32_t unused : {0xffffffffU, pages.front().value(), pages.back().value()}) {
+    SCOPED_TRACE(unused);
+    {
+      WritePagePin pin = TakeValue(pager_->WritePage(pages.back()));
+      Write32(pin.mutable_bytes(), 0, unused);
+    }
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
+    EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+  }
+}
+
+TEST_F(BtreePrefixComparisonTest, RejectsShortOverflowRecordsAsCorruption) {
+  const std::array<SqlValue, 1> fields{SqlValue::Blob(ByteBuffer{ByteCount{8192}})};
+  const PageNumber root = CreateIndex(fields);
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const std::array<SqlValue, 2> key{
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+      SqlValue::Integer(1),
+  };
+  const auto comparison = cursor.CompareCurrent(key);
+  ASSERT_FALSE(comparison.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, comparison.error().code());
+  EXPECT_TRUE(cursor.valid());
+  const auto seek = cursor.Seek(key, BtreeSeekMode::kEqual);
+  ASSERT_FALSE(seek.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, seek.error().code());
+  EXPECT_FALSE(cursor.valid());
 }
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescendingOrder) {

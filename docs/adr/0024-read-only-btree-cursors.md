@@ -246,10 +246,12 @@ must convert SQL values to a rowid before calling the table cursor.
 
 ### Index seeks
 
-Index seeks binary-search both leaf and interior cells. Every compared payload
-is parsed as one complete SQLite record and passed to `CompareIndexRecord`.
-Malformed records and records with fewer fields than the search key are
-corruption.
+Index seeks binary-search both leaf and interior cells. Every compared
+payload has its complete header and declared full size validated before
+canonical `CompareIndexRecord` comparison. ADR-0088 preserves complete
+`RecordView` parsing for local records and adds bounded `RecordPrefixView`
+parsing for overflow records. Malformed records and records with fewer
+complete fields than the search key remain corruption.
 
 The search key must be nonempty and no longer than the copied comparison
 metadata. It may be a prefix of the stored record. Prefix-equivalent records
@@ -265,21 +267,29 @@ greater skip all matching prefixes, less-or-equal find the last matching
 prefix, and less exclude all matching prefixes. Exact full-record searches
 follow the same rules.
 
-A fully local index record is compared directly from the pinned page. An
-overflow-backed record is copied into a cursor-owned reusable scratch buffer
-before parsing and comparison. The buffer grows only when necessary and is
-reused across comparisons and seeks.
+A fully local index record is compared directly from the pinned page.
+ADR-0088 supersedes the original complete-copy, cursor-owned overflow scratch
+policy: only the complete header and compared initial fields need contiguous
+bytes, borrowed locally where possible or copied into one operation-local
+`ByteBuffer`. A seek may reuse that buffer across candidate comparisons, but
+no comparison buffer survives a seek or current-comparison return.
 
-Before growing that buffer, the cursor computes the exact number of overflow
-pages implied by the logical and local payload sizes:
+Before allocating comparison scratch, the cursor still computes the exact
+number of overflow pages implied by the logical and local payload sizes:
 
 `required = 1 + (remaining - 1) / (usable_size - 4)`.
 
 If `required` exceeds `ReadPager::page_count()`, the payload is impossible in
 the current snapshot and the seek returns `kCorruption` without attempting
-the payload-sized allocation. This is only a necessary size bound; it does
+the comparison allocation. This is only a necessary size bound; it does
 not prove page uniqueness, ownership, acyclicity, or a zero unused final
 link.
+
+Overflow comparison still traverses every required full-payload page even
+when its compared prefix is local. Traversal failures precede staged format
+errors, and the last required page's unused next link is not decoded or
+followed. Ordinary range and full-payload access below remain unchanged and
+share the same walker.
 
 ### Payload access
 
