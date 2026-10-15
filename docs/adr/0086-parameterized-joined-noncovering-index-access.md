@@ -150,6 +150,11 @@ and use a new 256-instruction bound without modifying the existing covering
 workload or any frozen performance input, budget, threshold, or baseline.
 This is fixed-work evidence, not a wall-time speedup claim.
 
+At the unchanged production base, the physical test finds no joined index
+leaf and the public workload returns count 1 in 20,504 VM instructions.
+Both focused tests fail before production changes, including the existing
+scan exceeding the new 256-instruction bound.
+
 Reuse the independent indexed fixture and append native evidence without
 changing any existing corpus case or oracle record. Pin table-backed fields,
 defaults and REAL types, nested retained prefixes, actual-core ownership,
@@ -168,6 +173,34 @@ Review this design before implementation and design/code closure before
 committing production. Merge only the reviewed exact head after all required
 local and hosted gates pass, then continue the next ready advanced-SQL slice.
 This package does not complete node 43.
+
+### Local closure evidence
+
+The focused physical and execution tests turn green. The unchanged workload
+returns count 1 in 41 VM instructions, down from 20,504; the covering and
+rowid controls remain 35 and 364. These are execution-only fixed-work
+observations, not wall-time speedup claims.
+
+The pinned corpus adds 53 comparisons for 408 comparisons and six unchanged
+unsupported boundaries. All 361 inherited corpus cases and oracle records,
+frozen provenance, and fixture bytes remain unchanged. The independent
+preservation model covers 144 covering/noncovering combinations. Focused
+evidence includes both-root read failures, empty table replay, actual
+matched-ledger migration and temporary-write failure recovery, real malformed
+index suffixes, and 64-source execution.
+
+Complete Debug, Release, and ASan/UBSan tiers each pass 1,351 tests; genuine
+GCC 16 Debug and Release each pass 1,349. The complete instrumented fast unit
+tier passes 1,314 tests. All 58 existing performance contracts pass without
+changing frozen inputs, baselines, budgets, or thresholds. The final
+ASan/UBSan grammar campaign completes 20,000 inputs with seed 86, maximum
+input length 4,096, and the unchanged ten-second per-input limit. Formatting,
+engineering discipline, dependency-graph validation, and unfiltered
+clang-tidy for the required production targets pass.
+
+GPT-5.6 Sol design, implementation, and final guarded-optional delta reviews
+find no unresolved in-scope issue. Hosted exact-head gates remain required
+before merge; this evidence does not complete `implement-advanced-sql`.
 
 ## Traceability
 

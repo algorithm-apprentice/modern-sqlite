@@ -278,7 +278,7 @@ struct TemporaryConsumerCase {
   bool joined_index_fixture = false;
 };
 
-constexpr std::array<TemporaryConsumerCase, 21> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 24> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -366,6 +366,23 @@ constexpr std::array<TemporaryConsumerCase, 21> kTemporaryConsumers{
                           .sql = "SELECT count(DISTINCT b.numeric_key) FROM probe_rows p "
                                  "JOIN key_rows b ON b.text_key=p.text_key WHERE p.id<=?1 "
                                  "UNION SELECT ?2 LIMIT 1",
+                          .joined_index_fixture = true},
+    TemporaryConsumerCase{.name = "joined_noncovering_full_aggregate",
+                          .sql =
+                              "SELECT group_concat(b.payload ORDER BY b.id DESC) FROM probe_rows p "
+                              "FULL JOIN key_rows b ON b.text_key=p.text_key "
+                              "WHERE p.id<=?1 OR p.id IS NULL LIMIT ?2",
+                          .joined_index_fixture = true},
+    TemporaryConsumerCase{
+        .name = "joined_noncovering_scalar_group",
+        .sql = "SELECT (SELECT group_concat(b.payload ORDER BY b.id DESC) FROM probe_rows p "
+               "LEFT JOIN key_rows b ON b.text_key=p.text_key "
+               "WHERE p.id<=?1 GROUP BY p.id ORDER BY p.id LIMIT ?2)",
+        .joined_index_fixture = true},
+    TemporaryConsumerCase{.name = "joined_noncovering_distinct_set",
+                          .sql =
+                              "SELECT count(DISTINCT b.payload) FROM probe_rows p JOIN key_rows b "
+                              "ON b.text_key=p.text_key WHERE p.id<=?1 UNION SELECT ?2 LIMIT 1",
                           .joined_index_fixture = true},
 };
 

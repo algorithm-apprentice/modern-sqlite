@@ -388,7 +388,7 @@ int main() try {
     return 1;
   }
 
-  const std::array<std::string_view, 12> advanced_sqls{
+  const std::array<std::string_view, 16> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -406,6 +406,11 @@ int main() try {
       "SELECT a.id,b.id,c.id FROM Items a LEFT JOIN Items b ON b.Name=a.Name "
       "FULL JOIN Items c ON c.Name=b.Name",
       "SELECT (SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name ORDER BY b.id LIMIT 1)",
+      "SELECT b.Payload FROM Items a JOIN Items b ON b.Name=a.Name",
+      "SELECT count(b.Payload) FROM Items a FULL JOIN Items b ON b.Name IS a.Name",
+      "SELECT a.id,b.Payload,c.Payload FROM Items a LEFT JOIN Items b ON b.Name=a.Name "
+      "FULL JOIN Items c ON c.Name=b.Name",
+      "SELECT (SELECT b.Payload FROM Items a JOIN Items b ON b.Name=a.Name LIMIT 1)",
   };
   for (const auto& fixture_catalog : {catalog, indexed_catalog}) {
     for (const std::string_view sql : advanced_sqls) {

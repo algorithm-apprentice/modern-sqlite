@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -28,6 +29,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
@@ -2502,6 +2504,297 @@ TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
     EXPECT_EQ(test_case.rows, rows[0][0].integer_value());
     EXPECT_EQ(test_case.left, rows[0][1].integer_value());
     EXPECT_EQ(test_case.right, rows[0][2].integer_value());
+  }
+}
+
+TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 157}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT a.id,b.payload,c.payload FROM items a JOIN items b ON b.category=a.category "
+      "JOIN items c ON c.category=b.category AND c.score=b.score WHERE a.id=1",
+      catalog);
+  std::vector<const SeekIndexInstruction*> seeks;
+  std::vector<const SeekTableRowIdInstruction*> lookups;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
+      seeks.push_back(seek);
+    } else if (const auto* lookup = std::get_if<SeekTableRowIdInstruction>(&instruction);
+               lookup != nullptr) {
+      lookups.push_back(lookup);
+    }
+  }
+  ASSERT_EQ(2U, seeks.size());
+  EXPECT_EQ(1U, seeks[0]->key_count);
+  EXPECT_EQ(2U, seeks[1]->key_count);
+  EXPECT_LE(seeks[0]->first_key.value() + seeks[0]->key_count, seeks[1]->first_key.value());
+  ASSERT_EQ(2U, lookups.size());
+  EXPECT_NE(lookups[0]->cursor, lookups[1]->cursor);
+  EXPECT_EQ(lookups[0]->key, lookups[1]->key);
+  ASSERT_EQ(5U, program.cursors().size());
+  EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+  EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
+  EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[3].storage);
+  EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[4].storage);
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(128U, BlobBytes(rows[0][1]).size());
+  EXPECT_EQ(128U, BlobBytes(rows[0][2]).size());
+}
+
+TEST(ReadLowering, ExecutesJoinedNoncoveringPrefixesAndCompleteTableReplay) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 159}));
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  struct Case {
+    std::string_view join;
+    std::int64_t rows;
+    std::int64_t left;
+    std::int64_t right;
+    bool replay = false;
+  };
+  const std::array cases{
+      Case{.join = "JOIN", .rows = 5, .left = 5, .right = 5},
+      Case{.join = "LEFT JOIN", .rows = 8, .left = 8, .right = 5},
+      Case{.join = "RIGHT JOIN", .rows = 12, .left = 5, .right = 12, .replay = true},
+      Case{.join = "FULL JOIN", .rows = 15, .left = 8, .right = 12, .replay = true},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.join);
+    const BytecodeProgram program = LowerOrThrow(
+        "SELECT count(),count(p.rowid),count(b.rowid),count(b.payload) "
+        "FROM probe_rows p " +
+            std::string{test_case.join} + " key_rows b ON b.text_key=p.text_key",
+        catalog);
+    ASSERT_EQ(3U, program.cursors().size());
+    EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+    EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
+    const auto table_rewinds =
+        std::ranges::count_if(program.instructions(), [](const Instruction& instruction) {
+          const auto* rewind = std::get_if<RewindInstruction>(&instruction);
+          return rewind != nullptr && rewind->cursor == CursorId{2};
+        });
+    EXPECT_EQ(test_case.replay ? 1 : 0, table_rewinds);
+    const auto rows =
+        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(4U, rows[0].size());
+    EXPECT_EQ(test_case.rows, rows[0][0].integer_value());
+    EXPECT_EQ(test_case.left, rows[0][1].integer_value());
+    EXPECT_EQ(test_case.right, rows[0][2].integer_value());
+    EXPECT_EQ(test_case.right, rows[0][3].integer_value());
+  }
+}
+
+TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
+  test::WritePagerFixedVfs vfs{false};
+  InitializeIndexedMutationDatabase(vfs);
+  auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = IndexedMutationCatalog();
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const BytecodeProgram program = LowerOrThrow(
+        "SELECT a.Name,b.Score FROM Items a " + std::string{join} + " Items b ON b.Name=a.Name",
+        catalog);
+    ASSERT_EQ(3U, program.cursors().size());
+    EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+    EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
+    EXPECT_TRUE(
+        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory)
+            .empty());
+  }
+}
+
+TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateConsumers) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 161}));
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const std::string source =
+        " FROM empty_probe_rows p " + std::string{join} + " key_rows b ON b.text_key=p.text_key";
+    const BytecodeProgram aggregate =
+        LowerOrThrow("SELECT group_concat(b.payload)" + source, catalog);
+    const auto rows = ExecuteRows(aggregate, *pager, catalog->version().generation,
+                                  VmEnvironment::Core(), &memory);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(
+        "one,zero-one,zeros-one,alpha,upper-alpha,null-one,null-two,"
+        "beta-null,beta-five,same-one,same-two,null-three",
+        TextBytes(rows[0][0]));
+    const BytecodeProgram scalar = LowerOrThrow("SELECT (SELECT b.payload" + source + ")", catalog);
+    const auto first =
+        ExecuteRows(scalar, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    ASSERT_EQ(1U, first.size());
+    EXPECT_EQ("one", TextBytes(first[0][0]));
+  }
+}
+
+TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggregateCores) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 163}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT count(b.payload) FROM probe_rows p JOIN key_rows b ON b.text_key=p.text_key "
+      "UNION ALL SELECT count(payload) FROM key_rows WHERE text_key='alpha'",
+      catalog);
+  std::optional<RegisterId> rowid;
+  std::size_t lookups = 0;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* lookup = std::get_if<SeekTableRowIdInstruction>(&instruction);
+        lookup != nullptr) {
+      if (rowid.has_value()) {
+        EXPECT_EQ(*rowid, lookup->key);
+      } else {
+        rowid = lookup->key;
+      }
+      ++lookups;
+    }
+  }
+  EXPECT_EQ(3U, lookups);
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(5, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+}
+
+TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 165}));
+  constexpr std::size_t kSources = 64;
+  std::string sql = "SELECT t0.id,t63.id,t63.payload FROM items t0";
+  for (std::size_t source = 1; source < kSources; ++source) {
+    const std::string current = "t" + std::to_string(source);
+    const std::string previous = "t" + std::to_string(source - 1U);
+    sql += " JOIN items " + current + " ON " + current + ".category=" + previous +
+           ".category AND " + current + ".payload=" + previous + ".payload";
+  }
+  sql += " WHERE t0.id=1";
+  const BytecodeProgram program = LowerOrThrow(sql, catalog);
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(kSources * 2U - 1U, program.cursors().size());
+  EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekIndex));
+  EXPECT_EQ(kSources - 1U, std::ranges::count(kinds, InstructionKind::kSeekTableRowId));
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+  EXPECT_LE(program.instructions().size(), kSources * 32U + 128U);
+  std::optional<RegisterId> rowid;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* lookup = std::get_if<SeekTableRowIdInstruction>(&instruction);
+        lookup != nullptr) {
+      if (rowid.has_value()) {
+        EXPECT_EQ(*rowid, lookup->key);
+      } else {
+        rowid = lookup->key;
+      }
+    }
+  }
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(128U, BlobBytes(rows[0][2]).size());
+}
+
+TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
+  PosixVfs source_vfs;
+  auto source = TakeValue(Pager::Open(source_vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(source->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*source, CatalogLoadOptions{.generation = 167}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT p.id,b.payload FROM probe_rows p JOIN key_rows b "
+      "ON b.text_key=p.text_key WHERE p.id=2",
+      catalog);
+  ASSERT_EQ(3U, program.cursors().size());
+  ASSERT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+  const PageNumber root{program.cursors()[1].root_page.value()};
+  ASSERT_EQ(ByteCount{512}, source->page_size());
+  const auto geometry = TakeValue(BtreePageGeometry::Create(ByteCount{512}, ByteCount{512}));
+  const auto size = std::filesystem::file_size(JoinedIndexFixturePath());
+  ASSERT_LE(size, test::kWritePagerFileCapacity);
+  ByteBuffer image{ByteCount{static_cast<std::size_t>(size)}};
+  {
+    std::ifstream input(JoinedIndexFixturePath(), std::ios::binary);
+    ASSERT_TRUE(input);
+    input.read(reinterpret_cast<char*>(image.mutable_view().data()),
+               static_cast<std::streamsize>(size));
+    ASSERT_TRUE(input);
+  }
+  enum class Fault {
+    None,
+    DanglingRowid,
+    NonintegerRowid,
+    MalformedRecord,
+  };
+  for (const Fault fault :
+       {Fault::None, Fault::DanglingRowid, Fault::NonintegerRowid, Fault::MalformedRecord}) {
+    SCOPED_TRACE(static_cast<int>(fault));
+    ByteBuffer corrupted = image.Clone();
+    const std::size_t page_offset = (root.value() - 1U) * 512U;
+    const MutableByteView bytes = corrupted.mutable_view().subspan(page_offset, 512U);
+    const auto page = TakeValue(BtreePageView::Parse(bytes, root, geometry));
+    ASSERT_EQ(BtreePageType::kLeafIndex, page.type());
+    bool patched = false;
+    for (std::size_t index = 0; index < page.cell_count(); ++index) {
+      const auto cell = TakeValue(page.cell(index));
+      const ByteView payload = cell.local_payload();
+      const auto record = TakeValue(RecordView::Parse(payload));
+      ASSERT_EQ(3U, record.field_count());
+      if (TakeValue(record.field(2)).integer_value() != 4) {
+        continue;
+      }
+      const auto offset = static_cast<std::size_t>(payload.data() - bytes.data());
+      ASSERT_EQ(std::byte{1}, payload[record.header_size().value() - 1U]);
+      ASSERT_EQ(std::byte{4}, payload.back());
+      if (fault == Fault::DanglingRowid) {
+        bytes[offset + payload.size() - 1U] = std::byte{127};
+      } else if (fault == Fault::NonintegerRowid) {
+        bytes[offset + record.header_size().value() - 1U] = std::byte{15};
+      } else if (fault == Fault::MalformedRecord) {
+        bytes[offset + record.header_size().value() - 1U] = std::byte{7};
+      }
+      patched = true;
+      break;
+    }
+    ASSERT_TRUE(patched);
+    test::WritePagerFixedVfs vfs{false};
+    vfs.LoadDatabase(corrupted.view());
+    auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+    RequireStatus(pager->BeginRead());
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    if (fault == Fault::None) {
+      for (const std::string_view payload : {"alpha", "upper-alpha"}) {
+        ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+        EXPECT_EQ(2, vm.row()[0].integer_value());
+        EXPECT_EQ(payload, TextBytes(vm.row()[1]));
+      }
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    } else {
+      const auto failed = vm.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kCorruption, failed.error().code());
+      EXPECT_TRUE(vm.row().empty());
+    }
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(pager->EndRead());
   }
 }
 

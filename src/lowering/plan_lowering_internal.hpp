@@ -75,6 +75,39 @@ template <typename T>
   }
 }
 
+[[nodiscard]] inline LoweringResult<void> EmitIndexTableLookup(ProgramBuilder& builder,
+                                                               CursorId index_cursor,
+                                                               CursorId table_cursor,
+                                                               RegisterId rowid,
+                                                               bool open_table = false) {
+  constexpr std::string_view kFailure = "unable to append a bytecode instruction";
+  auto read = ConvertProgramResult(builder.Append(ReadFieldInstruction{
+                                       .cursor = index_cursor,
+                                       .field = CursorFieldId{0},
+                                       .output = rowid,
+                                   }),
+                                   kFailure);
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
+  }
+  if (open_table) {
+    auto opened = ConvertProgramResult(
+        builder.Append(OpenReadCursorInstruction{.cursor = table_cursor}), kFailure);
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+  }
+  auto sought = ConvertProgramResult(builder.Append(SeekTableRowIdInstruction{
+                                         .cursor = table_cursor,
+                                         .key = rowid,
+                                     }),
+                                     kFailure);
+  if (!sought.has_value()) {
+    return std::unexpected(std::move(sought.error()));
+  }
+  return {};
+}
+
 }  // namespace modern_sqlite::lowering_internal
 
 #endif  // MODERN_SQLITE_SRC_LOWERING_PLAN_LOWERING_INTERNAL_HPP_
