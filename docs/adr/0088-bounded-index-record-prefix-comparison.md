@@ -253,6 +253,25 @@ contracts remain in force. It provides the lower-layer prerequisite required
 by ADR-0053's automatic-index slice and ADR-0058's retained-byte ownership
 contract; neither SQL source integration nor temporary budgets change here.
 
+## Implementation evidence
+
+The instrumented pre-change regression compared a one-integer key with a
+record containing an unprobed 8,192-byte BLOB. Both `Seek()` and
+`CompareCurrent()` copied 8,198 bytes and failed the eight-byte copy bound.
+After the change both copy zero payload bytes while still visiting the
+required overflow chain. A 204-byte overflow-backed header requires 409
+copied bytes across its header and one-field prefix reads. Comparing a
+1,500-byte NOCASE text key copies its 1,506-byte header/value prefix, not the
+unprobed 8,192-byte suffix.
+
+These are execution-only copy-work diagnostics, not elapsed-time or
+cross-engine speed claims. Instrumented tests collect actual counters;
+ordinary builds run the same behavioral operations without linking optional
+instrumentation or reporting synthetic zero counters. The separate
+allocation test keeps each cursor alive across repeated successful,
+malformed-record, and exhaustively injected OOM operations and checks that
+all comparison allocations have been released before the next operation.
+
 ## Rejected alternatives
 
 - A complete retained payload buffer would leave temporary cursor memory

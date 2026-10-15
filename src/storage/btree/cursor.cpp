@@ -109,6 +109,11 @@ namespace {
   return EqualPrefixResult::kEquivalent;
 }
 
+enum class PayloadReadExtent : std::uint8_t {
+  kRequestedRange,
+  kCompletePayload,
+};
+
 class CursorCore final {
  private:
   struct Frame {
@@ -399,8 +404,9 @@ class CursorCore final {
     return page->cell(CurrentFrame().index);
   }
 
-  [[nodiscard]] Status ReadCellPayload(const BtreeCellView& cell, ByteOffset offset,
-                                       MutableByteView destination) {
+  [[nodiscard]] Status ReadCellPayload(
+      const BtreeCellView& cell, ByteOffset offset, MutableByteView destination,
+      PayloadReadExtent extent = PayloadReadExtent::kRequestedRange) {
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
@@ -410,7 +416,7 @@ class CursorCore final {
     if (payload_offset > payload_size || destination.size() > payload_size - payload_offset) {
       return std::unexpected(OutOfRange("B-tree payload range is out of bounds"));
     }
-    if (destination.empty()) {
+    if (destination.empty() && extent == PayloadReadExtent::kRequestedRange) {
       return {};
     }
     if (!geometry_.has_value()) {
@@ -420,8 +426,10 @@ class CursorCore final {
 
     const std::size_t local_size = cell.local_payload().size();
     const std::size_t range_end = payload_offset + destination.size();
-    if (range_end > local_size) {
-      const std::size_t overflow_end = range_end - local_size;
+    const std::size_t walk_end =
+        extent == PayloadReadExtent::kCompletePayload ? payload_size : range_end;
+    if (walk_end > local_size) {
+      const std::size_t overflow_end = walk_end - local_size;
       const std::size_t capacity = geometry.overflow_payload_capacity().value();
       const std::size_t pages_to_reach = 1U + (overflow_end - 1U) / capacity;
       if (pages_to_reach > pager_->page_count()) {
@@ -430,42 +438,24 @@ class CursorCore final {
       }
     }
 
-    std::size_t source_offset = payload_offset;
-    std::size_t output_offset = 0;
-    std::size_t remaining = destination.size();
-    if (source_offset < local_size) {
-      const std::size_t count = std::min(remaining, local_size - source_offset);
-      std::memcpy(destination.data(), cell.local_payload().data() + source_offset, count);
+    const auto copy_overlap = [payload_offset, range_end, destination](ByteView source,
+                                                                       std::size_t source_offset) {
+      const std::size_t first = std::max(payload_offset, source_offset);
+      const std::size_t last = std::min(range_end, source_offset + source.size());
+      if (first >= last) {
+        return;
+      }
+      const std::size_t count = last - first;
+      std::memcpy(destination.data() + (first - payload_offset),
+                  source.data() + (first - source_offset), count);
       MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBytesCopied, count);
-      output_offset += count;
-      remaining -= count;
-      source_offset = 0;
-    } else {
-      source_offset -= local_size;
-    }
-    if (remaining == 0) {
-      return {};
-    }
+    };
+    copy_overlap(cell.local_payload(), 0);
 
     std::optional<PageNumber> next_page = cell.first_overflow_page();
     const std::size_t capacity = geometry.overflow_payload_capacity().value();
-    while (source_offset >= capacity) {
-      if (!next_page.has_value()) {
-        return std::unexpected(Corruption("B-tree overflow chain ends prematurely"));
-      }
-      auto pin = pager_->ReadPage(*next_page);
-      if (!pin.has_value()) {
-        return std::unexpected(std::move(pin.error()));
-      }
-      auto overflow = OverflowPageView::Parse(pin->frame().bytes(), geometry);
-      if (!overflow.has_value()) {
-        return std::unexpected(std::move(overflow.error()));
-      }
-      next_page = overflow->next_page();
-      source_offset -= capacity;
-    }
-
-    while (remaining > 0) {
+    std::size_t source_offset = local_size;
+    while (source_offset < walk_end) {
       if (!next_page.has_value()) {
         return std::unexpected(Corruption("B-tree overflow chain ends prematurely"));
       }
@@ -474,14 +464,10 @@ class CursorCore final {
         return std::unexpected(std::move(pin.error()));
       }
       const ByteView page = pin->frame().bytes();
-      const ByteView overflow_payload = page.subspan(4U, capacity);
-      const std::size_t count = std::min(remaining, capacity - source_offset);
-      std::memcpy(destination.data() + output_offset, overflow_payload.data() + source_offset,
-                  count);
-      MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBytesCopied, count);
-      output_offset += count;
-      remaining -= count;
-      if (remaining == 0) {
+      const std::size_t count = std::min(capacity, walk_end - source_offset);
+      copy_overlap(page.subspan(4U, count), source_offset);
+      source_offset += count;
+      if (source_offset == walk_end) {
         return {};
       }
 
@@ -490,7 +476,6 @@ class CursorCore final {
         return std::unexpected(std::move(overflow.error()));
       }
       next_page = overflow->next_page();
-      source_offset = 0;
     }
     return {};
   }
@@ -907,45 +892,105 @@ struct IndexBtreeCursor::Impl {
 
   [[nodiscard]] Result<std::weak_ordering> CompareCell(const BtreeCellView& cell,
                                                        std::span<const SqlValue> key,
-                                                       EqualPrefixResult equal_prefix_result) {
+                                                       EqualPrefixResult equal_prefix_result,
+                                                       ByteBuffer& scratch) {
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
-    ByteView encoded;
-    if (cell.local_payload().size() == cell.payload_size().value()) {
-      encoded = cell.local_payload();
-    } else {
-      auto possible = core.EnsureCompletePayloadPossible(cell);
-      if (!possible.has_value()) {
-        return std::unexpected(std::move(possible.error()));
+    const auto compare = [this, key,
+                          equal_prefix_result](const auto& record) -> Result<std::weak_ordering> {
+      auto comparison = CompareIndexRecord(record, key, columns, equal_prefix_result);
+      if (!comparison.has_value()) {
+        return std::unexpected(std::move(comparison.error()));
       }
+      return comparison->ordering;
+    };
+    if (cell.local_payload().size() == cell.payload_size().value()) {
+      auto record = RecordView::Parse(cell.local_payload(), options);
+      if (!record.has_value()) {
+        return std::unexpected(std::move(record.error()));
+      }
+      return compare(*record);
+    }
+
+    auto possible = core.EnsureCompletePayloadPossible(cell);
+    if (!possible.has_value()) {
+      return std::unexpected(std::move(possible.error()));
+    }
+    bool complete_chain_read = false;
+    const auto fail_after_chain_validation =
+        [this, &cell, &complete_chain_read](Error error) -> Result<std::weak_ordering> {
+      if (!complete_chain_read) {
+        auto read =
+            core.ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::kCompletePayload);
+        if (!read.has_value()) {
+          return std::unexpected(std::move(read.error()));
+        }
+      }
+      return std::unexpected(std::move(error));
+    };
+    auto header_size =
+        RecordPrefixView::RequiredHeaderSize(cell.local_payload(), cell.payload_size(), options);
+    if (!header_size.has_value()) {
+      return fail_after_chain_validation(std::move(header_size.error()));
+    }
+    ByteView header = cell.local_payload();
+    if (header_size->value() > header.size()) {
+      auto read = ReadComparisonPrefix(cell, *header_size, scratch);
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      complete_chain_read = true;
+      header = scratch.view().first(header_size->value());
+    }
+    auto prefix_size =
+        RecordPrefixView::RequiredPrefixSize(header, cell.payload_size(), key.size(), options);
+    header = {};
+    if (!prefix_size.has_value()) {
+      return fail_after_chain_validation(std::move(prefix_size.error()));
+    }
+
+    ByteView encoded;
+    if (prefix_size->value() <= cell.local_payload().size()) {
+      auto read =
+          core.ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::kCompletePayload);
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      encoded = cell.local_payload().first(prefix_size->value());
+    } else if (complete_chain_read && *prefix_size == *header_size) {
+      encoded = scratch.view().first(prefix_size->value());
+    } else {
+      auto read = ReadComparisonPrefix(cell, *prefix_size, scratch);
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      encoded = scratch.view().first(prefix_size->value());
+    }
+    auto record = RecordPrefixView::Parse(encoded, cell.payload_size(), key.size(), options);
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    return compare(*record);
+  }
+
+  [[nodiscard]] Status ReadComparisonPrefix(const BtreeCellView& cell, ByteCount size,
+                                            ByteBuffer& scratch) {
+    if (scratch.size() < size) {
+      scratch = ByteBuffer{};
       try {
-        scratch.resize(cell.payload_size().value());
+        scratch = ByteBuffer{size};
       } catch (const std::bad_alloc&) {
         return std::unexpected(Error::OutOfMemory());
       } catch (const std::length_error&) {
         return std::unexpected(Error::OutOfMemory());
       }
-      auto read = core.ReadCellPayload(cell, ByteOffset{0}, MutableByteView{scratch});
-      if (!read.has_value()) {
-        return std::unexpected(std::move(read.error()));
-      }
-      encoded = ByteView{scratch};
     }
-
-    auto record = RecordView::Parse(encoded, options);
-    if (!record.has_value()) {
-      return std::unexpected(std::move(record.error()));
-    }
-    auto comparison = CompareIndexRecord(*record, key, columns, equal_prefix_result);
-    if (!comparison.has_value()) {
-      return std::unexpected(std::move(comparison.error()));
-    }
-    return comparison->ordering;
+    return core.ReadCellPayload(cell, ByteOffset{0}, scratch.mutable_view().first(size.value()),
+                                PayloadReadExtent::kCompletePayload);
   }
 
   CursorCore core;
   std::vector<IndexColumnOrder> columns;
   RecordCodecOptions options;
-  std::vector<std::byte> scratch;
 };
 
 TableBtreeCursor::TableBtreeCursor(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -1163,9 +1208,11 @@ Result<bool> IndexBtreeCursor::Seek(std::span<const SqlValue> key, BtreeSeekMode
     return std::unexpected(Misuse("index seek key is longer than the comparison metadata"));
   }
   const EqualPrefixResult prefix_result = PrefixResultFor(mode);
-  return impl_->core.SeekIndex(mode, [this, key, prefix_result](const BtreeCellView& cell) {
-    return impl_->CompareCell(cell, key, prefix_result);
-  });
+  ByteBuffer scratch;
+  return impl_->core.SeekIndex(mode,
+                               [this, key, prefix_result, &scratch](const BtreeCellView& cell) {
+                                 return impl_->CompareCell(cell, key, prefix_result, scratch);
+                               });
 }
 
 Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlValue> key) {
@@ -1182,7 +1229,8 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlV
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return impl_->CompareCell(*cell, key, EqualPrefixResult::kEquivalent);
+  ByteBuffer scratch;
+  return impl_->CompareCell(*cell, key, EqualPrefixResult::kEquivalent, scratch);
 }
 
 Result<BtreePayloadView> IndexBtreeCursor::payload() const {

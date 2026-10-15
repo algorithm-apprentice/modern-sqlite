@@ -2463,6 +2463,28 @@ TEST(ReadSession, BoundsJoinedEqualityWorkByPointPositionedPrefixes) {
   EXPECT_LT(instructions, 1024U);
 }
 
+TEST(ReadSession, RecordsUnindexedJoinedEqualityScalingBaseline) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  for (const std::int64_t outer_rows : {1, 8, 32}) {
+    SCOPED_TRACE(outer_rows);
+    const std::string predicate =
+        outer_rows == 1 ? "a.id=1" : "a.id<=" + std::to_string(outer_rows);
+    ReadStatement statement = PrepareStatement(session,
+                                               "SELECT count(b.id) FROM items a JOIN items b "
+                                               "ON b.payload=a.payload WHERE " +
+                                                   predicate);
+    instrumentation::CounterCollection work;
+    {
+      const instrumentation::ScopedCounterCollection scope{work};
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(outer_rows, IntegerValue(statement.row()[0]));
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    }
+    RecordProperty("vm_instructions_" + std::to_string(outer_rows),
+                   std::to_string(work.Value(instrumentation::Counter::kVmInstructions)));
+  }
+}
+
 TEST(ReadSession, CapturesAggregateLifecycleAndSharedTemporaryPeaks) {
   using instrumentation::AggregateWorkMetric;
   using instrumentation::ProbeCollectionKind;

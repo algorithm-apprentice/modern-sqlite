@@ -167,6 +167,90 @@ template <typename Value>
   };
 }
 
+struct RecordHeader {
+  std::size_t initial_offset;
+  std::size_t header_size;
+  std::size_t field_count;
+  std::size_t prefix_size;
+};
+
+[[nodiscard]] Result<RecordHeader> ReadRecordHeaderBounds(ByteView initial,
+                                                          std::size_t complete_size,
+                                                          RecordCodecOptions options) {
+  auto valid_options = ValidateOptions(options);
+  if (!valid_options.has_value()) {
+    return std::unexpected(std::move(valid_options.error()));
+  }
+  if (initial.empty() || complete_size == 0) {
+    return std::unexpected(Corruption("record header is missing"));
+  }
+  if (complete_size > kMaximumRecordSize) {
+    return std::unexpected(Corruption("record exceeds SQLite's size limit"));
+  }
+  if (initial.size() > complete_size) {
+    return std::unexpected(Corruption("record input exceeds the declared complete size"));
+  }
+  const auto decoded = DecodeSqliteVarint(initial);
+  if (!decoded.has_value()) {
+    return std::unexpected(Corruption("record header size varint is truncated"));
+  }
+  if (decoded->value > kMaximumRecordHeaderSize || decoded->value > complete_size) {
+    return std::unexpected(Corruption("record header size is outside the input"));
+  }
+  const auto header_size = static_cast<std::size_t>(decoded->value);
+  const std::size_t initial_offset = decoded->bytes_consumed.value();
+  if (header_size <= initial_offset) {
+    return std::unexpected(Corruption("record header contains no fields"));
+  }
+  return RecordHeader{
+      .initial_offset = initial_offset,
+      .header_size = header_size,
+      .field_count = 0,
+      .prefix_size = header_size,
+  };
+}
+
+[[nodiscard]] Result<RecordHeader> ValidateRecordHeader(ByteView encoded, ByteCount complete_size,
+                                                        std::size_t requested_fields,
+                                                        RecordCodecOptions options) {
+  auto header = ReadRecordHeaderBounds(encoded, complete_size.value(), options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
+  }
+  if (encoded.size() < header->header_size) {
+    return std::unexpected(Corruption("record header is truncated"));
+  }
+  std::size_t header_offset = header->initial_offset;
+  std::size_t body_offset = header->header_size;
+  while (header_offset < header->header_size) {
+    const auto decoded_serial_type =
+        DecodeSqliteVarint(encoded.subspan(header_offset, header->header_size - header_offset));
+    if (!decoded_serial_type.has_value()) {
+      return std::unexpected(Corruption("record serial type varint is truncated"));
+    }
+    auto serial_type = InterpretRecordSerialType(decoded_serial_type->value, options);
+    if (!serial_type.has_value()) {
+      return std::unexpected(std::move(serial_type.error()));
+    }
+    header_offset += decoded_serial_type->bytes_consumed.value();
+    if (serial_type->payload_size().value() > complete_size.value() - body_offset) {
+      return std::unexpected(Corruption("record field payload is truncated"));
+    }
+    body_offset += serial_type->payload_size().value();
+    ++header->field_count;
+    if (header->field_count > kMaximumRecordFieldCount) {
+      return std::unexpected(Corruption("record field count exceeds SQLite's hard limit"));
+    }
+    if (header->field_count <= requested_fields) {
+      header->prefix_size = body_offset;
+    }
+  }
+  if (body_offset != complete_size.value()) {
+    return std::unexpected(Corruption("record has trailing payload bytes"));
+  }
+  return header;
+}
+
 void WriteSignedInteger(MutableByteView output, std::int64_t value) noexcept {
   assert(!output.empty());
   assert(output.size() <= sizeof(value));
@@ -312,6 +396,45 @@ template <typename Left, typename Right>
     }
   }
   return {};
+}
+
+[[nodiscard]] Result<IndexKeyComparison> CompareIndexRecordFields(
+    RecordCursor cursor, std::size_t complete_fields, std::span<const SqlValue> search_key,
+    std::span<const IndexColumnOrder> columns, EqualPrefixResult equal_prefix_result) {
+  if (!IsValidEqualPrefixResult(equal_prefix_result)) {
+    return std::unexpected(Misuse("invalid equal-prefix comparison result"));
+  }
+  if (columns.size() < search_key.size()) {
+    return std::unexpected(Misuse("index comparison metadata is shorter than the search key"));
+  }
+  auto valid_columns = ValidateComparisonColumns(columns.first(search_key.size()));
+  if (!valid_columns.has_value()) {
+    return std::unexpected(std::move(valid_columns.error()));
+  }
+  if (complete_fields < search_key.size()) {
+    return std::unexpected(Corruption("index record has fewer fields than the search key"));
+  }
+  if (cursor.remaining() < search_key.size()) {
+    return std::unexpected(Misuse("available record prefix is shorter than the search key"));
+  }
+
+  for (std::size_t index = 0; index < search_key.size(); ++index) {
+    const auto field = cursor.Next();
+    if (!field.has_value()) {
+      return std::unexpected(Corruption("index record field metadata ended during comparison"));
+    }
+    const std::weak_ordering ordering = CompareField(*field, search_key[index], columns[index]);
+    if (ordering != std::weak_ordering::equivalent) {
+      return IndexKeyComparison{
+          .ordering = ordering,
+          .equivalent_prefix = false,
+      };
+    }
+  }
+  return IndexKeyComparison{
+      .ordering = PrefixOrdering(equal_prefix_result),
+      .equivalent_prefix = true,
+  };
 }
 
 void EncodeMeasuredRecord(std::span<const SqlValue> values, RecordCodecOptions options,
@@ -585,60 +708,11 @@ std::optional<RecordFieldView> RecordCursor::Next() noexcept {
 }
 
 Result<RecordView> RecordView::Parse(ByteView encoded, RecordCodecOptions options) {
-  auto valid_options = ValidateOptions(options);
-  if (!valid_options.has_value()) {
-    return std::unexpected(std::move(valid_options.error()));
+  auto header = ValidateRecordHeader(encoded, ByteCount{encoded.size()}, 0, options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
   }
-  if (encoded.empty()) {
-    return std::unexpected(Corruption("record header is missing"));
-  }
-  if (encoded.size() > kMaximumRecordSize) {
-    return std::unexpected(Corruption("record exceeds SQLite's size limit"));
-  }
-
-  const auto decoded_header_size = DecodeSqliteVarint(encoded);
-  if (!decoded_header_size.has_value()) {
-    return std::unexpected(Corruption("record header size varint is truncated"));
-  }
-  if (decoded_header_size->value > kMaximumRecordHeaderSize ||
-      decoded_header_size->value > encoded.size()) {
-    return std::unexpected(Corruption("record header size is outside the input"));
-  }
-
-  const auto header_size = static_cast<std::size_t>(decoded_header_size->value);
-  const std::size_t initial_header_offset = decoded_header_size->bytes_consumed.value();
-  if (header_size <= initial_header_offset) {
-    return std::unexpected(Corruption("record header contains no fields"));
-  }
-
-  std::size_t header_offset = initial_header_offset;
-  std::size_t body_offset = header_size;
-  std::size_t field_count = 0;
-  while (header_offset < header_size) {
-    const auto decoded_serial_type =
-        DecodeSqliteVarint(encoded.subspan(header_offset, header_size - header_offset));
-    if (!decoded_serial_type.has_value()) {
-      return std::unexpected(Corruption("record serial type varint is truncated"));
-    }
-    auto serial_type = InterpretRecordSerialType(decoded_serial_type->value, options);
-    if (!serial_type.has_value()) {
-      return std::unexpected(std::move(serial_type.error()));
-    }
-    header_offset += decoded_serial_type->bytes_consumed.value();
-    if (serial_type->payload_size().value() > encoded.size() - body_offset) {
-      return std::unexpected(Corruption("record field payload is truncated"));
-    }
-    body_offset += serial_type->payload_size().value();
-    ++field_count;
-    if (field_count > kMaximumRecordFieldCount) {
-      return std::unexpected(Corruption("record field count exceeds SQLite's hard limit"));
-    }
-  }
-
-  if (body_offset != encoded.size()) {
-    return std::unexpected(Corruption("record has trailing payload bytes"));
-  }
-  return RecordView{encoded, initial_header_offset, header_size, field_count};
+  return RecordView{encoded, header->initial_offset, header->header_size, header->field_count};
 }
 
 RecordCursor RecordView::cursor() const noexcept {
@@ -663,6 +737,51 @@ Result<RecordFieldView> RecordView::field(std::size_t index) const {
     return std::unexpected(Corruption("record field metadata ended early"));
   }
   return *result;
+}
+
+Result<ByteCount> RecordPrefixView::RequiredHeaderSize(ByteView initial, ByteCount complete_size,
+                                                       RecordCodecOptions options) {
+  auto header = ReadRecordHeaderBounds(initial, complete_size.value(), options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
+  }
+  return ByteCount{header->header_size};
+}
+
+Result<ByteCount> RecordPrefixView::RequiredPrefixSize(ByteView header_bytes,
+                                                       ByteCount complete_size,
+                                                       std::size_t requested_fields,
+                                                       RecordCodecOptions options) {
+  if (requested_fields == 0) {
+    return std::unexpected(Misuse("record prefix requires at least one requested field"));
+  }
+  auto header = ValidateRecordHeader(header_bytes, complete_size, requested_fields, options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
+  }
+  return ByteCount{header->prefix_size};
+}
+
+Result<RecordPrefixView> RecordPrefixView::Parse(ByteView encoded, ByteCount complete_size,
+                                                 std::size_t requested_fields,
+                                                 RecordCodecOptions options) {
+  if (requested_fields == 0) {
+    return std::unexpected(Misuse("record prefix requires at least one requested field"));
+  }
+  auto header = ValidateRecordHeader(encoded, complete_size, requested_fields, options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
+  }
+  if (encoded.size() < header->prefix_size) {
+    return std::unexpected(Corruption("record prefix field payload is truncated"));
+  }
+  return RecordPrefixView{encoded.first(header->prefix_size), header->initial_offset,
+                          header->header_size, std::min(requested_fields, header->field_count),
+                          header->field_count};
+}
+
+RecordCursor RecordPrefixView::cursor() const noexcept {
+  return RecordCursor{encoded_, header_offset_, header_end_, header_end_, available_fields_};
 }
 
 Result<ByteCount> EncodedRecordSize(std::span<const SqlValue> values, RecordCodecOptions options) {
@@ -750,38 +869,16 @@ Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
                                               std::span<const SqlValue> search_key,
                                               std::span<const IndexColumnOrder> columns,
                                               EqualPrefixResult equal_prefix_result) {
-  if (!IsValidEqualPrefixResult(equal_prefix_result)) {
-    return std::unexpected(Misuse("invalid equal-prefix comparison result"));
-  }
-  if (columns.size() < search_key.size()) {
-    return std::unexpected(Misuse("index comparison metadata is shorter than the search key"));
-  }
-  auto valid_columns = ValidateComparisonColumns(columns.first(search_key.size()));
-  if (!valid_columns.has_value()) {
-    return std::unexpected(std::move(valid_columns.error()));
-  }
-  if (record.field_count() < search_key.size()) {
-    return std::unexpected(Corruption("index record has fewer fields than the search key"));
-  }
+  return CompareIndexRecordFields(record.cursor(), record.field_count(), search_key, columns,
+                                  equal_prefix_result);
+}
 
-  RecordCursor cursor = record.cursor();
-  for (std::size_t index = 0; index < search_key.size(); ++index) {
-    const auto field = cursor.Next();
-    if (!field.has_value()) {
-      return std::unexpected(Corruption("index record field metadata ended during comparison"));
-    }
-    const std::weak_ordering ordering = CompareField(*field, search_key[index], columns[index]);
-    if (ordering != std::weak_ordering::equivalent) {
-      return IndexKeyComparison{
-          .ordering = ordering,
-          .equivalent_prefix = false,
-      };
-    }
-  }
-  return IndexKeyComparison{
-      .ordering = PrefixOrdering(equal_prefix_result),
-      .equivalent_prefix = true,
-  };
+Result<IndexKeyComparison> CompareIndexRecord(const RecordPrefixView& record,
+                                              std::span<const SqlValue> search_key,
+                                              std::span<const IndexColumnOrder> columns,
+                                              EqualPrefixResult equal_prefix_result) {
+  return CompareIndexRecordFields(record.cursor(), record.complete_field_count(), search_key,
+                                  columns, equal_prefix_result);
 }
 
 }  // namespace modern_sqlite

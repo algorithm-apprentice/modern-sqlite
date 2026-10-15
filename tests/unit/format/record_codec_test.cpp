@@ -266,6 +266,241 @@ TEST(RecordCodec, AcceptsMaximumWithoutRowidIndexFieldCount) {
   EXPECT_EQ(values.size(), record->field_count());
 }
 
+TEST(RecordPrefixViewTest, BorrowsOnlyAvailableInitialFieldsFromIndependentBytes) {
+  const ByteBuffer encoded = Bytes({
+      0x09, 0x00, 0x08, 0x09, 0x02, 0x07, 0x17, 0x10, 0x01, 0x00, 0x80, 0x7f, 0xf8, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0x6c, 0x70, 0x68, 0x61, 0x00, 0xff, 0xff,
+  });
+  constexpr std::array<std::size_t, 8> kPrefixSizes{9, 9, 9, 11, 19, 24, 26, 27};
+  const auto header = RecordPrefixView::RequiredHeaderSize(encoded.view().first(1), encoded.size());
+  ASSERT_TRUE(header.has_value());
+  EXPECT_EQ(ByteCount{9}, *header);
+
+  for (std::size_t count = 1; count <= kPrefixSizes.size(); ++count) {
+    SCOPED_TRACE(count);
+    const auto required = RecordPrefixView::RequiredPrefixSize(
+        encoded.view().first(header->value()), encoded.size(), count);
+    ASSERT_TRUE(required.has_value());
+    EXPECT_EQ(ByteCount{kPrefixSizes[count - 1U]}, *required);
+    const auto prefix =
+        RecordPrefixView::Parse(encoded.view().first(required->value()), encoded.size(), count);
+    ASSERT_TRUE(prefix.has_value());
+    EXPECT_EQ(8U, prefix->complete_field_count());
+    EXPECT_EQ(count, prefix->field_count());
+    EXPECT_EQ(*header, prefix->header_size());
+    EXPECT_EQ(encoded.view().data(), prefix->encoded().data());
+    EXPECT_EQ(required->value(), prefix->encoded().size());
+    RecordCursor cursor = prefix->cursor();
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto field = cursor.Next();
+      ASSERT_TRUE(field.has_value());
+      switch (index) {
+        case 0:
+        case 4:
+          EXPECT_EQ(SqlValueType::kNull, field->type());
+          break;
+        case 1:
+          ExpectInteger(*field, 0);
+          break;
+        case 2:
+          ExpectInteger(*field, 1);
+          break;
+        case 3:
+          ExpectInteger(*field, 128);
+          break;
+        case 5:
+          ASSERT_TRUE(field->text_value().has_value());
+          EXPECT_EQ("Alpha", field->text_value()->bytes());
+          EXPECT_EQ(AsStringView(encoded.view()).data() + 19, field->text_value()->bytes().data());
+          break;
+        case 6:
+          ASSERT_TRUE(field->blob_value().has_value());
+          EXPECT_TRUE(std::ranges::equal(encoded.view().subspan(24, 2), *field->blob_value()));
+          break;
+        case 7:
+          ExpectInteger(*field, -1);
+          break;
+        default:
+          FAIL() << "unexpected independent record field";
+      }
+    }
+    EXPECT_EQ(0U, cursor.remaining());
+    EXPECT_FALSE(cursor.Next().has_value());
+  }
+
+  const auto supplied_complete = RecordPrefixView::Parse(encoded.view(), encoded.size(), 1);
+  ASSERT_TRUE(supplied_complete.has_value());
+  EXPECT_EQ(9U, supplied_complete->encoded().size());
+  EXPECT_FALSE(RecordView::Parse(encoded.view().first(9)).has_value());
+}
+
+TEST(RecordPrefixViewTest, PreservesComparisonSemanticsAndStoredWidthErrors) {
+  const ByteBuffer encoded = Bytes({0x04, 0x17, 0x01, 0x00, 0x41, 0x6c, 0x70, 0x68, 0x61, 0x07});
+  const auto complete = RecordView::Parse(encoded.view());
+  const auto prefix = RecordPrefixView::Parse(encoded.view().first(9), encoded.size(), 1);
+  ASSERT_TRUE(complete.has_value());
+  ASSERT_TRUE(prefix.has_value());
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  const std::array<SqlValue, 1> key{SqlValue::Text("aLPHa")};
+  for (const EqualPrefixResult policy :
+       {EqualPrefixResult::kLess, EqualPrefixResult::kEquivalent, EqualPrefixResult::kGreater}) {
+    const auto expected = CompareIndexRecord(*complete, key, columns, policy);
+    const auto actual = CompareIndexRecord(*prefix, key, columns, policy);
+    ASSERT_TRUE(expected.has_value());
+    ASSERT_TRUE(actual.has_value());
+    EXPECT_EQ(expected->ordering, actual->ordering);
+    EXPECT_EQ(expected->equivalent_prefix, actual->equivalent_prefix);
+  }
+  for (const std::string_view value : {"aardvark", "zebra"}) {
+    const std::array<SqlValue, 1> unequal{SqlValue::Text(std::string{value})};
+    const auto expected = CompareIndexRecord(*complete, unequal, columns);
+    const auto actual = CompareIndexRecord(*prefix, unequal, columns);
+    ASSERT_TRUE(expected.has_value());
+    ASSERT_TRUE(actual.has_value());
+    EXPECT_EQ(expected->ordering, actual->ordering);
+    EXPECT_FALSE(actual->equivalent_prefix);
+  }
+
+  const std::array<SqlValue, 2> longer{SqlValue::Text("Alpha"), SqlValue::Integer(7)};
+  const auto unavailable = CompareIndexRecord(*prefix, longer, columns);
+  ASSERT_FALSE(unavailable.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, unavailable.error().code());
+  const ByteBuffer one_field = Bytes({0x02, 0x09});
+  const auto shorter = RecordPrefixView::Parse(one_field.view(), one_field.size(), 2);
+  ASSERT_TRUE(shorter.has_value());
+  EXPECT_EQ(1U, shorter->complete_field_count());
+  EXPECT_EQ(1U, shorter->field_count());
+  const auto malformed = CompareIndexRecord(*shorter, longer, columns);
+  ASSERT_FALSE(malformed.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, malformed.error().code());
+}
+
+TEST(RecordPrefixViewTest, RejectsMalformedUnrequestedMetadataAndMissingPrefixBytes) {
+  const std::array<ByteBuffer, 8> malformed{
+      Bytes({}),
+      Bytes({0x80}),
+      Bytes({0x03, 0x01, 0x0a, 0x07}),
+      Bytes({0x03, 0x01, 0x0b, 0x07}),
+      Bytes({0x03, 0x01, 0x80, 0x07}),
+      Bytes({0x03, 0x01, 0x10, 0x07}),
+      Bytes({0x03, 0x01, 0x00, 0x07, 0xaa}),
+      Bytes({0x86, 0x80, 0x04}),
+  };
+  for (const ByteBuffer& encoded : malformed) {
+    const auto prefix = RecordPrefixView::Parse(encoded.view(), encoded.size(), 1);
+    const auto required = RecordPrefixView::RequiredPrefixSize(encoded.view(), encoded.size(), 1);
+    ASSERT_FALSE(prefix.has_value());
+    ASSERT_FALSE(required.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, prefix.error().code());
+    EXPECT_EQ(ErrorCode::kCorruption, required.error().code());
+  }
+
+  const ByteBuffer integer = Bytes({0x02, 0x01, 0x07});
+  const auto truncated = RecordPrefixView::Parse(integer.view().first(2), integer.size(), 1);
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, truncated.error().code());
+  const auto oversized_input = RecordPrefixView::Parse(integer.view(), ByteCount{2}, 1);
+  ASSERT_FALSE(oversized_input.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, oversized_input.error().code());
+  const auto invalid_width = RecordPrefixView::Parse(integer.view(), integer.size(), 0);
+  ASSERT_FALSE(invalid_width.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_width.error().code());
+
+  const ByteBuffer legacy_suffix = Bytes({0x03, 0x01, 0x08, 0x07});
+  const auto legacy =
+      RecordPrefixView::Parse(legacy_suffix.view(), legacy_suffix.size(), 1, LegacyOptions());
+  ASSERT_FALSE(legacy.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, legacy.error().code());
+}
+
+TEST(RecordPrefixViewTest, SharesComparisonForAllStorageClassesAndOrderingPolicies) {
+  const std::array<SqlValue, 7> values{
+      SqlValue{},
+      SqlValue::Integer(-1),
+      SqlValue::Integer(9007199254740993LL),
+      SqlValue::Real(9007199254740992.0),
+      SqlValue::Real(1.25),
+      SqlValue::Text("Alpha"),
+      SqlValue::Blob(Bytes({0x00, 0xff})),
+  };
+  const auto source_bytes = EncodeRecord(values);
+  ASSERT_TRUE(source_bytes.has_value());
+  const auto source = RecordView::Parse(source_bytes->view());
+  ASSERT_TRUE(source.has_value());
+  const std::array<IndexColumnOrder, 4> policies{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kAscending,
+                       IndexNullPlacement::kLast},
+      IndexColumnOrder{RTrimCollation(), IndexSortDirection::kDescending},
+  };
+  for (std::size_t stored = 0; stored < values.size(); ++stored) {
+    SCOPED_TRACE(stored);
+    const auto field = source->field(stored);
+    ASSERT_TRUE(field.has_value());
+    const std::array<SqlValue, 2> fields{
+        field->ToOwned(),
+        SqlValue::Blob(ByteBuffer{ByteCount{32}}),
+    };
+    const auto encoded = EncodeRecord(fields);
+    ASSERT_TRUE(encoded.has_value());
+    const auto complete = RecordView::Parse(encoded->view());
+    const auto required = RecordPrefixView::RequiredPrefixSize(encoded->view(), encoded->size(), 1);
+    ASSERT_TRUE(complete.has_value());
+    ASSERT_TRUE(required.has_value());
+    const auto prefix =
+        RecordPrefixView::Parse(encoded->view().first(required->value()), encoded->size(), 1);
+    ASSERT_TRUE(prefix.has_value());
+    for (std::size_t searched = 0; searched < values.size(); ++searched) {
+      SCOPED_TRACE(searched);
+      const auto key = std::span{values}.subspan(searched, 1);
+      for (const IndexColumnOrder& policy : policies) {
+        const std::span<const IndexColumnOrder> columns{&policy, 1};
+        const auto expected = CompareIndexRecord(*complete, key, columns);
+        const auto actual = CompareIndexRecord(*prefix, key, columns);
+        ASSERT_TRUE(expected.has_value());
+        ASSERT_TRUE(actual.has_value());
+        EXPECT_EQ(expected->ordering, actual->ordering);
+        EXPECT_EQ(expected->equivalent_prefix, actual->equivalent_prefix);
+      }
+    }
+  }
+}
+
+TEST(RecordPrefixViewTest, ValidatesCompleteLargeHeadersAndStructuralLimits) {
+  std::vector<SqlValue> fields = NullValues(kMaximumRecordFieldCount);
+  const auto encoded = EncodeRecord(fields);
+  ASSERT_TRUE(encoded.has_value());
+  const auto header =
+      RecordPrefixView::RequiredHeaderSize(encoded->view().first(3), encoded->size());
+  ASSERT_TRUE(header.has_value());
+  EXPECT_EQ(encoded->size(), *header);
+  const auto prefix = RecordPrefixView::Parse(encoded->view(), encoded->size(), 1);
+  ASSERT_TRUE(prefix.has_value());
+  EXPECT_EQ(kMaximumRecordFieldCount, prefix->complete_field_count());
+  EXPECT_EQ(1U, prefix->field_count());
+  RecordCursor cursor = prefix->cursor();
+  ASSERT_TRUE(cursor.Next().has_value());
+  EXPECT_FALSE(cursor.Next().has_value());
+
+  ByteBuffer too_many{ByteCount{65538}};
+  too_many.mutable_view()[0] = Byte(0x84);
+  too_many.mutable_view()[1] = Byte(0x80);
+  too_many.mutable_view()[2] = Byte(0x02);
+  const auto excessive = RecordPrefixView::Parse(too_many.view(), too_many.size(), 1);
+  ASSERT_FALSE(excessive.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, excessive.error().code());
+  const auto too_large = RecordPrefixView::RequiredHeaderSize(
+      encoded->view().first(3), ByteCount{std::numeric_limits<std::size_t>::max()});
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, too_large.error().code());
+}
+
 TEST(RecordCodec, ReportsTheExactEncodedSize) {
   std::vector<SqlValue> values;
   values.push_back(SqlValue::Integer(128));

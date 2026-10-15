@@ -79,6 +79,7 @@ class RecordCursor final {
 
  private:
   friend class RecordView;
+  friend class RecordPrefixView;
 
   RecordCursor(ByteView encoded, std::size_t header_offset, std::size_t header_end,
                std::size_t body_offset, std::size_t field_count) noexcept
@@ -119,6 +120,43 @@ class RecordView final {
   std::size_t header_offset_;
   std::size_t header_end_;
   std::size_t field_count_;
+};
+
+// Borrows the complete header and available initial field payloads of a
+// record with a known full size. The bytes must outlive all derived views.
+class RecordPrefixView final {
+ public:
+  [[nodiscard]] static Result<ByteCount> RequiredHeaderSize(ByteView initial,
+                                                            ByteCount complete_size,
+                                                            RecordCodecOptions options = {});
+  [[nodiscard]] static Result<ByteCount> RequiredPrefixSize(ByteView header,
+                                                            ByteCount complete_size,
+                                                            std::size_t requested_fields,
+                                                            RecordCodecOptions options = {});
+  [[nodiscard]] static Result<RecordPrefixView> Parse(ByteView encoded, ByteCount complete_size,
+                                                      std::size_t requested_fields,
+                                                      RecordCodecOptions options = {});
+
+  [[nodiscard]] ByteView encoded() const noexcept { return encoded_; }
+  [[nodiscard]] ByteCount header_size() const noexcept { return ByteCount{header_end_}; }
+  [[nodiscard]] std::size_t field_count() const noexcept { return available_fields_; }
+  [[nodiscard]] std::size_t complete_field_count() const noexcept { return complete_fields_; }
+  [[nodiscard]] RecordCursor cursor() const noexcept;
+
+ private:
+  RecordPrefixView(ByteView encoded, std::size_t header_offset, std::size_t header_end,
+                   std::size_t available_fields, std::size_t complete_fields) noexcept
+      : encoded_(encoded),
+        header_offset_(header_offset),
+        header_end_(header_end),
+        available_fields_(available_fields),
+        complete_fields_(complete_fields) {}
+
+  ByteView encoded_;
+  std::size_t header_offset_;
+  std::size_t header_end_;
+  std::size_t available_fields_;
+  std::size_t complete_fields_;
 };
 
 [[nodiscard]] Result<ByteCount> EncodedRecordSize(std::span<const SqlValue> values,
@@ -176,6 +214,11 @@ struct IndexKeyComparison {
 
 [[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
     const RecordView& record, std::span<const SqlValue> search_key,
+    std::span<const IndexColumnOrder> columns,
+    EqualPrefixResult equal_prefix_result = EqualPrefixResult::kEquivalent);
+
+[[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
+    const RecordPrefixView& record, std::span<const SqlValue> search_key,
     std::span<const IndexColumnOrder> columns,
     EqualPrefixResult equal_prefix_result = EqualPrefixResult::kEquivalent);
 
