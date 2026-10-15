@@ -156,12 +156,14 @@ namespace {
   }
   for (std::uint8_t kind = 0; kind < 4U; ++kind) {
     for (std::uint8_t key = 0; key < 4U; ++key) {
-      for (std::uint8_t consumer = 0; consumer < 3U; ++consumer) {
+      for (std::uint8_t consumer = 0; consumer < 6U; ++consumer) {
         const std::array<std::uint8_t, 11> input{
             0x05, kind, key, key, 0x01, 0x00, 0x06, consumer, 0x0c, 0x00, 0x01,
         };
         const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
-        if (sql.find("key_rows") == std::string::npos || !ExecuteSql(*indexed, sql)) {
+        if (sql.find("key_rows") == std::string::npos ||
+            (consumer >= 3U && sql.find("b.payload") == std::string::npos) ||
+            !ExecuteSql(*indexed, sql)) {
           return false;
         }
       }

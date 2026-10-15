@@ -1219,6 +1219,13 @@ TEST(ReadSession, CleansAndRecoversIndexedMatchRelationsAfterTemporaryWriteFailu
       4096);
 }
 
+TEST(ReadSession, CleansAndRecoversNoncoveringIndexedMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(b.payload),count(a.rowid) FROM items a FULL JOIN items b "
+      "ON b.category=a.category",
+      4096);
+}
+
 TEST(ReadSession, PreservesBothFullSidesAcrossExternalOrderAndPmaFailureRecovery) {
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<int>(mode));
@@ -2025,23 +2032,35 @@ TEST(ReadSession, RebindsTypedJoinedIndexKeysAfterSuspensionAndCompletion) {
       Case{.key = SqlValue::Text("1"), .ids = {1}},
   };
   ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
-  ReadStatement statement = PrepareStatement(session,
-                                             "SELECT b.id FROM probe_rows p CROSS JOIN key_rows b "
-                                             "WHERE p.id=1 AND b.text_key=?1 ORDER BY b.id");
-  for (const bool complete : {false, true}) {
-    for (const Case& test_case : cases) {
-      RequireStatus(statement.Bind(1, test_case.key));
-      for (const std::int64_t id : test_case.ids) {
-        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
-        EXPECT_EQ(id, IntegerValue(statement.row()[0]));
-        if (!complete) {
-          break;
+  for (const bool noncovering : {false, true}) {
+    SCOPED_TRACE(noncovering);
+    ReadStatement statement = PrepareStatement(
+        session, "SELECT b.id" +
+                     std::string{noncovering ? ",b.payload,b.default_text,b.real_key" : ""} +
+                     " FROM probe_rows p CROSS JOIN key_rows b "
+                     "WHERE p.id=1 AND b.text_key=?1" +
+                     (noncovering ? "" : " ORDER BY b.id"));
+    for (const bool complete : {false, true}) {
+      for (const Case& test_case : cases) {
+        RequireStatus(statement.Bind(1, test_case.key));
+        for (const std::int64_t id : test_case.ids) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+          if (noncovering) {
+            ASSERT_EQ(4U, statement.row().size());
+            EXPECT_EQ(SqlValueType::kText, statement.row()[1].type());
+            EXPECT_EQ("fallback", TextValue(statement.row()[2]));
+            EXPECT_EQ(SqlValueType::kReal, statement.row()[3].type());
+          }
+          if (!complete) {
+            break;
+          }
         }
+        if (complete || test_case.ids.empty()) {
+          EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+        }
+        RequireStatus(statement.Reset());
       }
-      if (complete || test_case.ids.empty()) {
-        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
-      }
-      RequireStatus(statement.Reset());
     }
   }
 }
@@ -2085,58 +2104,75 @@ TEST(ReadSession, MatchesIndependentJoinedIndexNullAndPreservationModels) {
     return true;
   };
   using Pair = std::pair<std::optional<std::int64_t>, std::optional<std::int64_t>>;
+  constexpr std::array<std::string_view, 12> kPayloads{
+      "one",      "zero-one",  "zeros-one", "alpha",    "upper-alpha", "null-one",
+      "null-two", "beta-null", "beta-five", "same-one", "same-two",    "null-three",
+  };
   ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
-  for (const Join& join : joins) {
-    for (const bool nulls_equal : {false, true}) {
-      ReadStatement statement = PrepareStatement(
-          session, "SELECT p.id,b.id FROM probe_rows p " + std::string{join.sql} +
-                       " key_rows b ON b.text_key" + (nulls_equal ? " IS " : "=") +
-                       "p.text_key AND b.id>?1 WHERE p.id IS NULL OR p.id<=?2 ORDER BY p.id,b.id");
-      for (const std::int64_t floor : {0, 4, 12}) {
-        for (const std::int64_t cutoff : {0, 2, 6}) {
-          SCOPED_TRACE(::testing::Message() << join.sql << " IS=" << nulls_equal
-                                            << " floor=" << floor << " cutoff=" << cutoff);
-          std::vector<Pair> expected;
-          std::array<bool, right_keys.size()> matched_right{};
-          for (std::size_t left = 0; left < left_keys.size(); ++left) {
-            const auto left_id = static_cast<std::int64_t>(left + 1U);
-            bool matched_left = false;
-            for (std::size_t right = 0; right < right_keys.size(); ++right) {
-              const auto right_id = static_cast<std::int64_t>(right + 1U);
-              if (right_id > floor && equal(left_keys[left], right_keys[right], nulls_equal)) {
-                matched_left = true;
-                matched_right[right] = true;
-                if (left_id <= cutoff) {
-                  expected.emplace_back(left_id, right_id);
+  for (const bool noncovering : {false, true}) {
+    SCOPED_TRACE(noncovering);
+    for (const Join& join : joins) {
+      for (const bool nulls_equal : {false, true}) {
+        ReadStatement statement = PrepareStatement(
+            session,
+            "SELECT p.id,b.id" + std::string{noncovering ? ",b.payload" : ""} +
+                " FROM probe_rows p " + std::string{join.sql} + " key_rows b ON b.text_key" +
+                (nulls_equal ? " IS " : "=") +
+                "p.text_key AND b.id>?1 WHERE p.id IS NULL OR p.id<=?2 ORDER BY p.id,b.id");
+        for (const std::int64_t floor : {0, 4, 12}) {
+          for (const std::int64_t cutoff : {0, 2, 6}) {
+            SCOPED_TRACE(::testing::Message() << join.sql << " IS=" << nulls_equal
+                                              << " floor=" << floor << " cutoff=" << cutoff);
+            std::vector<Pair> expected;
+            std::array<bool, right_keys.size()> matched_right{};
+            for (std::size_t left = 0; left < left_keys.size(); ++left) {
+              const auto left_id = static_cast<std::int64_t>(left + 1U);
+              bool matched_left = false;
+              for (std::size_t right = 0; right < right_keys.size(); ++right) {
+                const auto right_id = static_cast<std::int64_t>(right + 1U);
+                if (right_id > floor && equal(left_keys[left], right_keys[right], nulls_equal)) {
+                  matched_left = true;
+                  matched_right[right] = true;
+                  if (left_id <= cutoff) {
+                    expected.emplace_back(left_id, right_id);
+                  }
+                }
+              }
+              if (join.preserve_left && !matched_left && left_id <= cutoff) {
+                expected.emplace_back(left_id, std::nullopt);
+              }
+            }
+            if (join.preserve_right) {
+              for (std::size_t right = 0; right < right_keys.size(); ++right) {
+                if (!matched_right[right]) {
+                  expected.emplace_back(std::nullopt, static_cast<std::int64_t>(right + 1U));
                 }
               }
             }
-            if (join.preserve_left && !matched_left && left_id <= cutoff) {
-              expected.emplace_back(left_id, std::nullopt);
-            }
-          }
-          if (join.preserve_right) {
-            for (std::size_t right = 0; right < right_keys.size(); ++right) {
-              if (!matched_right[right]) {
-                expected.emplace_back(std::nullopt, static_cast<std::int64_t>(right + 1U));
+            std::ranges::sort(expected);
+            RequireStatus(statement.Bind(1, SqlValue::Integer(floor)));
+            RequireStatus(statement.Bind(2, SqlValue::Integer(cutoff)));
+            for (const Pair& row : expected) {
+              ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+              ASSERT_EQ(noncovering ? 3U : 2U, statement.row().size());
+              EXPECT_EQ(row.first.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
+                        statement.row()[0].type());
+              EXPECT_EQ(row.second.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
+                        statement.row()[1].type());
+              EXPECT_EQ(row.first, statement.row()[0].integer_value());
+              EXPECT_EQ(row.second, statement.row()[1].integer_value());
+              if (noncovering) {
+                if (row.second.has_value()) {
+                  EXPECT_EQ(kPayloads[static_cast<std::size_t>(*row.second - 1)],
+                            TextValue(statement.row()[2]));
+                } else {
+                  EXPECT_EQ(SqlValueType::kNull, statement.row()[2].type());
+                }
               }
             }
+            EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+            RequireStatus(statement.Reset());
           }
-          std::ranges::sort(expected);
-          RequireStatus(statement.Bind(1, SqlValue::Integer(floor)));
-          RequireStatus(statement.Bind(2, SqlValue::Integer(cutoff)));
-          for (const Pair& row : expected) {
-            ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
-            ASSERT_EQ(2U, statement.row().size());
-            EXPECT_EQ(row.first.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
-                      statement.row()[0].type());
-            EXPECT_EQ(row.second.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
-                      statement.row()[1].type());
-            EXPECT_EQ(row.first, statement.row()[0].integer_value());
-            EXPECT_EQ(row.second, statement.row()[1].integer_value());
-          }
-          EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
-          RequireStatus(statement.Reset());
         }
       }
     }
@@ -2186,6 +2222,66 @@ TEST(ReadSession, DefersJoinedIndexReadsForZeroLimitAndRecoversTypedReadFailure)
   EXPECT_EQ(0U, state->live_count);
 }
 
+TEST(ReadSession, BypassesBothNoncoveringRootsForZeroLimitAndRecoversEitherReadFailure) {
+  for (const std::string_view object : {"keys_text_num", "key_rows"}) {
+    for (const std::int64_t probe : {2, 5}) {
+      SCOPED_TRACE(::testing::Message() << object << " probe=" << probe);
+      const auto state = std::make_shared<TemporaryFileState>();
+      ReadSession session = TakeValue(ReadSession::Open(
+          std::make_unique<TemporaryTrackingVfs>(state), JoinedIndexFixturePath().string()));
+      ReadStatement root = PrepareStatement(
+          session, "SELECT rootpage FROM sqlite_schema WHERE name='" + std::string{object} + "'");
+      ASSERT_EQ(ReadStep::kRow, TakeValue(root.Step()));
+      const auto page = IntegerValue(root.row()[0]);
+      ASSERT_GT(page, 0);
+      RequireStatus(root.Finalize());
+      ReadStatement statement =
+          PrepareStatement(session,
+                           "SELECT p.id,b.id,b.payload,b.default_text,b.real_key FROM probe_rows p "
+                           "JOIN key_rows b ON b.text_key=p.text_key WHERE p.id=" +
+                               std::to_string(probe) + " LIMIT ?1");
+      RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+      state->main_read_failure_offset = FileOffset{(static_cast<std::uint64_t>(page) - 1U) * 512U};
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      EXPECT_EQ(0U, state->main_read_failures);
+      ASSERT_TRUE(state->main_read_failure_offset.has_value());
+      RequireStatus(statement.Reset());
+      RequireStatus(statement.Bind(1, SqlValue::Integer(-1)));
+      const auto failed = statement.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+      EXPECT_EQ(1U, state->main_read_failures);
+      EXPECT_EQ(0U, state->live_count);
+      const auto reset = statement.Reset();
+      ASSERT_FALSE(reset.has_value());
+      EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+      if (probe == 2) {
+        for (const std::int64_t id : {4, 5}) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          ASSERT_EQ(5U, statement.row().size());
+          EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+          EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+          EXPECT_EQ(id == 4 ? "alpha" : "upper-alpha", TextValue(statement.row()[2]));
+          EXPECT_EQ("fallback", TextValue(statement.row()[3]));
+          EXPECT_EQ(SqlValueType::kReal, statement.row()[4].type());
+          EXPECT_EQ(id == 4 ? 2.5 : 3.5, statement.row()[4].real_value());
+        }
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+      RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+      if (probe == 2) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(4, IntegerValue(statement.row()[1]));
+      } else {
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+      RequireStatus(statement.Finalize());
+      EXPECT_EQ(0U, state->live_count);
+    }
+  }
+}
+
 TEST(ReadSession, ExecutesSixtyFourJoinedCoveringPrefixesInOneSourcePipeline) {
   ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
   std::string sql = "SELECT t0.id,t63.id FROM items t0";
@@ -2207,6 +2303,23 @@ TEST(ReadSession, BoundsJoinedCoveringEqualityWorkByIndexedPrefixes) {
   ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
   ReadStatement statement = PrepareStatement(
       session, "SELECT count() FROM items a JOIN items b ON b.category=a.category WHERE a.id=1");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 256U);
+}
+
+TEST(ReadSession, BoundsJoinedNoncoveringEqualityWorkByIndexedPrefixes) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT count(b.payload) FROM items a JOIN items b ON b.category=a.category WHERE a.id=1");
   instrumentation::CounterCollection work;
   {
     const instrumentation::ScopedCounterCollection scope{work};

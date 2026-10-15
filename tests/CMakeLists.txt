@@ -896,7 +896,10 @@ foreach(consumer_case IN ITEMS
     exists_intersect
     joined_index_full_aggregate
     joined_index_scalar_group
-    joined_index_distinct_set)
+    joined_index_distinct_set
+    joined_noncovering_full_aggregate
+    joined_noncovering_scalar_group
+    joined_noncovering_distinct_set)
   if(consumer_case STREQUAL "natural_right_demand_one"
      OR consumer_case STREQUAL "natural_full_demand_one")
     foreach(partition RANGE 0 3)

@@ -144,6 +144,10 @@ NUMERIC, INTEGER, or REAL. This applies to source-independent scalar-query
 keys as well; a numeric-affinity key must not constrain a TEXT index and omit
 equivalent stored numeric spellings.
 
+ADR-0086 admits the same joined equality prefixes when required fields need
+the canonical index-rowid table lookup. It reuses these noncovering costs
+and descriptors and retains complete table-backed RIGHT/FULL replay.
+
 Comparison orientation is normalized. `? < column` becomes a lower bound and
 `? > column` becomes an upper bound. The physical plan retains:
 

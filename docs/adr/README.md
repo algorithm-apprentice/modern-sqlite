@@ -89,3 +89,4 @@ their corresponding implementation begins.
 83. [ADR-0083: Private Read Subroutine Capabilities](0083-private-read-subroutine-capabilities.md)
 84. [ADR-0084: Bound Query Ownership for Nested SELECT](0084-bound-query-ownership-for-nested-select.md)
 85. [ADR-0085: Parameterized Joined Covering Index Access](0085-parameterized-joined-covering-index-access.md)
+86. [ADR-0086: Parameterized Joined Noncovering Index Access](0086-parameterized-joined-noncovering-index-access.md)

@@ -1522,7 +1522,7 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
     auto candidate = AnalyzeIndexCandidate(bound_select, source_id, *table_id,
                                            source->source_column_begin, source->source_column_count,
                                            index, predicates, core, false, source_id);
-    if (!candidate.has_value() || !candidate->node.covering || candidate->node.equalities.empty() ||
+    if (!candidate.has_value() || candidate->node.equalities.empty() ||
         candidate->node.range.has_value()) {
       continue;
     }

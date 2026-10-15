@@ -103,6 +103,10 @@ checked optional access, error construction, and `ProgramResult` conversion
 helpers used by both translation units. The extraction does not duplicate
 those canonical diagnostics or mappings.
 
+ADR-0086 shares the stateless index-rowid/table-position emission through
+that existing internal helper boundary. Access selection, traversal, cursor
+ownership, and this service interface remain in their current modules.
+
 Virtual dispatch is confined to compile-time plan lowering. The interface and
 input record allocate no memory, so existing allocation and OOM contracts
 remain exact.

@@ -268,7 +268,7 @@ class ByteReader final {
                              predicate +
                              " WHERE p.id IS NULL OR p.id<=" + std::to_string(input.Next() % 7U);
   std::string sql;
-  switch (input.Next() % 3U) {
+  switch (input.Next() % 6U) {
     case 0:
       sql = "SELECT p.id,b.id,b.numeric_key" + source + " ORDER BY p.id,b.id";
       break;
@@ -276,8 +276,19 @@ class ByteReader final {
       sql = "SELECT b.numeric_key,count(),count(b.rowid)" + source +
             " GROUP BY b.numeric_key ORDER BY b.numeric_key";
       break;
-    default:
+    case 2:
       sql = "SELECT DISTINCT b.id" + source + " ORDER BY b.id";
+      break;
+    case 3:
+      sql = "SELECT p.id,b.id,b.payload,b.default_text,typeof(b.real_key),b.real_key" + source +
+            " ORDER BY p.id,b.id";
+      break;
+    case 4:
+      sql = "SELECT b.numeric_key,count(b.payload),group_concat(b.payload ORDER BY b.id DESC)" +
+            source + " GROUP BY b.numeric_key ORDER BY b.numeric_key";
+      break;
+    default:
+      sql = "SELECT DISTINCT b.payload COLLATE BINARY" + source + " ORDER BY b.payload";
       break;
   }
   sql += " LIMIT " + std::to_string(input.Next() % 13U) + " OFFSET " +

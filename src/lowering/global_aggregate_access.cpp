@@ -769,22 +769,8 @@ class GlobalAggregateAccessEmitter final {
         return std::unexpected(std::move(checked.error()));
       }
     }
-    if (auto rowid = Append(ReadFieldInstruction{
-            .cursor = index_cursor,
-            .field = CursorFieldId{0},
-            .output = AssumeValue(index_rowid_register_),
-        });
-        !rowid.has_value()) {
-      return rowid;
-    }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = table_cursor});
-        !opened.has_value()) {
-      return opened;
-    }
-    if (auto sought = Append(SeekTableRowIdInstruction{
-            .cursor = table_cursor,
-            .key = AssumeValue(index_rowid_register_),
-        });
+    if (auto sought = EmitIndexTableLookup(*builder_, index_cursor, table_cursor,
+                                           AssumeValue(index_rowid_register_), true);
         !sought.has_value()) {
       return sought;
     }
@@ -807,18 +793,8 @@ class GlobalAggregateAccessEmitter final {
         return std::unexpected(std::move(checked.error()));
       }
     }
-    if (auto rowid = Append(ReadFieldInstruction{
-            .cursor = index_cursor,
-            .field = CursorFieldId{0},
-            .output = AssumeValue(index_rowid_register_),
-        });
-        !rowid.has_value()) {
-      return rowid;
-    }
-    if (auto sought = Append(SeekTableRowIdInstruction{
-            .cursor = table_cursor,
-            .key = AssumeValue(index_rowid_register_),
-        });
+    if (auto sought = EmitIndexTableLookup(*builder_, index_cursor, table_cursor,
+                                           AssumeValue(index_rowid_register_));
         !sought.has_value()) {
       return sought;
     }
@@ -1263,18 +1239,8 @@ class GlobalAggregateAccessEmitter final {
     if (!index_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("indexed MIN/MAX table lookup has no rowid register"));
     }
-    if (auto rowid = Append(ReadFieldInstruction{
-            .cursor = index_cursor,
-            .field = CursorFieldId{0},
-            .output = AssumeValue(index_rowid_register_),
-        });
-        !rowid.has_value()) {
-      return rowid;
-    }
-    return Append(SeekTableRowIdInstruction{
-        .cursor = *table_cursor,
-        .key = AssumeValue(index_rowid_register_),
-    });
+    return EmitIndexTableLookup(*builder_, index_cursor, *table_cursor,
+                                AssumeValue(index_rowid_register_));
   }
 
   [[nodiscard]] LoweringResult<void> CloseIndexedMinMaxCursors(
