@@ -1228,14 +1228,17 @@ TEST(ReadSession, CleansAndRecoversNoncoveringIndexedMatchRelationsAfterTemporar
 }
 
 TEST(ReadSession, CleansAndRecoversRangeMatchRelationsAfterTemporaryWriteFailure) {
-  for (const bool covering : {true, false}) {
-    SCOPED_TRACE(covering);
-    ExercisePreservedRightMatchFailure("SELECT " +
-                                           std::string{covering ? "count()" : "count(b.payload)"} +
-                                           ",count(a.rowid) FROM items a FULL JOIN items b "
-                                           "ON b.category>=a.category AND b.category<=a.category",
-                                       4096);
-  }
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(),count(a.rowid) FROM items a FULL JOIN items b "
+      "ON b.category>=a.category AND b.category<=a.category",
+      4096);
+}
+
+TEST(ReadSession, CleansAndRecoversNoncoveringRangeMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(b.payload),count(a.rowid) FROM items a FULL JOIN items b "
+      "ON b.category>=a.category AND b.category<=a.category",
+      4096);
 }
 
 TEST(ReadSession, PreservesBothFullSidesAcrossExternalOrderAndPmaFailureRecovery) {
