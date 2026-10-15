@@ -79,6 +79,7 @@ struct SubroutineDescriptor {
 enum class CursorStorageKind : std::uint8_t {
   kRowIdTable,
   kIndex,
+  kEphemeralIndex,
 };
 
 enum class WriteCursorStorageKind : std::uint8_t {
@@ -166,6 +167,11 @@ enum class RelationInsertMode : std::uint8_t {
   kReplaceExisting,
 };
 
+enum class RelationPurpose : std::uint8_t {
+  kMembership,
+  kLookup,
+};
+
 struct CursorFieldSource {
   CursorFieldSourceKind kind;
   std::uint32_t record_field;
@@ -194,6 +200,7 @@ struct OrderingRecordDescriptor {
   std::uint32_t field_count = 0;
   std::uint32_t key_field_count = 0;
   std::vector<OrderingColumnMetadata> key_columns;
+  RelationPurpose relation_purpose = RelationPurpose::kMembership;
 };
 
 struct AggregateDescriptor {
@@ -210,6 +217,7 @@ struct ReadCursorDescriptor {
   std::uint32_t record_field_count;
   std::vector<CursorFieldSource> fields;
   std::vector<IndexColumnMetadata> index_columns;
+  std::optional<RelationId> relation{};
 };
 
 struct WriteColumnDescriptor {
@@ -705,6 +713,30 @@ struct CloseRelationInstruction {
   RelationId relation;
 };
 
+struct CheckRelationLookupInstruction {
+  RelationId relation;
+  InstructionAddress ready_target;
+  InstructionAddress empty_target;
+};
+
+struct SealRelationInstruction {
+  RelationId relation;
+};
+
+struct SeekRelationPrefixInstruction {
+  CursorId cursor;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress missing_target;
+};
+
+struct NextRelationPrefixInstruction {
+  CursorId cursor;
+  RegisterId first_key;
+  std::uint32_t key_count;
+  InstructionAddress next_target;
+};
+
 struct CompareRecordsInstruction {
   RecordComparisonId comparison;
   RegisterId left_first;
@@ -767,7 +799,8 @@ using Instruction = std::variant<
     CloseRelationInstruction, CompareRecordsInstruction, OpenAggregateInstruction,
     StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
     CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction,
-    CallSubroutineInstruction, ReturnSubroutineInstruction>;
+    CallSubroutineInstruction, ReturnSubroutineInstruction, CheckRelationLookupInstruction,
+    SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -859,6 +892,10 @@ enum class InstructionKind : std::uint8_t {
   kNullRow,
   kCallSubroutine,
   kReturnSubroutine,
+  kCheckRelationLookup,
+  kSealRelation,
+  kSeekRelationPrefix,
+  kNextRelationPrefix,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -1076,6 +1113,9 @@ class BytecodeProgram final {
   [[nodiscard]] const OrderingRecordDescriptor& sorter(SorterId id) const noexcept;
   [[nodiscard]] const OrderingRecordDescriptor& top_n(TopNId id) const noexcept;
   [[nodiscard]] const OrderingRecordDescriptor& relation(RelationId id) const noexcept;
+  [[nodiscard]] std::optional<CursorId> relation_borrower(RelationId id) const noexcept {
+    return relation_borrowers_.empty() ? std::nullopt : relation_borrowers_[id.value()];
+  }
   [[nodiscard]] const OrderingRecordDescriptor& record_comparison(
       RecordComparisonId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
@@ -1083,11 +1123,15 @@ class BytecodeProgram final {
   [[nodiscard]] const SubroutineDescriptor& subroutine(SubroutineId id) const noexcept;
 
  private:
-  BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics) noexcept
-      : input_(std::move(input)), metrics_(metrics) {}
+  BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics,
+                  std::vector<std::optional<CursorId>> relation_borrowers) noexcept
+      : input_(std::move(input)),
+        metrics_(metrics),
+        relation_borrowers_(std::move(relation_borrowers)) {}
 
   ProgramInput input_;
   ProgramVerificationMetrics metrics_;
+  std::vector<std::optional<CursorId>> relation_borrowers_;
 };
 
 class Label final {
@@ -1168,6 +1212,17 @@ class ProgramBuilder final {
                                                                      Label empty_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRelation(RelationId relation,
                                                                    Label next_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitCheckRelationLookup(RelationId relation,
+                                                                          Label ready_target,
+                                                                          Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRelationPrefix(CursorId cursor,
+                                                                         RegisterId first_key,
+                                                                         std::uint32_t key_count,
+                                                                         Label missing_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitNextRelationPrefix(CursorId cursor,
+                                                                         RegisterId first_key,
+                                                                         std::uint32_t key_count,
+                                                                         Label next_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRowId(
       CursorId cursor, RegisterId key, Label missing_target,
       RowIdSeekMode mode = RowIdSeekMode::kEqual);
@@ -1254,6 +1309,23 @@ class ProgramBuilder final {
     RelationId relation;
     Label target;
   };
+  struct PendingCheckRelationLookup {
+    RelationId relation;
+    Label ready_target;
+    Label empty_target;
+  };
+  struct PendingSeekRelationPrefix {
+    CursorId cursor;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+  };
+  struct PendingNextRelationPrefix {
+    CursorId cursor;
+    RegisterId first_key;
+    std::uint32_t key_count;
+    Label target;
+  };
   struct PendingSeekRowId {
     CursorId cursor;
     RegisterId key;
@@ -1292,13 +1364,13 @@ class ProgramBuilder final {
     SubroutineKind kind;
   };
 
-  using PendingInstruction =
-      std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
-                   PendingRewindRowIdList, PendingNextRowIdList, PendingRewindSorter,
-                   PendingNextSorter, PendingCheckTopN, PendingRewindTopN, PendingNextTopN,
-                   PendingInsertRelation, PendingContainsRelation, PendingRewindRelation,
-                   PendingNextRelation, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
-                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf>;
+  using PendingInstruction = std::variant<
+      Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious, PendingRewindRowIdList,
+      PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
+      PendingRewindTopN, PendingNextTopN, PendingInsertRelation, PendingContainsRelation,
+      PendingRewindRelation, PendingNextRelation, PendingSeekRowId, PendingSeekIndex,
+      PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
+      PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

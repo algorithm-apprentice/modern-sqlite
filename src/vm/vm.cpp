@@ -236,8 +236,8 @@ struct RuntimeAggregate {
 };
 
 struct RuntimeCursor {
-  using Storage =
-      std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor, TableBtreeMutationCursor>;
+  using Storage = std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor,
+                               TableBtreeMutationCursor, RelationId>;
 
   void ClearRecordCache() noexcept {
     null_row = false;
@@ -661,6 +661,9 @@ struct Vm::Impl {
     EphemeralRelationDescriptor runtime{
         .field_count = descriptor.field_count,
         .key_field_count = descriptor.key_field_count,
+        .purpose = descriptor.relation_purpose == RelationPurpose::kLookup
+                       ? EphemeralRelationPurpose::kLookup
+                       : EphemeralRelationPurpose::kMembership,
     };
     runtime.key_columns.reserve(descriptor.key_columns.size());
     for (const OrderingColumnMetadata& column : descriptor.key_columns) {
@@ -1178,6 +1181,17 @@ struct Vm::Impl {
         return std::unexpected(std::move(cursor.error()));
       }
       runtime.storage = std::move(*cursor);
+    } else if (descriptor.storage == CursorStorageKind::kEphemeralIndex) {
+      if (!descriptor.relation.has_value()) {
+        return std::unexpected(
+            VmError(ErrorCode::kInternal, "ephemeral source has no relation owner"));
+      }
+      const RelationId relation_id = *descriptor.relation;
+      auto relation = Relation(relation_id);
+      if (!relation.has_value()) {
+        return std::unexpected(std::move(relation.error()));
+      }
+      runtime.storage = relation_id;
     } else {
       std::vector<IndexColumnOrder> columns;
       columns.reserve(descriptor.index_columns.size());
@@ -1228,6 +1242,16 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseCursorInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
+    if (const auto* id = std::get_if<RelationId>(&runtime.storage); id != nullptr) {
+      auto relation = Relation(*id);
+      if (!relation.has_value()) {
+        return std::unexpected(std::move(relation.error()));
+      }
+      auto cleared = (*relation)->ClearPosition();
+      if (!cleared.has_value()) {
+        return std::unexpected(std::move(cleared.error()));
+      }
+    }
     runtime.storage = std::monostate{};
     return std::nullopt;
   }
@@ -1236,11 +1260,17 @@ struct Vm::Impl {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
     auto cleared = std::visit(
-        [](auto& cursor) -> Status {
+        [this](auto& cursor) -> Status {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, TableBtreeCursor> ||
                         std::is_same_v<T, IndexBtreeCursor>) {
             return cursor.ClearPosition();
+          } else if constexpr (std::is_same_v<T, RelationId>) {
+            auto relation = Relation(cursor);
+            if (!relation.has_value()) {
+              return std::unexpected(std::move(relation.error()));
+            }
+            return (*relation)->ClearPosition();
           } else {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "NULL-row publication requires an open read cursor"));
@@ -1980,7 +2010,7 @@ struct Vm::Impl {
     auto has_entry = std::visit(
         [](auto& cursor) -> Result<bool> {
           using T = std::remove_cvref_t<decltype(cursor)>;
-          if constexpr (std::is_same_v<T, std::monostate>) {
+          if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, RelationId>) {
             return std::unexpected(VmError(ErrorCode::kInternal, "rewind used a closed cursor"));
           } else {
             return cursor.First();
@@ -2006,7 +2036,7 @@ struct Vm::Impl {
     auto has_entry = std::visit(
         [](auto& cursor) -> Result<bool> {
           using T = std::remove_cvref_t<decltype(cursor)>;
-          if constexpr (std::is_same_v<T, std::monostate>) {
+          if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, RelationId>) {
             return std::unexpected(VmError(ErrorCode::kInternal, "next used a closed cursor"));
           } else {
             return cursor.Next();
@@ -2030,7 +2060,8 @@ struct Vm::Impl {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, std::monostate>) {
             return std::unexpected(VmError(ErrorCode::kInternal, "last used a closed cursor"));
-          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
+                               std::is_same_v<T, RelationId>) {
             return std::unexpected(VmError(ErrorCode::kInternal, "last used a mutation cursor"));
           } else {
             return cursor.Last();
@@ -2058,7 +2089,8 @@ struct Vm::Impl {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, std::monostate>) {
             return std::unexpected(VmError(ErrorCode::kInternal, "previous used a closed cursor"));
-          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
+                               std::is_same_v<T, RelationId>) {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "previous used a mutation cursor"));
           } else {
@@ -2626,6 +2658,7 @@ struct Vm::Impl {
     if (!encoded.has_value()) {
       return std::unexpected(std::move(encoded.error()));
     }
+    InvalidateRelationBorrower(operation.relation);
     auto inserted =
         runtime->Insert(std::move(*encoded), operation.mode == RelationInsertMode::kReplaceExisting
                                                  ? EphemeralInsertMode::kReplaceExisting
@@ -2731,6 +2764,7 @@ struct Vm::Impl {
     if (!runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
     }
+    InvalidateRelationBorrower(operation.relation);
     auto reset = runtime->Reset();
     if (!reset.has_value()) {
       return std::unexpected(std::move(reset.error()));
@@ -2743,8 +2777,85 @@ struct Vm::Impl {
     if (!runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
     }
+    InvalidateRelationBorrower(operation.relation);
     runtime->Close();
     runtime.reset();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const CheckRelationLookupInstruction& operation) {
+    auto relation = Relation(operation.relation);
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    const EphemeralRelationState state = (*relation)->state();
+    if (state == EphemeralRelationState::kWriting) {
+      return std::nullopt;
+    }
+    if (state != EphemeralRelationState::kLookupReady &&
+        state != EphemeralRelationState::kLookupPositioned) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "lookup readiness requires a writing or sealed relation"));
+    }
+    program_counter_ = (*relation)->record_count() == 0U ? operation.empty_target.value()
+                                                         : operation.ready_target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const SealRelationInstruction& operation) {
+    auto relation = Relation(operation.relation);
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    InvalidateRelationBorrower(operation.relation);
+    auto sealed = (*relation)->SealForLookup();
+    if (!sealed.has_value()) {
+      return std::unexpected(std::move(sealed.error()));
+    }
+    return std::nullopt;
+  }
+
+  template <typename Operation>
+    requires(std::is_same_v<Operation, SeekRelationPrefixInstruction> ||
+             std::is_same_v<Operation, NextRelationPrefixInstruction>)
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const Operation& operation) {
+    RuntimeCursor& runtime = Cursor(operation.cursor);
+    if constexpr (std::is_same_v<Operation, NextRelationPrefixInstruction>) {
+      if (runtime.null_row) {
+        runtime.ClearRecordCache();
+        return std::nullopt;
+      }
+    }
+    runtime.ClearRecordCache();
+    const auto* id = std::get_if<RelationId>(&runtime.storage);
+    if (id == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "lookup requires an open ephemeral-index cursor"));
+    }
+    auto relation = Relation(*id);
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    const auto key = std::span<const SqlValue>{registers_}.subspan(operation.first_key.value(),
+                                                                   operation.key_count);
+    auto positioned = [&]() -> Result<bool> {
+      if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction>) {
+        return (*relation)->SeekPrefix(key);
+      } else {
+        return (*relation)->NextPrefix(key);
+      }
+    }();
+    if (!positioned.has_value()) {
+      return std::unexpected(std::move(positioned.error()));
+    }
+    if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction>) {
+      if (!*positioned) {
+        program_counter_ = operation.missing_target.value();
+      }
+    } else if (*positioned) {
+      program_counter_ = operation.next_target.value();
+    }
     return std::nullopt;
   }
 
@@ -2805,6 +2916,21 @@ struct Vm::Impl {
     return cursors_[cursor_id.value()];
   }
 
+  [[nodiscard]] Result<EphemeralRelation*> Relation(RelationId id) {
+    std::optional<EphemeralRelation>& relation = relations_[id.value()];
+    if (!relation.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "ephemeral relation is not open"));
+    }
+    return &*relation;
+  }
+
+  void InvalidateRelationBorrower(RelationId id) noexcept {
+    if (const std::optional<CursorId> borrower = program_->relation_borrower(id);
+        borrower.has_value()) {
+      Cursor(*borrower).ClearRecordCache();
+    }
+  }
+
   [[nodiscard]] RuntimeWriteCursor& WriteCursor(WriteCursorId cursor_id) noexcept {
     return write_cursors_[cursor_id.value()];
   }
@@ -2846,6 +2972,13 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] Result<RecordView> CompleteRecord(RuntimeCursor& runtime) {
+    if (const auto* id = std::get_if<RelationId>(&runtime.storage); id != nullptr) {
+      auto relation = Relation(*id);
+      if (!relation.has_value()) {
+        return std::unexpected(std::move(relation.error()));
+      }
+      return (*relation)->current_record();
+    }
     if (auto* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage); cursor != nullptr) {
       if (!cursor->valid()) {
         return std::unexpected(
@@ -2867,7 +3000,8 @@ struct Vm::Impl {
           if constexpr (std::is_same_v<T, std::monostate>) {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "record read used a closed cursor"));
-          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
+                               std::is_same_v<T, RelationId>) {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated reader"));
           } else {
@@ -2891,7 +3025,8 @@ struct Vm::Impl {
             if constexpr (std::is_same_v<T, std::monostate>) {
               return std::unexpected(
                   VmError(ErrorCode::kInternal, "record copy used a closed cursor"));
-            } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor>) {
+            } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
+                                 std::is_same_v<T, RelationId>) {
               return std::unexpected(
                   VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated copier"));
             } else {

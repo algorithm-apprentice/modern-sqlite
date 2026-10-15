@@ -691,6 +691,313 @@ TEST(BytecodeProgramTest, RetainsMainHaltCleanupPolicyOutsidePrivateReadRegions)
   return verified.error().code;
 }
 
+[[nodiscard]] OrderingRecordDescriptor LookupRelationDescriptor() {
+  OrderingRecordDescriptor descriptor = RecordComparisonDescriptor();
+  descriptor.relation_purpose = RelationPurpose::kLookup;
+  return descriptor;
+}
+
+[[nodiscard]] ReadCursorDescriptor LookupCursorDescriptor() {
+  return ReadCursorDescriptor{
+      .root_page = RootPageNumber(0),
+      .storage = CursorStorageKind::kEphemeralIndex,
+      .record_field_count = 2,
+      .fields =
+          {
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0},
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+          },
+      .index_columns = {},
+      .relation = Relation(0),
+  };
+}
+
+[[nodiscard]] ProgramInput LookupRelationInput() {
+  ProgramInput input;
+  input.register_count = 3;
+  input.constants.push_back(SqlValue::Integer(1));
+  input.symbols.emplace_back("BINARY");
+  input.relations.push_back(LookupRelationDescriptor());
+  input.cursors.push_back(LookupCursorDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      OpenRelationInstruction{.relation = Relation(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      CheckRelationLookupInstruction{
+          .relation = Relation(0), .ready_target = Address(8), .empty_target = Address(12)},
+      InsertRelationInstruction{
+          .relation = Relation(0),
+          .first_value = Reg(0),
+          .value_count = 2,
+          .mode = RelationInsertMode::kKeepExisting,
+          .duplicate_target = Address(6),
+      },
+      SealRelationInstruction{.relation = Relation(0)},
+      JumpInstruction{.target = Address(4)},
+      SeekRelationPrefixInstruction{
+          .cursor = Cursor(0), .first_key = Reg(0), .key_count = 1, .missing_target = Address(12)},
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(2)},
+      NextRelationPrefixInstruction{
+          .cursor = Cursor(0), .first_key = Reg(0), .key_count = 1, .next_target = Address(9)},
+      JumpInstruction{.target = Address(4)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+      HaltInstruction{},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, DoesNotRequirePersistentSnapshotForLookupOnlyProgram) {
+  auto program = BytecodeProgram::Create(LookupRelationInput());
+  ASSERT_TRUE(program.has_value());
+  EXPECT_FALSE(program->requires_database_snapshot());
+  EXPECT_EQ(RelationPurpose::kLookup, program->relation(Relation(0)).relation_purpose);
+  EXPECT_EQ(Relation(0), program->cursor(Cursor(0)).relation);
+  EXPECT_EQ(Cursor(0), program->relation_borrower(Relation(0)));
+  EXPECT_EQ("check_relation_lookup", InstructionKindName(InstructionKind::kCheckRelationLookup));
+  EXPECT_EQ("seal_relation", InstructionKindName(InstructionKind::kSealRelation));
+  EXPECT_EQ("seek_relation_prefix", InstructionKindName(InstructionKind::kSeekRelationPrefix));
+  EXPECT_EQ("next_relation_prefix", InstructionKindName(InstructionKind::kNextRelationPrefix));
+}
+
+TEST(BytecodeProgramTest, KeepsBorrowedLookupDescriptorsAndCapabilitiesConsistent) {
+  const auto reject = [](const ProgramInput& input) {
+    const auto rejected = BytecodeProgram::Create(input);
+    EXPECT_FALSE(rejected.has_value());
+  };
+  auto duplicate = LookupRelationInput();
+  duplicate.cursors.push_back(LookupCursorDescriptor());
+  reject(duplicate);
+
+  auto root = LookupRelationInput();
+  root.cursors[0].root_page = RootPageNumber(2);
+  reject(root);
+
+  auto owner = LookupRelationInput();
+  owner.cursors[0].relation = Relation(1);
+  reject(owner);
+  owner.cursors[0].relation.reset();
+  reject(owner);
+
+  auto shape = LookupRelationInput();
+  shape.cursors[0].record_field_count = 3;
+  reject(shape);
+
+  auto rowid = LookupRelationInput();
+  rowid.cursors[0].fields[1].kind = CursorFieldSourceKind::kRowId;
+  rowid.cursors[0].fields[1].record_field = 0;
+  reject(rowid);
+
+  auto metadata = LookupRelationInput();
+  metadata.cursors[0].index_columns.push_back(
+      IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending});
+  reject(metadata);
+
+  auto purpose = LookupRelationInput();
+  purpose.relations[0].relation_purpose = RelationPurpose::kMembership;
+  reject(purpose);
+  purpose.relations[0].relation_purpose = static_cast<RelationPurpose>(255);
+  reject(purpose);
+
+  auto prefix_only = LookupRelationInput();
+  prefix_only.relations[0].key_field_count = 1;
+  prefix_only.relations[0].key_columns.pop_back();
+  reject(prefix_only);
+
+  for (const CursorStorageKind kind : {CursorStorageKind::kRowIdTable, CursorStorageKind::kIndex}) {
+    auto persistent = LookupRelationInput();
+    persistent.cursors[0] =
+        kind == CursorStorageKind::kRowIdTable ? RowIdCursorDescriptor() : IndexCursorDescriptor();
+    persistent.cursors[0].relation = Relation(0);
+    reject(persistent);
+  }
+  for (std::size_t kind = 0; kind < 3U; ++kind) {
+    ProgramInput misplaced;
+    misplaced.symbols.emplace_back("BINARY");
+    misplaced.instructions = {HaltInstruction{}};
+    if (kind == 0U) {
+      misplaced.sorters.push_back(LookupRelationDescriptor());
+    } else if (kind == 1U) {
+      misplaced.top_ns.push_back(LookupRelationDescriptor());
+    } else {
+      misplaced.record_comparisons.push_back(LookupRelationDescriptor());
+    }
+    reject(misplaced);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsUnsafeBorrowedLookupOperationsAndUninitializedKeys) {
+  const std::array<std::pair<Instruction, ProgramErrorCode>, 10> invalid{
+      std::pair{Instruction{ResetRelationInstruction{.relation = Relation(0)}},
+                ProgramErrorCode::kCursorStateConflict},
+      std::pair{Instruction{CloseRelationInstruction{.relation = Relation(0)}},
+                ProgramErrorCode::kCursorStateConflict},
+      std::pair{Instruction{SealRelationInstruction{.relation = Relation(0)}},
+                ProgramErrorCode::kCapabilityNotWriting},
+      std::pair{Instruction{ContainsRelationInstruction{.relation = Relation(0),
+                                                        .first_key = Reg(0),
+                                                        .key_count = 2,
+                                                        .found_target = Address(12)}},
+                ProgramErrorCode::kCapabilityNotWriting},
+      std::pair{Instruction{DeleteRelationInstruction{
+                    .relation = Relation(0), .first_key = Reg(0), .key_count = 2}},
+                ProgramErrorCode::kCapabilityNotWriting},
+      std::pair{Instruction{RewindRelationInstruction{.relation = Relation(0),
+                                                      .empty_target = Address(12)}},
+                ProgramErrorCode::kInvalidOrderingDescriptor},
+      std::pair{Instruction{RewindInstruction{.cursor = Cursor(0), .empty_target = Address(12)}},
+                ProgramErrorCode::kInvalidCursorDescriptor},
+      std::pair{Instruction{
+                    ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(2)}},
+                ProgramErrorCode::kCursorNotPositioned},
+      std::pair{
+          Instruction{NextRelationPrefixInstruction{
+              .cursor = Cursor(0), .first_key = Reg(0), .key_count = 1, .next_target = Address(9)}},
+          ProgramErrorCode::kCursorNotPositioned},
+      std::pair{Instruction{SeekRelationPrefixInstruction{.cursor = Cursor(0),
+                                                          .first_key = Reg(2),
+                                                          .key_count = 1,
+                                                          .missing_target = Address(12)}},
+                ProgramErrorCode::kUninitializedRegister},
+  };
+  for (const auto& [instruction, expected] : invalid) {
+    SCOPED_TRACE(InstructionKindName(InstructionKindOf(instruction)));
+    auto input = LookupRelationInput();
+    input.instructions[8] = instruction;
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(expected, rejected.error().code);
+  }
+  for (const std::uint32_t width : {0U, 3U}) {
+    auto input = LookupRelationInput();
+    std::get<SeekRelationPrefixInstruction>(input.instructions[8]).key_count = width;
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, rejected.error().code);
+  }
+  auto before_owner = LookupRelationInput();
+  std::swap(before_owner.instructions[2], before_owner.instructions[3]);
+  const auto rejected = VerifyProgram(before_owner);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCapabilityNotOpen, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, VerifiesWritingLookupNullRowsAndRequiresOnePrivateOwner) {
+  const std::array<Instruction, 7> body{
+      OpenRelationInstruction{.relation = Relation(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(0)},
+      NullRowInstruction{.cursor = Cursor(0), .enabled = false},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+  };
+  auto valid = PrivateCapabilitySubroutineInput(body);
+  valid.relations[0] = LookupRelationDescriptor();
+  valid.cursors.push_back(LookupCursorDescriptor());
+  EXPECT_TRUE(BytecodeProgram::Create(valid).has_value());
+
+  const std::array<Instruction, 2> relation{
+      OpenRelationInstruction{.relation = Relation(0)},
+      CloseRelationInstruction{.relation = Relation(0)},
+  };
+  const std::array<Instruction, 2> cursor{
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+  };
+  for (const bool caller_owns_relation : {false, true}) {
+    auto input = caller_owns_relation ? PrivateCapabilitySubroutineInput(cursor, relation)
+                                      : PrivateCapabilitySubroutineInput(relation, cursor);
+    input.relations[0] = LookupRelationDescriptor();
+    input.cursors.push_back(LookupCursorDescriptor());
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, ChargesBorrowerMapAndLookupFlowToExistingAnalysisLimits) {
+  const ProgramInput input = LookupRelationInput();
+  const auto measured = VerifyProgram(input);
+  ASSERT_TRUE(measured.has_value());
+  ProgramLimits memory;
+  memory.maximum_analysis_words = measured->analysis_words;
+  EXPECT_TRUE(VerifyProgram(input, memory).has_value());
+  --memory.maximum_analysis_words;
+  EXPECT_EQ(ProgramErrorCode::kAnalysisLimitExceeded, VerifyError(input, memory));
+  ProgramLimits work;
+  work.maximum_analysis_edge_words = measured->processed_edge_words;
+  EXPECT_TRUE(VerifyProgram(input, work).has_value());
+  --work.maximum_analysis_edge_words;
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, VerifyError(input, work));
+}
+
+TEST(BytecodeProgramTest, BuilderResolvesLookupBranchesWithoutAcceptingNumericTargets) {
+  auto builder = ProgramBuilder::Create({}, Resources(3));
+  ASSERT_TRUE(builder.has_value());
+  ASSERT_TRUE(builder->AddSymbol("BINARY").has_value());
+  ASSERT_TRUE(builder->AddRelation(LookupRelationDescriptor()).has_value());
+  ASSERT_TRUE(builder->AddCursor(LookupCursorDescriptor()).has_value());
+  ASSERT_TRUE(builder->AddConstant(SqlValue::Integer(1)).has_value());
+  const auto check = builder->CreateLabel();
+  const auto inserted = builder->CreateLabel();
+  const auto ready = builder->CreateLabel();
+  const auto row = builder->CreateLabel();
+  const auto done = builder->CreateLabel();
+  ASSERT_TRUE(check.has_value() && inserted.has_value() && ready.has_value() && row.has_value() &&
+              done.has_value());
+  ASSERT_TRUE(builder->Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)}));
+  ASSERT_TRUE(builder->Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)}));
+  ASSERT_TRUE(builder->Append(OpenRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(builder->Append(OpenReadCursorInstruction{.cursor = Cursor(0)}));
+  ASSERT_TRUE(builder->BindLabel(*check));
+  ASSERT_TRUE(builder->EmitCheckRelationLookup(Relation(0), *ready, *done));
+  ASSERT_TRUE(builder->EmitInsertRelation(Relation(0), Reg(0), 2, RelationInsertMode::kKeepExisting,
+                                          *inserted));
+  ASSERT_TRUE(builder->BindLabel(*inserted));
+  ASSERT_TRUE(builder->Append(SealRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(builder->EmitJump(*check));
+  ASSERT_TRUE(builder->BindLabel(*ready));
+  ASSERT_TRUE(builder->EmitSeekRelationPrefix(Cursor(0), Reg(0), 1, *done));
+  ASSERT_TRUE(builder->BindLabel(*row));
+  ASSERT_TRUE(builder->Append(
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(2)}));
+  ASSERT_TRUE(builder->EmitNextRelationPrefix(Cursor(0), Reg(0), 1, *row));
+  ASSERT_TRUE(builder->BindLabel(*done));
+  ASSERT_TRUE(builder->Append(CloseCursorInstruction{.cursor = Cursor(0)}));
+  ASSERT_TRUE(builder->Append(CloseRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(builder->Append(HaltInstruction{}));
+  auto program = std::move(*builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_FALSE(program->requires_database_snapshot());
+  const auto& checked = std::get<CheckRelationLookupInstruction>(program->instructions()[4]);
+  EXPECT_EQ(Address(8), checked.ready_target);
+  EXPECT_EQ(Address(11), checked.empty_target);
+  EXPECT_EQ(Address(11),
+            std::get<SeekRelationPrefixInstruction>(program->instructions()[8]).missing_target);
+  EXPECT_EQ(Address(9),
+            std::get<NextRelationPrefixInstruction>(program->instructions()[10]).next_target);
+
+  for (const Instruction instruction :
+       {Instruction{CheckRelationLookupInstruction{
+            .relation = Relation(0), .ready_target = Address(0), .empty_target = Address(0)}},
+        Instruction{SeekRelationPrefixInstruction{.cursor = Cursor(0),
+                                                  .first_key = Reg(0),
+                                                  .key_count = 1,
+                                                  .missing_target = Address(0)}},
+        Instruction{NextRelationPrefixInstruction{.cursor = Cursor(0),
+                                                  .first_key = Reg(0),
+                                                  .key_count = 1,
+                                                  .next_target = Address(0)}}}) {
+    auto numeric = ProgramBuilder::Create({}, Resources(1));
+    ASSERT_TRUE(numeric.has_value());
+    const auto rejected = numeric->Append(instruction);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kBranchRequiresLabel, rejected.error().code);
+  }
+}
+
 TEST(BytecodeProgramTest, UsesStrongIdsAndStableInstructionMetadata) {
   static_assert(!std::is_convertible_v<std::uint32_t, RegisterId>);
   static_assert(!std::is_convertible_v<RegisterId, CursorId>);

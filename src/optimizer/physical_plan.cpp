@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "modern_sqlite/instrumentation/counters.hpp"
+#include "modern_sqlite/runtime/sql_value.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -1076,13 +1077,18 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
       expression.payload);
 }
 
-[[nodiscard]] bool IsCoveringIndex(const BoundQueryView& bound_select, BoundSourceId source_id,
-                                   const CatalogTable& table, const CatalogIndex& index,
-                                   std::span<const ReadPredicateTerm> predicates,
-                                   const std::vector<bool>& selected_terms,
-                                   const BoundSelectCore* select_core = nullptr) {
-  std::vector<bool> required_columns(table.columns.size(), false);
-  bool required_rowid = false;
+struct RequiredSourceValues {
+  std::vector<bool> columns{};
+  bool rowid = false;
+};
+
+[[nodiscard]] RequiredSourceValues DiscoverRequiredSourceValues(
+    const BoundQueryView& bound_select, BoundSourceId source_id, const CatalogTable& table,
+    std::span<const ReadPredicateTerm> predicates, const std::vector<bool>& selected_terms,
+    const BoundSelectCore* select_core) {
+  RequiredSourceValues required{.columns = std::vector<bool>(table.columns.size(), false)};
+  std::vector<bool>& required_columns = required.columns;
+  bool& required_rowid = required.rowid;
   const bool joined = select_core != nullptr && select_core->table_sources.size() > 1U;
   for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
     if (index_value >= selected_terms.size() || !selected_terms[index_value]) {
@@ -1138,7 +1144,16 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
                                &required_rowid);
     }
   }
+  return required;
+}
 
+[[nodiscard]] bool IsCoveringIndex(const BoundQueryView& bound_select, BoundSourceId source_id,
+                                   const CatalogTable& table, const CatalogIndex& index,
+                                   std::span<const ReadPredicateTerm> predicates,
+                                   const std::vector<bool>& selected_terms,
+                                   const BoundSelectCore* select_core = nullptr) {
+  const RequiredSourceValues required = DiscoverRequiredSourceValues(
+      bound_select, source_id, table, predicates, selected_terms, select_core);
   std::vector<bool> covered_columns(table.columns.size(), false);
   bool covered_rowid = false;
   for (const CatalogIndexTerm& term : index.terms) {
@@ -1152,12 +1167,12 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
   if (table.rowid_alias.has_value() && covered_rowid) {
     covered_columns[table.rowid_alias->value] = true;
   }
-  for (std::size_t column = 0; column < required_columns.size(); ++column) {
-    if (required_columns[column] && !covered_columns[column]) {
+  for (std::size_t column = 0; column < required.columns.size(); ++column) {
+    if (required.columns[column] && !covered_columns[column]) {
       return false;
     }
   }
-  return !required_rowid || covered_rowid;
+  return !required.rowid || covered_rowid;
 }
 
 [[nodiscard]] bool IsNullLiteral(const BoundQueryView& bound_select,
@@ -1183,24 +1198,32 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
   return table_rows;
 }
 
+[[nodiscard]] std::uint64_t EstimateEqualityPrefixOutput(
+    const BoundQueryView& bound_select, std::span<const PhysicalIndexEquality> equalities,
+    std::uint64_t input_rows, std::span<const std::uint64_t> rows_per_prefix = {}) noexcept {
+  std::uint64_t estimate = input_rows;
+  for (std::size_t equality = 0; equality < equalities.size(); ++equality) {
+    const std::size_t prefix = equality + 1U;
+    const std::uint64_t incoming = estimate;
+    const bool supplied = prefix < rows_per_prefix.size();
+    estimate = supplied ? rows_per_prefix[prefix] : std::min(DefaultPrefixRows(prefix), estimate);
+    if (!supplied && !equalities[equality].reject_null &&
+        IsNullLiteral(bound_select, equalities[equality].key)) {
+      estimate = std::min(SaturatingMultiply(estimate, 2), incoming);
+    }
+  }
+  return estimate;
+}
+
 [[nodiscard]] std::uint64_t EstimateIndexOutput(const BoundQueryView& bound_select,
                                                 const CatalogIndex& index,
                                                 const PhysicalIndexScanNode& node,
                                                 std::uint64_t index_rows) noexcept {
-  std::uint64_t estimate = index_rows;
-  for (std::size_t equality = 0; equality < node.equalities.size(); ++equality) {
-    const std::size_t prefix = equality + 1U;
-    const std::uint64_t incoming = estimate;
-    const bool supplied =
-        index.statistics.has_stat1 && prefix < index.statistics.rows_per_prefix.size();
-    estimate = supplied ? index.statistics.rows_per_prefix[prefix]
-                        : std::min(DefaultPrefixRows(prefix), estimate);
-    if (!supplied && !node.equalities[equality].reject_null &&
-        IsNullLiteral(bound_select, node.equalities[equality].key)) {
-      estimate = std::min(SaturatingMultiply(estimate, 2), incoming);
-    }
-  }
-
+  const std::span<const std::uint64_t> prefixes =
+      index.statistics.has_stat1 ? std::span<const std::uint64_t>{index.statistics.rows_per_prefix}
+                                 : std::span<const std::uint64_t>{};
+  std::uint64_t estimate =
+      EstimateEqualityPrefixOutput(bound_select, node.equalities, index_rows, prefixes);
   if (node.equalities.size() == index.key_term_count && index.unique) {
     const bool only_ordinary_equalities = std::ranges::all_of(
         node.equalities,
@@ -1248,6 +1271,19 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   if (!SourceJoinPreservesLeft(source.join) && !right_core && core.where.has_value()) {
     static_cast<void>(VisitConjuncts(bound_select, *core.where, visitor));
   }
+}
+
+[[nodiscard]] std::vector<ReadPredicateTerm> JoinedAccessPredicates(
+    const BoundQueryView& bound_select, const BoundSelectCore& core,
+    const BoundTableSource& source) {
+  std::vector<ReadPredicateTerm> predicates;
+  auto visitor = [&](BoundExpressionId predicate) {
+    predicates.push_back(
+        ReadPredicateTerm{.predicate = predicate, .conjunct_position = predicates.size()});
+    return true;
+  };
+  VisitJoinedAccessPredicates(bound_select, core, source, &visitor);
+  return predicates;
 }
 
 [[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(
@@ -1501,13 +1537,8 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   if (!info.rowid_eligible || indexes.empty()) {
     return std::nullopt;
   }
-  std::vector<ReadPredicateTerm> predicates;
-  auto visitor = [&](BoundExpressionId predicate) {
-    predicates.push_back(
-        ReadPredicateTerm{.predicate = predicate, .conjunct_position = predicates.size()});
-    return true;
-  };
-  VisitJoinedAccessPredicates(bound_select, *core, *source, &visitor);
+  const std::vector<ReadPredicateTerm> predicates =
+      JoinedAccessPredicates(bound_select, *core, *source);
   if (predicates.empty()) {
     return std::nullopt;
   }
@@ -1536,6 +1567,185 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
     return std::move(index->node);
   }
   return std::nullopt;
+}
+
+[[nodiscard]] std::optional<PhysicalAutomaticIndexNode> JoinedAutomaticIndex(
+    const BoundQueryView& bound_select, std::size_t core_index, const BoundSelectCore& core,
+    const BoundTableSource& source, const SourceInfo& info, std::uint64_t repetitions,
+    OptimizerOptions options) {
+  if (!options.allow_file_backed_automatic_indexes || repetitions <= 1U ||
+      core.table_sources.size() < 2U || !info.rowid_eligible ||
+      source.kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
+      std::ranges::any_of(core.table_sources, [](const BoundTableSource& item) {
+        return SourceJoinPreservesRight(item.join);
+      })) {
+    return std::nullopt;
+  }
+  const CatalogTable& table = bound_select.catalog()->table(*source.table);
+  const std::vector<ReadPredicateTerm> predicates =
+      JoinedAccessPredicates(bound_select, core, source);
+  PhysicalAutomaticIndexNode automatic{
+      .core_index = core_index,
+      .source = source.id,
+      .table = *source.table,
+      .table_root_page = table.root_page,
+  };
+  for (std::size_t column = 0; column < table.columns.size(); ++column) {
+    for (const ReadPredicateTerm& predicate : predicates) {
+      const BoundExpressionId transparent =
+          TransparentPredicateId(bound_select, predicate.predicate);
+      if (!IsValidExpressionId(bound_select, transparent)) {
+        continue;
+      }
+      const auto* comparison =
+          std::get_if<BoundComparisonExpression>(&bound_select.expression(transparent).payload);
+      if (comparison == nullptr ||
+          comparison->collation.value() >= bound_select.collations().size()) {
+        continue;
+      }
+      const std::string_view collation =
+          bound_select.collations()[comparison->collation.value()].name;
+      if (!IsRegisteredCollation(bound_select, collation)) {
+        continue;
+      }
+      const CatalogIndexTerm term{
+          .target = ColumnId{column},
+          .collation_name = std::string{collation},
+          .order = SortOrder::kAscending,
+      };
+      const auto match =
+          MatchIndexConstraint(bound_select, source.id, source.source_column_begin,
+                               source.source_column_count, term, predicate, source.id);
+      if (!match.has_value() || match->kind != IndexConstraintKind::kEquality) {
+        continue;
+      }
+      automatic.equalities.push_back(PhysicalIndexEquality{
+          .column = ColumnId{column},
+          .key = match->key,
+          .predicate = match->predicate,
+          .conjunct_position = match->conjunct_position,
+          .affinity = table.columns[column].affinity,
+          .collation_name = collation,
+          .order = SortOrder::kAscending,
+          .reject_null = match->reject_null,
+      });
+      break;
+    }
+  }
+  if (automatic.equalities.empty()) {
+    return std::nullopt;
+  }
+  RequiredSourceValues required =
+      DiscoverRequiredSourceValues(bound_select, source.id, table, predicates, {}, &core);
+  std::uint64_t width_units = 1;
+  for (const PhysicalIndexEquality& equality : automatic.equalities) {
+    required.columns[equality.column.value] = false;
+    width_units = SaturatingAdd(width_units,
+                                AffinityWidthUnits(table.columns[equality.column.value].affinity));
+  }
+  for (std::size_t column = 0; column < required.columns.size(); ++column) {
+    if (required.columns[column] && table.rowid_alias != ColumnId{column}) {
+      automatic.covering_columns.push_back(ColumnId{column});
+      width_units = SaturatingAdd(width_units, AffinityWidthUnits(table.columns[column].affinity));
+    }
+  }
+  if (automatic.equalities.size() + automatic.covering_columns.size() + 1U >
+      kMaximumRecordFieldCount) {
+    return std::nullopt;
+  }
+  const std::uint64_t width = SaturatingMultiply(width_units, 4);
+  const std::uint64_t levels =
+      static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(info.estimated_rows, 1U)));
+  const std::uint64_t matches =
+      EstimateEqualityPrefixOutput(bound_select, automatic.equalities, info.estimated_rows);
+  const std::uint64_t source_work =
+      ScanCost(info.estimated_rows, info.estimated_row_size).work_units;
+  const std::uint64_t build_work =
+      SaturatingMultiply(SaturatingMultiply(info.estimated_rows, levels), width);
+  const std::uint64_t probe_work =
+      SaturatingMultiply(repetitions, SaturatingAdd(levels, SaturatingMultiply(matches, width)));
+  const std::uint64_t automatic_work =
+      SaturatingAdd(source_work, SaturatingAdd(build_work, probe_work));
+  if (automatic_work >= SaturatingMultiply(repetitions, source_work)) {
+    return std::nullopt;
+  }
+  return automatic;
+}
+
+[[nodiscard]] std::expected<PhysicalNodePayload, OptimizerError> ChooseJoinedAccess(
+    const BoundQueryView& bound_select, const LogicalScanNode& scan, OptimizerOptions options,
+    std::vector<std::uint64_t>& prefix_executions) {
+  const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[scan.core_index]);
+  if (core == nullptr) {
+    return std::unexpected(InvariantFailure("joined scan does not belong to a SELECT core"));
+  }
+  const auto source = std::ranges::find(core->table_sources, scan.source, &BoundTableSource::id);
+  if (source == core->table_sources.end()) {
+    return std::unexpected(InvariantFailure("joined scan does not name a core-owned source"));
+  }
+  if (options.allow_file_backed_automatic_indexes && core->table_sources.size() > 1U &&
+      prefix_executions.empty()) {
+    prefix_executions.assign(bound_select.query_cores().size(), 1);
+  }
+  const std::uint64_t repetitions =
+      prefix_executions.empty() ? 1U : prefix_executions[scan.core_index];
+  const SourceInfo info = ResolveTableSource(bound_select, *source);
+  std::uint64_t output_rows = info.estimated_rows;
+  PhysicalNodePayload selected = PhysicalTableScanNode{
+      .core_index = scan.core_index,
+      .source = source->id,
+      .source_kind = source->kind,
+      .table = source->table,
+      .root_page = info.root_page,
+  };
+  if (const auto key = JoinedRowIdLookupKey(bound_select, scan.core_index, source->id);
+      key.has_value()) {
+    selected = PhysicalRowIdLookupNode{
+        .core_index = scan.core_index,
+        .source = source->id,
+        .source_kind = source->kind,
+        .table = source->table,
+        .root_page = info.root_page,
+        .key = *key,
+    };
+    output_rows = RowIdCost(info.estimated_rows).estimated_output_rows;
+  } else if (auto index = JoinedIndexScan(bound_select, scan.core_index, source->id);
+             index.has_value()) {
+    const CatalogIndex& definition = bound_select.catalog()->index(index->index);
+    output_rows = EstimateIndexOutput(bound_select, definition, *index,
+                                      IndexCardinality(definition, info.estimated_rows));
+    selected = std::move(*index);
+  } else if (auto automatic = JoinedAutomaticIndex(bound_select, scan.core_index, *core, *source,
+                                                   info, repetitions, options);
+             automatic.has_value()) {
+    output_rows =
+        EstimateEqualityPrefixOutput(bound_select, automatic->equalities, info.estimated_rows);
+    selected = std::move(*automatic);
+  }
+  if (SourceJoinPreservesLeft(source->join)) {
+    output_rows = std::max<std::uint64_t>(output_rows, 1U);
+  }
+  if (!prefix_executions.empty()) {
+    prefix_executions[scan.core_index] = SaturatingMultiply(repetitions, output_rows);
+  }
+  return selected;
+}
+
+[[nodiscard]] bool MatchesJoinedAccess(const PhysicalNode& actual,
+                                       const PhysicalNodePayload& expected) {
+  return std::visit(
+      [&](const auto& node) {
+        using Node = std::decay_t<decltype(node)>;
+        if constexpr (std::is_same_v<Node, PhysicalTableScanNode> ||
+                      std::is_same_v<Node, PhysicalRowIdLookupNode> ||
+                      std::is_same_v<Node, PhysicalIndexScanNode> ||
+                      std::is_same_v<Node, PhysicalAutomaticIndexNode>) {
+          const auto* value = std::get_if<Node>(&actual.payload);
+          return value != nullptr && *value == node;
+        }
+        return false;
+      },
+      expected);
 }
 
 [[nodiscard]] bool MatchesIndexScan(const PhysicalIndexScanNode& actual,
@@ -2278,6 +2488,8 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
       return PhysicalAccessKind::kRowIdLookup;
     case PhysicalNodeKind::kIndexScan:
       return PhysicalAccessKind::kIndexScan;
+    case PhysicalNodeKind::kAutomaticIndex:
+      return PhysicalAccessKind::kAutomaticIndex;
     case PhysicalNodeKind::kGuard:
     case PhysicalNodeKind::kFilter:
     case PhysicalNodeKind::kLimit:
@@ -2495,12 +2707,14 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
     const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
-    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
+    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index,
+    OptimizerOptions options) {
   if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value()) {
     return std::unexpected{InvariantFailure("advanced physical plan arena is invalid")};
   }
   std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
       logical_plan.bound_select().query_cores().size());
+  std::vector<std::uint64_t> prefix_executions;
   for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
     const auto* select =
         std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
@@ -2605,31 +2819,9 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                      value->root_page == aggregate.source.root_page &&
                      value->direction == aggregate.direction;
             }
-            const RootPageId expected_root =
-                node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()
-                    ? logical_plan.bound_select().catalog()->table(*node.table).root_page
-                    : RootPageId{1};
-            if (const auto key =
-                    JoinedRowIdLookupKey(logical_plan.bound_select(), node.core_index, node.source);
-                key.has_value()) {
-              const auto* value = std::get_if<PhysicalRowIdLookupNode>(&physical);
-              return value != nullptr && value->core_index == node.core_index &&
-                     value->source == node.source && value->source_kind == node.source_kind &&
-                     value->table == node.table && value->root_page == expected_root &&
-                     value->key == *key;
-            }
-            if (const auto expected =
-                    JoinedIndexScan(logical_plan.bound_select(), node.core_index, node.source);
-                expected.has_value()) {
-              const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
-              return value != nullptr && MatchesIndexScan(*value, *expected, node.core_index,
-                                                          PhysicalScanDirection::kForward);
-            }
-            const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
-            return value != nullptr && value->core_index == node.core_index &&
-                   value->source == node.source && value->source_kind == node.source_kind &&
-                   value->table == node.table && value->root_page == expected_root &&
-                   value->direction == PhysicalScanDirection::kForward;
+            const auto expected =
+                ChooseJoinedAccess(logical_plan.bound_select(), node, options, prefix_executions);
+            return expected.has_value() && MatchesJoinedAccess(nodes[index], *expected);
           } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
             const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
             const auto ready = JoinConditionSource(logical_plan, node);
@@ -2807,13 +2999,14 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidatePhysicalPlan(
     const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
-    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
+    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index,
+    OptimizerOptions options) {
   if (!logical_plan.valid()) {
     return std::unexpected{InvariantFailure("physical plan retained an invalid logical plan")};
   }
   if (IsAdvancedLogicalPlan(logical_plan)) {
     return ValidateAdvancedPhysicalPlan(logical_plan, nodes, root, candidates,
-                                        selected_candidate_index);
+                                        selected_candidate_index, options);
   }
   if (nodes.size() < 2U || nodes.size() > 6U || root.value() != nodes.size() - 1U) {
     return std::unexpected{InvariantFailure("physical plan node arena is invalid")};
@@ -3055,9 +3248,11 @@ void AppendExplainIdentifier(std::string_view name, std::string* output) {
 }  // namespace
 
 struct PhysicalPlan::Impl {
-  explicit Impl(LogicalPlan input) noexcept : logical_plan(std::move(input)) {}
+  Impl(LogicalPlan input, OptimizerOptions configuration) noexcept
+      : logical_plan(std::move(input)), options(configuration) {}
 
   LogicalPlan logical_plan;
+  OptimizerOptions options;
   PhysicalQueryPlan root_query;
   std::vector<PhysicalQueryPlan> nested_queries;
 };
@@ -3074,19 +3269,20 @@ namespace optimizer_detail {
 
 class PhysicalPlanBuilder final {
  public:
-  [[nodiscard]] static OptimizeLogicalPlanResult Build(LogicalPlan logical_plan) {
+  [[nodiscard]] static OptimizeLogicalPlanResult Build(LogicalPlan logical_plan,
+                                                       OptimizerOptions options) {
     if (!logical_plan.valid()) {
       return std::unexpected{
           OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical plan is invalid")};
     }
-    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan));
+    auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan), options);
     const std::size_t count = impl->logical_plan.bound_select().query_count();
     impl->nested_queries.resize(count - 1U);
     for (std::size_t index = 0; index < count; ++index) {
       const BoundQueryId id{static_cast<std::uint32_t>(index)};
       PhysicalQueryPlan& query = index == 0U ? impl->root_query : impl->nested_queries[index - 1U];
       query.query = id;
-      if (auto built = BuildQuery(LogicalQueryView{impl->logical_plan, id}, &query);
+      if (auto built = BuildQuery(LogicalQueryView{impl->logical_plan, id}, &query, impl->options);
           !built.has_value()) {
         return std::unexpected(std::move(built.error()));
       }
@@ -3096,9 +3292,9 @@ class PhysicalPlanBuilder final {
 
  private:
   [[nodiscard]] static std::expected<void, OptimizerError> BuildQuery(
-      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl) {
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options) {
     if (IsAdvancedLogicalPlan(logical_plan)) {
-      return BuildAdvanced(logical_plan, impl);
+      return BuildAdvanced(logical_plan, impl, options);
     }
 
     const SourceInfo source = ResolveSource(logical_plan);
@@ -3326,7 +3522,7 @@ class PhysicalPlanBuilder final {
 
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
     if (std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
-            logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
+            logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate, options);
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
@@ -3336,12 +3532,13 @@ class PhysicalPlanBuilder final {
   }
 
   [[nodiscard]] static std::expected<void, OptimizerError> BuildAdvanced(
-      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl) {
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options) {
     impl->nodes.reserve(logical_plan.nodes().size());
     std::vector<PhysicalNodeId> mapped;
     mapped.reserve(logical_plan.nodes().size());
     std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
         logical_plan.bound_select().query_cores().size());
+    std::vector<std::uint64_t> prefix_executions;
     for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
       const auto* select =
           std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
@@ -3400,6 +3597,17 @@ class PhysicalPlanBuilder final {
         }
       }
       const LogicalNode& logical = logical_plan.nodes()[logical_index];
+      std::optional<PhysicalNodePayload> joined_access;
+      if (const auto* scan = std::get_if<LogicalScanNode>(&logical.payload);
+          scan != nullptr && (!aggregate_plans[scan->core_index].has_value() ||
+                              AssumePresent(aggregate_plans[scan->core_index]).joined)) {
+        auto selected =
+            ChooseJoinedAccess(logical_plan.bound_select(), *scan, options, prefix_executions);
+        if (!selected.has_value()) {
+          return std::unexpected(std::move(selected.error()));
+        }
+        joined_access.emplace(std::move(*selected));
+      }
       PhysicalNodePayload payload = std::visit(
           [&](const auto& node) -> PhysicalNodePayload {
             using Node = std::decay_t<decltype(node)>;
@@ -3448,34 +3656,10 @@ class PhysicalPlanBuilder final {
                     .direction = aggregate.direction,
                 };
               }
-              RootPageId root_page{1};
-              if (node.source_kind == BoundSourceKind::kCatalogTable && node.table.has_value()) {
-                root_page = logical_plan.bound_select().catalog()->table(*node.table).root_page;
+              if (!joined_access.has_value()) {
+                std::terminate();
               }
-              if (const auto key = JoinedRowIdLookupKey(logical_plan.bound_select(),
-                                                        node.core_index, node.source);
-                  key.has_value()) {
-                return PhysicalRowIdLookupNode{
-                    .core_index = node.core_index,
-                    .source = node.source,
-                    .source_kind = node.source_kind,
-                    .table = node.table,
-                    .root_page = root_page,
-                    .key = *key,
-                };
-              }
-              if (auto index =
-                      JoinedIndexScan(logical_plan.bound_select(), node.core_index, node.source);
-                  index.has_value()) {
-                return std::move(*index);
-              }
-              return PhysicalTableScanNode{
-                  .core_index = node.core_index,
-                  .source = node.source,
-                  .source_kind = node.source_kind,
-                  .table = node.table,
-                  .root_page = root_page,
-              };
+              return std::move(*joined_access);
             } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
               return PhysicalNestedLoopJoinNode{
                   .left = mapped[node.left.value()],
@@ -3656,7 +3840,7 @@ class PhysicalPlanBuilder final {
     }
     const std::span<const AccessPathCandidate> candidates{impl->candidates};
     std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
-        logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate);
+        logical_plan, impl->nodes, impl->root, candidates, impl->selected_candidate, options);
     if (!validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
@@ -3667,14 +3851,15 @@ class PhysicalPlanBuilder final {
 
 class PhysicalStatementPlanBuilder final {
  public:
-  [[nodiscard]] static OptimizeLogicalStatementPlanResult Build(LogicalStatementPlan logical_plan) {
+  [[nodiscard]] static OptimizeLogicalStatementPlanResult Build(LogicalStatementPlan logical_plan,
+                                                                OptimizerOptions options) {
     if (!LogicalStatementIsValid(logical_plan)) {
       return std::unexpected{
           OptimizerFailure(OptimizerErrorCode::kInvalidInput, "logical statement plan is invalid")};
     }
     if (std::holds_alternative<LogicalPlan>(logical_plan)) {
       OptimizeLogicalPlanResult select =
-          OptimizeLogicalPlan(std::get<LogicalPlan>(std::move(logical_plan)));
+          OptimizeLogicalPlan(std::get<LogicalPlan>(std::move(logical_plan)), options);
       if (!select.has_value()) {
         return std::unexpected{std::move(select.error())};
       }
@@ -3837,6 +4022,8 @@ std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept {
       return "rowid_lookup";
     case PhysicalAccessKind::kIndexScan:
       return "index_scan";
+    case PhysicalAccessKind::kAutomaticIndex:
+      return "automatic_index";
   }
   return "unknown";
 }
@@ -3905,6 +4092,8 @@ std::string_view PhysicalNodeKindName(PhysicalNodeKind kind) noexcept {
       return "having";
     case PhysicalNodeKind::kNestedLoopJoin:
       return "nested_loop_join";
+    case PhysicalNodeKind::kAutomaticIndex:
+      return "automatic_index";
   }
   return "unknown";
 }
@@ -3945,6 +4134,8 @@ bool PhysicalPlan::valid() const noexcept { return impl_ != nullptr; }
 
 const LogicalPlan& PhysicalPlan::logical_plan() const noexcept { return impl_->logical_plan; }
 
+OptimizerOptions PhysicalPlan::options() const noexcept { return impl_->options; }
+
 std::span<const PhysicalNode> PhysicalPlan::nodes() const noexcept {
   return impl_ != nullptr ? std::span<const PhysicalNode>{impl_->root_query.nodes}
                           : std::span<const PhysicalNode>{};
@@ -3984,8 +4175,8 @@ const PhysicalQueryPlan& PhysicalPlan::query_plan(BoundQueryId id) const noexcep
   return id.value() == 0U ? impl_->root_query : impl_->nested_queries[id.value() - 1U];
 }
 
-OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan) {
-  return optimizer_detail::PhysicalPlanBuilder::Build(std::move(logical_plan));
+OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan, OptimizerOptions options) {
+  return optimizer_detail::PhysicalPlanBuilder::Build(std::move(logical_plan), options);
 }
 
 PhysicalMutationPlan::PhysicalMutationPlan(std::unique_ptr<Impl> impl) noexcept
@@ -4007,8 +4198,9 @@ const PhysicalMutationPayload& PhysicalMutationPlan::payload() const noexcept {
   return impl_->payload;
 }
 
-OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(LogicalStatementPlan logical_plan) {
-  return optimizer_detail::PhysicalStatementPlanBuilder::Build(std::move(logical_plan));
+OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(LogicalStatementPlan logical_plan,
+                                                                OptimizerOptions options) {
+  return optimizer_detail::PhysicalStatementPlanBuilder::Build(std::move(logical_plan), options);
 }
 
 namespace {
@@ -4075,6 +4267,15 @@ namespace {
         if (index_scan->direction == PhysicalScanDirection::kReverse) {
           line.append(" REVERSE");
         }
+        append_line(line);
+      } else if (const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&node.payload);
+                 automatic != nullptr) {
+        const CatalogTable& table =
+            plan.logical_plan().bound_select().catalog()->table(automatic->table);
+        std::string line = "CORE " + std::to_string(automatic->core_index) + " SEARCH ";
+        AppendExplainIdentifier(table.name, &line);
+        line.append(" SOURCE ").append(std::to_string(automatic->source.value()));
+        line.append(" USING AUTOMATIC COVERING INDEX");
         append_line(line);
       } else if (const auto* aggregate = std::get_if<PhysicalAggregateNode>(&node.payload);
                  aggregate != nullptr) {

@@ -87,6 +87,10 @@ and actual-core ownership rules for ON, WHERE, results, ordering, aggregate
 inputs, and representative leaves. Do not scan the shared expression arena
 or add another dependency walker.
 
+Joined scopes publish the existing query-owned registered-collation names
+even when no active source has a stored index. Automatic admission uses that
+same registry; an empty registry is not permission to assume a collation.
+
 Select one usable equality per catalog column through the canonical matcher,
 retaining original conjunct positions. Use the chosen effective collation,
 ascending order, and NULLS FIRST for each equality field. The record is:
@@ -106,8 +110,16 @@ Enforce the existing record-field limit before admission. Recompute and
 compare the complete physical selection through the same canonical chooser
 during validation. The access is forward-only and advertises no delivered
 ORDER BY.
+Keep the single unchanged record-field ceiling in the shared SQL-value
+contract, below both the compiler and the codec. The optimizer must not
+include record encoders, decoders, or storage-format contracts merely to
+obtain that ceiling.
 
 ### 3. Admit and cost only the configured file backend
+
+Optimizer options do not grant file-spill permission by default. Callers
+explicitly pass that capability from their execution factory; optimizing
+without temporary storage must retain the existing repeated scan.
 
 Add one narrow immutable optimizer input permitting file-backed automatic
 relations. It is derived from the session's existing
@@ -118,9 +130,10 @@ temporary owner, or session type.
 Thread this input through SELECT preparation in both read and write
 sessions, statement optimization, every nested query, and canonical physical
 validation. Retain it with the immutable physical owner so validation cannot
-silently recompute a different backend. The default matches the existing
-file-mode default. Callers constructing plans directly must pass their
-execution configuration; tests cover both inputs and both public sessions.
+silently recompute a different backend. Callers constructing plans directly
+must pass their execution configuration. Sessions retain their existing
+file-mode default through that explicit input; tests cover both inputs and
+both public sessions.
 When permission is false, automatic admission is disabled and validation
 rejects any automatic node. Generic relation prefix APIs still support both
 existing backends; that does not enable a memory-mode SQL optimization.
@@ -138,6 +151,9 @@ contributes at most one; a stored index uses its existing estimator; a table
 scan uses its canonical estimate. A preceding automatic source reuses the
 default equality-prefix estimate. Do not recursively optimize a source
 prefix for each later source.
+Initialize retained prefix estimates only for an admitted joined scope; do
+not allocate this state for unrelated aggregates or disabled automatic access.
+The existing exact allocation contracts remain unchanged.
 
 Reuse table statistics, affinity-width estimates, default equality-prefix
 cardinality, IS-NULL adjustment, and saturating arithmetic. Extract the
@@ -223,6 +239,8 @@ Add an ephemeral-index read-cursor storage kind with a typed `RelationId`.
 It has no persistent root, agrees with the relation's field count, and maps
 fields to materialized record positions. Keep complete comparison metadata
 in the existing relation descriptor, not a second cursor column container.
+Declaring only an ephemeral view does not require a persistent database
+snapshot; real construction cursors retain their existing snapshot requirement.
 
 The VM relation slot remains the sole owner. A runtime cursor variant holds
 only the borrowed relation ID. Derive and validate a one-to-one borrower map
@@ -354,6 +372,42 @@ Commit only reviewed changes and merge normally after all nine exact-head
 hosted gates pass. Clean only the confirmed merged branch, then continue the
 remaining prerequisite-ready ADR-0053 slices. This slice does not complete
 node 43 or authorize nodes 44-48.
+
+### Recorded source-access evidence
+
+The unchanged 32-probe public test now returns the same 32 rows in 37,365 VM
+instructions, below the original exclusive bound of 100,000. Its genuine
+676,012-instruction failure, one-point control, one-byte memory scan, and
+frozen performance contracts are not replaced or relaxed.
+
+The complete expanded fast gate passes 1,370 unit tests, two independent
+model tests, and two fuzz-smoke tests. This includes explicit lookup-purpose
+consumer assertions, both write-session temporary configurations,
+reset/finalize cleanup, two live automatic sources with one shared cache
+page, 64-source compilation, and complete optimizer, lowering, and lookup
+allocation-failure sweeps. The existing aggregate allocation count stays 46.
+The independent join-model suffix preserves all original seeded cases.
+
+The native corpus appends 36 comparisons to the unchanged 476 inherited
+records: 506 comparisons and six unsupported boundaries, exactly within the
+existing 512-case limit. The canonical pinned-oracle generator and verifier
+preserve inherited records, fixture hashes, profile, source provenance, and
+all limits. Grammar-aware smoke coverage exercises every admitted join form,
+six equality-key shapes, and six existing consumer forms.
+
+The complete instrumentation tier passes 1,414 tests. Clang Debug, Release,
+and ASan/UBSan each pass 1,403; genuine GCC 16 Debug and Release each pass
+1,401. A GCC range-loop diagnostic in the new lookup fixture is corrected
+with a const-reference binding, preserving every input and assertion. The
+corrected fixture passes on every configuration, and the complete 1,374-test
+fast/model/fuzz-smoke tier remains green.
+
+A fresh grammar-aware ASan/UBSan campaign completes 20,000 inputs with seed
+87, maximum length 4,096, and the unchanged ten-second timeout. All 58 frozen
+performance contracts and ten compatibility gates pass with timing isolated
+from builds and fuzz. Unfiltered production clang-tidy, pinned formatting,
+engineering discipline, and dependency-graph validation pass. No workload,
+profile, threshold, timeout, compiler policy, or allocation budget is relaxed.
 
 ## Rejected alternatives
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -162,7 +163,8 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::PhysicalPlan DistinctFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql,
+    modern_sqlite::OptimizerOptions options = {}) {
   using namespace modern_sqlite;
   BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog, TestEnvironment());
   if (!bound.has_value()) {
@@ -172,7 +174,7 @@ bool inject_failure = false;
   if (!logical.has_value()) {
     throw std::runtime_error{"failed to plan DISTINCT lowering OOM fixture"};
   }
-  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical), options);
   if (!physical.has_value()) {
     throw std::runtime_error{"failed to optimize DISTINCT lowering OOM fixture"};
   }
@@ -180,7 +182,8 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::PhysicalPlan AggregateFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog, std::string_view sql,
+    modern_sqlite::OptimizerOptions options = {}) {
   using namespace modern_sqlite;
   BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
   if (!bound.has_value()) {
@@ -190,7 +193,7 @@ bool inject_failure = false;
   if (!logical.has_value()) {
     throw std::runtime_error{"failed to plan aggregate lowering OOM fixture"};
   }
-  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical));
+  OptimizeLogicalPlanResult physical = OptimizeLogicalPlan(std::move(*logical), options);
   if (!physical.has_value()) {
     throw std::runtime_error{"failed to optimize aggregate lowering OOM fixture"};
   }
@@ -544,11 +547,45 @@ int main() try {
   const PhysicalMutationPlan create = CreateFixture(catalog);
   const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
   const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
+  constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
+  const std::array<PhysicalPlan, 6> automatic_plans{
+      DistinctFixture(catalog,
+                      "SELECT a.id,b.Name,c.Name FROM Items a JOIN Items b ON b.Name=a.Name "
+                      "JOIN Items c ON c.Name=b.Name",
+                      kAutomaticOptions),
+      DistinctFixture(catalog,
+                      "SELECT a.id,b.Name FROM Items a LEFT JOIN Items b ON b.Name IS a.Name "
+                      "ORDER BY a.id,b.id LIMIT ?1 OFFSET ?2",
+                      kAutomaticOptions),
+      DistinctFixture(catalog, "SELECT DISTINCT b.Name FROM Items a JOIN Items b ON b.Name=a.Name",
+                      kAutomaticOptions),
+      DistinctFixture(catalog,
+                      "SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name "
+                      "UNION SELECT ?1 ORDER BY 1",
+                      kAutomaticOptions),
+      DistinctFixture(catalog,
+                      "SELECT (SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name "
+                      "ORDER BY b.id LIMIT 1),"
+                      "EXISTS(SELECT b.Name FROM Items a JOIN Items b ON b.Name IS a.Name)",
+                      kAutomaticOptions),
+      AggregateFixture(catalog,
+                       "SELECT a.id,count(DISTINCT b.Name),group_concat(b.Name ORDER BY b.id) "
+                       "FROM Items a LEFT JOIN Items b ON b.Name IS a.Name "
+                       "GROUP BY a.id ORDER BY a.id",
+                       kAutomaticOptions),
+  };
 
-  const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U) {
+  const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
+                             bool require_lookup = false) {
     allocation_index.store(0, std::memory_order_relaxed);
     const LowerPlanResult baseline = LowerPlan(plan);
     if (!baseline.has_value()) {
+      return false;
+    }
+    if (require_lookup &&
+        !std::ranges::any_of(baseline->relations(), [](const OrderingRecordDescriptor& relation) {
+          return relation.relation_purpose == RelationPurpose::kLookup;
+        })) {
       return false;
     }
     const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
@@ -602,6 +639,11 @@ int main() try {
   for (const PhysicalPlan& joined_plan : joined_plans) {
     if (!verify_oom(joined_plan, 256U)) {
       return 1;
+    }
+  }
+  for (const PhysicalPlan& automatic_plan : automatic_plans) {
+    if (!verify_oom(automatic_plan, 256U, true)) {
+      return 2;
     }
   }
 

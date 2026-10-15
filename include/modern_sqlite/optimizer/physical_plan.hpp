@@ -41,6 +41,13 @@ enum class PhysicalAccessKind : std::uint8_t {
   kTableScan,
   kRowIdLookup,
   kIndexScan,
+  kAutomaticIndex,
+};
+
+struct OptimizerOptions {
+  bool allow_file_backed_automatic_indexes = false;
+
+  constexpr auto operator<=>(const OptimizerOptions&) const noexcept = default;
 };
 
 [[nodiscard]] std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept;
@@ -84,6 +91,8 @@ struct PhysicalTableScanNode {
   std::optional<TableId> table{};
   RootPageId root_page{};
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+
+  constexpr bool operator==(const PhysicalTableScanNode&) const noexcept = default;
 };
 
 struct PhysicalRowIdLookupNode {
@@ -93,6 +102,8 @@ struct PhysicalRowIdLookupNode {
   std::optional<TableId> table{};
   RootPageId root_page{};
   BoundExpressionId key;
+
+  constexpr bool operator==(const PhysicalRowIdLookupNode&) const noexcept = default;
 };
 
 struct PhysicalIndexEquality {
@@ -139,6 +150,20 @@ struct PhysicalIndexScanNode {
   std::optional<PhysicalIndexRange> range{};
   bool covering = false;
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+
+  constexpr bool operator==(const PhysicalIndexScanNode&) const noexcept = default;
+};
+
+struct PhysicalAutomaticIndexNode {
+  std::size_t core_index = 0;
+  BoundSourceId source{0};
+  TableId table{};
+  RootPageId table_root_page{};
+  std::vector<PhysicalIndexEquality> equalities{};
+  std::vector<ColumnId> covering_columns{};
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+
+  constexpr bool operator==(const PhysicalAutomaticIndexNode&) const noexcept = default;
 };
 
 struct PhysicalGuardNode {
@@ -290,7 +315,7 @@ using PhysicalNodePayload =
                  PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
                  PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode, PhysicalCompoundNode,
                  PhysicalAdvancedOrderNode, PhysicalAggregateNode, PhysicalHavingNode,
-                 PhysicalNestedLoopJoinNode>;
+                 PhysicalNestedLoopJoinNode, PhysicalAutomaticIndexNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -315,6 +340,7 @@ enum class PhysicalNodeKind : std::uint8_t {
   kAggregate,
   kHaving,
   kNestedLoopJoin,
+  kAutomaticIndex,
 };
 
 [[nodiscard]] PhysicalNodeKind PhysicalNodeKindOf(const PhysicalNode& node) noexcept;
@@ -353,6 +379,7 @@ class PhysicalPlan final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] const LogicalPlan& logical_plan() const noexcept;
+  [[nodiscard]] OptimizerOptions options() const noexcept;
   [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept;
   [[nodiscard]] const PhysicalNode& node(PhysicalNodeId id) const noexcept;
   [[nodiscard]] PhysicalNodeId root() const noexcept;
@@ -383,6 +410,7 @@ class PhysicalQueryView final {
   [[nodiscard]] LogicalQueryView logical_plan() const noexcept {
     return LogicalQueryView{owner_->logical_plan(), query_};
   }
+  [[nodiscard]] OptimizerOptions options() const noexcept { return owner_->options(); }
   [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept {
     return owner_->query_plan(query_).nodes;
   }
@@ -410,7 +438,8 @@ class PhysicalQueryView final {
 
 using OptimizeLogicalPlanResult = std::expected<PhysicalPlan, OptimizerError>;
 
-[[nodiscard]] OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan);
+[[nodiscard]] OptimizeLogicalPlanResult OptimizeLogicalPlan(LogicalPlan logical_plan,
+                                                            OptimizerOptions options = {});
 [[nodiscard]] std::string ExplainPhysicalPlan(const PhysicalPlan& plan);
 
 enum class MutationAccessKind : std::uint8_t {
@@ -501,7 +530,7 @@ using PhysicalStatementPlan =
 using OptimizeLogicalStatementPlanResult = std::expected<PhysicalStatementPlan, OptimizerError>;
 
 [[nodiscard]] OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(
-    LogicalStatementPlan logical_plan);
+    LogicalStatementPlan logical_plan, OptimizerOptions options = {});
 
 }  // namespace modern_sqlite
 

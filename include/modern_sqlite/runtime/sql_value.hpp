@@ -13,6 +13,8 @@
 
 namespace modern_sqlite {
 
+inline constexpr std::size_t kMaximumRecordFieldCount = 65'534;
+
 enum class SqlValueType : std::uint8_t {
   kNull = 0,
   kInteger = 1,

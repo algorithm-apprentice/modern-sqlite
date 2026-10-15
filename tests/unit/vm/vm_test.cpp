@@ -78,13 +78,18 @@ template <typename T>
 }
 
 template <typename T>
-[[nodiscard]] T TakeProgramValue(ProgramResult<T> result) {
+void RequireProgramResult(const ProgramResult<T>& result) {
   if (!result.has_value()) {
     throw std::runtime_error("bytecode program construction failed: code=" +
                              std::to_string(static_cast<int>(result.error().code)) +
                              " instruction=" + std::to_string(result.error().instruction) +
                              " detail=" + std::to_string(result.error().detail));
   }
+}
+
+template <typename T>
+[[nodiscard]] T TakeProgramValue(ProgramResult<T> result) {
+  RequireProgramResult(result);
   return std::move(*result);
 }
 
@@ -510,6 +515,99 @@ class TemporaryDatabase final {
       HaltInstruction{},
   };
   return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] BytecodeProgram BuildLookupRelationProgram(const Pager& pager, bool empty = false) {
+  auto builder = TakeProgramValue(ProgramBuilder::Create(
+      CurrentSchema(pager), ProgramResourceCounts{.registers = 6, .parameters = 1}));
+  const SymbolId binary = TakeProgramValue(builder.AddSymbol("BINARY"));
+  const SymbolId nocase = TakeProgramValue(builder.AddSymbol("NOCASE"));
+  const RelationId relation = TakeProgramValue(builder.AddRelation(OrderingRecordDescriptor{
+      .field_count = 3,
+      .key_field_count = 3,
+      .key_columns =
+          {
+              {.collation = nocase},
+              {.collation = binary},
+              {.collation = binary},
+          },
+      .relation_purpose = RelationPurpose::kLookup,
+  }));
+  const CursorId cursor = TakeProgramValue(builder.AddCursor(ReadCursorDescriptor{
+      .root_page = RootPageNumber(0),
+      .storage = CursorStorageKind::kEphemeralIndex,
+      .record_field_count = 3,
+      .fields =
+          {
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 2},
+          },
+      .index_columns = {},
+      .relation = relation,
+  }));
+  const auto check = TakeProgramValue(builder.CreateLabel());
+  const auto ready = TakeProgramValue(builder.CreateLabel());
+  const auto done = TakeProgramValue(builder.CreateLabel());
+  const auto emit_row = [&] {
+    RequireProgramResult(builder.Append(
+        ReadFieldInstruction{.cursor = cursor, .field = Field(0), .output = Reg(4)}));
+    RequireProgramResult(builder.Append(
+        ReadFieldInstruction{.cursor = cursor, .field = Field(1), .output = Reg(5)}));
+    RequireProgramResult(builder.Append(ResultRowInstruction{.first = Reg(4), .count = 2}));
+  };
+  RequireProgramResult(builder.Append(OpenRelationInstruction{.relation = relation}));
+  RequireProgramResult(builder.Append(OpenReadCursorInstruction{.cursor = cursor}));
+  RequireProgramResult(builder.Append(NullRowInstruction{.cursor = cursor}));
+  emit_row();
+  RequireProgramResult(builder.Append(NullRowInstruction{.cursor = cursor, .enabled = false}));
+  RequireProgramResult(builder.BindLabel(check));
+  RequireProgramResult(builder.EmitCheckRelationLookup(relation, ready, done));
+  if (!empty) {
+    const std::array<std::string_view, 3> keys{"a", "A", "b"};
+    const std::array<std::int64_t, 4> rowids{2, 1, 3, 4};
+    for (std::size_t index = 0; index < rowids.size(); ++index) {
+      std::array<SqlValue, 3> values{
+          index < keys.size() ? SqlValue::Text(std::string{keys[index]}) : SqlValue{},
+          SqlValue::Text(std::string(2048, 'p') + std::to_string(rowids[index])),
+          SqlValue::Integer(rowids[index]),
+      };
+      for (std::size_t field = 0; field < values.size(); ++field) {
+        const ConstantId value = TakeProgramValue(builder.AddConstant(std::move(values[field])));
+        RequireProgramResult(builder.Append(LoadConstantInstruction{
+            .constant = value, .output = Reg(static_cast<std::uint32_t>(field))}));
+      }
+      const auto inserted = TakeProgramValue(builder.CreateLabel());
+      RequireProgramResult(builder.EmitInsertRelation(relation, Reg(0), 3,
+                                                      RelationInsertMode::kKeepExisting, inserted));
+      RequireProgramResult(builder.BindLabel(inserted));
+    }
+  }
+  RequireProgramResult(builder.Append(SealRelationInstruction{.relation = relation}));
+  RequireProgramResult(builder.EmitJump(check));
+  RequireProgramResult(builder.BindLabel(ready));
+  for (std::size_t probe = 0; probe < 2U; ++probe) {
+    const auto row = TakeProgramValue(builder.CreateLabel());
+    const auto exhausted = TakeProgramValue(builder.CreateLabel());
+    RequireProgramResult(
+        builder.Append(LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(3)}));
+    RequireProgramResult(builder.EmitSeekRelationPrefix(cursor, Reg(3), 1, exhausted));
+    RequireProgramResult(builder.BindLabel(row));
+    emit_row();
+    RequireProgramResult(builder.EmitNextRelationPrefix(cursor, Reg(3), 1, row));
+    RequireProgramResult(builder.BindLabel(exhausted));
+    if (probe == 0U) {
+      RequireProgramResult(builder.Append(NullRowInstruction{.cursor = cursor}));
+      emit_row();
+      RequireProgramResult(builder.Append(NullRowInstruction{.cursor = cursor, .enabled = false}));
+    }
+  }
+  RequireProgramResult(builder.BindLabel(done));
+  RequireProgramResult(builder.Append(CloseCursorInstruction{.cursor = cursor}));
+  RequireProgramResult(builder.Append(ResetRelationInstruction{.relation = relation}));
+  RequireProgramResult(builder.Append(CloseRelationInstruction{.relation = relation}));
+  RequireProgramResult(builder.Append(HaltInstruction{}));
+  return TakeProgramValue(
+      std::move(builder).Build({ResultColumn("payload"), ResultColumn("rowid")}));
 }
 
 [[nodiscard]] BytecodeProgram BuildRelationProgram(const Pager& pager) {
@@ -4172,6 +4270,113 @@ TEST_F(VmTest, ExecutesRelationBytecodeAndCanResetForAnotherRun) {
       vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(2.0, vm.row()[0].real_value());
+}
+
+TEST_F(VmTest, ReprobesBorrowedLookupRecordsAndInvalidatesDecodedViewsBeforeMovement) {
+  const BytecodeProgram program = BuildLookupRelationProgram(*pager_);
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto factory = TakeValue(
+        TemporaryStorageFactory::Create(vfs_, *pager_, TemporaryStorageOptions{.mode = mode}));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    for (std::size_t run = 0; run < 2U; ++run) {
+      RequireStatus(
+          vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      RequireStatus(vm.Bind(Parameter(0), SqlValue::Text("A")));
+      for (const std::optional<std::int64_t> rowid :
+           {std::optional<std::int64_t>{}, std::optional<std::int64_t>{1},
+            std::optional<std::int64_t>{2}, std::optional<std::int64_t>{},
+            std::optional<std::int64_t>{1}, std::optional<std::int64_t>{2}}) {
+        ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+        ASSERT_EQ(2U, vm.row().size());
+        if (rowid.has_value()) {
+          ASSERT_TRUE(vm.row()[0].text_value().has_value());
+          EXPECT_EQ(std::string(2048, 'p') + std::to_string(*rowid),
+                    vm.row()[0].text_value()->bytes());
+          EXPECT_EQ(*rowid, vm.row()[1].integer_value());
+        } else {
+          EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+          EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+        }
+      }
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(vm.Reset());
+    }
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+    RequireStatus(vm.Bind(Parameter(0), SqlValue{}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(4, vm.row()[1].integer_value());
+    RequireStatus(vm.Reset());
+  }
+}
+
+TEST(Vm, EmptyLookupRemainsFileLazyAndPositionedResetDropsBorrowedViewsFirst) {
+  test::WritePagerFixedVfs vfs;
+  const auto pager = TakeValue(
+      Pager::Open(vfs, test::kWritePagerInputPath,
+                  PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                               .cache_capacity_pages = 1}));
+  RequireStatus(pager->BeginRead());
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                              .sorter_memory_threshold = ByteCount{64}}));
+  const BytecodeProgram empty = BuildLookupRelationProgram(*pager, true);
+  Vm empty_vm = TakeValue(Vm::Create(empty, VmEnvironment::Core()));
+  RequireStatus(
+      empty_vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(empty_vm.Step()));
+  EXPECT_EQ(SqlValueType::kNull, empty_vm.row()[0].type());
+  EXPECT_FALSE(vfs.pathless_file_present());
+  EXPECT_EQ(VmStep::kDone, TakeValue(empty_vm.Step()));
+  EXPECT_FALSE(vfs.pathless_file_present());
+
+  const BytecodeProgram populated = BuildLookupRelationProgram(*pager);
+  Vm positioned = TakeValue(Vm::Create(populated, VmEnvironment::Core()));
+  RequireStatus(
+      positioned.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(positioned.Bind(Parameter(0), SqlValue::Text("a")));
+  EXPECT_EQ(VmStep::kRow, TakeValue(positioned.Step()));
+  EXPECT_EQ(VmStep::kRow, TakeValue(positioned.Step()));
+  EXPECT_TRUE(vfs.pathless_file_present());
+  EXPECT_EQ(1, positioned.row()[1].integer_value());
+  RequireStatus(positioned.Reset());
+  EXPECT_FALSE(vfs.pathless_file_present());
+  RequireStatus(pager->EndRead());
+}
+
+TEST(Vm, BorrowedLookupPropagatesConstructionAndPositionedReadFailuresWithCleanup) {
+  for (const bool after_position : {false, true}) {
+    test::WritePagerFixedVfs vfs;
+    const auto pager = TakeValue(
+        Pager::Open(vfs, test::kWritePagerInputPath,
+                    PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                 .cache_capacity_pages = 1}));
+    RequireStatus(pager->BeginRead());
+    const auto factory = TakeValue(TemporaryStorageFactory::Create(
+        vfs, *pager,
+        TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                                .sorter_memory_threshold = ByteCount{64}}));
+    const BytecodeProgram program = BuildLookupRelationProgram(*pager);
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Text("A")));
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    if (after_position) {
+      EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      EXPECT_EQ(1, vm.row()[1].integer_value());
+      vfs.FailPathlessReadAfter(0, ErrorCode::kIo);
+    } else {
+      vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
+    }
+    const auto failed = vm.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_FALSE(vfs.pathless_file_present());
+    RequireStatus(pager->EndRead());
+  }
 }
 
 TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {

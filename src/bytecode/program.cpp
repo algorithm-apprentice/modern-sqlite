@@ -33,6 +33,8 @@ enum class CapabilityState : std::uint8_t {
   kCandidatePending = 2,
   kPositioned = 3,
   kExhausted = 4,
+  kLookupReady = 5,
+  kLookupMaybeReady = 6,
 };
 
 enum class AggregateCapabilityState : std::uint8_t {
@@ -40,6 +42,11 @@ enum class AggregateCapabilityState : std::uint8_t {
   kAccumulating = 1,
   kFinalized = 2,
 };
+
+[[nodiscard]] bool IsLookupReadinessState(CapabilityState state) noexcept {
+  return state == CapabilityState::kWriting || state == CapabilityState::kLookupReady ||
+         state == CapabilityState::kLookupMaybeReady;
+}
 
 [[nodiscard]] constexpr ProgramError MakeProgramError(ProgramErrorCode code) noexcept {
   return ProgramError{.code = code};
@@ -125,6 +132,7 @@ template <typename T>
   switch (kind) {
     case CursorStorageKind::kRowIdTable:
     case CursorStorageKind::kIndex:
+    case CursorStorageKind::kEphemeralIndex:
       return true;
   }
   return false;
@@ -481,9 +489,14 @@ template <typename T>
   clone.mutation_result = input.mutation_result;
   clone.register_count = input.register_count;
   clone.parameter_count = input.parameter_count;
-  clone.requires_database_snapshot = input.requires_database_snapshot ||
-                                     input.transaction_access == ProgramTransactionAccess::kWrite ||
-                                     !input.cursors.empty() || !input.write_cursors.empty();
+  clone.requires_database_snapshot =
+      input.requires_database_snapshot ||
+      input.transaction_access == ProgramTransactionAccess::kWrite ||
+      std::ranges::any_of(input.cursors,
+                          [](const ReadCursorDescriptor& cursor) {
+                            return cursor.storage != CursorStorageKind::kEphemeralIndex;
+                          }) ||
+      !input.write_cursors.empty();
 
   clone.constants.reserve(input.constants.size());
   for (const auto& value : input.constants) {
@@ -504,6 +517,7 @@ template <typename T>
         .fields = std::vector<CursorFieldSource>(cursor.fields.begin(), cursor.fields.end()),
         .index_columns = std::vector<IndexColumnMetadata>(cursor.index_columns.begin(),
                                                           cursor.index_columns.end()),
+        .relation = cursor.relation,
     });
   }
 
@@ -530,6 +544,7 @@ template <typename T>
         .key_field_count = sorter.key_field_count,
         .key_columns = std::vector<OrderingColumnMetadata>(sorter.key_columns.begin(),
                                                            sorter.key_columns.end()),
+        .relation_purpose = sorter.relation_purpose,
     });
   }
 
@@ -540,6 +555,7 @@ template <typename T>
         .key_field_count = top_n.key_field_count,
         .key_columns =
             std::vector<OrderingColumnMetadata>(top_n.key_columns.begin(), top_n.key_columns.end()),
+        .relation_purpose = top_n.relation_purpose,
     });
   }
 
@@ -550,6 +566,7 @@ template <typename T>
         .key_field_count = relation.key_field_count,
         .key_columns = std::vector<OrderingColumnMetadata>(relation.key_columns.begin(),
                                                            relation.key_columns.end()),
+        .relation_purpose = relation.relation_purpose,
     });
   }
 
@@ -560,6 +577,7 @@ template <typename T>
         .key_field_count = comparison.key_field_count,
         .key_columns = std::vector<OrderingColumnMetadata>(comparison.key_columns.begin(),
                                                            comparison.key_columns.end()),
+        .relation_purpose = comparison.relation_purpose,
     });
   }
 
@@ -672,10 +690,15 @@ template <typename T>
 
 [[nodiscard]] ProgramResult<void> CheckDescriptors(const ProgramInput& input) {
   const auto check_ordering_descriptor = [&](const OrderingRecordDescriptor& descriptor,
-                                             std::size_t descriptor_index) -> ProgramResult<void> {
+                                             std::size_t descriptor_index,
+                                             bool relation = false) -> ProgramResult<void> {
     if (descriptor.field_count == 0U || descriptor.key_field_count == 0U ||
         descriptor.key_field_count > descriptor.field_count ||
-        descriptor.key_columns.size() != descriptor.key_field_count) {
+        descriptor.key_columns.size() != descriptor.key_field_count ||
+        (descriptor.relation_purpose == RelationPurpose::kLookup &&
+         descriptor.key_field_count != descriptor.field_count) ||
+        (descriptor.relation_purpose != RelationPurpose::kMembership &&
+         (!relation || descriptor.relation_purpose != RelationPurpose::kLookup))) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
                                      ProgramError::kNoInstruction, descriptor_index));
     }
@@ -691,7 +714,8 @@ template <typename T>
 
   for (std::size_t cursor_index = 0; cursor_index < input.cursors.size(); ++cursor_index) {
     const auto& cursor = input.cursors[cursor_index];
-    if (cursor.root_page.value() == 0) {
+    const bool ephemeral = cursor.storage == CursorStorageKind::kEphemeralIndex;
+    if (ephemeral ? cursor.root_page.value() != 0U : cursor.root_page.value() == 0U) {
       return std::unexpected(
           ErrorAt(ProgramErrorCode::kInvalidRootPage, ProgramError::kNoInstruction, cursor_index));
     }
@@ -702,12 +726,22 @@ template <typename T>
                                      ProgramError::kNoInstruction, cursor_index));
     }
 
-    if (cursor.storage == CursorStorageKind::kRowIdTable) {
-      if (!cursor.index_columns.empty()) {
+    if (ephemeral) {
+      if (!cursor.relation.has_value() || cursor.relation->value() >= input.relations.size() ||
+          !cursor.index_columns.empty()) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                        ProgramError::kNoInstruction, cursor_index));
       }
-    } else if (cursor.index_columns.size() != cursor.record_field_count) {
+      const OrderingRecordDescriptor& owner = input.relations[cursor.relation->value()];
+      if (owner.relation_purpose != RelationPurpose::kLookup ||
+          owner.field_count != cursor.record_field_count) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                       ProgramError::kNoInstruction, cursor_index));
+      }
+    } else if (cursor.relation.has_value() ||
+               (cursor.storage == CursorStorageKind::kRowIdTable
+                    ? !cursor.index_columns.empty()
+                    : cursor.index_columns.size() != cursor.record_field_count)) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                      ProgramError::kNoInstruction, cursor_index));
     }
@@ -817,7 +851,8 @@ template <typename T>
     }
   }
   for (std::size_t relation_index = 0; relation_index < input.relations.size(); ++relation_index) {
-    if (auto checked = check_ordering_descriptor(input.relations[relation_index], relation_index);
+    if (auto checked =
+            check_ordering_descriptor(input.relations[relation_index], relation_index, true);
         !checked) {
       return checked;
     }
@@ -908,8 +943,15 @@ struct InstructionOwnership {
     if (id.value() >= input.cursors.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursor, instruction, id.value()));
     }
-    return ownership.has_value() ? check_owner(ownership->cursors, id, instruction)
-                                 : ProgramResult<void>{};
+    if (ownership.has_value()) {
+      if (auto checked = check_owner(ownership->cursors, id, instruction); !checked) {
+        return checked;
+      }
+      if (input.cursors[id.value()].relation.has_value()) {
+        return check_owner(ownership->relations, *input.cursors[id.value()].relation, instruction);
+      }
+    }
+    return {};
   };
   const auto check_write_cursor = [&](WriteCursorId id,
                                       std::size_t instruction) -> ProgramResult<void> {
@@ -1098,20 +1140,40 @@ struct InstructionOwnership {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
             }
+            if (input.cursors[operation.cursor.value()].storage ==
+                CursorStorageKind::kEphemeralIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
             return check_target(operation.empty_target, index);
           } else if constexpr (std::is_same_v<Operation, NextInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
+            }
+            if (input.cursors[operation.cursor.value()].storage ==
+                CursorStorageKind::kEphemeralIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
             }
             return check_target(operation.next_target, index);
           } else if constexpr (std::is_same_v<Operation, LastInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
             }
+            if (input.cursors[operation.cursor.value()].storage ==
+                CursorStorageKind::kEphemeralIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
             return check_target(operation.empty_target, index);
           } else if constexpr (std::is_same_v<Operation, PreviousInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
+            }
+            if (input.cursors[operation.cursor.value()].storage ==
+                CursorStorageKind::kEphemeralIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
             }
             return check_target(operation.previous_target, index);
           } else if constexpr (std::is_same_v<Operation, ClearRowIdListInstruction>) {
@@ -1178,6 +1240,31 @@ struct InstructionOwnership {
               return check_target(operation.missing_target, index);
             } else {
               return check_target(operation.end_target, index);
+            }
+          } else if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction> ||
+                               std::is_same_v<Operation, NextRelationPrefixInstruction>) {
+            if (auto result = check_cursor(operation.cursor, index); !result) {
+              return result;
+            }
+            const ReadCursorDescriptor& cursor = input.cursors[operation.cursor.value()];
+            if (cursor.storage != CursorStorageKind::kEphemeralIndex) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, index,
+                                             operation.cursor.value()));
+            }
+            const OrderingRecordDescriptor& relation = input.relations[cursor.relation->value()];
+            if (operation.key_count == 0U || operation.key_count > relation.key_field_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index, operation.key_count));
+            }
+            if (auto result = check_range(operation.first_key, operation.key_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction>) {
+              return check_target(operation.missing_target, index);
+            } else {
+              return check_target(operation.next_target, index);
             }
           } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
@@ -1578,6 +1665,23 @@ struct InstructionOwnership {
                                std::is_same_v<Operation, ResetRelationInstruction> ||
                                std::is_same_v<Operation, CloseRelationInstruction>) {
             return check_relation(operation.relation, index);
+          } else if constexpr (std::is_same_v<Operation, SealRelationInstruction> ||
+                               std::is_same_v<Operation, CheckRelationLookupInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            if (input.relations[operation.relation.value()].relation_purpose !=
+                RelationPurpose::kLookup) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.relation.value()));
+            }
+            if constexpr (std::is_same_v<Operation, CheckRelationLookupInstruction>) {
+              if (auto result = check_target(operation.ready_target, index); !result) {
+                return result;
+              }
+              return check_target(operation.empty_target, index);
+            }
+            return {};
           } else if constexpr (std::is_same_v<Operation, InsertRelationInstruction>) {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
@@ -1629,10 +1733,20 @@ struct InstructionOwnership {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
             }
+            if (input.relations[operation.relation.value()].relation_purpose ==
+                RelationPurpose::kLookup) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.relation.value()));
+            }
             return check_target(operation.empty_target, index);
           } else if constexpr (std::is_same_v<Operation, ReadRelationFieldInstruction>) {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
+            }
+            if (input.relations[operation.relation.value()].relation_purpose ==
+                RelationPurpose::kLookup) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.relation.value()));
             }
             if (operation.field >= input.relations[operation.relation.value()].field_count) {
               return std::unexpected(
@@ -1642,6 +1756,11 @@ struct InstructionOwnership {
           } else if constexpr (std::is_same_v<Operation, NextRelationInstruction>) {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
+            }
+            if (input.relations[operation.relation.value()].relation_purpose ==
+                RelationPurpose::kLookup) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.relation.value()));
             }
             return check_target(operation.next_target, index);
           } else if constexpr (std::is_same_v<Operation, CompareRecordsInstruction>) {
@@ -1868,6 +1987,10 @@ struct SubroutineAnalysis {
     case InstructionKind::kNextRelation:
     case InstructionKind::kResetRelation:
     case InstructionKind::kCloseRelation:
+    case InstructionKind::kCheckRelationLookup:
+    case InstructionKind::kSealRelation:
+    case InstructionKind::kSeekRelationPrefix:
+    case InstructionKind::kNextRelationPrefix:
     case InstructionKind::kOpenAggregate:
     case InstructionKind::kStepAggregate:
     case InstructionKind::kFinalizeAggregate:
@@ -2040,9 +2163,14 @@ struct SubroutineAnalysis {
   return result;
 }
 
-[[nodiscard]] ProgramResult<ProgramVerificationMetrics> AnalyzeProgram(const ProgramInput& input,
-                                                                       const ProgramLimits& limits,
-                                                                       std::size_t owned_bytes) {
+struct ProgramAnalysis {
+  ProgramVerificationMetrics metrics;
+  std::vector<std::optional<CursorId>> relation_borrowers;
+};
+
+[[nodiscard]] ProgramResult<ProgramAnalysis> AnalyzeProgram(const ProgramInput& input,
+                                                            const ProgramLimits& limits,
+                                                            std::size_t owned_bytes) {
   const std::size_t instruction_count = input.instructions.size();
   const std::size_t register_words =
       CeilingDivide(static_cast<std::size_t>(input.register_count), kBitsPerWord);
@@ -2070,11 +2198,36 @@ struct SubroutineAnalysis {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
   const std::size_t bitset_words = CeilingDivide(instruction_count, kBitsPerWord);
+  const bool has_relation_borrowers =
+      std::ranges::any_of(input.cursors, [](const ReadCursorDescriptor& cursor) {
+        return cursor.storage == CursorStorageKind::kEphemeralIndex;
+      });
+  std::size_t borrower_bytes = 0;
+  if (!AddArrayBytes<std::optional<CursorId>>(has_relation_borrowers ? input.relations.size() : 0U,
+                                              &borrower_bytes)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
   std::size_t analysis_words = stored_state_words;
   if (!CheckedAdd(bitset_words, &analysis_words) || !CheckedAdd(bitset_words, &analysis_words) ||
       !CheckedAdd(CeilingDivide(instruction_count, 2), &analysis_words) ||
-      !CheckedAdd(state_words, &analysis_words) || analysis_words > limits.maximum_analysis_words) {
+      !CheckedAdd(state_words, &analysis_words) ||
+      !CheckedAdd(CeilingDivide(borrower_bytes, sizeof(std::uint64_t)), &analysis_words) ||
+      analysis_words > limits.maximum_analysis_words) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
+  std::vector<std::optional<CursorId>> relation_borrowers(
+      has_relation_borrowers ? input.relations.size() : 0U);
+  for (std::size_t index = 0; index < input.cursors.size(); ++index) {
+    const ReadCursorDescriptor& cursor = input.cursors[index];
+    if (!cursor.relation.has_value()) {
+      continue;
+    }
+    std::optional<CursorId>& borrower = relation_borrowers[cursor.relation->value()];
+    if (borrower.has_value()) {
+      return std::unexpected(
+          ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor, ProgramError::kNoInstruction, index));
+    }
+    borrower = CursorId{static_cast<std::uint32_t>(index)};
   }
   auto subroutines = AnalyzeSubroutineGraph(input, limits, analysis_words);
   if (!subroutines) {
@@ -2143,6 +2296,17 @@ struct SubroutineAnalysis {
       for (std::size_t capability = 0; capability < capability_count; ++capability) {
         const std::size_t index = capability_offset + capability;
         if (current[index] != incoming[index]) {
+          if (index >= relation_offset && index < aggregate_offset &&
+              input.relations[index - relation_offset].relation_purpose ==
+                  RelationPurpose::kLookup &&
+              IsLookupReadinessState(static_cast<CapabilityState>(current[index])) &&
+              IsLookupReadinessState(static_cast<CapabilityState>(incoming[index]))) {
+            if (current[index] != static_cast<std::uint64_t>(CapabilityState::kLookupMaybeReady)) {
+              current[index] = static_cast<std::uint64_t>(CapabilityState::kLookupMaybeReady);
+              changed = true;
+            }
+            continue;
+          }
           return std::unexpected(
               ErrorAt(ProgramErrorCode::kCapabilityStateConflict, target, capability));
         }
@@ -2359,6 +2523,29 @@ struct SubroutineAnalysis {
       }
       return {};
     };
+    const auto require_relation_lookup_ready = [&](RelationId relation) -> ProgramResult<void> {
+      if (auto result = require_relation_open(relation); !result) {
+        return result;
+      }
+      if (relation_state(relation) != CapabilityState::kLookupReady) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                       instruction_index, relation.value()));
+      }
+      return {};
+    };
+    const auto require_relation_borrower = [&](RelationId relation,
+                                               bool closed) -> ProgramResult<void> {
+      if (relation_borrowers.empty() || !relation_borrowers[relation.value()].has_value()) {
+        return {};
+      }
+      const CursorId borrower = *relation_borrowers[relation.value()];
+      const CursorState actual = cursor_state(borrower);
+      if (closed ? actual != CursorState::kClosed : actual == CursorState::kPositioned) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, borrower.value()));
+      }
+      return {};
+    };
     const auto require_aggregate_open = [&](AggregateId aggregate) -> ProgramResult<void> {
       if (aggregate_state(aggregate) == AggregateCapabilityState::kClosed) {
         return std::unexpected(
@@ -2547,6 +2734,9 @@ struct SubroutineAnalysis {
             if (auto result = require_relation_writing(operation.relation); !result) {
               return result;
             }
+            if (auto result = require_relation_borrower(operation.relation, false); !result) {
+              return result;
+            }
             if (auto result = require_range(operation.first_value, operation.value_count);
                 !result) {
               return result;
@@ -2603,6 +2793,9 @@ struct SubroutineAnalysis {
             if (auto result = require_relation_open(operation.relation); !result) {
               return result;
             }
+            if (auto result = require_relation_borrower(operation.relation, true); !result) {
+              return result;
+            }
             set_relation_state(operation.relation, CapabilityState::kWriting);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CloseRelationInstruction>) {
@@ -2610,7 +2803,42 @@ struct SubroutineAnalysis {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
                                              instruction_index, operation.relation.value()));
             }
+            if (auto result = require_relation_borrower(operation.relation, true); !result) {
+              return result;
+            }
             set_relation_state(operation.relation, CapabilityState::kClosed);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CheckRelationLookupInstruction>) {
+            if (auto result = require_relation_open(operation.relation); !result) {
+              return result;
+            }
+            const CapabilityState readiness = relation_state(operation.relation);
+            if (!IsLookupReadinessState(readiness)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                             instruction_index, operation.relation.value()));
+            }
+            if (readiness != CapabilityState::kWriting) {
+              set_relation_state(operation.relation, CapabilityState::kLookupReady);
+              if (auto result = merge_state(operation.ready_target.value(), state); !result) {
+                return result;
+              }
+              if (auto result = merge_state(operation.empty_target.value(), state); !result) {
+                return result;
+              }
+            }
+            if (readiness != CapabilityState::kLookupReady) {
+              set_relation_state(operation.relation, CapabilityState::kWriting);
+              return fallthrough();
+            }
+            return {};
+          } else if constexpr (std::is_same_v<Operation, SealRelationInstruction>) {
+            if (auto result = require_relation_writing(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = require_relation_borrower(operation.relation, false); !result) {
+              return result;
+            }
+            set_relation_state(operation.relation, CapabilityState::kLookupReady);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, OpenAggregateInstruction>) {
             if (aggregate_state(operation.aggregate) != AggregateCapabilityState::kClosed) {
@@ -2720,6 +2948,13 @@ struct SubroutineAnalysis {
             if (cursor_state(operation.cursor) != CursorState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCursorAlreadyOpen,
                                              instruction_index, operation.cursor.value()));
+            }
+            if (input.cursors[operation.cursor.value()].relation.has_value()) {
+              if (auto result =
+                      require_relation_open(*input.cursors[operation.cursor.value()].relation);
+                  !result) {
+                return result;
+              }
             }
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return fallthrough();
@@ -2863,6 +3098,38 @@ struct SubroutineAnalysis {
             }
             set_cursor_state(operation.cursor, CursorState::kPositioned);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction> ||
+                               std::is_same_v<Operation, NextRelationPrefixInstruction>) {
+            const RelationId relation = *input.cursors[operation.cursor.value()].relation;
+            if (auto result = require_relation_lookup_ready(relation); !result) {
+              return result;
+            }
+            if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction>) {
+              if (auto result = require_open(operation.cursor); !result) {
+                return result;
+              }
+            } else {
+              if (auto result = require_positioned(operation.cursor); !result) {
+                return result;
+              }
+            }
+            if (auto result = require_range(operation.first_key, operation.key_count); !result) {
+              return result;
+            }
+            set_cursor_state(operation.cursor, CursorState::kPositioned);
+            if constexpr (std::is_same_v<Operation, SeekRelationPrefixInstruction>) {
+              if (auto result = fallthrough(); !result) {
+                return result;
+              }
+              set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+              return merge_state(operation.missing_target.value(), state);
+            } else {
+              if (auto result = merge_state(operation.next_target.value(), state); !result) {
+                return result;
+              }
+              set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+              return fallthrough();
+            }
           } else if constexpr (std::is_same_v<Operation, SeekIndexInstruction>) {
             if (auto result = require_open(operation.cursor); !result) {
               return result;
@@ -3107,12 +3374,16 @@ struct SubroutineAnalysis {
     }
   }
 
-  return ProgramVerificationMetrics{
-      .owned_bytes = owned_bytes,
-      .analysis_words = analysis_words,
-      .processed_edge_words = processed_edge_words,
-      .reachable_instruction_count = reachable_count,
-      .maximum_subroutine_depth = subroutines->maximum_depth,
+  return ProgramAnalysis{
+      .metrics =
+          ProgramVerificationMetrics{
+              .owned_bytes = owned_bytes,
+              .analysis_words = analysis_words,
+              .processed_edge_words = processed_edge_words,
+              .reachable_instruction_count = reachable_count,
+              .maximum_subroutine_depth = subroutines->maximum_depth,
+          },
+      .relation_borrowers = std::move(relation_borrowers),
   };
 }
 
@@ -3343,6 +3614,14 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "reset_aggregate";
     case InstructionKind::kCloseAggregate:
       return "close_aggregate";
+    case InstructionKind::kCheckRelationLookup:
+      return "check_relation_lookup";
+    case InstructionKind::kSealRelation:
+      return "seal_relation";
+    case InstructionKind::kSeekRelationPrefix:
+      return "seek_relation_prefix";
+    case InstructionKind::kNextRelationPrefix:
+      return "next_relation_prefix";
   }
   return "unknown";
 }
@@ -3422,8 +3701,10 @@ ErrorCode ProgramError::base_error_code() const noexcept {
   return ErrorCode::kInternal;
 }
 
-ProgramResult<ProgramVerificationMetrics> VerifyProgram(const ProgramInput& input,
-                                                        ProgramLimits limits) {
+namespace {
+
+[[nodiscard]] ProgramResult<ProgramAnalysis> VerifyProgramAnalysis(const ProgramInput& input,
+                                                                   ProgramLimits limits) {
   if (auto checked = CheckCounts(input, limits); !checked) {
     return std::unexpected(checked.error());
   }
@@ -3444,6 +3725,17 @@ ProgramResult<ProgramVerificationMetrics> VerifyProgram(const ProgramInput& inpu
     return std::unexpected(checked.error());
   }
   return AnalyzeProgram(input, limits, *owned_bytes);
+}
+
+}  // namespace
+
+ProgramResult<ProgramVerificationMetrics> VerifyProgram(const ProgramInput& input,
+                                                        ProgramLimits limits) {
+  auto analysis = VerifyProgramAnalysis(input, limits);
+  if (!analysis.has_value()) {
+    return std::unexpected(analysis.error());
+  }
+  return analysis->metrics;
 }
 
 ProgramResult<BytecodeProgram> BytecodeProgram::Create(const ProgramInput& input,
@@ -3469,11 +3761,12 @@ ProgramResult<BytecodeProgram> BytecodeProgram::Create(const ProgramInput& input
   }
 
   ProgramInput canonical = CloneProgramInput(input);
-  auto verified = VerifyProgram(canonical, limits);
+  auto verified = VerifyProgramAnalysis(canonical, limits);
   if (!verified) {
     return std::unexpected(verified.error());
   }
-  return BytecodeProgram(std::move(canonical), *verified);
+  return BytecodeProgram(std::move(canonical), verified->metrics,
+                         std::move(verified->relation_borrowers));
 }
 
 const SqlValue& BytecodeProgram::constant(ConstantId id) const noexcept {
@@ -3647,7 +3940,8 @@ ProgramResult<CursorId> ProgramBuilder::AddCursor(ReadCursorDescriptor cursor) {
   }
   try {
     input_.cursors.push_back(std::move(cursor));
-    input_.requires_database_snapshot = true;
+    input_.requires_database_snapshot |=
+        input_.cursors.back().storage != CursorStorageKind::kEphemeralIndex;
   } catch (...) {
     owned_bytes_ -= bytes;
     throw;
@@ -3932,6 +4226,9 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<ContainsRelationInstruction>(instruction) ||
       std::holds_alternative<RewindRelationInstruction>(instruction) ||
       std::holds_alternative<NextRelationInstruction>(instruction) ||
+      std::holds_alternative<CheckRelationLookupInstruction>(instruction) ||
+      std::holds_alternative<SeekRelationPrefixInstruction>(instruction) ||
+      std::holds_alternative<NextRelationPrefixInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
       std::holds_alternative<SeekIndexInstruction>(instruction) ||
       std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
@@ -4078,6 +4375,52 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitNextRelation(RelationId re
     return std::unexpected(checked.error());
   }
   return AppendPending(PendingNextRelation{.relation = relation, .target = next_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitCheckRelationLookup(RelationId relation,
+                                                                          Label ready_target,
+                                                                          Label empty_target) {
+  if (auto checked = CheckLabel(ready_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (auto checked = CheckLabel(empty_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingCheckRelationLookup{
+      .relation = relation,
+      .ready_target = ready_target,
+      .empty_target = empty_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRelationPrefix(CursorId cursor,
+                                                                         RegisterId first_key,
+                                                                         std::uint32_t key_count,
+                                                                         Label missing_target) {
+  if (auto checked = CheckLabel(missing_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingSeekRelationPrefix{
+      .cursor = cursor,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = missing_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitNextRelationPrefix(CursorId cursor,
+                                                                         RegisterId first_key,
+                                                                         std::uint32_t key_count,
+                                                                         Label next_target) {
+  if (auto checked = CheckLabel(next_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingNextRelationPrefix{
+      .cursor = cursor,
+      .first_key = first_key,
+      .key_count = key_count,
+      .target = next_target,
+  });
 }
 
 ProgramResult<InstructionAddress> ProgramBuilder::EmitSeekRowId(CursorId cursor, RegisterId key,
@@ -4276,6 +4619,26 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
           } else if constexpr (std::is_same_v<Operation, PendingNextRelation>) {
             return NextRelationInstruction{
                 .relation = operation.relation,
+                .next_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingCheckRelationLookup>) {
+            return CheckRelationLookupInstruction{
+                .relation = operation.relation,
+                .ready_target = target(operation.ready_target),
+                .empty_target = target(operation.empty_target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingSeekRelationPrefix>) {
+            return SeekRelationPrefixInstruction{
+                .cursor = operation.cursor,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
+                .missing_target = target(operation.target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingNextRelationPrefix>) {
+            return NextRelationPrefixInstruction{
+                .cursor = operation.cursor,
+                .first_key = operation.first_key,
+                .key_count = operation.key_count,
                 .next_target = target(operation.target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingSeekRowId>) {
