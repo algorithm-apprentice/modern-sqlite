@@ -148,6 +148,10 @@ ADR-0086 admits the same joined equality prefixes when required fields need
 the canonical index-rowid table lookup. It reuses these noncovering costs
 and descriptors and retains complete table-backed RIGHT/FULL replay.
 
+ADR-0087 extends the same joined candidate to these existing one-/two-sided
+range bounds, with or without a leading equality prefix. It retains shared
+admission and costs and does not authorize unconstrained joined index scans.
+
 Comparison orientation is normalized. `? < column` becomes a lower bound and
 `? > column` becomes an upper bound. The physical plan retains:
 

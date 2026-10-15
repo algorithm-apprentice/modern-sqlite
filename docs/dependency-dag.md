@@ -135,9 +135,10 @@ precede scalar and EXISTS queries; coroutine prerequisites remain attached to
 streaming derived-query, view, and CTE consumers. Joined stored covering-index
 equality access reuses the positioned-source producer under ADR-0085;
 ADR-0086 extends the same producer with noncovering equality access and
-table-backed outer replay. Parameterized range and automatic-index integration
-remain separate ordered prerequisites. Persistent
-constraints, generated values, foreign keys, views, schema operations, and
+table-backed outer replay. ADR-0087 integrates parameterized ranges through
+the same producer and canonical traversal emission. Automatic-index
+integration remains a separate ordered prerequisite. Persistent constraints,
+generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins
 until every advanced-SQL slice and its integrated review are complete.

@@ -90,3 +90,4 @@ their corresponding implementation begins.
 84. [ADR-0084: Bound Query Ownership for Nested SELECT](0084-bound-query-ownership-for-nested-select.md)
 85. [ADR-0085: Parameterized Joined Covering Index Access](0085-parameterized-joined-covering-index-access.md)
 86. [ADR-0086: Parameterized Joined Noncovering Index Access](0086-parameterized-joined-noncovering-index-access.md)
+87. [ADR-0087: Parameterized Joined Index Range Access](0087-parameterized-joined-index-range-access.md)
