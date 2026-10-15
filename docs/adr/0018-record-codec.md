@@ -88,6 +88,16 @@ appear in a well-formed persistent database record.
 - Missing trailing table columns and their schema defaults are handled by
   catalog/row materialization, not by the record codec.
 
+### Bounded comparison amendment
+
+ADR-0088 adds a borrowed `RecordPrefixView` without weakening `RecordView`'s
+complete-input invariant. The prefix view validates the complete header
+against the declared full record size through the shared header validator,
+then bounds the existing `RecordCursor` to available initial fields. Both
+views share the canonical index comparator. A complete stored-field shortage
+remains corruption, whereas a valid prefix view too narrow for the search
+key is caller misuse. The codec performs no payload acquisition or I/O.
+
 ## Consequences
 
 - B-tree lookup and VM column extraction share one independently fuzzable
