@@ -451,7 +451,7 @@ int main() try {
       DistinctFixture(catalog,
                       "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
   };
-  const std::array<PhysicalPlan, 16> joined_plans{
+  const std::array<PhysicalPlan, 20> joined_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.id FROM Items a JOIN Items b ON a.id>?1 AND b.id=a.id"),
       DistinctFixture(catalog,
@@ -499,6 +499,18 @@ int main() try {
       AggregateFixture(catalog,
                        "SELECT count() FROM Items a NATURAL LEFT JOIN Items b "
                        "UNION SELECT ?1 LIMIT 1"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.Name=a.Name "
+                      "JOIN Items c ON c.Name=b.Name ORDER BY a.id,b.id,c.id"),
+      AggregateFixture(indexed_catalog,
+                       "SELECT b.Name,count(a.id) FROM Items a FULL JOIN Items b "
+                       "ON b.Name IS a.Name GROUP BY b.Name ORDER BY b.Name"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT a.id,b.id,c.id FROM Items a LEFT JOIN Items b ON b.Name=a.Name "
+                      "FULL JOIN Items c ON c.Name=b.Name"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT (SELECT b.Name FROM Items a JOIN Items b ON b.Name=a.Name "
+                      "ORDER BY b.id LIMIT 1)"),
   };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);

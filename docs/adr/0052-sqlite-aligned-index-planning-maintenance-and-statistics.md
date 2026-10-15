@@ -137,6 +137,13 @@ The optimizer chooses the longest leftmost equality prefix and then at most
 one lower and one upper bound on the immediately following key term. It does
 not skip an unconstrained leading key term.
 
+ADR-0085 extends this matcher to admitted joined value keys and requires the
+shared comparison-affinity check: a no-affinity comparison permits any
+supported index affinity, TEXT requires TEXT, and numeric comparison requires
+NUMERIC, INTEGER, or REAL. This applies to source-independent scalar-query
+keys as well; a numeric-affinity key must not constrain a TEXT index and omit
+equivalent stored numeric spellings.
+
 Comparison orientation is normalized. `? < column` becomes a lower bound and
 `? > column` becomes an upper bound. The physical plan retains:
 

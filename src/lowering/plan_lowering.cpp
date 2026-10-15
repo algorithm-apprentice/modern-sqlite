@@ -887,6 +887,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalNode* access = nullptr;
     BoundSourceId source{0};
     std::optional<CursorId> cursor{};
+    std::optional<RegisterId> index_key_first{};
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::optional<RegisterId> matched{};
     std::optional<RegisterId> replay_mode{};
@@ -1104,12 +1105,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         streaming_requires_snapshot_ = true;
       } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&physical.payload);
                  index_scan != nullptr) {
-        if (index_scan->core_index >= streaming_cores_.size() ||
-            has_access(streaming_cores_[index_scan->core_index])) {
-          return std::unexpected(InternalFailure("streaming index core is invalid"));
+        auto joined = InspectJoinedAccess(physical, index_scan->core_index, index_scan->source);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
         }
-        streaming_cores_[index_scan->core_index].leaf = &physical;
-        streaming_cores_[index_scan->core_index].index_scan = index_scan;
+        StreamingCorePlan& core = streaming_cores_[index_scan->core_index];
+        if (!*joined) {
+          if (has_access(core)) {
+            return std::unexpected(InternalFailure("streaming index core is invalid"));
+          }
+          core.leaf = &physical;
+          core.index_scan = index_scan;
+        }
         node_cores[index] = index_scan->core_index;
         streaming_requires_snapshot_ = true;
       } else if (const auto* values = std::get_if<PhysicalValuesNode>(&physical.payload);
@@ -2636,6 +2643,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (StreamingCorePlan& core : streaming_cores_) {
       for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
         JoinedSourcePlan& source = core.joined_sources[index];
+        if (source.access == nullptr) {
+          return std::unexpected(InternalFailure("joined source has no register-layout access"));
+        }
+        if (const auto* scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
+            scan != nullptr) {
+          if (!scan->covering || scan->equalities.empty() || scan->range.has_value() ||
+              scan->direction != PhysicalScanDirection::kForward) {
+            return std::unexpected(InternalFailure("joined index prefix metadata is invalid"));
+          }
+          auto keys = AllocateRegisters(scan->equalities.size());
+          if (!keys.has_value()) {
+            return std::unexpected(std::move(keys.error()));
+          }
+          source.index_key_first = *keys;
+        }
         if (source.join != nullptr && SourceJoinPreservesLeft(source.join->join)) {
           auto matched = AllocateRegisters(1);
           if (!matched.has_value()) {
@@ -3666,7 +3688,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             }
             table_scan_ = std::get_if<PhysicalTableScanNode>(&joined.access->payload);
             rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&joined.access->payload);
-            index_scan_ = nullptr;
+            index_scan_ = std::get_if<PhysicalIndexScanNode>(&joined.access->payload);
             leaf_ = joined.access;
             active_source_column_begin_ = source.source_column_begin;
             active_source_column_count_ = source.source_column_count;
@@ -5197,6 +5219,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitCursorRowIdValue(BoundSourceId source,
+                                                          RegisterId destination) {
+    auto binding = SourceCursor(source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    if (binding->rowid_field.has_value()) {
+      return Append(ReadFieldInstruction{
+          .cursor = binding->cursor, .field = *binding->rowid_field, .output = destination});
+    }
+    return Append(ReadRowIdInstruction{.cursor = binding->cursor, .output = destination});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitRowIdValue(const BoundRowIdExpression& rowid,
                                                     RegisterId destination) {
     if ((grouped_aggregate_query_ || global_representative_query_) &&
@@ -5213,15 +5248,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .output = destination,
       });
     }
-    auto binding = SourceCursor(rowid.source);
-    if (!binding.has_value()) {
-      return std::unexpected(std::move(binding.error()));
-    }
-    if (binding->rowid_field.has_value()) {
-      return Append(ReadFieldInstruction{
-          .cursor = binding->cursor, .field = *binding->rowid_field, .output = destination});
-    }
-    return Append(ReadRowIdInstruction{.cursor = binding->cursor, .output = destination});
+    return EmitCursorRowIdValue(rowid.source, destination);
   }
 
   [[nodiscard]] LoweringResult<void> EmitUnaryValue(const BoundUnaryExpression& unary,
@@ -6646,16 +6673,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
       const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound) override {
+    if (!index_key_first_.has_value()) {
+      return std::unexpected(InternalFailure("covering index key register block is invalid"));
+    }
+    return EmitIndexKeyBlock(index, range_bound, *index_key_first_, index_key_capacity_);
+  }
+
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
+      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound, RegisterId first,
+      std::uint32_t capacity) {
     const std::size_t count =
         index.equalities.size() + static_cast<std::size_t>(range_bound != nullptr);
-    if (!index_key_first_.has_value() || count == 0U || count > index_key_capacity_) {
+    if (count == 0U || count > capacity) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
     std::size_t offset = 0;
     const auto copy_term = [&](BoundExpressionId expression,
                                TypeAffinity affinity) -> LoweringResult<void> {
-      const RegisterId destination{AssumeValue(index_key_first_).value() +
-                                   static_cast<std::uint32_t>(offset++)};
+      const RegisterId destination{first.value() + static_cast<std::uint32_t>(offset++)};
       if (auto copied = Append(CopyInstruction{
               .input = Home(expression),
               .output = destination,
@@ -9068,10 +9103,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const BoundTableSource& bound_source = select.table_sources[depth];
     const CatalogSnapshot& catalog = *bound_select_->catalog();
     if (!bound_source.table.has_value() || !catalog.table(*bound_source.table).without_rowid) {
-      return Append(ReadRowIdInstruction{
-          .cursor = *source.cursor,
-          .output = *source.right_key_first,
-      });
+      return EmitCursorRowIdValue(source.source, *source.right_key_first);
     }
     const auto primary_id = catalog.primary_key_index(*bound_source.table);
     if (!primary_id.has_value()) {
@@ -9112,6 +9144,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
     }
     const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
+    const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
     const bool has_inner = depth + 1U < core.joined_sources.size();
     const bool left = source.join != nullptr && SourceJoinPreservesLeft(source.join->join);
     const bool right = source.join != nullptr && SourceJoinPreservesRight(source.join->join);
@@ -9135,6 +9168,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!done.has_value()) {
       return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> index_end;
+    if (index_scan != nullptr) {
+      if (!source.index_key_first.has_value()) {
+        return std::unexpected(InternalFailure("joined index has no retained prefix registers"));
+      }
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      index_end = *label;
     }
     std::optional<Label> published;
     if (right) {
@@ -9180,6 +9224,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
       }
+    } else if (index_scan != nullptr) {
+      if (auto keys = EmitIndexKeyExpressions(*index_scan, *done); !keys.has_value()) {
+        return keys;
+      }
+      const RegisterId first = AssumeValue(source.index_key_first);
+      auto count = EmitIndexKeyBlock(*index_scan, nullptr, first,
+                                     static_cast<std::uint32_t>(index_scan->equalities.size()));
+      if (!count.has_value()) {
+        return std::unexpected(std::move(count.error()));
+      }
+      auto sought =
+          ConvertProgramResult(AssumeValue(builder_).EmitSeekIndex(cursor, first, *count, *done,
+                                                                   IndexSeekMode::kGreaterOrEqual),
+                               "unable to position joined index prefix");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
     } else {
       auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
                                           "unable to position joined source");
@@ -9189,6 +9250,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
+    }
+    if (index_scan != nullptr) {
+      auto checked =
+          ConvertProgramResult(AssumeValue(builder_).EmitCheckIndexRange(
+                                   cursor, AssumeValue(source.index_key_first),
+                                   static_cast<std::uint32_t>(index_scan->equalities.size()),
+                                   AssumeValue(index_end), IndexRangeEndMode::kInclusive),
+                               "unable to check joined index prefix");
+      if (!checked.has_value()) {
+        return std::unexpected(std::move(checked.error()));
+      }
     }
     if (left || right) {
       if (source.join->on.has_value()) {
@@ -9296,6 +9368,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!next.has_value()) {
           return std::unexpected(std::move(next.error()));
         }
+        if (index_scan != nullptr) {
+          if (auto finished = EmitJump(*done); !finished.has_value()) {
+            return finished;
+          }
+        }
+      }
+    }
+    if (index_end.has_value()) {
+      if (auto bound = BindLabel(*index_end); !bound.has_value()) {
+        return bound;
+      }
+      if (auto cleared = Append(NullRowInstruction{.cursor = cursor, .enabled = false});
+          !cleared.has_value()) {
+        return cleared;
       }
     }
     if (auto bound = BindLabel(*done); !bound.has_value()) {
@@ -9461,6 +9547,29 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!source.cursor.has_value()) {
         return std::unexpected(InternalFailure("joined source has no cursor descriptor"));
       }
+      const CursorId cursor = *source.cursor;
+      if (source.index_key_first.has_value() &&
+          (!replays.empty() ||
+           (source.join != nullptr && SourceJoinPreservesLeft(source.join->join)))) {
+        const auto* index = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
+        if (index == nullptr) {
+          return std::unexpected(InternalFailure("joined prefix initialization has no index"));
+        }
+        const RegisterId first = AssumeValue(source.index_key_first);
+        auto null = EnsureNullConstant();
+        if (!null.has_value()) {
+          return std::unexpected(std::move(null.error()));
+        }
+        for (std::size_t term = 0; term < index->equalities.size(); ++term) {
+          if (auto initialized = Append(LoadConstantInstruction{
+                  .constant = *null,
+                  .output = RegisterId{first.value() + static_cast<std::uint32_t>(term)},
+              });
+              !initialized.has_value()) {
+            return initialized;
+          }
+        }
+      }
       if (!replays.empty() && source.matched.has_value()) {
         auto zero = EnsureZeroConstant();
         if (!zero.has_value()) {
@@ -9468,14 +9577,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         if (auto initialized = Append(LoadConstantInstruction{
                 .constant = *zero,
-                .output = *source.matched,
+                .output = AssumeValue(source.matched),
             });
             !initialized.has_value()) {
           return initialized;
         }
       }
-      if (auto opened = Append(OpenReadCursorInstruction{.cursor = *source.cursor});
-          !opened.has_value()) {
+      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
         return opened;
       }
       if (source.right_matches.has_value()) {
@@ -9490,7 +9598,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             !initialized.has_value()) {
           return initialized;
         }
-        if (auto opened = Append(OpenRelationInstruction{.relation = *source.right_matches});
+        if (auto opened =
+                Append(OpenRelationInstruction{.relation = AssumeValue(source.right_matches)});
             !opened.has_value()) {
           return opened;
         }

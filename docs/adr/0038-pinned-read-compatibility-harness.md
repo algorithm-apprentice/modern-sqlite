@@ -765,12 +765,14 @@ uninstrumented target.
 
 `modern_sqlite_read_sql_fuzz`:
 
-- opens the committed pinned compatibility database;
+- opens the committed pinned fixture for its input family: the core
+  compatibility database or ADR-0085's joined covering-index database;
 - rejects inputs larger than 64 KiB;
 - feeds every remaining byte sequence to `ReadSession::Prepare()`, including
   malformed UTF-8, high-bit identifier bytes, overlong encodings, embedded
   NULs, and invalid continuation bytes;
 - applies no external bindings;
+- also prepares a bounded grammar-derived query against that same fixture;
 - steps at most 256 rows; and
 - finalizes all created statements.
 

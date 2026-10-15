@@ -8,7 +8,8 @@
 
 namespace modern_sqlite::fuzz {
 
-void RunReadSqlInput(std::span<const std::uint8_t> input, std::string_view database_path);
+void RunReadSqlInput(std::span<const std::uint8_t> input, std::string_view database_path,
+                     std::string_view joined_index_path);
 [[nodiscard]] std::string GenerateReadSqlInput(std::span<const std::uint8_t> input);
 void RunDatabaseImageInput(std::span<const std::uint8_t> input);
 

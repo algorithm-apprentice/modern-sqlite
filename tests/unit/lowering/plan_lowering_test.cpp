@@ -471,6 +471,11 @@ void RequireStatus(Status status) {
          "index_performance" / "indexed.db";
 }
 
+[[nodiscard]] std::filesystem::path JoinedIndexFixturePath() {
+  return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
+         "joined_index" / "sqlite-3.54.0-joined-index.db";
+}
+
 [[nodiscard]] std::filesystem::path AlterDefaultsFixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "lowering" / "sqlite-3.54.0-alter-defaults.db";
@@ -2430,6 +2435,96 @@ TEST_F(ReadLoweringAggregateIntegration, SkipsAggregateRightArmOfEmptyIntersect)
                       custom.Binder(), custom.Vm())
                   .empty());
   EXPECT_EQ(0U, callback_count);
+}
+
+TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 149}));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT a.id,b.id,c.id FROM items a JOIN items b ON b.category=a.category "
+      "JOIN items c ON c.category=b.category AND c.score=b.score WHERE a.id=1",
+      catalog);
+  std::vector<const SeekIndexInstruction*> seeks;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
+      seeks.push_back(seek);
+    }
+  }
+  ASSERT_EQ(2U, seeks.size());
+  EXPECT_NE(seeks[0]->cursor, seeks[1]->cursor);
+  EXPECT_EQ(1U, seeks[0]->key_count);
+  EXPECT_EQ(2U, seeks[1]->key_count);
+  EXPECT_LE(seeks[0]->first_key.value() + seeks[0]->key_count, seeks[1]->first_key.value());
+  ASSERT_EQ(3U, program.cursors().size());
+  EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+  EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[2].storage);
+  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  for (const SqlValue& value : rows[0]) {
+    EXPECT_EQ(1, value.integer_value());
+  }
+}
+
+TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 151}));
+  const auto memory = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  struct Case {
+    std::string_view join;
+    std::int64_t rows;
+    std::int64_t left;
+    std::int64_t right;
+  };
+  const std::array cases{
+      Case{.join = "JOIN", .rows = 5, .left = 5, .right = 5},
+      Case{.join = "LEFT JOIN", .rows = 8, .left = 8, .right = 5},
+      Case{.join = "RIGHT JOIN", .rows = 12, .left = 5, .right = 12},
+      Case{.join = "FULL JOIN", .rows = 15, .left = 8, .right = 12},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.join);
+    const BytecodeProgram program =
+        LowerOrThrow("SELECT count(),count(p.rowid),count(b.rowid) FROM probe_rows p " +
+                         std::string{test_case.join} + " key_rows b ON b.text_key=p.text_key",
+                     catalog);
+    ASSERT_EQ(2U, program.cursors().size());
+    EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
+    const auto rows =
+        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(3U, rows[0].size());
+    EXPECT_EQ(test_case.rows, rows[0][0].integer_value());
+    EXPECT_EQ(test_case.left, rows[0][1].integer_value());
+    EXPECT_EQ(test_case.right, rows[0][2].integer_value());
+  }
+}
+
+TEST(ReadLowering, SharesOneConsumerAcrossSixtyFourIndexedFullSources) {
+  PosixVfs vfs;
+  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(pager->BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 153}));
+  constexpr std::size_t kSources = 64;
+  std::string sql = "SELECT 1 FROM items t0";
+  for (std::size_t source = 1; source < kSources; ++source) {
+    sql += " FULL JOIN items t" + std::to_string(source) + " ON t" + std::to_string(source) +
+           ".category=t" + std::to_string(source - 1U) + ".category";
+  }
+  sql += " LIMIT 0";
+  const BytecodeProgram program = LowerOrThrow(sql, catalog);
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(kSources - 1U,
+            static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kSeekIndex)));
+  EXPECT_EQ(kSources - 1U,
+            static_cast<std::size_t>(std::ranges::count(kinds, InstructionKind::kOpenRelation)));
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kResultRow));
+  EXPECT_LE(program.instructions().size(), kSources * kSources * 2U + kSources * 96U + 128U);
 }
 
 TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {

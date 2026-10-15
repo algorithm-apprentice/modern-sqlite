@@ -3374,6 +3374,1790 @@
         {"op": "finalize"}
       ],
       "sql_hex": "53454c4543542063617465676f72792c20636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f7279204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-covering-equality",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792c622e6e756d657269635f6b65792046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-multi-equality",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920414e4420622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-null-is",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b657920495320702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792046524f4d2070726f62655f726f77732070205249474854204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e746578745f6b65792046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-full-where-rejected",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920574845524520702e6964204953204e554c4c204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-full-null-is",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b657920495320702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-numeric-text-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e6e756d657269635f6b657920574845524520702e69643d31204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-numeric-text-affinity-reversed",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20702e6e756d657269635f6b65793d622e746578745f6b657920574845524520702e69643d31204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-raw-text-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e7261775f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-blob-text-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e626c6f625f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-numeric-text-key",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-real-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c747970656f6628622e7265616c5f6b6579292c622e7265616c5f6b65792046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-rtrim-fallback",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920434f4c4c41544520525452494d204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-binary-collation",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b657920434f4c4c4154452042494e4152593d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-noncovering-payload",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e7061796c6f61642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-default-covering",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e64656661756c745f746578742046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e64656661756c745f746578743d702e746578745f6b657920574845524520702e69643d36204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-default-null-extension",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c622e64656661756c745f746578742046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e64656661756c745f746578743d702e746578745f6b657920574845524520702e69643d35"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-later-on-requires-uncovered-payload",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204a4f494e2070726f62655f726f77732063204f4e20632e746578745f6b65793d622e7061796c6f6164204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-nested-index-prefixes",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c632e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204a4f494e206b65795f726f77732063204f4e20632e746578745f6b65793d622e746578745f6b657920414e4420632e6e756d657269635f6b65793d622e6e756d657269635f6b6579204f5244455220425920702e69642c622e69642c632e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-virtual-prefix-is",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c632e69642046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204a4f494e206b65795f726f77732063204f4e20632e6e756d657269635f6b657920495320622e6e756d657269635f6b657920574845524520702e69643d35204f5244455220425920632e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-coalesced-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c632e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204a4f494e206b65795f726f77732063204f4e20632e746578745f6b65793d636f616c6573636528702e746578745f6b65792c622e746578745f6b657929204f5244455220425920702e69642c622e69642c632e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-computed-key-fallback",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d61627328702e6e756d657269635f6b657929204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-ordinary-scalar-numeric-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f777320574845524520746578745f6b65793d2853454c454354206e756d657269635f6b65792046524f4d2070726f62655f726f77732057484552452069643d3129204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-ordinary-scalar-text-affinity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f777320574845524520746578745f6b65793d2853454c45435420746578745f6b65792046524f4d2070726f62655f726f77732057484552452069643d3129204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-safe-where-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702043524f5353204a4f494e206b65795f726f7773206220574845524520622e746578745f6b65793d702e746578745f6b657920414e4420702e69643d32204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-constant-own-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d27414c50484127"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-is-null-collation",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b657920434f4c4c41544520525452494d204953204e554c4c20574845524520702e69643d31204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-left-where-null-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920574845524520622e746578745f6b6579204953204e554c4c204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-empty-left-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d20656d7074795f70726f62655f726f77732070205249474854204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-empty-left-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d20656d7074795f70726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b657920495320702e746578745f6b6579204f5244455220425920622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-empty-indexed-right-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204c454654204a4f494e20656d7074795f6b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-empty-indexed-right-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e20656d7074795f6b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-zero-limit",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204c494d49542030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-early-limit-offset",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c622e6964204c494d49542033204f46465345542034"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-full-using",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420746578745f6b65792c702e69642c622e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062205553494e4728746578745f6b657929204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-right-using",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420746578745f6b65792c702e69642c622e69642046524f4d2070726f62655f726f77732070205249474854204a4f494e206b65795f726f77732062205553494e4728746578745f6b657929204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-grouped-inputs",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6e756d657269635f6b65792c636f756e7428292c67726f75705f636f6e63617428622e6964204f5244455220425920622e69642044455343292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b65792047524f555020425920622e6e756d657269635f6b6579204f5244455220425920622e6e756d657269635f6b6579"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-grouped-modifiers",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e6e756d657269635f6b65792c636f756e742844495354494e435420622e746578745f6b6579292c73756d28622e7265616c5f6b6579292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b65792047524f555020425920622e6e756d657269635f6b657920484156494e4720636f756e7428293e30204f5244455220425920622e6e756d657269635f6b6579"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-ordered-full-aggregate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292c636f756e7428702e726f776964292c636f756e7428622e726f776964292c67726f75705f636f6e63617428622e6964204f5244455220425920622e69642044455343292046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542044495354494e435420622e746578745f6b657920434f4c4c4154452042494e415259204153206b65795f76616c75652046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f52444552204259206b65795f76616c7565"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920554e494f4e2053454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f524445522042592031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920494e544552534543542053454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f524445522042592031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204558434550542053454c45435420622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f524445522042592031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-compound-core-covering",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642c622e6e756d657269635f6b65792046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920554e494f4e20414c4c2053454c45435420622e69642c622e6e756d657269635f6b65792046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e6e756d657269635f6b65793d702e6e756d657269635f6b6579204f5244455220425920312c32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-compound-core-uncovered",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354207061796c6f61642046524f4d206b65795f726f77732057484552452069643d3120554e494f4e20414c4c2053454c45435420622e7061796c6f61642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f524445522042592031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-scalar-private",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420622e6e756d657269635f6b65792046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b6579204f5244455220425920622e6964204c494d49542031204f4646534554203229"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-exists-private-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420616273282d39323233333732303336383534373735383038292046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657929"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-scalar-private-grouped",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420636f756e7428292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b65792047524f555020425920622e6e756d657269635f6b6579204f5244455220425920622e6e756d657269635f6b6579204c494d4954203129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-two-full-replays",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642c632e69642046524f4d2070726f62655f726f777320702046554c4c204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b65792046554c4c204a4f494e206b65795f726f77732063204f4e20632e746578745f6b65793d622e746578745f6b657920414e4420632e6e756d657269635f6b65793d622e6e756d657269635f6b6579204f5244455220425920702e69642c622e69642c632e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-range-deferred",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e69642046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f77732062204f4e20622e746578745f6b65793d702e746578745f6b657920414e4420622e6e756d657269635f6b65793e702e6e756d657269635f6b6579204f5244455220425920702e69642c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-left-virtual-default",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c622e64656661756c745f746578742046524f4d2070726f62655f726f77732070204c454654204a4f494e206b65795f726f77732062204f4e20622e64656661756c745f746578743d702e746578745f6b657920574845524520702e69643d35"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "joined-covering-index",
+      "id": "joined-index-typed-reset-rebind",
+      "operations": [
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "text",
+            "hex": "3031"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "real",
+            "bits": "3ff0000000000000"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "text",
+            "hex": "414c504841"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "bind",
+          "index": 1,
+          "value": {
+            "type": "blob",
+            "hex": "31"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642046524f4d2070726f62655f726f777320702043524f5353204a4f494e206b65795f726f7773206220574845524520702e69643d3120414e4420622e746578745f6b65793d3f31204f5244455220425920622e6964"
     }
   ],
   "databases": [
@@ -3381,6 +5165,11 @@
       "id": "core",
       "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
       "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    },
+    {
+      "id": "joined-index",
+      "path": "tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db",
+      "sha256": "ff55a8f7ba44f729060fa1e65256d99d2d00c1ca08a93d4d48bd2cd5def7501d"
     }
   ],
   "limits": {
@@ -3435,6 +5224,7 @@
     "union-all",
     "using-natural-join",
     "values",
-    "without-rowid"
+    "without-rowid",
+    "joined-covering-index"
   ]
 }

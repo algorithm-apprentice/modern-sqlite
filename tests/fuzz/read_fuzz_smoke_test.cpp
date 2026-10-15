@@ -62,8 +62,8 @@ namespace {
   return files;
 }
 
-[[nodiscard]] bool ReplaySqlCorpus(const std::filesystem::path& directory,
-                                   std::string_view fixture) {
+[[nodiscard]] bool ReplaySqlCorpus(const std::filesystem::path& directory, std::string_view fixture,
+                                   std::string_view joined_fixture) {
   const auto files = CorpusFiles(directory);
   if (!files.has_value()) {
     return false;
@@ -73,12 +73,12 @@ namespace {
     if (!bytes.has_value()) {
       return false;
     }
-    modern_sqlite::fuzz::RunReadSqlInput(*bytes, fixture);
+    modern_sqlite::fuzz::RunReadSqlInput(*bytes, fixture, joined_fixture);
   }
   constexpr std::array<std::uint8_t, 4> invalid_utf8{0xff, 0x80, 0xc0, 0x00};
   constexpr std::array<std::uint8_t, 9> embedded_nul{'S', 'E', 'L', 'E', 'C', 'T', 0x00, ' ', '1'};
-  modern_sqlite::fuzz::RunReadSqlInput(invalid_utf8, fixture);
-  modern_sqlite::fuzz::RunReadSqlInput(embedded_nul, fixture);
+  modern_sqlite::fuzz::RunReadSqlInput(invalid_utf8, fixture, joined_fixture);
+  modern_sqlite::fuzz::RunReadSqlInput(embedded_nul, fixture, joined_fixture);
   return true;
 }
 
@@ -101,7 +101,7 @@ namespace {
   return false;
 }
 
-[[nodiscard]] bool ReplayGeneratedSql(std::string_view fixture) {
+[[nodiscard]] bool ReplayGeneratedSql(std::string_view fixture, std::string_view joined_fixture) {
   auto session = modern_sqlite::ReadSession::Open(fixture);
   if (!session.has_value()) {
     return false;
@@ -150,6 +150,23 @@ namespace {
       return false;
     }
   }
+  auto indexed = modern_sqlite::ReadSession::Open(joined_fixture);
+  if (!indexed.has_value()) {
+    return false;
+  }
+  for (std::uint8_t kind = 0; kind < 4U; ++kind) {
+    for (std::uint8_t key = 0; key < 4U; ++key) {
+      for (std::uint8_t consumer = 0; consumer < 3U; ++consumer) {
+        const std::array<std::uint8_t, 11> input{
+            0x05, kind, key, key, 0x01, 0x00, 0x06, consumer, 0x0c, 0x00, 0x01,
+        };
+        const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+        if (sql.find("key_rows") == std::string::npos || !ExecuteSql(*indexed, sql)) {
+          return false;
+        }
+      }
+    }
+  }
   return true;
 }
 
@@ -179,13 +196,15 @@ struct DatabaseCorpusInputs {
 }
 
 [[nodiscard]] int Run(int argument_count, char* const* arguments) {
-  if (argument_count != 4) {
+  if (argument_count != 5) {
     return 1;
   }
   const std::filesystem::path fixture = arguments[1];
   const std::filesystem::path sql_corpus = arguments[2];
   const std::filesystem::path database_corpus = arguments[3];
-  return ReplaySqlCorpus(sql_corpus, fixture.string()) && ReplayGeneratedSql(fixture.string()) &&
+  const std::filesystem::path joined_fixture = arguments[4];
+  return ReplaySqlCorpus(sql_corpus, fixture.string(), joined_fixture.string()) &&
+                 ReplayGeneratedSql(fixture.string(), joined_fixture.string()) &&
                  ReplayDatabaseCorpus({.directory = database_corpus, .valid_fixture = fixture})
              ? 0
              : 1;

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -58,6 +59,16 @@ void RequireStatus(Status status) {
 [[nodiscard]] std::filesystem::path ReadCompatibilityFixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "read_compatibility" / "sqlite-3.54.0-read-compatibility.db";
+}
+
+[[nodiscard]] std::filesystem::path IndexFixturePath() {
+  return ReadCompatibilityFixturePath().parent_path().parent_path() / "index_performance" /
+         "indexed.db";
+}
+
+[[nodiscard]] std::filesystem::path JoinedIndexFixturePath() {
+  return ReadCompatibilityFixturePath().parent_path().parent_path() / "joined_index" /
+         "sqlite-3.54.0-joined-index.db";
 }
 
 [[nodiscard]] std::filesystem::path SessionFixturePath(std::string_view name) {
@@ -1165,10 +1176,8 @@ void ExercisePreservedRightMatchFailure(std::string_view sql, std::int64_t expec
               .sorter_memory_threshold = ByteCount{32U << 10U},
           },
   };
-  const auto fixture = ReadCompatibilityFixturePath().parent_path().parent_path() /
-                       "index_performance" / "indexed.db";
-  ReadSession session = TakeValue(
-      ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state), fixture.string(), options));
+  ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                                    IndexFixturePath().string(), options));
   ReadStatement statement = PrepareStatement(session, sql);
   state->writes_until_failure = 0U;
   const auto failed = statement.Step();
@@ -1202,6 +1211,12 @@ TEST(ReadSession, CleansAndRecoversFullMatchRelationsAfterTemporaryWriteFailure)
 TEST(ReadSession, CleansAndRecoversParameterizedMatchRelationsAfterTemporaryWriteFailure) {
   ExercisePreservedRightMatchFailure(
       "SELECT count(),count(a.rowid) FROM items a FULL JOIN items b ON b.id=a.id", 4096);
+}
+
+TEST(ReadSession, CleansAndRecoversIndexedMatchRelationsAfterTemporaryWriteFailure) {
+  ExercisePreservedRightMatchFailure(
+      "SELECT count(),count(a.rowid) FROM items a FULL JOIN items b ON b.category=a.category",
+      4096);
 }
 
 TEST(ReadSession, PreservesBothFullSidesAcrossExternalOrderAndPmaFailureRecovery) {
@@ -1982,7 +1997,228 @@ TEST(ReadSession, CleansJoinedAggregateStateAfterPmaFlushFailure) {
   }
 }
 
+TEST(ReadSession, PreservesNumericComparisonAgainstIndexedTextSpellings) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT id FROM key_rows "
+      "WHERE text_key=(SELECT numeric_key FROM probe_rows WHERE id=1) ORDER BY id");
+  for (const std::int64_t expected : {1, 2, 3}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, RebindsTypedJoinedIndexKeysAfterSuspensionAndCompletion) {
+  struct Case {
+    SqlValue key;
+    std::vector<std::int64_t> ids;
+  };
+  const std::array cases{
+      Case{.key = SqlValue::Integer(1), .ids = {1}},
+      Case{.key = SqlValue::Text("01"), .ids = {2}},
+      Case{.key = SqlValue::Real(1.0), .ids = {}},
+      Case{.key = SqlValue::Text("ALPHA"), .ids = {4, 5}},
+      Case{.key = SqlValue{}, .ids = {}},
+      Case{.key = SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("1"))), .ids = {}},
+      Case{.key = SqlValue::Text("1"), .ids = {1}},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT b.id FROM probe_rows p CROSS JOIN key_rows b "
+                                             "WHERE p.id=1 AND b.text_key=?1 ORDER BY b.id");
+  for (const bool complete : {false, true}) {
+    for (const Case& test_case : cases) {
+      RequireStatus(statement.Bind(1, test_case.key));
+      for (const std::int64_t id : test_case.ids) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+        if (!complete) {
+          break;
+        }
+      }
+      if (complete || test_case.ids.empty()) {
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+      RequireStatus(statement.Reset());
+    }
+  }
+}
+
+TEST(ReadSession, MatchesIndependentJoinedIndexNullAndPreservationModels) {
+  const std::array<std::optional<std::string_view>, 6> left_keys{
+      "1", "ALPHA", std::nullopt, "beta", "missing", "fallback",
+  };
+  const std::array<std::optional<std::string_view>, 12> right_keys{
+      "1",          "01",   "0001", "alpha", "ALPHA", std::nullopt,
+      std::nullopt, "beta", "beta", "same",  "same",  std::nullopt,
+  };
+  struct Join {
+    std::string_view sql;
+    bool preserve_left = false;
+    bool preserve_right = false;
+  };
+  const std::array joins{
+      Join{.sql = "JOIN"},
+      Join{.sql = "LEFT JOIN", .preserve_left = true},
+      Join{.sql = "RIGHT JOIN", .preserve_right = true},
+      Join{.sql = "FULL JOIN", .preserve_left = true, .preserve_right = true},
+  };
+  const auto equal = [](std::optional<std::string_view> left, std::optional<std::string_view> right,
+                        bool nulls_equal) {
+    if (!left.has_value() || !right.has_value()) {
+      return nulls_equal && !left.has_value() && !right.has_value();
+    }
+    if (left->size() != right->size()) {
+      return false;
+    }
+    const auto fold = [](char character) {
+      return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a')
+                                                  : character;
+    };
+    for (std::size_t index = 0; index < left->size(); ++index) {
+      if (fold((*left)[index]) != fold((*right)[index])) {
+        return false;
+      }
+    }
+    return true;
+  };
+  using Pair = std::pair<std::optional<std::int64_t>, std::optional<std::int64_t>>;
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const Join& join : joins) {
+    for (const bool nulls_equal : {false, true}) {
+      ReadStatement statement = PrepareStatement(
+          session, "SELECT p.id,b.id FROM probe_rows p " + std::string{join.sql} +
+                       " key_rows b ON b.text_key" + (nulls_equal ? " IS " : "=") +
+                       "p.text_key AND b.id>?1 WHERE p.id IS NULL OR p.id<=?2 ORDER BY p.id,b.id");
+      for (const std::int64_t floor : {0, 4, 12}) {
+        for (const std::int64_t cutoff : {0, 2, 6}) {
+          SCOPED_TRACE(::testing::Message() << join.sql << " IS=" << nulls_equal
+                                            << " floor=" << floor << " cutoff=" << cutoff);
+          std::vector<Pair> expected;
+          std::array<bool, right_keys.size()> matched_right{};
+          for (std::size_t left = 0; left < left_keys.size(); ++left) {
+            const auto left_id = static_cast<std::int64_t>(left + 1U);
+            bool matched_left = false;
+            for (std::size_t right = 0; right < right_keys.size(); ++right) {
+              const auto right_id = static_cast<std::int64_t>(right + 1U);
+              if (right_id > floor && equal(left_keys[left], right_keys[right], nulls_equal)) {
+                matched_left = true;
+                matched_right[right] = true;
+                if (left_id <= cutoff) {
+                  expected.emplace_back(left_id, right_id);
+                }
+              }
+            }
+            if (join.preserve_left && !matched_left && left_id <= cutoff) {
+              expected.emplace_back(left_id, std::nullopt);
+            }
+          }
+          if (join.preserve_right) {
+            for (std::size_t right = 0; right < right_keys.size(); ++right) {
+              if (!matched_right[right]) {
+                expected.emplace_back(std::nullopt, static_cast<std::int64_t>(right + 1U));
+              }
+            }
+          }
+          std::ranges::sort(expected);
+          RequireStatus(statement.Bind(1, SqlValue::Integer(floor)));
+          RequireStatus(statement.Bind(2, SqlValue::Integer(cutoff)));
+          for (const Pair& row : expected) {
+            ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+            ASSERT_EQ(2U, statement.row().size());
+            EXPECT_EQ(row.first.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
+                      statement.row()[0].type());
+            EXPECT_EQ(row.second.has_value() ? SqlValueType::kInteger : SqlValueType::kNull,
+                      statement.row()[1].type());
+            EXPECT_EQ(row.first, statement.row()[0].integer_value());
+            EXPECT_EQ(row.second, statement.row()[1].integer_value());
+          }
+          EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+          RequireStatus(statement.Reset());
+        }
+      }
+    }
+  }
+}
+
+TEST(ReadSession, DefersJoinedIndexReadsForZeroLimitAndRecoversTypedReadFailure) {
+  const auto state = std::make_shared<TemporaryFileState>();
+  ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                                    JoinedIndexFixturePath().string()));
+  ReadStatement root =
+      PrepareStatement(session, "SELECT rootpage FROM sqlite_schema WHERE name='keys_text_num'");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(root.Step()));
+  const auto page = IntegerValue(root.row()[0]);
+  ASSERT_GT(page, 0);
+  RequireStatus(root.Finalize());
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT p.id,b.id FROM probe_rows p JOIN key_rows b ON b.text_key=p.text_key "
+      "WHERE p.id=2 ORDER BY b.id LIMIT ?1");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  state->main_read_failure_offset = FileOffset{(static_cast<std::uint64_t>(page) - 1U) * 512U};
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  EXPECT_EQ(0U, state->main_read_failures);
+  ASSERT_TRUE(state->main_read_failure_offset.has_value());
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(-1)));
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(1U, state->main_read_failures);
+  EXPECT_EQ(0U, state->live_count);
+  const auto reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  for (const std::int64_t id : {4, 5}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(4, IntegerValue(statement.row()[1]));
+  RequireStatus(statement.Finalize());
+  EXPECT_EQ(0U, state->live_count);
+}
+
+TEST(ReadSession, ExecutesSixtyFourJoinedCoveringPrefixesInOneSourcePipeline) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  std::string sql = "SELECT t0.id,t63.id FROM items t0";
+  for (std::size_t source = 1; source < 64U; ++source) {
+    sql += " JOIN items t" + std::to_string(source) + " ON t" + std::to_string(source) +
+           ".category=t" + std::to_string(source - 1U) + ".category";
+  }
+  sql += " WHERE t0.id=1";
+  ReadStatement statement = PrepareStatement(session, sql);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(2U, statement.row().size());
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSession, BoundsJoinedCoveringEqualityWorkByIndexedPrefixes) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT count() FROM items a JOIN items b ON b.category=a.category WHERE a.id=1");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 256U);
+}
+
 TEST(ReadSession, BoundsJoinedEqualityWorkByPointPositionedPrefixes) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =

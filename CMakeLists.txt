@@ -226,6 +226,7 @@ if(MODERN_SQLITE_BUILD_FUZZERS)
     modern_sqlite_read_sql_fuzz
     PRIVATE
       MODERN_SQLITE_READ_FUZZ_DATABASE="${PROJECT_SOURCE_DIR}/tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db"
+      MODERN_SQLITE_JOINED_INDEX_FUZZ_DATABASE="${PROJECT_SOURCE_DIR}/tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db"
   )
 
   add_executable(

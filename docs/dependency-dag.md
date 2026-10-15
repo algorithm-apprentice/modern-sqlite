@@ -132,7 +132,10 @@ relation arrives with DISTINCT and compounds, then these capabilities are
 reused by grouping, automatic join indexes, recursive CTEs, and windows.
 Multi-source and joined-output scopes precede joins. Verified subroutines
 precede scalar and EXISTS queries; coroutine prerequisites remain attached to
-streaming derived-query, view, and CTE consumers. Persistent
+streaming derived-query, view, and CTE consumers. Joined stored covering-index
+equality access reuses the positioned-source producer under ADR-0085;
+parameterized noncovering/range and automatic-index integration remain
+separate ordered prerequisites. Persistent
 constraints, generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

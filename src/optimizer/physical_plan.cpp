@@ -462,6 +462,17 @@ template <typename Bound>
 }
 
 template <typename Bound>
+[[nodiscard]] bool IsAccessKeyAvailable(
+    const Bound& bound_select, BoundExpressionId key,
+    std::optional<BoundSourceId> available_before = std::nullopt) {
+  if (available_before.has_value()) {
+    return IsJoinedLookupValue(bound_select, key) &&
+           ExpressionAvailableBeforeSource(bound_select, key, *available_before);
+  }
+  return !ExpressionDependsOnSource(bound_select, key);
+}
+
+template <typename Bound>
 [[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(
     const Bound& bound_select, const SourceInfo& source, BoundExpressionId predicate,
     std::optional<BoundSourceId> available_before = std::nullopt) {
@@ -481,12 +492,7 @@ template <typename Bound>
     return std::nullopt;
   }
   const BoundExpressionId key = left_rowid ? comparison->right : comparison->left;
-  if (available_before.has_value()) {
-    if (!IsJoinedLookupValue(bound_select, key) ||
-        !ExpressionAvailableBeforeSource(bound_select, key, *available_before)) {
-      return std::nullopt;
-    }
-  } else if (ExpressionDependsOnSource(bound_select, key)) {
+  if (!IsAccessKeyAvailable(bound_select, key, available_before)) {
     return std::nullopt;
   }
   return key;
@@ -937,7 +943,8 @@ struct IndexConstraintMatch {
 [[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
     const BoundQueryView& bound_select, BoundSourceId source_id, std::size_t source_column_begin,
     std::size_t source_column_count, const CatalogIndexTerm& term,
-    const ReadPredicateTerm& predicate) {
+    const ReadPredicateTerm& predicate,
+    std::optional<BoundSourceId> available_before = std::nullopt) {
   const auto* indexed_column = std::get_if<ColumnId>(&term.target);
   if (indexed_column == nullptr) {
     return std::nullopt;
@@ -962,7 +969,20 @@ struct IndexConstraintMatch {
     return std::nullopt;
   }
   const BoundExpressionId key = left_column ? comparison->right : comparison->left;
-  if (ExpressionDependsOnSource(bound_select, key)) {
+  if (!IsAccessKeyAvailable(bound_select, key, available_before)) {
+    return std::nullopt;
+  }
+  const TypeAffinity indexed_affinity =
+      bound_select
+          .expression(TransparentRowIdOperandId(bound_select,
+                                                left_column ? comparison->left : comparison->right))
+          .properties.affinity;
+  const auto is_numeric = [](TypeAffinity affinity) noexcept {
+    return affinity == TypeAffinity::kNumeric || affinity == TypeAffinity::kInteger ||
+           affinity == TypeAffinity::kReal;
+  };
+  if ((comparison->affinity == TypeAffinity::kText && indexed_affinity != TypeAffinity::kText) ||
+      (is_numeric(comparison->affinity) && !is_numeric(indexed_affinity))) {
     return std::nullopt;
   }
   const SqlComparison normalized =
@@ -1060,23 +1080,36 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
                                    const CatalogTable& table, const CatalogIndex& index,
                                    std::span<const ReadPredicateTerm> predicates,
                                    const std::vector<bool>& selected_terms,
-                                   const BoundSelectCore* aggregate_core = nullptr) {
+                                   const BoundSelectCore* select_core = nullptr) {
   std::vector<bool> required_columns(table.columns.size(), false);
   bool required_rowid = false;
+  const bool joined = select_core != nullptr && select_core->table_sources.size() > 1U;
   for (std::size_t index_value = 0; index_value < predicates.size(); ++index_value) {
     if (index_value >= selected_terms.size() || !selected_terms[index_value]) {
       MarkRequiredSourceValues(bound_select, source_id, predicates[index_value].predicate,
                                &required_columns, &required_rowid);
     }
   }
-  if (aggregate_core != nullptr && aggregate_core->aggregate.has_value()) {
-    const BoundAggregateProgram& aggregate = *aggregate_core->aggregate;
+  if (joined) {
+    for (const BoundTableSource& source : select_core->table_sources) {
+      if (source.on.has_value()) {
+        MarkRequiredSourceValues(bound_select, source_id, *source.on, &required_columns,
+                                 &required_rowid);
+      }
+    }
+    if (select_core->where.has_value()) {
+      MarkRequiredSourceValues(bound_select, source_id, *select_core->where, &required_columns,
+                               &required_rowid);
+    }
+  }
+  if (select_core != nullptr && select_core->aggregate.has_value()) {
+    const BoundAggregateProgram& aggregate = *select_core->aggregate;
     for (const BoundExpressionId expression : aggregate.source_leaves) {
       MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
                                &required_rowid);
     }
     if (aggregate.group_by.empty()) {
-      for (const BoundResultColumn& result : aggregate_core->result_columns) {
+      for (const BoundResultColumn& result : select_core->result_columns) {
         MarkRequiredSourceValues(bound_select, source_id, result.expression, &required_columns,
                                  &required_rowid);
       }
@@ -1091,10 +1124,15 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
       }
     }
   } else {
-    for (const BoundResultColumn& result : bound_select.result_columns()) {
+    const std::span<const BoundResultColumn> results =
+        select_core != nullptr ? std::span<const BoundResultColumn>{select_core->result_columns}
+                               : bound_select.result_columns();
+    for (const BoundResultColumn& result : results) {
       MarkRequiredSourceValues(bound_select, source_id, result.expression, &required_columns,
                                &required_rowid);
     }
+  }
+  if (select_core == nullptr || !select_core->aggregate.has_value() || joined) {
     for (const BoundOrderingTerm& ordering : bound_select.order_by()) {
       MarkRequiredSourceValues(bound_select, source_id, ordering.expression, &required_columns,
                                &required_rowid);
@@ -1198,6 +1236,20 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
   };
 }
 
+template <typename Visitor>
+void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const BoundSelectCore& core,
+                                 const BoundTableSource& source, Visitor* visitor) {
+  if (source.on.has_value() && !VisitConjuncts(bound_select, *source.on, visitor)) {
+    return;
+  }
+  const bool right_core = std::ranges::any_of(core.table_sources, [](const BoundTableSource& item) {
+    return SourceJoinPreservesRight(item.join);
+  });
+  if (!SourceJoinPreservesLeft(source.join) && !right_core && core.where.has_value()) {
+    static_cast<void>(VisitConjuncts(bound_select, *core.where, visitor));
+  }
+}
+
 [[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(
     const BoundQueryView& bound_select, std::size_t core_index, BoundSourceId source_id) {
   const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[core_index]);
@@ -1219,24 +1271,16 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
     key = RowIdLookupKey(bound_select, info, predicate, source_id);
     return !key.has_value();
   };
-  if (source->on.has_value()) {
-    static_cast<void>(VisitConjuncts(bound_select, *source->on, &visitor));
-  }
-  const bool right_core = std::ranges::any_of(
-      core->table_sources,
-      [](const BoundTableSource& item) { return SourceJoinPreservesRight(item.join); });
-  if (!key.has_value() && !SourceJoinPreservesLeft(source->join) && !right_core &&
-      core->where.has_value()) {
-    static_cast<void>(VisitConjuncts(bound_select, *core->where, &visitor));
-  }
+  VisitJoinedAccessPredicates(bound_select, *core, *source, &visitor);
   return key;
 }
 
 [[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
     const BoundQueryView& bound_select, BoundSourceId source_id, TableId table_id,
     std::size_t source_column_begin, std::size_t source_column_count, IndexId index_id,
-    std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* aggregate_core = nullptr,
-    bool allow_noncovering_full_scan = false) {
+    std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* select_core = nullptr,
+    bool allow_noncovering_full_scan = false,
+    std::optional<BoundSourceId> available_before = std::nullopt) {
   const CatalogSnapshot& catalog = *bound_select.catalog();
   const CatalogTable& table = catalog.table(table_id);
   const CatalogIndex& index = catalog.index(index_id);
@@ -1270,7 +1314,7 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
       }
       const std::optional<IndexConstraintMatch> match =
           MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
-                               term, predicates[predicate_index]);
+                               term, predicates[predicate_index], available_before);
       if (match.has_value() && match->kind == IndexConstraintKind::kEquality) {
         selected = predicate_index;
         selected_match = match;
@@ -1309,7 +1353,7 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
       }
       const std::optional<IndexConstraintMatch> match =
           MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
-                               term, predicates[predicate_index]);
+                               term, predicates[predicate_index], available_before);
       if (!match.has_value()) {
         continue;
       }
@@ -1364,7 +1408,7 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
     return std::nullopt;
   }
   candidate.node.covering = IsCoveringIndex(bound_select, source_id, table, index, predicates,
-                                            candidate.selected_terms, aggregate_core);
+                                            candidate.selected_terms, select_core);
   if (!constrained && !candidate.node.covering && !allow_noncovering_full_scan) {
     return std::nullopt;
   }
@@ -1435,6 +1479,73 @@ void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId 
   }
   return candidate.kind == PhysicalAccessKind::kRowIdLookup &&
          selected.kind != PhysicalAccessKind::kRowIdLookup;
+}
+
+[[nodiscard]] std::optional<PhysicalIndexScanNode> JoinedIndexScan(
+    const BoundQueryView& bound_select, std::size_t core_index, BoundSourceId source_id) {
+  const auto query_cores = bound_select.query_cores();
+  const auto* core = std::get_if<BoundSelectCore>(&query_cores[core_index]);
+  if (core == nullptr || core->table_sources.size() < 2U) {
+    return std::nullopt;
+  }
+  const auto source = std::ranges::find(core->table_sources, source_id, &BoundTableSource::id);
+  if (source == core->table_sources.end() || source->kind != BoundSourceKind::kCatalogTable) {
+    return std::nullopt;
+  }
+  const auto table_id = source->table;
+  if (!table_id.has_value()) {
+    return std::nullopt;
+  }
+  const SourceInfo info = ResolveTableSource(bound_select, *source);
+  const auto indexes = bound_select.catalog()->table_indexes(*table_id);
+  if (!info.rowid_eligible || indexes.empty()) {
+    return std::nullopt;
+  }
+  std::vector<ReadPredicateTerm> predicates;
+  auto visitor = [&](BoundExpressionId predicate) {
+    predicates.push_back(
+        ReadPredicateTerm{.predicate = predicate, .conjunct_position = predicates.size()});
+    return true;
+  };
+  VisitJoinedAccessPredicates(bound_select, *core, *source, &visitor);
+  if (predicates.empty()) {
+    return std::nullopt;
+  }
+  ReadAccessCandidate selected{
+      .published =
+          AccessPathCandidate{
+              .kind = PhysicalAccessKind::kTableScan,
+              .cost = ScanCost(info.estimated_rows, info.estimated_row_size),
+          },
+  };
+  for (const IndexId index : indexes) {
+    auto candidate = AnalyzeIndexCandidate(bound_select, source_id, *table_id,
+                                           source->source_column_begin, source->source_column_count,
+                                           index, predicates, core, false, source_id);
+    if (!candidate.has_value() || !candidate->node.covering || candidate->node.equalities.empty() ||
+        candidate->node.range.has_value()) {
+      continue;
+    }
+    const AccessPathCandidate published = PublishIndexCandidate(bound_select, info, *candidate);
+    if (PreferCandidate(published, selected.published)) {
+      selected = ReadAccessCandidate{.published = published, .payload = std::move(*candidate)};
+    }
+  }
+  if (auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
+    index->node.core_index = core_index;
+    return std::move(index->node);
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool MatchesIndexScan(const PhysicalIndexScanNode& actual,
+                                    const PhysicalIndexScanNode& expected, std::size_t core_index,
+                                    PhysicalScanDirection direction) noexcept {
+  return actual.core_index == core_index && actual.source == expected.source &&
+         actual.table == expected.table && actual.table_root_page == expected.table_root_page &&
+         actual.index == expected.index && actual.index_root_page == expected.index_root_page &&
+         actual.equalities == expected.equalities && actual.range == expected.range &&
+         actual.covering == expected.covering && actual.direction == direction;
 }
 
 struct DirectSourceIdentity {
@@ -2482,15 +2593,8 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                 if (const auto* index_plan = std::get_if<IndexCandidatePlan>(&selected.payload);
                     index_plan != nullptr) {
                   const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
-                  return value != nullptr && value->source == index_plan->node.source &&
-                         value->table == index_plan->node.table &&
-                         value->table_root_page == index_plan->node.table_root_page &&
-                         value->index == index_plan->node.index &&
-                         value->index_root_page == index_plan->node.index_root_page &&
-                         value->equalities == index_plan->node.equalities &&
-                         value->range == index_plan->node.range &&
-                         value->covering == index_plan->node.covering &&
-                         value->direction == aggregate.direction;
+                  return value != nullptr && MatchesIndexScan(*value, index_plan->node,
+                                                              node.core_index, aggregate.direction);
                 }
               }
               const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
@@ -2513,6 +2617,13 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                      value->source == node.source && value->source_kind == node.source_kind &&
                      value->table == node.table && value->root_page == expected_root &&
                      value->key == *key;
+            }
+            if (const auto expected =
+                    JoinedIndexScan(logical_plan.bound_select(), node.core_index, node.source);
+                expected.has_value()) {
+              const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
+              return value != nullptr && MatchesIndexScan(*value, *expected, node.core_index,
+                                                          PhysicalScanDirection::kForward);
             }
             const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
             return value != nullptr && value->core_index == node.core_index &&
@@ -3352,6 +3463,11 @@ class PhysicalPlanBuilder final {
                     .root_page = root_page,
                     .key = *key,
                 };
+              }
+              if (auto index =
+                      JoinedIndexScan(logical_plan.bound_select(), node.core_index, node.source);
+                  index.has_value()) {
+                return std::move(*index);
               }
               return PhysicalTableScanNode{
                   .core_index = node.core_index,
