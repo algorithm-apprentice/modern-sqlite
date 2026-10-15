@@ -2552,8 +2552,8 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                 SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
             std::vector<BoundSourceId> placements;
             if (core_index.has_value()) {
-              const auto& core =
-                  std::get<BoundSelectCore>(logical_plan.bound_select().query_cores()[*core_index]);
+              const auto query_cores = logical_plan.bound_select().query_cores();
+              const auto& core = std::get<BoundSelectCore>(query_cores[*core_index]);
               auto ready =
                   JoinPredicateSources(logical_plan.bound_select(), core, expected.predicates);
               if (!ready.has_value()) {
@@ -3920,8 +3920,8 @@ namespace {
                  scan != nullptr) {
         std::string line = "CORE " + std::to_string(scan->core_index) + " SCAN ";
         AppendExplainIdentifier(SourceName(plan, scan->source_kind, scan->table), &line);
-        const auto& core = std::get<BoundSelectCore>(
-            plan.logical_plan().bound_select().query_cores()[scan->core_index]);
+        const auto query_cores = plan.logical_plan().bound_select().query_cores();
+        const auto& core = std::get<BoundSelectCore>(query_cores[scan->core_index]);
         if (core.table_sources.size() > 1U) {
           line.append(" SOURCE ").append(std::to_string(scan->source.value()));
         }

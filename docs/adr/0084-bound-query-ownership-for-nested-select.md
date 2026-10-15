@@ -199,6 +199,14 @@ encoder contracts. These test-only corrections retain the same valid and
 malformed program/page inputs; compiler warnings remain errors, and no
 production semantics or compiler policy is weakened.
 
+The hosted Linux GCC lifetime diagnostic is addressed by naming borrowed
+core spans before retaining references to their variant members. This changes
+neither the canonical owner nor query allocation, execution, or error phases;
+no compiler-specific lifetime attribute or warning exemption is used.
+The follow-up passes the complete fast tier, 106 focused planner/session/native
+cases on Release, ASan/UBSan, and GCC 16 Release, and all 58 performance
+contracts. A separate GPT-5.6 Sol lifetime review has no unresolved issue.
+
 Forty-four new pinned native comparisons and one correlation boundary replace
 the retired executable-subquery boundary. All 262 other prior corpus and
 oracle records remain identical as JSON data. The published matrix contains
