@@ -426,6 +426,13 @@ struct WriteStatement::Impl final {
     return std::unexpected(std::move(error));
   }
 
+  void DiscardPendingCompletion() noexcept {
+    active_statement.reset();
+    success_pending = false;
+    pending_candidate.reset();
+    pending_changes.reset();
+  }
+
   [[nodiscard]] Status RollbackActiveStatement() {
     if (!active_statement.has_value()) {
       return {};
@@ -434,10 +441,7 @@ struct WriteStatement::Impl final {
     if (!rolled_back.has_value()) {
       return rolled_back;
     }
-    active_statement.reset();
-    success_pending = false;
-    pending_candidate.reset();
-    pending_changes.reset();
+    DiscardPendingCompletion();
     return {};
   }
 
@@ -464,10 +468,14 @@ struct WriteStatement::Impl final {
     }
     auto succeeded = active_statement->Succeed();
     if (!succeeded.has_value()) {
+      if (!active_statement->valid()) {
+        if (pending_changes.has_value()) {
+          state->changes = 0;
+        }
+        DiscardPendingCompletion();
+      }
       return succeeded;
     }
-    active_statement.reset();
-    success_pending = false;
     if (pending_candidate != nullptr) {
       state->catalog = std::move(pending_candidate);
       state->catalog_generation = state->catalog->version().generation;
@@ -475,7 +483,7 @@ struct WriteStatement::Impl final {
     if (pending_changes.has_value()) {
       state->changes = *pending_changes;
     }
-    pending_changes.reset();
+    DiscardPendingCompletion();
     return {};
   }
 

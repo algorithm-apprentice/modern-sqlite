@@ -736,6 +736,236 @@ TEST(WriteSession, PreparedStatementsRetainZombieSessionState) {
   RequireStatus(survivor->Finalize());
 }
 
+TEST(WriteSession, RetiresImplicitSuccessAfterAutomaticCommitRollback) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(?1)");
+  RequireStatus(insert.Bind(1, SqlValue::Integer(2)));
+
+  fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, ErrorCode::kBusy);
+  const auto failed = insert.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, failed.error().code());
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(0U, session.changes());
+  EXPECT_EQ(2, session.last_insert_rowid());
+  const auto old_rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+  ASSERT_EQ(1U, old_rows.size());
+  EXPECT_EQ(1, old_rows[0][0].integer_value());
+
+  const auto reset = insert.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, reset.error().code());
+  EXPECT_EQ(failed.error().ToString(), reset.error().ToString());
+  ASSERT_TRUE(insert.Bind(1, SqlValue::Integer(2)).has_value());
+  EXPECT_EQ(WriteStep::kDone, TakeValue(insert.Step()));
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(1U, session.changes());
+  const auto retried_rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+  ASSERT_EQ(2U, retried_rows.size());
+  EXPECT_EQ(2, retried_rows[1][0].integer_value());
+}
+
+TEST(WriteSession, RebindsAfterRetiredImplicitCompletion) {
+  for (const ErrorCode failure : {ErrorCode::kBusy, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<int>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(?1)");
+    RequireStatus(insert.Bind(1, SqlValue::Integer(2)));
+    fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, failure);
+    const auto failed = insert.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure, failed.error().code());
+    EXPECT_EQ(0U, session.changes());
+
+    const auto reset = insert.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failed.error().ToString(), reset.error().ToString());
+    ASSERT_TRUE(insert.Bind(1, SqlValue::Integer(3)).has_value());
+    EXPECT_EQ(WriteStep::kDone, TakeValue(insert.Step()));
+    EXPECT_EQ(3, session.last_insert_rowid());
+    EXPECT_EQ(1U, session.changes());
+    const auto rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(3, rows[1][0].integer_value());
+  }
+}
+
+TEST(WriteSession, ReexecutesAfterRetiredImplicitCompletionWithoutReset) {
+  for (const ErrorCode failure : {ErrorCode::kBusy, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<int>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(?1)");
+    RequireStatus(insert.Bind(1, SqlValue::Integer(2)));
+    fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, failure);
+    const auto failed = insert.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure, failed.error().code());
+    EXPECT_EQ(0U, session.changes());
+    EXPECT_TRUE(session.autocommit());
+
+    EXPECT_EQ(WriteStep::kDone, TakeValue(insert.Step()));
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
+    const auto rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(2, rows[1][0].integer_value());
+  }
+}
+
+TEST(WriteSession, FinalizesRetiredImplicitCompletionWithOriginalError) {
+  for (const ErrorCode failure : {ErrorCode::kBusy, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<int>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(2)");
+    fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, failure);
+    const auto failed = insert.Step();
+    ASSERT_FALSE(failed.has_value());
+    const auto finalized = insert.Finalize();
+    ASSERT_FALSE(finalized.has_value());
+    EXPECT_EQ(failed.error().ToString(), finalized.error().ToString());
+    EXPECT_FALSE(insert.valid());
+    EXPECT_EQ(0U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
+    EXPECT_TRUE(session.autocommit());
+    RequireStatus(insert.Finalize());
+    const auto old_rows = QueryRows(session, "SELECT id FROM Items");
+    ASSERT_EQ(1U, old_rows.size());
+    EXPECT_EQ(1, old_rows[0][0].integer_value());
+    ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+    EXPECT_EQ(1U, session.changes());
+  }
+}
+
+TEST(WriteSession, DiscardsRolledBackCatalogCompletionBeforeReexecution) {
+  for (const ErrorCode failure : {ErrorCode::kBusy, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<int>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    WriteStatement create = PrepareOne(session, "CREATE TABLE New(id INTEGER PRIMARY KEY)");
+    fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, failure);
+    const auto failed = create.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure, failed.error().code());
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(1, session.last_insert_rowid());
+    const auto missing = session.Prepare(Utf8View{"SELECT id FROM New"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, missing.error().code());
+
+    const auto reset = create.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failed.error().ToString(), reset.error().ToString());
+    EXPECT_EQ(WriteStep::kDone, TakeValue(create.Step()));
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(1, session.last_insert_rowid());
+    EXPECT_TRUE(QueryRows(session, "SELECT id FROM New").empty());
+  }
+}
+
+TEST(WriteSession, RetainsDurableDmlCompletionAcrossCleanupFailures) {
+  for (const DatabaseLock lock : {DatabaseLock::kShared, DatabaseLock::kNone}) {
+    SCOPED_TRACE(static_cast<int>(lock));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Value INT)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2,20)");
+    WriteStatement update = PrepareOne(session, "UPDATE Items SET Value=Value+1");
+    fixture.vfs->FailDatabaseUnlockAfter(lock, lock == DatabaseLock::kNone ? 1U : 0U,
+                                         ErrorCode::kIo);
+    const auto failed = update.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_EQ(1U, session.changes());
+    const std::size_t writes = fixture.vfs->total_database_writes();
+
+    const auto reset = update.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failed.error().ToString(), reset.error().ToString());
+    EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(2U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
+    const auto rows = QueryRows(session, "SELECT Value FROM Items ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(11, rows[0][0].integer_value());
+    EXPECT_EQ(21, rows[1][0].integer_value());
+    RequireStatus(update.Reset());
+  }
+}
+
+TEST(WriteSession, RetainsDurableCatalogCompletionAcrossCleanupFailures) {
+  for (const DatabaseLock lock : {DatabaseLock::kShared, DatabaseLock::kNone}) {
+    SCOPED_TRACE(static_cast<int>(lock));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    WriteStatement create = PrepareOne(session, "CREATE TABLE New(id INTEGER PRIMARY KEY)");
+    fixture.vfs->FailDatabaseUnlockAfter(lock, lock == DatabaseLock::kNone ? 1U : 0U,
+                                         ErrorCode::kIo);
+    const auto failed = create.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    const std::size_t writes = fixture.vfs->total_database_writes();
+
+    const auto reset = create.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failed.error().ToString(), reset.error().ToString());
+    EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(1, session.last_insert_rowid());
+    EXPECT_TRUE(QueryRows(session, "SELECT id FROM New").empty());
+    const auto schema = QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='New'");
+    ASSERT_EQ(1U, schema.size());
+    EXPECT_EQ("New", Text(schema[0][0]));
+    RequireStatus(create.Reset());
+  }
+}
+
+TEST(WriteSession, ClearsEveryRolledBackDmlChangeCount) {
+  for (const std::string_view sql :
+       {"INSERT INTO Items VALUES(3,30)", "UPDATE Items SET Value=Value+1", "DELETE FROM Items"}) {
+    SCOPED_TRACE(sql);
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Value INT)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2,20)");
+    WriteStatement mutation = PrepareOne(session, sql);
+    fixture.vfs->FailNextDatabaseLock(DatabaseLock::kExclusive, ErrorCode::kIo);
+    const auto failed = mutation.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(0U, session.changes());
+    EXPECT_EQ(sql.starts_with("INSERT") ? 3 : 2, session.last_insert_rowid());
+    const auto rows = QueryRows(session, "SELECT id,Value FROM Items ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(10, rows[0][1].integer_value());
+    EXPECT_EQ(2, rows[1][0].integer_value());
+    EXPECT_EQ(20, rows[1][1].integer_value());
+  }
+}
+
 TEST(WriteSession, RetriesTransactionControlCleanupBeforeCatalogRefresh) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

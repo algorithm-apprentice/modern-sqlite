@@ -818,6 +818,13 @@ On VM error the session detaches the context, calls `Rollback()`, publishes
 zero changes, and preserves the primary statement error augmented with
 rollback failure context.
 
+ADR-0098 clarifies failed VM-success completion: when the coordinator has
+completed automatic rollback and retired the token, discard pending success,
+catalog, and count ownership, report zero DML changes, and retain the original
+error for reset/finalize. A valid durable-cleanup token instead retains its
+pending publication and existing retry. Neither outcome rewinds the earlier
+last-insert-rowid event.
+
 Reset and finalize return the prior execution error, close cursors, and finish
 any still-active transaction statement explicitly. Destructors perform no
 hidden commit. The statement destructor may abandon the coordinator token;
