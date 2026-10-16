@@ -89,6 +89,9 @@ using the existing statement query arena. Result definitions bind once before
 later-clause alias use; syntax query identities do not alias another result
 definition. Store this fact with the existing alias entry, not in a second
 expression ownership graph or a global expression-property traversal.
+ADR-0092 subsequently moves this same fact into the existing canonical
+result-definition metadata selected by the alias's result index. Its
+foundation refactor changes storage, not query-containing alias admission.
 Check the alias target's scalarity before the staged boundary, matching
 native `sqlite3ExprVectorSize()`: a direct scalar-query target with multiple
 output columns reports the existing typed width error even in an ignored
