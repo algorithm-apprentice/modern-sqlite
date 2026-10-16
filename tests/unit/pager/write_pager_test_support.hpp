@@ -45,6 +45,7 @@ struct WritePagerFileState {
   std::optional<FileSize> reported_size;
   std::optional<std::pair<DatabaseLock, ErrorCode>> lock_failure;
   std::optional<std::pair<DatabaseLock, ErrorCode>> unlock_failure;
+  std::size_t unlock_failure_skip = 0;
   std::optional<std::pair<std::size_t, ErrorCode>> read_failure;
   std::optional<std::pair<std::size_t, ByteCount>> short_read;
   std::optional<std::pair<FileOffset, ByteCount>> last_read;
@@ -244,9 +245,12 @@ class WritePagerMemoryFile final : public File {
 
   [[nodiscard]] Status DoUnlock(DatabaseLock lock) override {
     if (state_->unlock_failure.has_value() && state_->unlock_failure->first == lock) {
-      const ErrorCode code = state_->unlock_failure->second;
-      state_->unlock_failure.reset();
-      return std::unexpected(Error::Create(code, "injected fixed-file unlock failure"));
+      if (state_->unlock_failure_skip == 0U) {
+        const ErrorCode code = state_->unlock_failure->second;
+        state_->unlock_failure.reset();
+        return std::unexpected(Error::Create(code, "injected fixed-file unlock failure"));
+      }
+      --state_->unlock_failure_skip;
     }
     state_->lock = lock;
     return {};
@@ -340,7 +344,13 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   void FailNextDatabaseUnlock(DatabaseLock lock, ErrorCode code) noexcept {
+    FailDatabaseUnlockAfter(lock, 0U, code);
+  }
+
+  void FailDatabaseUnlockAfter(DatabaseLock lock, std::size_t successful_matches,
+                               ErrorCode code) noexcept {
     main_.unlock_failure = std::pair{lock, code};
+    main_.unlock_failure_skip = successful_matches;
   }
 
   void FailDatabaseWriteAfter(std::size_t successful_writes, ErrorCode code) noexcept {
@@ -376,6 +386,7 @@ class WritePagerMemoryVfs final : public Vfs {
     RestoreDurable(wal_);
     main_.lock_failure.reset();
     main_.unlock_failure.reset();
+    main_.unlock_failure_skip = 0;
     main_.write_failure.reset();
     pathless_open_failure_.reset();
     crash_.fail_after_mutation.reset();

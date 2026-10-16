@@ -69,6 +69,7 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { s
 int main() try {
   using namespace modern_sqlite;
   auto vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+  test::WritePagerFixedVfs& test_vfs = *vfs;
   auto opened = WriteSession::Open(std::move(vfs), test::kWritePagerDatabasePath);
   if (!opened.has_value()) {
     return 1;
@@ -106,7 +107,29 @@ int main() try {
 
   WriteStatement select = Prepare(session, "SELECT id FROM Items");
   const auto done = select.Step();
-  return done.has_value() && *done == WriteStep::kDone ? 0 : 1;
+  if (!done.has_value() || *done != WriteStep::kDone) {
+    return 1;
+  }
+  WriteStatement first = Prepare(session, "INSERT INTO Items VALUES(1,'first')");
+  const auto inserted = first.Step();
+  if (!inserted.has_value() || *inserted != WriteStep::kDone || session.changes() != 1U) {
+    return 1;
+  }
+  WriteStatement rolled_back = Prepare(session, "INSERT INTO Items VALUES(2,'rolled back')");
+  test_vfs.FailNextDatabaseLock(DatabaseLock::kExclusive, ErrorCode::kBusy);
+  const auto commit_failure = rolled_back.Step();
+  if (commit_failure.has_value() || commit_failure.error().code() != ErrorCode::kBusy) {
+    return 1;
+  }
+  fail_allocations = true;
+  const Status retired_reset = rolled_back.Reset();
+  fail_allocations = false;
+  if (retired_reset.has_value() || retired_reset.error().code() != ErrorCode::kBusy ||
+      session.changes() != 0U || !session.autocommit()) {
+    return 1;
+  }
+  const auto retried = rolled_back.Step();
+  return retried.has_value() && *retried == WriteStep::kDone && session.changes() == 1U ? 0 : 1;
 } catch (...) {
   fail_allocations = false;
   return 1;

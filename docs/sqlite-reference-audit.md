@@ -7,9 +7,10 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5 and D1 are corrected and verified by merged PRs #205 and
-  #204. ADR-0097 owns D3's bounded correction and delivery requirements;
-  other findings remain open unless their own evidence states otherwise.
+- Follow-up: A5, D1, and D3 are corrected and verified by merged PRs #205,
+  #204, and #206. ADR-0098 owns D2's bounded correction and delivery
+  requirements; other findings remain open unless their own evidence states
+  otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -140,6 +141,8 @@ crash-tail behavior.
 ### D2. Implicit commit rollback leaves stale statement success
 
 Priority: **high observable lifecycle correctness**.
+Correction: **ADR-0098**, reusing canonical token retirement with its own
+review and delivery gates.
 
 If an implicit DML VM completes but commit fails before durability, the
 coordinator can successfully roll back the transaction and invalidate its
@@ -159,10 +162,19 @@ returns the prior error from Reset, and then successfully re-executes the
 same statement. Ordinary successful and constraint traces did not exercise
 this seam.
 
+ADR-0098 now discards pending completion only after authoritative token
+retirement, preserving still-valid durable-cleanup retries. Phase-correct
+public and allocation regressions failed before the correction and now pass.
+The 27 focused cases and complete Debug suite pass. Seven paired native
+lifecycle transcripts also match changes, rowid, autocommit, rows/schema,
+reset/finalize errors, and actual reexecution; native accepts all final
+Modern images and all fourteen integrity checks pass. The remaining full
+qualification and exact-head gates are still required for delivery.
+
 ### D3. Empty POSIX super-journal files have the wrong existence meaning
 
 Priority: **high consequence, sidecar-dependent recovery difference**.
-Correction: **ADR-0097**, with its own review and delivery gates.
+Status: **corrected by ADR-0097/PR #206**.
 
 `src/platform/posix_vfs.cpp:1817-1844` reports a zero-size regular file as
 existing. Native `src/os_unix.c:6867-6898` reports it absent for
@@ -186,8 +198,14 @@ regressions failed before that change and now pass, including exact complete
 recovery images, missing/nonempty controls, individual-journal finalization,
 symlinks, nonregular files, and explicit unexpected errors. The independent
 comparison now matches all three native outcomes with byte-identical final
-images and native `integrity_check=ok`. Full matrix, exact-tree review, and
-exact-head hosted gates remain mandatory for delivery.
+images and native `integrity_check=ok`. The first hosted head also exposed
+shared recovery-test directory collisions; atomic reservation in the existing
+helper passed 240 two-worker executions across six configurations without
+weakening scheduling or deadlines. The normally appended head passed all nine
+hosted checks, including the original model in 2.77 seconds under its
+ten-second deadline. Merged commit
+`b6e5e29904e2a769ae13b9f9de2bc8e2f5566f3d` has the exact Sol-accepted
+tree `fd6d37552664b798197fc01b3cc4b7b53d978de8`.
 
 ### A1. Upper-only index ranges admit SQL NULL keys
 
@@ -415,11 +433,12 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1 and A5 have merged with exact-head hosted proof, and the preserved binder
-foundation is integrated. D3 uses ADR-0097's canonical POSIX correction.
-Prioritize the remaining durable/lifecycle and silent-result defects
-according to their reproduced scope. The NULL-range design has passed
-GPT-5.6 Sol review and remains preserved for its own ordered correction.
+D1, A5, and D3 have merged with exact-head hosted proof, and the preserved
+binder foundation is integrated. D2 uses ADR-0098's canonical session
+completion correction. Prioritize the remaining durable/lifecycle and
+silent-result defects according to their reproduced scope. The NULL-range
+design has passed GPT-5.6 Sol review and remains preserved for its own ordered
+correction.
 
 Conditional predicate and ON/access scheduling need bounded designs before
 arithmetic admission is broadened. Preserve each source-derived versus
