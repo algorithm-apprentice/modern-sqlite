@@ -4920,6 +4920,78 @@
         }
       ],
       "sql_hex": "53454c4543542073756d2869642920415320782046524f4d206974656d73204f52444552204259202853454c454354207829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "computed-rowid-correlated-inner-count",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e7428292046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e69643d612e69642b6f2e696429204153206e2046524f4d206974656d73206f205748455245206f2e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "computed-rowid-correlated-left-count",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e7428292046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e69642b6f2e696429204153206e2046524f4d206974656d73206f205748455245206f2e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "computed-rowid-correlated-right-count",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e7428292046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20622e69643d612e69642b6f2e696429204153206e2046524f4d206974656d73206f205748455245206f2e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "computed-rowid-correlated-full-count",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e7428292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e69643d612e69642b6f2e696429204153206e2046524f4d206974656d73206f205748455245206f2e69643d31"
     }
   ],
   "databases": [

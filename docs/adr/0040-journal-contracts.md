@@ -363,6 +363,10 @@ record, illegal main-journal page number, or checksum mismatch terminates the
 cursor successfully at the last valid record, matching SQLite's tolerated
 crash-tail behavior. The concrete SQLite backend ignores later header geometry
 fields, as specified by ADR-0041. Actual VFS read failures remain errors.
+ADR-0095 clarifies that an incomplete header is a physical crash tail only
+when its complete sector is absent according to file size. An incomplete
+read within size-admitted metadata is `SQLITE_IOERR_SHORT_READ`, not
+successful exhaustion.
 Savepoint records are generated and consumed by the same process; an invalid
 savepoint record is an internal contract violation.
 

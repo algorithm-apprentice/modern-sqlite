@@ -478,9 +478,17 @@ template <typename Bound>
   return VisitExpressionSources(bound_select, expression, visitor) && available;
 }
 
+enum class JoinedExpressionShape : std::uint8_t {
+  kValue,
+  kArithmetic,
+  kPredicate,
+};
+
 template <typename Bound>
-[[nodiscard]] bool IsJoinedLookupValue(const Bound& bound_select, BoundExpressionId id) {
-  id = TransparentRowIdOperandId(bound_select, id);
+[[nodiscard]] bool IsJoinedAccessExpression(const Bound& bound_select, BoundExpressionId id,
+                                            JoinedExpressionShape shape) {
+  id = shape == JoinedExpressionShape::kPredicate ? TransparentPredicateId(bound_select, id)
+                                                  : TransparentRowIdOperandId(bound_select, id);
   if (!IsValidExpressionId(bound_select, id)) {
     return false;
   }
@@ -491,19 +499,63 @@ template <typename Bound>
       std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
     return true;
   }
-  const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-  return coalesce != nullptr &&
-         std::ranges::all_of(coalesce->arguments, [&](BoundExpressionId argument) {
-           return IsJoinedLookupValue(bound_select, argument);
-         });
+  const auto admitted = [&](BoundExpressionId operand) {
+    return IsJoinedAccessExpression(bound_select, operand, shape);
+  };
+  if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+      coalesce != nullptr) {
+    return std::ranges::all_of(coalesce->arguments, admitted);
+  }
+  if (shape == JoinedExpressionShape::kValue) {
+    return false;
+  }
+  if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+      unary != nullptr) {
+    return (unary->operation != BoundUnaryOperation::kLogicalNot ||
+            shape == JoinedExpressionShape::kPredicate) &&
+           admitted(unary->operand);
+  }
+  if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+      binary != nullptr) {
+    switch (binary->operation) {
+      case BoundBinaryOperation::kAdd:
+      case BoundBinaryOperation::kSubtract:
+      case BoundBinaryOperation::kMultiply:
+      case BoundBinaryOperation::kDivide:
+      case BoundBinaryOperation::kRemainder:
+      case BoundBinaryOperation::kShiftLeft:
+      case BoundBinaryOperation::kShiftRight:
+      case BoundBinaryOperation::kBitwiseAnd:
+      case BoundBinaryOperation::kBitwiseOr:
+        return admitted(binary->left) && admitted(binary->right);
+      case BoundBinaryOperation::kLogicalAnd:
+      case BoundBinaryOperation::kLogicalOr:
+        return shape == JoinedExpressionShape::kPredicate && admitted(binary->left) &&
+               admitted(binary->right);
+      case BoundBinaryOperation::kConcatenate:
+        return false;
+    }
+  }
+  if (shape == JoinedExpressionShape::kPredicate) {
+    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+        comparison != nullptr) {
+      return admitted(comparison->left) && admitted(comparison->right);
+    }
+    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
+        truth != nullptr) {
+      return admitted(truth->operand);
+    }
+  }
+  return false;
 }
 
 template <typename Bound>
 [[nodiscard]] bool IsAccessKeyAvailable(
     const Bound& bound_select, BoundExpressionId key,
-    std::optional<BoundSourceId> available_before = std::nullopt) {
+    std::optional<BoundSourceId> available_before = std::nullopt,
+    JoinedExpressionShape shape = JoinedExpressionShape::kValue) {
   if (available_before.has_value()) {
-    return IsJoinedLookupValue(bound_select, key) &&
+    return IsJoinedAccessExpression(bound_select, key, shape) &&
            ExpressionAvailableBeforeSource(bound_select, key, *available_before);
   }
   return !ExpressionDependsOnSource(bound_select, key);
@@ -512,7 +564,8 @@ template <typename Bound>
 template <typename Bound>
 [[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(
     const Bound& bound_select, const SourceInfo& source, BoundExpressionId predicate,
-    std::optional<BoundSourceId> available_before = std::nullopt) {
+    std::optional<BoundSourceId> available_before = std::nullopt,
+    JoinedExpressionShape shape = JoinedExpressionShape::kValue) {
   const BoundExpressionId transparent = TransparentPredicateId(bound_select, predicate);
   if (!IsValidExpressionId(bound_select, transparent)) {
     return std::nullopt;
@@ -529,7 +582,7 @@ template <typename Bound>
     return std::nullopt;
   }
   const BoundExpressionId key = left_rowid ? comparison->right : comparison->left;
-  if (!IsAccessKeyAvailable(bound_select, key, available_before)) {
+  if (!IsAccessKeyAvailable(bound_select, key, available_before, shape)) {
     return std::nullopt;
   }
   return key;
@@ -1308,28 +1361,53 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   return predicates;
 }
 
-[[nodiscard]] std::optional<BoundExpressionId> JoinedRowIdLookupKey(
-    const BoundQueryView& bound_select, std::size_t core_index, BoundSourceId source_id) {
+[[nodiscard]] std::expected<std::optional<BoundExpressionId>, OptimizerError> JoinedRowIdLookupKey(
+    const LogicalQueryView& logical_plan, std::size_t core_index, BoundSourceId source_id) {
+  const BoundQueryView& bound_select = logical_plan.bound_select();
   const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[core_index]);
   if (core == nullptr || core->table_sources.size() < 2U) {
-    return std::nullopt;
+    return std::optional<BoundExpressionId>{};
   }
   const auto source = std::ranges::find(core->table_sources, source_id, &BoundTableSource::id);
   if (source == core->table_sources.end()) {
-    return std::nullopt;
+    return std::optional<BoundExpressionId>{};
   }
   const SourceInfo info = ResolveTableSource(bound_select, *source);
   if (!info.rowid_eligible ||
       RowIdCost(info.estimated_rows).work_units >=
           ScanCost(info.estimated_rows, info.estimated_row_size).work_units) {
-    return std::nullopt;
+    return std::optional<BoundExpressionId>{};
   }
-  std::optional<BoundExpressionId> key;
-  auto visitor = [&](BoundExpressionId predicate) {
-    key = RowIdLookupKey(bound_select, info, predicate, source_id);
-    return !key.has_value();
+  const auto find_key = [&](JoinedExpressionShape shape) {
+    std::optional<BoundExpressionId> key;
+    auto visitor = [&](BoundExpressionId predicate) {
+      key = RowIdLookupKey(bound_select, info, predicate, source_id, shape);
+      return !key.has_value();
+    };
+    VisitJoinedAccessPredicates(bound_select, *core, *source, &visitor);
+    return key;
   };
-  VisitJoinedAccessPredicates(bound_select, *core, *source, &visitor);
+  if (auto value = find_key(JoinedExpressionShape::kValue); value.has_value()) {
+    return value;
+  }
+  auto key = find_key(JoinedExpressionShape::kArithmetic);
+  if (!key.has_value()) {
+    return key;
+  }
+  for (const LogicalNode& node : logical_plan.nodes()) {
+    const auto* join = std::get_if<LogicalJoinNode>(&node.payload);
+    if (join == nullptr || join->core_index != core_index || !join->on.has_value() ||
+        IsJoinedAccessExpression(bound_select, *join->on, JoinedExpressionShape::kPredicate)) {
+      continue;
+    }
+    auto ready = JoinConditionSource(logical_plan, *join);
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (*ready == source_id) {
+      return std::optional<BoundExpressionId>{};
+    }
+  }
   return key;
 }
 
@@ -1695,8 +1773,9 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
 }
 
 [[nodiscard]] std::expected<PhysicalNodePayload, OptimizerError> ChooseJoinedAccess(
-    const BoundQueryView& bound_select, const LogicalScanNode& scan, OptimizerOptions options,
+    const LogicalQueryView& logical_plan, const LogicalScanNode& scan, OptimizerOptions options,
     std::vector<std::uint64_t>& prefix_executions) {
+  const BoundQueryView& bound_select = logical_plan.bound_select();
   const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[scan.core_index]);
   if (core == nullptr) {
     return std::unexpected(InvariantFailure("joined scan does not belong to a SELECT core"));
@@ -1720,15 +1799,18 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
       .table = source->table,
       .root_page = info.root_page,
   };
-  if (const auto key = JoinedRowIdLookupKey(bound_select, scan.core_index, source->id);
-      key.has_value()) {
+  auto key = JoinedRowIdLookupKey(logical_plan, scan.core_index, source->id);
+  if (!key.has_value()) {
+    return std::unexpected(std::move(key.error()));
+  }
+  if (key->has_value()) {
     selected = PhysicalRowIdLookupNode{
         .core_index = scan.core_index,
         .source = source->id,
         .source_kind = source->kind,
         .table = source->table,
         .root_page = info.root_page,
-        .key = *key,
+        .key = **key,
     };
     output_rows = RowIdCost(info.estimated_rows).estimated_output_rows;
   } else if (auto index = JoinedIndexScan(bound_select, scan.core_index, source->id);
@@ -2842,7 +2924,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                      value->direction == aggregate.direction;
             }
             const auto expected =
-                ChooseJoinedAccess(logical_plan.bound_select(), node, options, prefix_executions);
+                ChooseJoinedAccess(logical_plan, node, options, prefix_executions);
             return expected.has_value() && MatchesJoinedAccess(nodes[index], *expected);
           } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
             const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
@@ -3623,8 +3705,7 @@ class PhysicalPlanBuilder final {
       if (const auto* scan = std::get_if<LogicalScanNode>(&logical.payload);
           scan != nullptr && (!aggregate_plans[scan->core_index].has_value() ||
                               AssumePresent(aggregate_plans[scan->core_index]).joined)) {
-        auto selected =
-            ChooseJoinedAccess(logical_plan.bound_select(), *scan, options, prefix_executions);
+        auto selected = ChooseJoinedAccess(logical_plan, *scan, options, prefix_executions);
         if (!selected.has_value()) {
           return std::unexpected(std::move(selected.error()));
         }

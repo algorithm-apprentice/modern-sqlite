@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -111,6 +112,24 @@ struct JournalCohort {
   return read->complete();
 }
 
+[[nodiscard]] Status ReadMetadata(File& file, MutableByteView destination, std::uint64_t offset) {
+  auto complete = ReadComplete(file, destination, offset);
+  if (!complete.has_value()) {
+    return std::unexpected(std::move(complete.error()));
+  }
+  if (!*complete) {
+    try {
+      constexpr int kShortRead = 522;
+      auto error = Error::FromSqliteCode(kShortRead, "short rollback-journal metadata read");
+      assert(error.has_value());
+      return std::unexpected(std::move(*error));
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] bool IsHexDigit(char value) noexcept {
   return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
          (value >= 'A' && value <= 'F');
@@ -136,12 +155,11 @@ struct JournalCohort {
   }
 
   std::array<std::byte, kTrailerTailSize> tail{};
-  auto complete = ReadComplete(file, tail, file_size - kTrailerTailSize);
-  if (!complete.has_value()) {
-    return std::unexpected(std::move(complete.error()));
+  auto read = ReadMetadata(file, tail, file_size - kTrailerTailSize);
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
   }
-  if (!*complete ||
-      !std::ranges::equal(kJournalMagic, ByteView{tail}.subspan(8, kJournalMagic.size()))) {
+  if (!std::ranges::equal(kJournalMagic, ByteView{tail}.subspan(8, kJournalMagic.size()))) {
     return false;
   }
 
@@ -164,12 +182,9 @@ struct JournalCohort {
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
-  complete = ReadComplete(file, name_bytes, file_size - kTrailerTailSize - name_size);
-  if (!complete.has_value()) {
-    return std::unexpected(std::move(complete.error()));
-  }
-  if (!*complete) {
-    return false;
+  read = ReadMetadata(file, name_bytes, file_size - kTrailerTailSize - name_size);
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
   }
 
   std::uint32_t checksum = 0;
@@ -310,12 +325,11 @@ class RollbackMainPlayback final : public JournalPlayback {
     }
 
     std::array<std::byte, 28> header{};
-    auto complete = ReadComplete(*file_, header, 0);
-    if (!complete.has_value()) {
-      return std::unexpected(std::move(complete.error()));
+    auto read = ReadMetadata(*file_, header, 0);
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
     }
-    if (!*complete ||
-        !std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
+    if (!std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
       ended_ = true;
       return {};
     }
@@ -386,12 +400,11 @@ class RollbackMainPlayback final : public JournalPlayback {
     }
 
     std::array<std::byte, 20> header{};
-    auto complete = ReadComplete(*file_, header, *aligned);
-    if (!complete.has_value()) {
-      return std::unexpected(std::move(complete.error()));
+    auto read = ReadMetadata(*file_, header, *aligned);
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
     }
-    if (!*complete ||
-        !std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
+    if (!std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
       return false;
     }
 

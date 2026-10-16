@@ -57,6 +57,12 @@ approximate those native phases. A later computed-key admission must establish
 the corresponding evaluation schedule before broadening this value-only
 contract.
 
+ADR-0096 admits numeric computed rowid keys only when all ON expressions
+scheduled at the probed source pass its bounded expression-domain proof.
+It preserves existing value-key preference, reuses canonical placement and
+the same producer, and does not broaden joined stored/automatic-index keys
+or resolve general callback/error scheduling.
+
 ### 2. Position once per logical prefix
 
 Open each cursor once. At a normal prefix entry, evaluate the key and use

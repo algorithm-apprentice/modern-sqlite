@@ -1640,6 +1640,121 @@ TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers
   }
 }
 
+TEST(PhysicalPlan, SelectsComputedJoinedRowidProbesInValueOnlyOnContexts) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
+      "ON b.id=a.id+?3 AND a.id<=?1 AND b.id<=?2 "
+      "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL)",
+      TestCatalog());
+  const auto lookup = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    const auto* point = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return point != nullptr && point->source == BoundSourceId{1};
+  });
+  ASSERT_NE(plan.nodes().end(), lookup);
+  const auto key = std::get<PhysicalRowIdLookupNode>(lookup->payload).key;
+  const auto* arithmetic = std::get_if<BoundBinaryExpression>(
+      &plan.logical_plan().bound_select().expression(key).payload);
+  ASSERT_NE(nullptr, arithmetic);
+  EXPECT_EQ(BoundBinaryOperation::kAdd, arithmetic->operation);
+}
+
+TEST(PhysicalPlan, KeepsComputedJoinedKeysBehindCallbackAndPreservationBoundaries) {
+  struct Case {
+    std::string_view sql;
+    std::vector<BoundSourceId> lookups;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.id=a.id+1 AND abs(a.Value)>0",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
+                  "ON b.id=a.id+1 AND (SELECT a.id)>0",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.id=a.id+1 AND a.Name||a.Name!=''",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.id=a.id+1 AND iif(a.id>0,1,0)",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
+                  "ON b.id=a.id AND abs(a.Value)>0",
+           .lookups = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=b.Value+1", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=c.id+1 "
+                  "LEFT JOIN Items c ON c.id=a.id",
+           .lookups = {BoundSourceId{2}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON 1 "
+                  "WHERE b.id=a.id+1",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b "
+                  "ON c.id>0 AND abs(a.Value)>0 JOIN Items c ON c.id=a.id+1000",
+           .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=a.id+1000 "
+                  "JOIN Items c ON b.id>0 AND abs(a.Value)>0",
+           .lookups = {}},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto plan = OptimizeOrThrow(test_case.sql, TestCatalog());
+    std::vector<BoundSourceId> lookups;
+    for (const auto& node : plan.nodes()) {
+      if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+          lookup != nullptr) {
+        lookups.push_back(lookup->source);
+      }
+    }
+    EXPECT_EQ(test_case.lookups, lookups);
+  }
+}
+
+TEST(PhysicalPlan, AdmitsNumericJoinedRowidShapesWithoutChangingValueKeyPreference) {
+  for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    for (const std::string_view key :
+         {"a.id+?1", "?1+a.id", "a.Value-1", "a.id*2", "a.id/2", "a.id%2", "a.id<<1", "a.id>>1",
+          "a.id&?1", "a.id|?1", "-a.id", "+a.id", "~a.id", "coalesce(a.id,?1)+1",
+          "(a.id+?1) COLLATE NOCASE"}) {
+      SCOPED_TRACE(::testing::Message() << join << " " << key);
+      const auto plan = OptimizeOrThrow("SELECT a.id,b.id FROM Items a " + std::string{join} +
+                                            " Items b ON b.id=" + std::string{key},
+                                        TestCatalog());
+      EXPECT_TRUE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+        const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+        return lookup != nullptr && lookup->source == BoundSourceId{1};
+      }));
+    }
+  }
+  const auto plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=a.id+1 AND b.id=?1", TestCatalog());
+  const auto lookup = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    const auto* point = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return point != nullptr && point->source == BoundSourceId{1};
+  });
+  ASSERT_NE(plan.nodes().end(), lookup);
+  EXPECT_TRUE(std::holds_alternative<BoundParameterExpression>(
+      plan.logical_plan()
+          .bound_select()
+          .expression(std::get<PhysicalRowIdLookupNode>(lookup->payload).key)
+          .payload));
+}
+
+TEST(PhysicalPlan, PreservesNonjoinedFunctionKeysAndJoinedIndexValueOnlyAdmission) {
+  const auto point = OptimizeOrThrow("SELECT Name FROM Items WHERE id=abs(?1)+?2", TestCatalog());
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(point.nodes().front().payload));
+  const auto index =
+      OptimizeOrThrow("SELECT Category FROM Items WHERE Category=lower(?1)", IndexedCatalog());
+  EXPECT_TRUE(std::holds_alternative<PhysicalIndexScanNode>(index.nodes().front().payload));
+  for (const bool automatic : {false, true}) {
+    const auto joined =
+        OptimizeOrThrow("SELECT a.id,b.Score FROM Items a JOIN Items b ON b.Score=a.Score+?1",
+                        IndexedCatalog(), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = automatic});
+    EXPECT_FALSE(std::ranges::any_of(joined.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalIndexScanNode>(node.payload) ||
+             std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+    }));
+  }
+}
+
 TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "

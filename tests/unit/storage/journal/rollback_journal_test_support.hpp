@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
@@ -29,6 +30,7 @@ struct FixedFileState {
   std::array<std::byte, kFixedJournalCapacity> bytes{};
   std::size_t size = 0;
   bool present = false;
+  std::optional<std::pair<FileOffset, ByteCount>> short_read;
   FileProperties properties{
       .sector_size = ByteCount{kTestSectorSize},
       .device_characteristics = DeviceCharacteristics{},
@@ -57,7 +59,11 @@ class FixedMemoryFile final : public File {
     if (start >= state_->size) {
       return ByteCount{0};
     }
-    const std::size_t count = std::min(destination.size(), state_->size - start);
+    std::size_t count = std::min(destination.size(), state_->size - start);
+    if (state_->short_read.has_value() && state_->short_read->first == offset) {
+      count = std::min(count, state_->short_read->second.value());
+      state_->short_read.reset();
+    }
     std::ranges::copy(ByteView{state_->bytes}.subspan(start, count), destination.begin());
     return ByteCount{count};
   }
@@ -195,6 +201,10 @@ class FixedMemoryVfs final : public Vfs {
   }
 
   [[nodiscard]] bool journal_present() const noexcept { return journal_.present; }
+
+  void ShortJournalReadAt(FileOffset offset, ByteCount maximum_bytes) noexcept {
+    journal_.short_read = std::pair{offset, maximum_bytes};
+  }
 
  protected:
   [[nodiscard]] Result<OpenedFile> DoOpen(std::optional<std::string_view> path,

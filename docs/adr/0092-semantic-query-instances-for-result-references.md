@@ -272,6 +272,27 @@ foundation refactor nor expression-copy delivery closes this decision;
 integrated query-instance coverage is complete only after the final slice.
 Node 43 remains active throughout.
 
+### Foundation integration after prerequisite corrections
+
+The first delivery was reviewed at tree
+`be92d19215b114856c80747645dd45d9c00974f4` and published as PR #203,
+head `9b6ad86bf035b8a48c6bbb74af2d82021c10cfd2`. Its original local
+compiler/sanitizer/native checks passed, but the unchanged correlated model
+exceeded the hosted ten-second deadline.
+
+ADR-0096/PR #205 separately removed the computed-rowid scan amplification
+and verified the original hosted model in 6.60 seconds on its first head.
+ADR-0095/PR #204 then passed that same unchanged model in 6.68 seconds.
+The resulting main is
+`f1ed8f52355687ecc0493215c34569cb02f0444a`.
+
+Normally merge that main into the existing foundation branch without
+rewriting its published history. Preserve the reviewed binder and
+characterization implementations, reconcile ADR ordering, and require
+combined-tree review/local validation and all new-head hosted checks.
+This refresh admits no expression-copy or aggregate-ordering behavior and
+does not complete this ADR.
+
 ## Verification
 
 Obtain GPT-5.6 Sol design approval before production changes. Start with
