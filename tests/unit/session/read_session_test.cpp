@@ -1233,6 +1233,57 @@ TEST(ReadSession, RebindsExactJoinedRowidKeysWithoutRestrictingFullReplay) {
   }
 }
 
+TEST(ReadSession, RebindsComputedJoinedRowidKeysAcrossPreservedSources) {
+  constexpr std::array<std::byte, 1> kNumericBlob{std::byte{0x31}};
+  struct Case {
+    SqlValue offset;
+    std::int64_t matches = 0;
+  };
+  const std::array cases{
+      Case{.offset = SqlValue::Integer(0), .matches = 4},
+      Case{.offset = SqlValue::Integer(1), .matches = 3},
+      Case{.offset = SqlValue::Integer(-1), .matches = 3},
+      Case{.offset = SqlValue::Real(1.0), .matches = 3},
+      Case{.offset = SqlValue::Real(0.5)},
+      Case{.offset = SqlValue{}},
+      Case{.offset = SqlValue::Text("1x"), .matches = 3},
+      Case{.offset = SqlValue::Text("bad"), .matches = 4},
+      Case{.offset = SqlValue::Blob(ByteBuffer::CopyOf(kNumericBlob)), .matches = 3},
+      Case{.offset = SqlValue::Integer(std::numeric_limits<std::int64_t>::max())},
+      Case{.offset = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
+      Case{.offset = SqlValue::Real(std::numeric_limits<double>::infinity())},
+  };
+  for (const bool file_backed : {false, true}) {
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = file_backed ? TemporaryStoreMode::kFile : TemporaryStoreMode::kMemory,
+                .sorter_memory_threshold = ByteCount{32U * 1024U},
+            },
+    };
+    for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+      SCOPED_TRACE(::testing::Message() << file_backed << " " << join);
+      auto session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string(), options));
+      auto statement =
+          PrepareStatement(session, "SELECT count(),count(a.id),count(b.id) FROM items a " +
+                                        std::string{join} + " items b ON b.id=a.id+?1");
+      for (const auto& test_case : cases) {
+        RequireStatus(statement.Bind(1, test_case.offset));
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        const auto matches = test_case.matches;
+        const auto rows = join == "JOIN" ? matches : join == "FULL JOIN" ? 8 - matches : 4;
+        EXPECT_EQ(rows, IntegerValue(statement.row()[0]));
+        EXPECT_EQ(join == "JOIN" || join == "RIGHT JOIN" ? matches : 4,
+                  IntegerValue(statement.row()[1]));
+        EXPECT_EQ(join == "JOIN" || join == "LEFT JOIN" ? matches : 4,
+                  IntegerValue(statement.row()[2]));
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+        RequireStatus(statement.Reset());
+      }
+    }
+  }
+}
+
 TEST(ReadSession, ResetsRightReplayAndKeepsNullPrefixDefaultsOutOfOutput) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -2664,6 +2715,49 @@ TEST(ReadSession, BoundsJoinedEqualityWorkByPointPositionedPrefixes) {
   const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
   RecordProperty("vm_instructions", std::to_string(instructions));
   EXPECT_LT(instructions, 1024U);
+}
+
+TEST(ReadSession, BoundsComputedFullJoinWorkByPointPositionedPrefixes) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT a.id,b.id,(SELECT coalesce(a.id,b.id)),(SELECT a.value),(SELECT b.nullable) "
+      "FROM model_rows a FULL JOIN model_rows b "
+      "ON b.id=a.id+?3 AND a.id<=?1 AND b.id<=?2 "
+      "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL) "
+      "ORDER BY a.id IS NULL,a.id,b.id");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(8)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(8)));
+  RequireStatus(statement.Bind(3, SqlValue::Integer(1)));
+  constexpr std::array<std::array<std::optional<std::int64_t>, 5>, 9> kExpected{{
+      {1, 2, 1, -31, 20},
+      {2, 3, 2, -29, 30},
+      {3, 4, 3, -23, std::nullopt},
+      {4, 5, 4, -19, 50},
+      {5, 6, 5, -17, 60},
+      {6, 7, 6, -13, std::nullopt},
+      {7, 8, 7, -11, 80},
+      {8, std::nullopt, 8, -7, std::nullopt},
+      {std::nullopt, 1, 1, std::nullopt, std::nullopt},
+  }};
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    for (const auto& expected : kExpected) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      ASSERT_EQ(expected.size(), statement.row().size());
+      for (std::size_t field = 0; field < expected.size(); ++field) {
+        EXPECT_EQ(expected[field], statement.row()[field].integer_value());
+        if (!expected[field].has_value()) {
+          EXPECT_EQ(SqlValueType::kNull, statement.row()[field].type());
+        }
+      }
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const auto instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 4096U);
 }
 
 TEST(ReadSession, RecordsUnindexedJoinedEqualityScalingBaseline) {

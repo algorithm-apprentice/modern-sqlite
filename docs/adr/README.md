@@ -96,3 +96,4 @@ their corresponding implementation begins.
 90. [ADR-0090: Source-Correlated Scalar and EXISTS Queries](0090-source-correlated-scalar-and-exists-queries.md)
 91. [ADR-0091: Lexical Outer Expression Aliases](0091-lexical-outer-expression-aliases.md)
 95. [ADR-0095: Exact Rollback-Journal Metadata Reads](0095-exact-rollback-journal-metadata-reads.md)
+96. [ADR-0096: Computed Joined Rowid Probes](0096-computed-joined-rowid-probes.md)

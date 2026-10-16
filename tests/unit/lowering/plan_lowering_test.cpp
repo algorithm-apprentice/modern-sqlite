@@ -1993,6 +1993,13 @@ TEST_F(ReadLoweringJoin, KeepsComputedJoinKeysInTheirExistingCandidatePhase) {
                std::runtime_error);
 }
 
+TEST_F(ReadLoweringJoin, KeepsComputedProbesBehindForwardOnCallbacks) {
+  EXPECT_THROW(static_cast<void>(Execute("SELECT count() FROM items a JOIN items b "
+                                         "ON c.id>0 AND abs(a.id-a.id-9223372036854775807-1)>0 "
+                                         "JOIN items c ON c.id=a.id+1000")),
+               std::runtime_error);
+}
+
 TEST_F(ReadLoweringJoin, KeepsNondeterministicJoinKeysInTheirPhysicalCandidatePhase) {
   const CustomEnvironment custom;
   for (const std::string_view key : {"trace_argument(a.id)", "trace_argument(2)"}) {

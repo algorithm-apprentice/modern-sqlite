@@ -7,6 +7,8 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
+- Follow-up: A5 is corrected and verified by merged PR #205; other findings
+  remain open unless their own delivery evidence states otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -265,11 +267,13 @@ compatibility. Reproduce and correct the schedule through canonical
 predicate/access contracts before admitting broader function keys. Do not
 add a second guard collection.
 
-### A5. Arithmetic joined keys retain quadratic candidate scans
+### A5. Arithmetic joined keys retained quadratic candidate scans
 
-Priority: **high performance; unchanged sanitizer deadline blocker**.
+Priority at audit: **high performance; unchanged sanitizer deadline blocker**.
+Status: **corrected by ADR-0096/PR #205**.
 
-`b.id=a.id+?3` never reaches a joined point candidate because
+At the audited revision, `b.id=a.id+?3` never reaches a joined point candidate
+because
 `src/optimizer/physical_plan.cpp:481-509` admits only value leaves and lazy
 coalesces. Native computes the equality key and emits a rowid seek in
 `src/wherecode.c:1743-1770`.
@@ -288,6 +292,19 @@ file I/O.
 The separately preserved compact header-reuse change reduces model CPU by
 about 8%; it does not remove this algorithmic amplification or establish an
 exact-head hosted sanitizer repair.
+
+The separate computed-rowid correction now uses canonical typed probes and
+ON readiness. The unchanged complete model executes 587,276 instructions;
+32/64/128-row arithmetic growth executes 2,343/4,359/8,391, rather than the
+quadratic baseline above. The native phase and cross-feature comparisons
+gain no new differences.
+
+Exact head `b1ddd3bf92cc442bf722e6c3565438c2c2f5d8e6` passed the original
+hosted sanitizer model in 6.60 seconds under its unchanged ten-second
+deadline on its first CI run. All nine checks passed, and PR #205 normally
+squash merged as `75308c5160689864c6855f4715963b30bdb16acb`.
+The separate general callback phases in A3/A4 and other audit findings are
+not claimed resolved.
 
 ### R1. Aggregate numeric TEXT classification crosses embedded NUL
 

@@ -140,6 +140,21 @@ acceptance and exact-head hosted gates remain publication requirements;
 local success is not evidence that the separate hosted model deadline has
 been repaired.
 
+### Integration with the completed deadline correction
+
+PR #204's initial journal head was held because the unchanged correlated
+model still timed out at 10.02 seconds. ADR-0096/PR #205 corrected that
+separate algorithmic cause and merged as
+`75308c5160689864c6855f4715963b30bdb16acb`. Its first exact-head hosted
+sanitizer run passed the original model in 6.60 seconds under the unchanged
+ten-second limit, with all nine checks passing.
+
+Refresh this journal slice through a normal merge of that main revision,
+preserving its published history. The journal and optimizer source hashes
+remain identical to their separately accepted implementations. Reconcile
+the ADR index/DAG and audit status, then require combined-tree review and
+new exact-head validation before merging the journal correction.
+
 ## Traceability
 
 Node: `implement-advanced-sql`, prerequisite durability correction.
@@ -149,4 +164,5 @@ ADR-0042, and ADR-0045.
 
 The separately reviewed NULL-range correction and the remaining audit
 findings remain separate. This correction does not complete node 43 or
-resolve the unchanged correlated-model hosted deadline.
+implement the algorithmic deadline correction delivered separately by
+ADR-0096.

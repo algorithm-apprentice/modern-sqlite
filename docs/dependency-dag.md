@@ -145,12 +145,14 @@ owners and producers, with lazy inline emission inside one lexical bytecode
 region and separate binding/value dependencies. Source-free queries retain
 the verified value-call interface. ADR-0091 defines the next bounded outer
 expression-alias admission through immutable targets and the same capture
-contract. Query-containing alias instances and outer aggregate ownership
-remain ordered subquery follow-ups. The
-[implemented-engine reference audit](sqlite-reference-audit.md) pauses that
-feature expansion for prerequisite corrections; ADR-0095 first
-repairs exact journal metadata reads without changing tolerated page-record
-crash tails. Persistent constraints,
+contract. ADR-0096 corrects arithmetic joined-rowid scan amplification through
+the same positioned producer and canonical ON readiness, without relaxing the
+unchanged model deadline. Query-containing alias instances and outer aggregate
+ownership remain ordered subquery follow-ups. The
+[implemented-engine reference audit](sqlite-reference-audit.md) retains
+prerequisite corrections before further feature expansion. ADR-0095 repairs
+exact journal metadata reads without changing tolerated page-record crash
+tails. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins
