@@ -32,7 +32,7 @@ class GlobalAggregateAccessServices {
   [[nodiscard]] virtual LoweringResult<void> EmitIndexKeyExpressions(
       const PhysicalIndexScanNode& index, std::optional<Label> null_target) = 0;
   [[nodiscard]] virtual LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound) = 0;
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound) = 0;
 };
 
 struct GlobalAggregateAccessInput {

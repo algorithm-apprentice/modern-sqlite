@@ -152,6 +152,11 @@ ADR-0087 extends the same joined candidate to these existing one-/two-sided
 range bounds, with or without a leading equality prefix. It retains shared
 admission and costs and does not authorize unconstrained joined index scans.
 
+ADR-0094 corrects upper-only nullable ranges through an implicit exclusive
+NULL lower boundary in canonical lowering. Record order alone does not
+enforce SQL NULL rejection after a selected predicate leaves the residual
+filter; explicit NULL runtime keys remain distinct from this sentinel.
+
 Comparison orientation is normalized. `? < column` becomes a lower bound and
 `? > column` becomes an upper bound. The physical plan retains:
 

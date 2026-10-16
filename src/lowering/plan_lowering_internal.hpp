@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/lowering/plan_lowering.hpp"
 
 namespace modern_sqlite::lowering_internal {
@@ -75,41 +76,71 @@ template <typename T>
   }
 }
 
+struct IndexTraversalBound {
+  const PhysicalIndexBound* expression = nullptr;
+  bool implicit_null = false;
+
+  [[nodiscard]] bool has_range_term() const noexcept {
+    return expression != nullptr || implicit_null;
+  }
+
+  [[nodiscard]] bool inclusive() const noexcept {
+    return expression != nullptr ? expression->inclusive : !implicit_null;
+  }
+};
+
 struct IndexTraversal {
-  const PhysicalIndexBound* start = nullptr;
-  const PhysicalIndexBound* end = nullptr;
+  IndexTraversalBound start;
+  IndexTraversalBound end;
   bool has_start_key = false;
   bool has_end_key = false;
 };
 
-[[nodiscard]] inline IndexTraversal ResolveIndexTraversal(
-    const PhysicalIndexScanNode& index) noexcept {
-  const PhysicalIndexBound* forward_start = nullptr;
-  const PhysicalIndexBound* forward_end = nullptr;
+[[nodiscard]] inline LoweringResult<IndexTraversal> ResolveIndexTraversal(
+    const PhysicalIndexScanNode& index, const CatalogSnapshot& catalog) {
+  IndexTraversalBound forward_start;
+  IndexTraversalBound forward_end;
   if (index.range.has_value()) {
+    if (index.table.value >= catalog.tables().size()) {
+      return std::unexpected(InternalFailure("index range table ID is out of range"));
+    }
+    const CatalogTable& table = catalog.table(index.table);
+    if (index.range->column.value >= table.columns.size()) {
+      return std::unexpected(InternalFailure("index range column ID is out of range"));
+    }
+    const IndexTraversalBound lower{
+        .expression = index.range->lower.has_value() ? &*index.range->lower : nullptr,
+        .implicit_null =
+            !index.range->lower.has_value() && index.range->upper.has_value() &&
+            table.rowid_alias != index.range->column &&
+            !table.columns[index.range->column.value].effective_not_null_conflict.has_value(),
+    };
+    const IndexTraversalBound upper{
+        .expression = index.range->upper.has_value() ? &*index.range->upper : nullptr,
+    };
     if (index.range->order == SortOrder::kDescending) {
-      forward_start = index.range->upper.has_value() ? &*index.range->upper : nullptr;
-      forward_end = index.range->lower.has_value() ? &*index.range->lower : nullptr;
+      forward_start = upper;
+      forward_end = lower;
     } else {
-      forward_start = index.range->lower.has_value() ? &*index.range->lower : nullptr;
-      forward_end = index.range->upper.has_value() ? &*index.range->upper : nullptr;
+      forward_start = lower;
+      forward_end = upper;
     }
   }
   const bool reverse = index.direction == PhysicalScanDirection::kReverse;
-  const PhysicalIndexBound* start = reverse ? forward_end : forward_start;
-  const PhysicalIndexBound* end = reverse ? forward_start : forward_end;
+  const IndexTraversalBound start = reverse ? forward_end : forward_start;
+  const IndexTraversalBound end = reverse ? forward_start : forward_end;
   return IndexTraversal{
       .start = start,
       .end = end,
-      .has_start_key = !index.equalities.empty() || start != nullptr,
-      .has_end_key = !index.equalities.empty() || end != nullptr,
+      .has_start_key = !index.equalities.empty() || start.has_range_term(),
+      .has_end_key = !index.equalities.empty() || end.has_range_term(),
   };
 }
 
 [[nodiscard]] inline ProgramResult<InstructionAddress> EmitIndexTraversalSeek(
     ProgramBuilder& builder, const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
     CursorId cursor, RegisterId first, std::uint32_t count, Label missing) {
-  const bool inclusive = traversal.start == nullptr || traversal.start->inclusive;
+  const bool inclusive = traversal.start.inclusive();
   const IndexSeekMode mode =
       index.direction == PhysicalScanDirection::kReverse
           ? (inclusive ? IndexSeekMode::kLessOrEqual : IndexSeekMode::kLess)
@@ -120,7 +151,7 @@ struct IndexTraversal {
 [[nodiscard]] inline ProgramResult<InstructionAddress> EmitIndexTraversalEndCheck(
     ProgramBuilder& builder, const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
     CursorId cursor, RegisterId first, std::uint32_t count, Label end) {
-  const bool inclusive = traversal.end == nullptr || traversal.end->inclusive;
+  const bool inclusive = traversal.end.inclusive();
   const IndexRangeEndMode mode =
       index.direction == PhysicalScanDirection::kReverse
           ? (inclusive ? IndexRangeEndMode::kReverseInclusive

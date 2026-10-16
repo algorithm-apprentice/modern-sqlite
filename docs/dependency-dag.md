@@ -158,6 +158,8 @@ tails. ADR-0097 corrects the production POSIX nonempty-regular-file existence
 policy through the canonical VFS query, preserving custom-backend recovery
 semantics. ADR-0098 retires session-owned pending completion after canonical
 automatic rollback without discarding valid durable-cleanup retries.
+ADR-0094 corrects nullable upper-only range traversal through the same
+borrowed index boundaries and existing key blocks in every range consumer.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
