@@ -7,8 +7,9 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5 is corrected and verified by merged PR #205; other findings
-  remain open unless their own delivery evidence states otherwise.
+- Follow-up: A5 and D1 are corrected and verified by merged PRs #205 and
+  #204. ADR-0097 owns D3's bounded correction and delivery requirements;
+  other findings remain open unless their own evidence states otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -30,9 +31,10 @@ SQL CAST syntax, and the remaining constraint/conflict surfaces retain their
 documented delivery boundaries. Scalar-value conversion primitives do not
 imply that SQL CAST syntax has been delivered.
 
-The parked B-tree header-reuse optimization and open binder-foundation PR
-#203 are not part of the audit revision. Neither is discarded or treated as a
-completed sanitizer repair.
+The parked B-tree header-reuse optimization and binder-foundation PR #203
+are not part of the audit revision. The foundation has subsequently merged
+after its own combined-tree review and gates. Neither is treated as the
+sanitizer repair; that correction is A5.
 
 ## Method
 
@@ -105,6 +107,7 @@ not 93 independent defects.
 ### D1. Short journal metadata can authorize destructive false recovery
 
 Priority: **critical durability risk; correction takes precedence over A1**.
+Status: **corrected by ADR-0095/PR #204**.
 
 Source review shows that a successful short VFS read of a size-admitted
 rollback header becomes end-of-journal rather than I/O failure.
@@ -127,9 +130,12 @@ the short page-record control passed. ADR-0095's bounded correction now
 passes those regressions, the compiler/sanitizer matrix, the 1,403-case fast
 tier, 68 isolated native contracts, and 20,000 read plus 20,000 write
 generated inputs. The 27 inherited work properties remain unchanged.
-Bounded GPT-5.6 Sol implementation review is approved; final exact-tree and
-hosted delivery gates remain open. Physically truncated files and
-complete-but-unpublished headers retain their crash-tail behavior.
+GPT-5.6 Sol approved the implementation and integrated exact tree. The
+normally refreshed head passed all nine hosted checks, including the
+unchanged original sanitizer model in 6.68 seconds under its ten-second
+deadline, and merged as `f1ed8f52355687ecc0493215c34569cb02f0444a`.
+Physically truncated files and complete-but-unpublished headers retain their
+crash-tail behavior.
 
 ### D2. Implicit commit rollback leaves stale statement success
 
@@ -156,6 +162,7 @@ this seam.
 ### D3. Empty POSIX super-journal files have the wrong existence meaning
 
 Priority: **high consequence, sidecar-dependent recovery difference**.
+Correction: **ADR-0097**, with its own review and delivery gates.
 
 `src/platform/posix_vfs.cpp:1817-1844` reports a zero-size regular file as
 existing. Native `src/os_unix.c:6867-6898` reports it absent for
@@ -167,9 +174,20 @@ Modern does not create attached-database super-journals yet, but recovering
 SQLite-created trailers is an admitted ADR-0041 surface. Custom VFS
 existence policies and production POSIX parity must not be conflated.
 The production-POSIX/default-native-VFS probe confirms `true` versus `false`
-for the same zero-byte regular file. The broader cold-journal consequence
-remains source-derived; its committed recovery-seam regression is still
-required.
+for the same zero-byte regular file. The independent cold-journal/image
+comparison also confirms the consequence: nonempty masters restore `[1]`
+in both engines, missing masters retain `[1,2]` in both, and empty masters
+restore `[1]` in Modern but retain `[1,2]` in native. Native reads the final
+Modern image in each case.
+
+ADR-0097 corrects only canonical POSIX `kExists`, preserving custom-VFS
+policies and the existing recovery path. Focused platform and real-Pager
+regressions failed before that change and now pass, including exact complete
+recovery images, missing/nonempty controls, individual-journal finalization,
+symlinks, nonregular files, and explicit unexpected errors. The independent
+comparison now matches all three native outcomes with byte-identical final
+images and native `integrity_check=ok`. Full matrix, exact-tree review, and
+exact-head hosted gates remain mandatory for delivery.
 
 ### A1. Upper-only index ranges admit SQL NULL keys
 
@@ -397,10 +415,11 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-Correct D1 first because an I/O fault must not destroy recovery authority.
-Then prioritize the remaining durable/lifecycle and silent-result defects
+D1 and A5 have merged with exact-head hosted proof, and the preserved binder
+foundation is integrated. D3 uses ADR-0097's canonical POSIX correction.
+Prioritize the remaining durable/lifecycle and silent-result defects
 according to their reproduced scope. The NULL-range design has passed
-GPT-5.6 Sol review but is deliberately not implemented ahead of D1.
+GPT-5.6 Sol review and remains preserved for its own ordered correction.
 
 Conditional predicate and ON/access scheduling need bounded designs before
 arithmetic admission is broadened. Preserve each source-derived versus

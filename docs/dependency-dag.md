@@ -154,7 +154,9 @@ without relaxing the unchanged model deadline. The
 [implemented-engine reference audit](sqlite-reference-audit.md) retains
 prerequisite corrections before further feature expansion. ADR-0095 repairs
 exact journal metadata reads without changing tolerated page-record crash
-tails. Persistent constraints,
+tails. ADR-0097 corrects the production POSIX nonempty-regular-file existence
+policy through the canonical VFS query, preserving custom-backend recovery
+semantics. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

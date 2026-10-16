@@ -52,6 +52,9 @@ The following format and protocol constraints are compatibility requirements:
 11. The legacy zero page-size field uses a caller-supplied fallback page size.
 12. A valid super-journal trailer whose referenced super-journal no longer
     exists means the transaction committed and page playback must not occur.
+    Existence is supplied by the VFS; the production POSIX policy treats an
+    empty regular file as absent under ADR-0097, without imposing that policy
+    on custom backends.
 13. The subjournal is a pathless delete-on-close temporary file containing only
     a page number and page image per record.
 14. DELETE finalization closes the journal and removes its pathname.

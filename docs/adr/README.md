@@ -98,3 +98,4 @@ their corresponding implementation begins.
 92. [ADR-0092: Semantic Query Instances for Result References](0092-semantic-query-instances-for-result-references.md)
 95. [ADR-0095: Exact Rollback-Journal Metadata Reads](0095-exact-rollback-journal-metadata-reads.md)
 96. [ADR-0096: Computed Joined Rowid Probes](0096-computed-joined-rowid-probes.md)
+97. [ADR-0097: POSIX Nonempty Regular-File Existence](0097-posix-nonempty-regular-file-existence.md)

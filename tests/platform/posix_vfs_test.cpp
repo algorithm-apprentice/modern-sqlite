@@ -435,6 +435,126 @@ TEST(PosixVfs, HonorsExclusiveCreateSymlinkPolicyAndDeleteOnClose) {
   EXPECT_TRUE(pathless_temporary->file->WriteAt(View(payload), FileOffset{0}).has_value());
 }
 
+TEST(PosixVfs, TreatsEmptyRegularFilesAsAbsentForExistenceOnly) {
+  const TemporaryDirectory directory;
+  const std::string path = directory.Path("empty.sqlite");
+  PosixVfs vfs;
+  auto opened = vfs.Open(path, CreateMainDatabaseOptions());
+  ASSERT_TRUE(opened.has_value());
+
+  const auto empty_exists = vfs.Access(path, FileAccessQuery::kExists);
+  const auto readable = vfs.Access(path, FileAccessQuery::kRead);
+  const auto writable = vfs.Access(path, FileAccessQuery::kReadWrite);
+  ASSERT_TRUE(empty_exists.has_value());
+  ASSERT_TRUE(readable.has_value());
+  ASSERT_TRUE(writable.has_value());
+  EXPECT_FALSE(*empty_exists);
+  EXPECT_TRUE(*readable);
+  EXPECT_TRUE(*writable);
+
+  const std::array<std::uint8_t, 1> payload{0x7f};
+  ASSERT_TRUE(opened->file->WriteAt(View(payload), FileOffset{0}).has_value());
+  const auto nonempty_exists = vfs.Access(path, FileAccessQuery::kExists);
+  ASSERT_TRUE(nonempty_exists.has_value());
+  EXPECT_TRUE(*nonempty_exists);
+
+  ASSERT_TRUE(opened->file->Truncate(FileSize{0}).has_value());
+  const auto truncated_exists = vfs.Access(path, FileAccessQuery::kExists);
+  ASSERT_TRUE(truncated_exists.has_value());
+  EXPECT_FALSE(*truncated_exists);
+  EXPECT_TRUE(std::filesystem::exists(path));
+}
+
+TEST(PosixVfs, ChecksExistenceThroughSymlinksAndForNonregularPaths) {
+  const TemporaryDirectory directory;
+  const std::string path = directory.Path("target.sqlite");
+  const std::string alias = directory.Path("alias.sqlite");
+  const std::string dangling = directory.Path("dangling.sqlite");
+  const std::string fifo = directory.Path("fifo");
+  PosixVfs vfs;
+  auto opened = vfs.Open(path, CreateMainDatabaseOptions());
+  ASSERT_TRUE(opened.has_value());
+
+  std::error_code error;
+  std::filesystem::create_symlink(path, alias, error);
+  ASSERT_FALSE(error);
+  std::filesystem::create_symlink(directory.Path("missing.sqlite"), dangling, error);
+  ASSERT_FALSE(error);
+  ASSERT_EQ(0, ::mkfifo(fifo.c_str(), 0600));
+
+  const auto empty_alias = vfs.Access(alias, FileAccessQuery::kExists);
+  const auto missing_target = vfs.Access(dangling, FileAccessQuery::kExists);
+  const auto directory_exists = vfs.Access(directory.path(), FileAccessQuery::kExists);
+  const auto fifo_exists = vfs.Access(fifo, FileAccessQuery::kExists);
+  ASSERT_TRUE(empty_alias.has_value());
+  ASSERT_TRUE(missing_target.has_value());
+  ASSERT_TRUE(directory_exists.has_value());
+  ASSERT_TRUE(fifo_exists.has_value());
+  EXPECT_FALSE(*empty_alias);
+  EXPECT_FALSE(*missing_target);
+  EXPECT_TRUE(*directory_exists);
+  EXPECT_TRUE(*fifo_exists);
+
+  const std::array<std::uint8_t, 1> payload{0x7f};
+  ASSERT_TRUE(opened->file->WriteAt(View(payload), FileOffset{4096}).has_value());
+  const auto sparse_alias = vfs.Access(alias, FileAccessQuery::kExists);
+  ASSERT_TRUE(sparse_alias.has_value());
+  EXPECT_TRUE(*sparse_alias);
+}
+
+TEST(PosixVfs, PreservesNegativeAndUnexpectedAccessResults) {
+  const TemporaryDirectory directory;
+  const std::string path = directory.Path("file.sqlite");
+  const std::string loop = directory.Path("loop");
+  PosixVfs vfs;
+  auto opened = vfs.Open(path, CreateMainDatabaseOptions());
+  ASSERT_TRUE(opened.has_value());
+  std::error_code error;
+  std::filesystem::create_symlink(loop, loop, error);
+  ASSERT_FALSE(error);
+
+  for (const FileAccessQuery query :
+       {FileAccessQuery::kExists, FileAccessQuery::kRead, FileAccessQuery::kReadWrite}) {
+    SCOPED_TRACE(static_cast<int>(query));
+    const auto missing = vfs.Access(directory.Path("missing"), query);
+    const auto not_directory = vfs.Access(path + "/child", query);
+    const auto symlink_loop = vfs.Access(loop, query);
+    ASSERT_TRUE(missing.has_value());
+    ASSERT_TRUE(not_directory.has_value());
+    EXPECT_FALSE(*missing);
+    EXPECT_FALSE(*not_directory);
+    ASSERT_FALSE(symlink_loop.has_value());
+    EXPECT_EQ(ErrorCode::kIo, symlink_loop.error().code());
+    EXPECT_TRUE(symlink_loop.error().message().starts_with(
+        query == FileAccessQuery::kExists ? "stat failed" : "access failed"));
+  }
+}
+
+TEST(PosixVfs, ReportsAccessDeniedAsAnOrdinaryNegativeResult) {
+  const TemporaryDirectory directory;
+  const std::string parent = directory.Path("restricted");
+  const std::string path = (std::filesystem::path{parent} / "file.sqlite").string();
+  ASSERT_TRUE(std::filesystem::create_directory(parent));
+  PosixVfs vfs;
+  auto opened = vfs.Open(path, CreateMainDatabaseOptions());
+  ASSERT_TRUE(opened.has_value());
+  const std::array<std::uint8_t, 1> payload{0x7f};
+  ASSERT_TRUE(opened->file->WriteAt(View(payload), FileOffset{0}).has_value());
+
+  ASSERT_EQ(0, ::chmod(parent.c_str(), 0000));
+  const auto exists = vfs.Access(path, FileAccessQuery::kExists);
+  const auto readable = vfs.Access(path, FileAccessQuery::kRead);
+  const auto writable = vfs.Access(path, FileAccessQuery::kReadWrite);
+  const int restored = ::chmod(parent.c_str(), 0700);
+  ASSERT_EQ(0, restored);
+  ASSERT_TRUE(exists.has_value());
+  ASSERT_TRUE(readable.has_value());
+  ASSERT_TRUE(writable.has_value());
+  EXPECT_EQ(::geteuid() == 0, *exists);
+  EXPECT_EQ(::getuid() == 0, *readable);
+  EXPECT_EQ(::getuid() == 0, *writable);
+}
+
 TEST(PosixVfs, ResolvesPathsChecksAccessDeletesAndProvidesServices) {
   const TemporaryDirectory directory;
   const std::string real_directory = directory.Path("real");
@@ -458,6 +578,8 @@ TEST(PosixVfs, ResolvesPathsChecksAccessDeletesAndProvidesServices) {
   const std::string path = directory.Path("delete-me.sqlite");
   auto file = vfs.Open(path, CreateMainDatabaseOptions());
   ASSERT_TRUE(file.has_value());
+  const std::array<std::uint8_t, 1> payload{0x7f};
+  ASSERT_TRUE(file->file->WriteAt(View(payload), FileOffset{0}).has_value());
   file->file.reset();
 
   const auto exists = vfs.Access(path, FileAccessQuery::kExists);

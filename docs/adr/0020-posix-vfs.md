@@ -152,6 +152,10 @@ Modern LevelDB references:
   component is allowed while existing symlinks are resolved.
 - Access checks return `false` for ordinary missing or permission-denied
   results and reserve errors for unexpected operating-system failures.
+- Existence uses SQLite's Unix `stat` policy: a regular file must have
+  positive size; existing nonregular paths remain present. Symlinks follow
+  their targets. Readability and read-write checks remain independent of
+  file size. ADR-0097 records the recovery consequence and correction.
 - Randomness fills every requested byte from `getentropy` in bounded chunks.
 - Sleep retries interruption and uses a steady-clock deadline so reported
   elapsed time is never less than requested.
