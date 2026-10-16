@@ -34,6 +34,7 @@
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
+#include "src/lowering/plan_lowering_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
@@ -211,13 +212,14 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
-[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog() {
+[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog(bool name_not_null = false) {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 0, .generation = 17},
   };
-  input.definitions.push_back(
-      ParseTree("CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)"));
+  input.definitions.push_back(ParseTree(
+      name_not_null ? "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT NOT NULL, Score REAL)"
+                    : "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT, Score REAL)"));
   input.definitions.push_back(ParseTree("CREATE UNIQUE INDEX items_name ON Items(Name)"));
   input.definitions.push_back(ParseTree("CREATE INDEX items_score ON Items(Score DESC)"));
   input.definitions.push_back(ParseTree("CREATE INDEX items_id ON Items(id)"));
@@ -235,6 +237,8 @@ void RequireStatus(Status status) {
               CatalogColumnInput{
                   .name = "Name",
                   .declared_type = "TEXT",
+                  .not_null_conflict =
+                      name_not_null ? std::optional{ConflictAction::kDefault} : std::nullopt,
               },
               CatalogColumnInput{
                   .name = "Score",
@@ -2323,6 +2327,154 @@ TEST(PlanLowering, SeeksPastNullableMinMaxNullRegions) {
   EXPECT_EQ(IndexRangeEndMode::kExclusive, descending_max_ends.front());
 }
 
+TEST(PlanLowering, ClassifiesIndexRangeNullabilityFromCanonicalCatalogMetadata) {
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 0, .generation = 17},
+  };
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE nullable_pk(id INTEGER PRIMARY KEY DESC, value TEXT)"));
+  input.tables.push_back(CatalogTableInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "nullable_pk",
+      .root_page = RootPageId{2},
+      .columns =
+          {
+              CatalogColumnInput{
+                  .name = "id",
+                  .declared_type = "INTEGER",
+                  .primary_key = true,
+              },
+              CatalogColumnInput{.name = "value", .declared_type = "TEXT"},
+          },
+  });
+  input.indexes.push_back(CatalogIndexInput{
+      .definition = SchemaDefinitionId{0},
+      .name = "sqlite_autoindex_nullable_pk_1",
+      .table = TableId{0},
+      .root_page = RootPageId{3},
+      .origin = IndexOrigin::kPrimaryKey,
+      .unique = true,
+      .conflict_action = ConflictAction::kDefault,
+      .key_term_count = 1,
+      .terms =
+          {
+              CatalogIndexTerm{
+                  .target = ColumnId{0},
+                  .collation_name = "BINARY",
+                  .order = SortOrder::kDescending,
+              },
+              CatalogIndexTerm{.target = RowIdIndexTerm{}, .collation_name = "BINARY"},
+          },
+  });
+  auto created = CatalogSnapshot::Create(std::move(input));
+  ASSERT_TRUE(created.has_value()) << created.error().detail;
+  const CatalogSnapshotPtr nullable = IndexedMutationCatalog();
+  struct Case {
+    CatalogSnapshotPtr catalog;
+    ColumnId column;
+    bool nullable = false;
+  };
+  const std::array cases{
+      Case{.catalog = nullable, .column = ColumnId{1}, .nullable = true},
+      Case{.catalog = IndexedMutationCatalog(true), .column = ColumnId{1}},
+      Case{.catalog = nullable, .column = ColumnId{0}},
+      Case{.catalog = *created, .column = ColumnId{0}, .nullable = true},
+  };
+  for (const Case& test_case : cases) {
+    for (const SortOrder order : {SortOrder::kAscending, SortOrder::kDescending}) {
+      for (const PhysicalScanDirection direction :
+           {PhysicalScanDirection::kForward, PhysicalScanDirection::kReverse}) {
+        for (const bool prefix : {false, true}) {
+          SCOPED_TRACE(test_case.catalog->table(TableId{0}).name);
+          SCOPED_TRACE(test_case.column.value);
+          SCOPED_TRACE(static_cast<int>(order));
+          SCOPED_TRACE(static_cast<int>(direction));
+          SCOPED_TRACE(prefix);
+          PhysicalIndexScanNode index{
+              .table = TableId{0},
+              .range =
+                  PhysicalIndexRange{
+                      .column = test_case.column,
+                      .order = order,
+                      .upper = PhysicalIndexBound{.inclusive = false},
+                  },
+              .direction = direction,
+          };
+          if (prefix) {
+            index.equalities.push_back(PhysicalIndexEquality{});
+          }
+          auto resolved = lowering_internal::ResolveIndexTraversal(index, *test_case.catalog);
+          ASSERT_TRUE(resolved.has_value()) << resolved.error().detail;
+          const auto& traversal = *resolved;
+          const bool lower_starts =
+              (order == SortOrder::kAscending) == (direction == PhysicalScanDirection::kForward);
+          const PhysicalIndexBound* upper = &*index.range->upper;
+          EXPECT_EQ(lower_starts ? nullptr : upper, traversal.start.expression);
+          EXPECT_EQ(lower_starts ? upper : nullptr, traversal.end.expression);
+          EXPECT_EQ(test_case.nullable && lower_starts, traversal.start.implicit_null);
+          EXPECT_EQ(test_case.nullable && !lower_starts, traversal.end.implicit_null);
+          const std::size_t prefix_count = prefix ? 1U : 0U;
+          const std::size_t start_count =
+              prefix_count + static_cast<std::size_t>(traversal.start.has_range_term());
+          const std::size_t end_count =
+              prefix_count + static_cast<std::size_t>(traversal.end.has_range_term());
+          EXPECT_EQ(prefix_count + static_cast<std::size_t>(!lower_starts || test_case.nullable),
+                    start_count);
+          EXPECT_EQ(prefix_count + static_cast<std::size_t>(lower_starts || test_case.nullable),
+                    end_count);
+          EXPECT_EQ(start_count != 0U, traversal.has_start_key);
+          EXPECT_EQ(end_count != 0U, traversal.has_end_key);
+          EXPECT_EQ(!traversal.start.has_range_term(), traversal.start.inclusive());
+          EXPECT_EQ(!traversal.end.has_range_term(), traversal.end.inclusive());
+        }
+      }
+    }
+  }
+}
+
+TEST(PlanLowering, OmitsImplicitNullSeekForEffectiveNotNullRanges) {
+  for (const bool not_null : {false, true}) {
+    SCOPED_TRACE(not_null);
+    const BytecodeProgram program =
+        LowerOrThrow("SELECT Name FROM Items WHERE Name<?1", IndexedMutationCatalog(not_null));
+    ASSERT_EQ(1U, program.cursors().size());
+    EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[0].storage);
+    const auto seeks = IndexSeekModes(program);
+    EXPECT_EQ(not_null ? 0U : 1U, seeks.size());
+    if (!not_null) {
+      ASSERT_FALSE(seeks.empty());
+      EXPECT_EQ(IndexSeekMode::kGreater, seeks.front());
+    }
+    const auto end = std::ranges::find_if(program.instructions(), [](const Instruction& value) {
+      return std::holds_alternative<CheckIndexRangeInstruction>(value);
+    });
+    ASSERT_NE(program.instructions().end(), end);
+    EXPECT_EQ(1U, std::get<CheckIndexRangeInstruction>(*end).key_count);
+    EXPECT_EQ(IndexRangeEndMode::kExclusive, std::get<CheckIndexRangeInstruction>(*end).mode);
+  }
+}
+
+TEST(PlanLowering, RejectsInvalidCatalogIdentitiesDuringIndexTraversal) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  PhysicalIndexScanNode index{
+      .table = TableId{catalog->tables().size()},
+      .range =
+          PhysicalIndexRange{
+              .column = ColumnId{1},
+              .upper = PhysicalIndexBound{},
+          },
+  };
+  auto invalid_table = lowering_internal::ResolveIndexTraversal(index, *catalog);
+  ASSERT_FALSE(invalid_table.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kInternalInvariant, invalid_table.error().code);
+  index.table = TableId{0};
+  index.range->column = ColumnId{catalog->table(index.table).columns.size()};
+  auto invalid_column = lowering_internal::ResolveIndexTraversal(index, *catalog);
+  ASSERT_FALSE(invalid_column.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kInternalInvariant, invalid_column.error().code);
+}
+
 TEST(PlanLowering, LowersGroupedAggregateModifiers) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const BytecodeProgram distinct =
@@ -3349,83 +3501,108 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
   const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 173}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
-  const BytecodeProgram program = LowerOrThrow(
-      "SELECT p.id,b.id,c.id,b.payload,c.payload FROM probe_rows p JOIN key_rows b "
-      "ON b.numeric_key>=p.numeric_key AND b.numeric_key<=3 "
-      "JOIN key_rows c ON c.numeric_key>b.numeric_key AND c.numeric_key<=4 "
-      "ORDER BY p.id,b.id,c.id",
-      catalog);
-  std::vector<const SeekIndexInstruction*> seeks;
-  for (const Instruction& instruction : program.instructions()) {
-    if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
-      seeks.push_back(seek);
+  for (const bool implicit_end : {false, true}) {
+    SCOPED_TRACE(implicit_end);
+    // Unary plus keeps the lower predicate but excludes it from index matching.
+    const std::string barrier = implicit_end ? "+" : "";
+    const BytecodeProgram program = LowerOrThrow(
+        "SELECT p.id,b.id,c.id,b.payload,c.payload FROM probe_rows p JOIN key_rows b ON " +
+            barrier +
+            "b.numeric_key>=p.numeric_key AND b.numeric_key<=3 "
+            "JOIN key_rows c ON " +
+            barrier +
+            "c.numeric_key>b.numeric_key AND c.numeric_key<=4 "
+            "ORDER BY p.id,b.id,c.id",
+        catalog);
+    std::vector<const SeekIndexInstruction*> seeks;
+    for (const Instruction& instruction : program.instructions()) {
+      if (const auto* seek = std::get_if<SeekIndexInstruction>(&instruction); seek != nullptr) {
+        seeks.push_back(seek);
+      }
     }
-  }
-  ASSERT_EQ(2U, seeks.size());
-  ASSERT_EQ(5U, program.cursors().size());
-  EXPECT_LE(seeks[0]->first_key.value() + seeks[0]->key_count, seeks[1]->first_key.value());
-  for (const SeekIndexInstruction* seek : seeks) {
-    ASSERT_EQ(1U, seek->key_count);
-    const auto start =
-        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
-          const auto* candidate = std::get_if<SeekIndexInstruction>(&instruction);
-          return candidate != nullptr && candidate->cursor == seek->cursor;
-        });
-    const auto end =
-        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
-          const auto* candidate = std::get_if<CheckIndexRangeInstruction>(&instruction);
-          return candidate != nullptr && candidate->cursor == seek->cursor;
-        });
-    ASSERT_NE(program.instructions().end(), end);
-    const auto& check = std::get<CheckIndexRangeInstruction>(*end);
-    EXPECT_EQ(seek->first_key, check.first_key);
-    EXPECT_EQ(1U, check.key_count);
-    const auto start_position =
-        static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), start));
-    const auto end_position =
-        static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), end));
-    ASSERT_LT(start_position, end_position);
-    EXPECT_TRUE(std::ranges::any_of(
-        program.instructions().subspan(start_position + 1U, end_position - start_position - 1U),
-        [&](const Instruction& instruction) {
-          const auto* copy = std::get_if<CopyInstruction>(&instruction);
-          return copy != nullptr && copy->output == seek->first_key;
-        }));
-    const auto next =
-        std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
-          const auto* candidate = std::get_if<NextInstruction>(&instruction);
-          return candidate != nullptr && candidate->cursor == seek->cursor;
-        });
-    ASSERT_NE(program.instructions().end(), next);
-    EXPECT_EQ(end_position, std::get<NextInstruction>(*next).next_target.value());
-  }
-  constexpr std::array<std::array<std::int64_t, 3>, 15> kExpected{{
-      {1, 1, 4},
-      {1, 1, 5},
-      {1, 1, 7},
-      {1, 2, 4},
-      {1, 2, 5},
-      {1, 2, 7},
-      {1, 3, 4},
-      {1, 3, 5},
-      {1, 3, 7},
-      {1, 4, 5},
-      {1, 4, 7},
-      {1, 5, 7},
-      {2, 4, 5},
-      {2, 4, 7},
-      {2, 5, 7},
-  }};
-  const auto rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
-  ASSERT_EQ(kExpected.size(), rows.size());
-  for (std::size_t row = 0; row < rows.size(); ++row) {
-    ASSERT_EQ(5U, rows[row].size());
-    for (std::size_t column = 0; column < kExpected[row].size(); ++column) {
-      EXPECT_EQ(kExpected[row][column], rows[row][column].integer_value());
+    ASSERT_EQ(2U, seeks.size());
+    ASSERT_EQ(5U, program.cursors().size());
+    EXPECT_LE(seeks[0]->first_key.value() + seeks[0]->key_count, seeks[1]->first_key.value());
+    for (const SeekIndexInstruction* seek : seeks) {
+      ASSERT_EQ(1U, seek->key_count);
+      const auto start =
+          std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+            const auto* candidate = std::get_if<SeekIndexInstruction>(&instruction);
+            return candidate != nullptr && candidate->cursor == seek->cursor;
+          });
+      const auto end =
+          std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+            const auto* candidate = std::get_if<CheckIndexRangeInstruction>(&instruction);
+            return candidate != nullptr && candidate->cursor == seek->cursor;
+          });
+      ASSERT_NE(program.instructions().end(), end);
+      const auto& check = std::get<CheckIndexRangeInstruction>(*end);
+      EXPECT_EQ(seek->first_key, check.first_key);
+      EXPECT_EQ(1U, check.key_count);
+      if (implicit_end) {
+        EXPECT_EQ(IndexRangeEndMode::kExclusive, check.mode);
+      }
+      const auto start_position =
+          static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), start));
+      const auto end_position =
+          static_cast<std::size_t>(std::ranges::distance(program.instructions().begin(), end));
+      ASSERT_LT(start_position, end_position);
+      EXPECT_TRUE(std::ranges::any_of(
+          program.instructions().subspan(start_position + 1U, end_position - start_position - 1U),
+          [&](const Instruction& instruction) {
+            if (implicit_end) {
+              const auto* load = std::get_if<LoadConstantInstruction>(&instruction);
+              return load != nullptr && load->output == seek->first_key &&
+                     program.constant(load->constant).type() == SqlValueType::kNull;
+            }
+            const auto* copy = std::get_if<CopyInstruction>(&instruction);
+            return copy != nullptr && copy->output == seek->first_key;
+          }));
+      if (implicit_end) {
+        EXPECT_FALSE(std::ranges::any_of(
+            program.instructions().subspan(start_position + 1U, end_position - start_position - 1U),
+            [&](const Instruction& instruction) {
+              const auto* affinity = std::get_if<ApplyAffinityInstruction>(&instruction);
+              return affinity != nullptr &&
+                     (affinity->input == seek->first_key || affinity->output == seek->first_key);
+            }));
+      }
+      const auto next =
+          std::ranges::find_if(program.instructions(), [&](const Instruction& instruction) {
+            const auto* candidate = std::get_if<NextInstruction>(&instruction);
+            return candidate != nullptr && candidate->cursor == seek->cursor;
+          });
+      ASSERT_NE(program.instructions().end(), next);
+      EXPECT_EQ(end_position, std::get<NextInstruction>(*next).next_target.value());
     }
-    EXPECT_EQ(SqlValueType::kText, rows[row][3].type());
-    EXPECT_EQ(SqlValueType::kText, rows[row][4].type());
+    constexpr std::array<std::array<std::int64_t, 3>, 15> kExpected{{
+        {1, 1, 4},
+        {1, 1, 5},
+        {1, 1, 7},
+        {1, 2, 4},
+        {1, 2, 5},
+        {1, 2, 7},
+        {1, 3, 4},
+        {1, 3, 5},
+        {1, 3, 7},
+        {1, 4, 5},
+        {1, 4, 7},
+        {1, 5, 7},
+        {2, 4, 5},
+        {2, 4, 7},
+        {2, 5, 7},
+    }};
+    const auto rows =
+        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    ASSERT_EQ(kExpected.size(), rows.size());
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+      ASSERT_EQ(5U, rows[row].size());
+      for (std::size_t column = 0; column < kExpected[row].size(); ++column) {
+        EXPECT_EQ(kExpected[row][column], rows[row][column].integer_value());
+      }
+      EXPECT_EQ(SqlValueType::kText, rows[row][3].type());
+      EXPECT_EQ(SqlValueType::kText, rows[row][4].type());
+    }
   }
 }
 
@@ -3831,7 +4008,8 @@ void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
 
 TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
   for (const std::string_view predicate :
-       {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key"}) {
+       {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key",
+        "b.text_key<=p.text_key AND b.id>=4 AND b.id<=5"}) {
     SCOPED_TRACE(predicate);
     ExerciseJoinedIndexSuffixFailures(predicate);
   }

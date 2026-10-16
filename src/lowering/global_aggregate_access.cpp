@@ -129,8 +129,8 @@ class GlobalAggregateAccessEmitter final {
     return services_.EmitIndexKeyExpressions(index, null_target);
   }
 
-  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound) {
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(const PhysicalIndexScanNode& index,
+                                                                IndexTraversalBound range_bound) {
     return services_.EmitIndexKeyBlock(index, range_bound);
   }
 
@@ -333,7 +333,11 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(
           InternalFailure("global aggregate covering index metadata is invalid"));
     }
-    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
+    if (!resolved_traversal.has_value()) {
+      return std::unexpected(std::move(resolved_traversal.error()));
+    }
+    const IndexTraversal& traversal = *resolved_traversal;
     const bool has_start_key = traversal.has_start_key;
     const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
@@ -618,7 +622,11 @@ class GlobalAggregateAccessEmitter final {
     }
     const CursorId index_cursor = AssumeValue(index_cursor_);
     const CursorId table_cursor = AssumeValue(cursor_);
-    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
+    if (!resolved_traversal.has_value()) {
+      return std::unexpected(std::move(resolved_traversal.error()));
+    }
+    const IndexTraversal& traversal = *resolved_traversal;
     const bool has_start_key = traversal.has_start_key;
     const bool has_end_key = traversal.has_end_key;
     const bool rejects_null = std::ranges::any_of(index.equalities,
@@ -1020,7 +1028,7 @@ class GlobalAggregateAccessEmitter final {
       return std::unexpected(InternalFailure("indexed MIN/MAX NULL key is unavailable"));
     }
     if (!index.equalities.empty()) {
-      auto equality_count = EmitIndexKeyBlock(index, nullptr);
+      auto equality_count = EmitIndexKeyBlock(index, {});
       if (!equality_count.has_value()) {
         return std::unexpected(std::move(equality_count.error()));
       }
@@ -1443,7 +1451,11 @@ class GlobalAggregateAccessEmitter final {
         index.covering ? AssumeValue(cursor_) : AssumeValue(index_cursor_);
     const std::optional<CursorId> table_cursor =
         index.covering ? std::nullopt : std::optional<CursorId>{AssumeValue(cursor_)};
-    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
+    if (!resolved_traversal.has_value()) {
+      return std::unexpected(std::move(resolved_traversal.error()));
+    }
+    const IndexTraversal& traversal = *resolved_traversal;
     auto runtime = ResolveIndexedMinMaxRuntime();
     if (!runtime.has_value()) {
       return std::unexpected(std::move(runtime.error()));

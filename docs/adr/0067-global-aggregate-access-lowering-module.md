@@ -112,6 +112,10 @@ seek/end-check emission through this boundary. The global module retains
 its access schedule and specialized MIN/MAX NULL policy; the service
 interface and cursor ownership do not expand.
 
+ADR-0094 widens only the existing borrowed key-boundary argument so the same
+service can emit an implicit exclusive NULL range boundary. It adds no
+service, cursor owner, or aggregate-specific key emitter.
+
 Virtual dispatch is confined to compile-time plan lowering. The interface and
 input record allocate no memory, so existing allocation and OOM contracts
 remain exact.

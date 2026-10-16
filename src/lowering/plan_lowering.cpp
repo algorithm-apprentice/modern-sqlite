@@ -36,6 +36,7 @@ using lowering_internal::EmitIndexTableLookup;
 using lowering_internal::EmitIndexTraversalEndCheck;
 using lowering_internal::EmitIndexTraversalSeek;
 using lowering_internal::IndexTraversal;
+using lowering_internal::IndexTraversalBound;
 using lowering_internal::InternalFailure;
 using lowering_internal::ProgramFailure;
 using lowering_internal::ResolveIndexTraversal;
@@ -6898,24 +6899,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound) override {
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound) override {
     if (!index_key_first_.has_value()) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
     return EmitIndexKeyBlock(index, range_bound, *index_key_first_, index_key_capacity_);
   }
 
-  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, const PhysicalIndexBound* range_bound, RegisterId first,
-      std::uint32_t capacity) {
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(const PhysicalIndexScanNode& index,
+                                                                IndexTraversalBound range_bound,
+                                                                RegisterId first,
+                                                                std::uint32_t capacity) {
     return EmitIndexKeyBlock(index.equalities, index.range.has_value() ? &*index.range : nullptr,
                              range_bound, first, capacity);
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
       std::span<const PhysicalIndexEquality> equalities, const PhysicalIndexRange* range,
-      const PhysicalIndexBound* range_bound, RegisterId first, std::uint32_t capacity) {
-    const std::size_t count = equalities.size() + static_cast<std::size_t>(range_bound != nullptr);
+      IndexTraversalBound range_bound, RegisterId first, std::uint32_t capacity) {
+    if ((range_bound.expression != nullptr && range_bound.implicit_null) ||
+        (range_bound.has_range_term() && range == nullptr)) {
+      return std::unexpected(InternalFailure("covering index range boundary is invalid"));
+    }
+    const std::size_t count =
+        equalities.size() + static_cast<std::size_t>(range_bound.has_range_term());
     if (count == 0U || count > capacity) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
@@ -6943,12 +6950,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(copied.error()));
       }
     }
-    if (range_bound != nullptr) {
-      if (range == nullptr) {
-        return std::unexpected(InternalFailure("covering index range bound has no range metadata"));
-      }
-      if (auto copied = copy_term(range_bound->key, range->affinity); !copied.has_value()) {
+    if (range_bound.expression != nullptr) {
+      if (auto copied = copy_term(range_bound.expression->key, range->affinity);
+          !copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
+      }
+    } else if (range_bound.implicit_null) {
+      auto null = EnsureNullConstant();
+      if (!null.has_value()) {
+        return std::unexpected(std::move(null.error()));
+      }
+      const RegisterId destination{first.value() + static_cast<std::uint32_t>(offset)};
+      if (auto loaded = Append(LoadConstantInstruction{.constant = *null, .output = destination});
+          !loaded.has_value()) {
+        return std::unexpected(std::move(loaded.error()));
       }
     }
     return static_cast<std::uint32_t>(count);
@@ -6958,7 +6973,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!cursor_.has_value()) {
       return std::unexpected(InternalFailure("covering index scan has no cursor"));
     }
-    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
+    if (!resolved_traversal.has_value()) {
+      return std::unexpected(std::move(resolved_traversal.error()));
+    }
+    const IndexTraversal& traversal = *resolved_traversal;
     const bool reverse = index.direction == PhysicalScanDirection::kReverse;
     const bool has_start_key = traversal.has_start_key;
     const bool has_end_key = traversal.has_end_key;
@@ -7145,7 +7164,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const CursorId index_cursor = AssumeValue(index_cursor_);
     const CursorId table_cursor = AssumeValue(cursor_);
-    const IndexTraversal traversal = ResolveIndexTraversal(index);
+    auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
+    if (!resolved_traversal.has_value()) {
+      return std::unexpected(std::move(resolved_traversal.error()));
+    }
+    const IndexTraversal& traversal = *resolved_traversal;
     const bool reverse = index.direction == PhysicalScanDirection::kReverse;
     const bool has_start_key = traversal.has_start_key;
     const bool has_end_key = traversal.has_end_key;
@@ -9433,7 +9456,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!source.index_key_first.has_value() || source.index_key_capacity == 0U) {
         return std::unexpected(InternalFailure("joined index has no retained prefix registers"));
       }
-      index_traversal = ResolveIndexTraversal(*index_scan);
+      auto resolved_traversal = ResolveIndexTraversal(*index_scan, *bound_select_->catalog());
+      if (!resolved_traversal.has_value()) {
+        return std::unexpected(std::move(resolved_traversal.error()));
+      }
+      index_traversal = *resolved_traversal;
       if (index_traversal->has_end_key) {
         auto label = CreateLabel();
         if (!label.has_value()) {
@@ -9522,8 +9549,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !keys.has_value()) {
         return keys;
       }
-      auto count = EmitIndexKeyBlock(automatic->equalities, nullptr, nullptr,
-                                     *source.index_key_first, source.index_key_capacity);
+      auto count = EmitIndexKeyBlock(automatic->equalities, nullptr, {}, *source.index_key_first,
+                                     source.index_key_capacity);
       if (!count.has_value()) {
         return std::unexpected(std::move(count.error()));
       }
@@ -9559,7 +9586,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(rewound.error()));
         }
       }
-      if (traversal.end != nullptr) {
+      if (traversal.end.has_range_term()) {
         auto count =
             EmitIndexKeyBlock(*index_scan, traversal.end, first, source.index_key_capacity);
         if (!count.has_value()) {

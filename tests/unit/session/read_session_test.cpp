@@ -2356,6 +2356,120 @@ TEST(ReadSession, MatchesIndependentJoinedIndexNullAndPreservationModels) {
   }
 }
 
+TEST(ReadSession, RejectsNullKeysFromUpperOnlyIndexRanges) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT count(*) FROM key_rows WHERE numeric_key<3");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(1U, statement.row().size());
+  EXPECT_EQ(4, statement.row()[0].integer_value());
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, RebindsUpperOnlyRangesAcrossNullablePrefixesAndSuspension) {
+  const std::array<std::optional<std::int64_t>, 12> numeric_keys{
+      1, 1, 1, 2, 3, std::nullopt, 4, std::nullopt, 5, 6, 6, std::nullopt,
+  };
+  struct Prefix {
+    std::string_view predicate;
+    bool is_null_prefix = false;
+  };
+  const std::array prefixes{
+      Prefix{.predicate = ""},
+      Prefix{.predicate = "default_text='fallback' AND "},
+      Prefix{.predicate = "text_key IS NULL AND ", .is_null_prefix = true},
+  };
+  struct Key {
+    SqlValue value;
+    std::optional<std::int64_t> upper;
+  };
+  const std::array keys{
+      Key{.value = SqlValue{}, .upper = std::nullopt},
+      Key{.value = SqlValue::Integer(3), .upper = 3},
+      Key{.value = SqlValue::Text("3"), .upper = 3},
+      Key{.value = SqlValue::Integer(5), .upper = 5},
+      Key{.value = SqlValue::Integer(0), .upper = 0},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const bool noncovering : {false, true}) {
+    for (const Prefix& prefix : prefixes) {
+      SCOPED_TRACE(prefix.predicate);
+      SCOPED_TRACE(noncovering);
+      ReadStatement statement =
+          PrepareStatement(session, "SELECT id" + std::string{noncovering ? ",payload" : ""} +
+                                        " FROM key_rows WHERE " + std::string{prefix.predicate} +
+                                        "numeric_key<?1 ORDER BY id");
+      for (const bool complete : {false, true}) {
+        for (const Key& key : keys) {
+          std::vector<std::int64_t> expected;
+          for (std::size_t index = 0; index < numeric_keys.size(); ++index) {
+            if (key.upper.has_value() && numeric_keys[index].has_value() &&
+                *numeric_keys[index] < *key.upper &&
+                (!prefix.is_null_prefix || index == 5U || index == 6U || index == 11U)) {
+              expected.push_back(static_cast<std::int64_t>(index + 1U));
+            }
+          }
+          RequireStatus(statement.Bind(1, key.value));
+          for (const std::int64_t id : expected) {
+            ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+            EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+            if (noncovering) {
+              ASSERT_EQ(2U, statement.row().size());
+              EXPECT_EQ(SqlValueType::kText, statement.row()[1].type());
+            }
+            if (!complete) {
+              break;
+            }
+          }
+          if (complete || expected.empty()) {
+            EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+          }
+          RequireStatus(statement.Reset());
+        }
+      }
+    }
+  }
+}
+
+TEST(ReadSession, ExcludesRangeNullsFromGroupedHavingAndIndexedExtrema) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const std::string_view sql :
+       {"SELECT numeric_key,count(*) FROM key_rows WHERE numeric_key<3 "
+        "GROUP BY numeric_key ORDER BY numeric_key",
+        "SELECT numeric_key,count(*) FROM key_rows GROUP BY numeric_key "
+        "HAVING numeric_key<3 ORDER BY numeric_key"}) {
+    SCOPED_TRACE(sql);
+    ReadStatement grouped = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(grouped.Step()));
+    EXPECT_EQ(1, IntegerValue(grouped.row()[0]));
+    EXPECT_EQ(3, IntegerValue(grouped.row()[1]));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(grouped.Step()));
+    EXPECT_EQ(2, IntegerValue(grouped.row()[0]));
+    EXPECT_EQ(1, IntegerValue(grouped.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(grouped.Step()));
+  }
+  for (const std::string_view prefix : {"", "default_text='fallback' AND "}) {
+    for (const bool maximum : {false, true}) {
+      const std::string sql = "SELECT " + std::string{maximum ? "max" : "min"} +
+                              "(numeric_key) FROM key_rows WHERE " + std::string{prefix} +
+                              "numeric_key<3";
+      SCOPED_TRACE(sql);
+      ReadStatement extremum = PrepareStatement(session, sql);
+      ASSERT_EQ(ReadStep::kRow, TakeValue(extremum.Step()));
+      EXPECT_EQ(maximum ? 2 : 1, IntegerValue(extremum.row()[0]));
+      EXPECT_EQ(ReadStep::kDone, TakeValue(extremum.Step()));
+    }
+  }
+  ReadStatement empty = PrepareStatement(session,
+                                         "SELECT min(numeric_key),payload FROM key_rows "
+                                         "WHERE numeric_key<0");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(empty.Step()));
+  ASSERT_EQ(2U, empty.row().size());
+  EXPECT_EQ(SqlValueType::kNull, empty.row()[0].type());
+  EXPECT_EQ(SqlValueType::kNull, empty.row()[1].type());
+  EXPECT_EQ(ReadStep::kDone, TakeValue(empty.Step()));
+}
+
 TEST(ReadSession, RebindsJoinedRangesAcrossNullContradictoryAndTypedKeys) {
   ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
   ReadStatement statement =
@@ -2405,7 +2519,8 @@ TEST(ReadSession, RebindsJoinedRangesAcrossNullContradictoryAndTypedKeys) {
 
 TEST(ReadSession, DefersJoinedIndexReadsForZeroLimitAndRecoversTypedReadFailure) {
   for (const std::string_view predicate :
-       {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key"}) {
+       {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key",
+        "b.text_key<=p.text_key AND b.id>=4 AND b.id<=5"}) {
     SCOPED_TRACE(predicate);
     const auto state = std::make_shared<TemporaryFileState>();
     ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),

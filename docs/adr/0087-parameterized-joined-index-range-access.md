@@ -107,6 +107,13 @@ Initialize the entire retained capacity to NULL before any preserving or
 replay path can bypass normal positioning, including the range slot.
 Do not use the pooled ordinary workspace as retained joined state.
 
+ADR-0094 also represents an upper-only nullable range's implicit exclusive
+NULL boundary through this same borrowed traversal and key-block mechanism.
+When the implicit boundary resolves to the physical end, it occupies the
+existing retained range slot before the backedge. An equality-only end still
+reuses its retained prefix without another copy. Complete outer replay
+continues to ignore normal bounds.
+
 ### 4. Preserve the accepted source and replay state machine
 
 Runtime NULL range keys take the existing unpositioned no-match edge. A

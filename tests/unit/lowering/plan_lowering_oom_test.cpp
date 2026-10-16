@@ -602,6 +602,21 @@ int main() try {
                        "SELECT Name AS x,count(*) FROM Items GROUP BY Name "
                        "HAVING (SELECT x) IS NOT NULL"),
   };
+  const std::array<PhysicalPlan, 8> null_range_plans{
+      PhysicalIndexFixture(indexed_catalog, "SELECT Name FROM Items WHERE Name<?1"),
+      PhysicalIndexFixture(indexed_catalog, "SELECT Payload FROM Items WHERE Name<?1"),
+      AggregateFixture(indexed_catalog, "SELECT count(*) FROM Items WHERE Name<?1"),
+      AggregateFixture(indexed_catalog, "SELECT max(Name) FROM Items WHERE Name<?1"),
+      AggregateFixture(indexed_catalog,
+                       "SELECT Name,count(*) FROM Items WHERE Name<?1 GROUP BY Name"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT (SELECT Payload FROM Items WHERE Name<?1),"
+                      "EXISTS(SELECT 1 FROM Items WHERE Name<?2)"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT a.id,b.Payload FROM Items a LEFT JOIN Items b ON b.Name<a.Name"),
+      AggregateFixture(indexed_catalog,
+                       "SELECT count(b.Payload) FROM Items a FULL JOIN Items b ON b.Name<a.Name"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -677,6 +692,11 @@ int main() try {
   for (const PhysicalPlan& correlated_plan : correlated_plans) {
     if (!verify_oom(correlated_plan, 256U)) {
       return 3;
+    }
+  }
+  for (const PhysicalPlan& range_plan : null_range_plans) {
+    if (!verify_oom(range_plan, 256U)) {
+      return 1;
     }
   }
 

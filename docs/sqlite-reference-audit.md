@@ -7,9 +7,9 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5, D1, and D3 are corrected and verified by merged PRs #205,
-  #204, and #206. ADR-0098 owns D2's bounded correction and delivery
-  requirements; other findings remain open unless their own evidence states
+- Follow-up: A5, D1, D3, and D2 are corrected and verified by merged PRs #205,
+  #204, #206, and #207. The preserved ADR-0094 now owns A1's bounded
+  correction; other findings remain open unless their own evidence states
   otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
@@ -141,8 +141,7 @@ crash-tail behavior.
 ### D2. Implicit commit rollback leaves stale statement success
 
 Priority: **high observable lifecycle correctness**.
-Correction: **ADR-0098**, reusing canonical token retirement with its own
-review and delivery gates.
+Status: **corrected by ADR-0098/PR #207**.
 
 If an implicit DML VM completes but commit fails before durability, the
 coordinator can successfully roll back the transaction and invalidate its
@@ -168,8 +167,11 @@ public and allocation regressions failed before the correction and now pass.
 The 27 focused cases and complete Debug suite pass. Seven paired native
 lifecycle transcripts also match changes, rowid, autocommit, rows/schema,
 reset/finalize errors, and actual reexecution; native accepts all final
-Modern images and all fourteen integrity checks pass. The remaining full
-qualification and exact-head gates are still required for delivery.
+Modern images and all fourteen integrity checks pass. All local gates and
+nine first-head hosted checks passed, including the unchanged original model
+in 6.33 seconds under its ten-second deadline. Merged commit
+`27e8a29a9e26ebde29f962d8745ee6069690ef87` has the exact Sol-accepted
+tree `24c7054492585d8a3c00c148197bd4b7e34154c3`.
 
 ### D3. Empty POSIX super-journal files have the wrong existence meaning
 
@@ -210,6 +212,8 @@ tree `fd6d37552664b798197fc01b3cc4b7b53d978de8`.
 ### A1. Upper-only index ranges admit SQL NULL keys
 
 Priority: **high, silent wrong results**.
+Correction: **resumed ADR-0094**, with its own review and delivery gates
+after the completed durability/lifecycle prerequisites.
 
 Using the unchanged joined-index fixture:
 
@@ -235,6 +239,15 @@ not enforce SQL's NULL-rejecting range semantics.
 Repair the canonical traversal/key-block mechanism for ordinary covering,
 noncovering, grouped/global aggregate, private-query, and joined consumers.
 Do not patch only HAVING or reintroduce a private comparator.
+
+ADR-0094 now implements that shared borrowed NULL boundary and key emission.
+The pre-production fixture red observed `4` versus `7`; all 35 new native
+shard cases now pass without changing old records, fixtures, profiles, or
+the 512-case cap. Current Debug passes 1,480 tests. An exact replay of all
+2,511 frozen audit instances resolves 31 old differences and introduces no
+new or changed-unresolved outcome; native replay is unchanged. Remaining
+integrated qualification and exact-head gates are still required for
+delivery.
 
 ### A2. Qualified left wildcards lose native RIGHT/FULL USING values
 
@@ -433,12 +446,12 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1, A5, and D3 have merged with exact-head hosted proof, and the preserved
-binder foundation is integrated. D2 uses ADR-0098's canonical session
-completion correction. Prioritize the remaining durable/lifecycle and
-silent-result defects according to their reproduced scope. The NULL-range
-design has passed GPT-5.6 Sol review and remains preserved for its own ordered
-correction.
+D1, A5, D3, and D2 have merged with exact-head hosted proof, and the preserved
+binder foundation is integrated. Resume A1 through ADR-0094's canonical
+range correction. Prioritize the remaining durable/lifecycle and
+silent-result defects according to their reproduced scope. The earlier
+NULL-range design is now resumed under ADR-0094; the independent page-view
+optimization remains preserved and is not treated as a delivered correction.
 
 Conditional predicate and ON/access scheduling need bounded designs before
 arithmetic admission is broadened. Preserve each source-derived versus
