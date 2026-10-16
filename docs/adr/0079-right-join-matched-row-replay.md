@@ -61,6 +61,11 @@ the established visible slot order. Unique qualified names still bind their
 actual physical source. The existing generated-name resolver handles
 qualifying merged duplicates; unrelated matches remain ambiguous.
 
+ADR-0099 distinguishes explicit qualified names from generated wildcard
+references to the left of later preserving/USING boundaries. The latter use
+canonical unqualified resolution when native requires it, without changing
+physical `a.column` binding.
+
 Reuse ordinary bound leaves, alias references, metadata, and expression
 properties. Do not add a second column/value container or an unused FULL
 coalescing variant in this package.

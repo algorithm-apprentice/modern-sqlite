@@ -1394,6 +1394,40 @@ TEST(Binder, UsesFirstVisibleLeftUsingColumnAndRejectsMissingOrIllegalClauses) {
             std::get<BoundColumnExpression>(ResultExpression(explicit_rowid, 0).payload).column);
 }
 
+TEST(Binder, ResolvesPreservedWildcardKeysWithoutChangingExplicitPhysicalReferences) {
+  const auto catalog = TestCatalog();
+  const std::size_t columns = catalog->table(TableId{0}).columns.size();
+  for (const bool full : {false, true}) {
+    SCOPED_TRACE(full);
+    const BoundSelect select =
+        BindOrThrow("SELECT a.*,a.id,b.id FROM Items a " +
+                        std::string{full ? "FULL JOIN" : "RIGHT JOIN"} + " Items b USING(id)",
+                    catalog);
+    ASSERT_EQ(columns + 2U, select.result_columns().size());
+    const BoundSourceColumnId right{
+        static_cast<std::uint32_t>(select.table_sources()[1].source_column_begin)};
+    const auto* reference =
+        std::get_if<BoundAliasReferenceExpression>(&ResultExpression(select, 0).payload);
+    ASSERT_NE(nullptr, reference);
+    const BoundExpression& value = select.expression(reference->target);
+    if (full) {
+      const auto* coalesce = std::get_if<BoundCoalesceExpression>(&value.payload);
+      ASSERT_NE(nullptr, coalesce);
+      EXPECT_EQ(2U, coalesce->arguments.size());
+      EXPECT_EQ(std::nullopt, select.result_columns()[0].declared_type);
+    } else {
+      EXPECT_EQ(right, std::get<BoundColumnExpression>(value.payload).column);
+      EXPECT_EQ("INTEGER", select.result_columns()[0].declared_type);
+    }
+    EXPECT_EQ("id", select.result_columns()[0].name);
+    EXPECT_EQ(BoundSourceColumnId{0},
+              std::get<BoundColumnExpression>(ResultExpression(select, columns).payload).column);
+    EXPECT_EQ(
+        right,
+        std::get<BoundColumnExpression>(ResultExpression(select, columns + 1U).payload).column);
+  }
+}
+
 TEST(Binder, PublishesRightMergedValuesWithoutChangingUniquePhysicalQualifiers) {
   const BoundSelect bound =
       BindOrThrow("SELECT id,a.id,b.id FROM Items a RIGHT JOIN Items b USING(id)", TestCatalog());

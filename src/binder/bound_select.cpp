@@ -3897,7 +3897,7 @@ class StatementBinder final {
       const Expression& expression = tree_.expression(result.expression);
       if (const auto* wildcard = std::get_if<WildcardExpression>(&expression.payload);
           wildcard != nullptr) {
-        BindExpected<void> expanded = ExpandWildcard(*wildcard, expression.span);
+        BindExpected<void> expanded = ExpandWildcard(*wildcard, expression.span, select.from);
         if (!expanded.has_value()) {
           return std::unexpected(std::move(expanded.error()));
         }
@@ -4440,7 +4440,7 @@ class StatementBinder final {
     if (const auto* column = std::get_if<BoundColumnExpression>(&bound.payload);
         column != nullptr) {
       const BoundSourceColumn& source = impl_->source_columns[column->column.value()];
-      result.name = std::string{source.name};
+      result.name = std::string{synthetic_name.value_or(source.name)};
       return;
     }
     if (const auto* rowid = std::get_if<BoundRowIdExpression>(&bound.payload); rowid != nullptr) {
@@ -4453,22 +4453,45 @@ class StatementBinder final {
               table.rowid_alias->value < owner->source_column_count) {
             const BoundSourceColumn& source =
                 impl_->source_columns[owner->source_column_begin + table.rowid_alias->value];
-            result.name = std::string{source.name};
+            result.name = std::string{synthetic_name.value_or(source.name)};
             return;
           }
         }
       }
-      result.name = "rowid";
+      result.name = std::string{synthetic_name.value_or("rowid")};
       return;
     }
     result.name = std::string{synthetic_name.value_or(SpanText(span))};
   }
 
+  [[nodiscard]] bool WildcardUsesJoinedScope(std::span<const TableSource> from, std::size_t owner,
+                                             std::string_view name) const noexcept {
+    bool right_boundary = false;
+    bool using_name = false;
+    for (std::size_t index = owner + 1U; index < from.size(); ++index) {
+      right_boundary = right_boundary || SourceJoinPreservesRight(from[index].join);
+      if (!using_name) {
+        const auto column = FindSourceColumn(source_states_[index], name);
+        using_name =
+            column.has_value() && impl_->source_columns[column->value()].merged_into.has_value();
+      }
+      if (right_boundary && using_name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
-                                                  SourceSpan span) {
+                                                  SourceSpan span,
+                                                  std::span<const TableSource> from) {
     if (source_states_.empty()) {
       return std::unexpected(
           BinderError(BindErrorCode::kNoTablesSpecified, span, "no tables specified"));
+    }
+    if (from.size() != source_states_.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "wildcard source metadata is inconsistent"));
     }
     std::optional<DecodedNameParts> qualifier;
     if (wildcard.qualifier.has_value()) {
@@ -4503,7 +4526,8 @@ class StatementBinder final {
                                          "too many columns in result set"));
     }
 
-    for (const SourceState& owner : source_states_) {
+    for (std::size_t owner_index = 0; owner_index < source_states_.size(); ++owner_index) {
+      const SourceState& owner = source_states_[owner_index];
       if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
         continue;
       }
@@ -4549,10 +4573,13 @@ class StatementBinder final {
           }
           resolved = std::optional{*value};
         } else {
-          resolved = ResolveSourceName(
-              value_column->name, span,
-              SourceQualification{.schema = catalog_->schema_name(), .name = source_name},
-              source_states_, impl_->table_sources);
+          const std::optional<SourceQualification> qualification =
+              qualifier.has_value() && WildcardUsesJoinedScope(from, owner_index, column.name)
+                  ? std::nullopt
+                  : std::optional{SourceQualification{.schema = catalog_->schema_name(),
+                                                      .name = source_name}};
+          resolved = ResolveSourceName(value_column->name, span, qualification, source_states_,
+                                       impl_->table_sources);
         }
         if (!resolved.has_value()) {
           return std::unexpected(std::move(resolved.error()));

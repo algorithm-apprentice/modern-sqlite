@@ -160,6 +160,9 @@ semantics. ADR-0098 retires session-owned pending completion after canonical
 automatic rollback without discarding valid durable-cleanup retries.
 ADR-0094 corrects nullable upper-only range traversal through the same
 borrowed index boundaries and existing key blocks in every range consumer.
+ADR-0099 corrects generated wildcard publication across preserving USING
+boundaries through the canonical joined namespace without changing explicit
+physical qualification.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

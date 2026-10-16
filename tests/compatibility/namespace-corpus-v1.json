@@ -1,0 +1,1166 @@
+{
+  "cases": [
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-right-id-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061205249474854204a4f494e206b65795f726f77732062205553494e472869642920574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-full-id-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f777320612046554c4c204a4f494e206b65795f726f77732062205553494e472869642920574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-right-text-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e746578745f6b65792c622e746578745f6b65792046524f4d206b65795f726f77732061205249474854204a4f494e2070726f62655f726f77732062205553494e4728746578745f6b65792920574845524520622e69643d32204f5244455220425920612e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-full-text-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e746578745f6b65792c622e746578745f6b65792046524f4d206b65795f726f777320612046554c4c204a4f494e2070726f62655f726f77732062205553494e4728746578745f6b65792920574845524520622e69643d32204f5244455220425920612e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-right-physical-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061205249474854204a4f494e206b65795f726f77732062205553494e472869642920574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-full-physical-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e2a2c612e69642c622e69642046524f4d2070726f62655f726f777320612046554c4c204a4f494e206b65795f726f77732062205553494e472869642920574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-left-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e472869642920574845524520612e69643d36"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-inner-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061204a4f494e206b65795f726f77732062205553494e472869642920574845524520612e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-natural-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061204e41545552414c205249474854204a4f494e206b65795f726f7773206220574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-natural-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061204e41545552414c2046554c4c204a4f494e206b65795f726f7773206220574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-natural-left-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061204e41545552414c204c454654204a4f494e206b65795f726f7773206220574845524520612e69643d36"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-on-only-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d2070726f62655f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e20612e69643d622e696420574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-right-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e4728696429205249474854204a4f494e2070726f62655f726f77732063205553494e472869642920574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-full-prefix",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f777320612046554c4c204a4f494e206b65795f726f77732062205553494e47286964292046554c4c204a4f494e2070726f62655f726f77732063205553494e472869642920574845524520622e69643d3132"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-right-suppressed-owner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e4728696429205249474854204a4f494e2070726f62655f726f77732063205553494e472869642920574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-full-suppressed-owner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e47286964292046554c4c204a4f494e2070726f62655f726f77732063205553494e472869642920574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-earlier-using-later-on-ambiguity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e4728696429205249474854204a4f494e2070726f62655f726f77732063204f4e20622e69643d632e696420574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-on-qualified-control",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e2a2c612e69642c622e69642c632e69642046524f4d20656d7074795f70726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e4728696429205249474854204a4f494e2070726f62655f726f77732063204f4e20622e69643d632e696420574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-different-using-ambiguity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2046524f4d2070726f62655f726f77732061204c454654204a4f494e206b65795f726f77732062205553494e4728696429205249474854204a4f494e2070726f62655f726f77732063205553494e4728746578745f6b65792920574845524520632e69643d32"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-unrelated-duplicate-qualifier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420712e2a2046524f4d2070726f62655f726f77732071204a4f494e206b65795f726f77732071205553494e4728696429204f524445522042592031"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-duplicate-natural-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420712e2a2046524f4d2077696c645f6c2071204e41545552414c2046554c4c204a4f494e2077696c645f722071204f5244455220425920312c322c33"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-duplicate-natural-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420712e2a2046524f4d2077696c645f6c2071204e41545552414c205249474854204a4f494e2077696c645f722071204f5244455220425920312c322c33"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-subgroup-full",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420712e2a2c712e69642c632e69642046524f4d206f6e6c795f696420712046554c4c204a4f494e206f6e6c795f69642071205553494e47286964292046554c4c204a4f494e2077696c645f722063205553494e472869642920574845524520632e69643d34"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-subgroup-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420712e2a2c712e69642c632e69642046524f4d206f6e6c795f696420712046554c4c204a4f494e206f6e6c795f69642071205553494e4728696429205249474854204a4f494e2077696c645f722063205553494e472869642920574845524520632e69643d34"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-schema-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d61696e2e6f6e6c795f69642e2a2c6f6e6c795f69642e69642c77696c645f722e69642046524f4d206f6e6c795f6964205249474854204a4f494e2077696c645f72205553494e47286964292057484552452077696c645f722e69643d34"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-grouped",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c636f756e74282a292046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e47286964292047524f555020425920622e6964204f5244455220425920622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-compound-actual-core",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e472869642920554e494f4e20414c4c2053454c45435420612e2a2046524f4d206f6e6c795f69642061204c454654204a4f494e2077696c645f722062205553494e4728696429204f524445522042592031"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-exists-binding-only",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420612e2a2046524f4d206f6e6c795f696420612046554c4c204a4f494e2077696c645f722062205553494e4728696429204c494d4954203029"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-scalar",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420612e2a2046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e472869642920574845524520622e69643d3429"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-correlated-actual-owner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420612e2a2046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e472869642920574845524520622e69643d6f2e6964204c494d49542031292046524f4d2077696c645f72206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542044495354494e435420612e2a2046524f4d206f6e6c795f696420612046554c4c204a4f494e2077696c645f722062205553494e4728696429204f524445522042592031"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-left-id-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c2061204c454654204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-left-id-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c2061204c454654204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-left-key-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c2061204c454654204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-left-key-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c2061204c454654204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-right-id-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c2061205249474854204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-right-id-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c2061205249474854204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-right-key-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c2061205249474854204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-right-key-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c2061205249474854204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-full-id-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c20612046554c4c204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-full-id-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c20612046554c4c204a4f494e2077696c645f722062205553494e47282249442229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-full-key-qualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e49442c622e69642046524f4d2077696c645f6c20612046554c4c204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-spelling-full-key-unqualified",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202a2c612e49442c622e69642046524f4d2077696c645f6c20612046554c4c204a4f494e2077696c645f722062205553494e4728224b65792229204f5244455220425920612e49442c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-later-unmerged-id-ambiguity",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c622e69642046524f4d206974656d732061205249474854204a4f494e206d6f64656c5f726f77732062205553494e47286964292043524f5353204a4f494e206d6f64656c5f726f77732063204f52444552204259203120444553432c622e69642c632e6964"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-typed-rebinding",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "5"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "5"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e472869642920574845524520622e69643c3d3f31204f5244455220425920622e6964204c494d4954203f32"
+    },
+    {
+      "database": "wildcard-namespace",
+      "expectation": "compare",
+      "feature": "wildcard-namespace",
+      "id": "namespace-suspended-reset",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "5"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "5"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e2a2c612e69642c622e69642046524f4d206f6e6c795f69642061205249474854204a4f494e2077696c645f722062205553494e472869642920574845524520622e69643c3d3f31204f5244455220425920622e6964204c494d4954203f32"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "namespace-syntax-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542029"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "write",
+      "id": "namespace-unsupported-write",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "494e5345525420494e544f206974656d732869642c6e616d65292056414c5545532839392c2777726974652729"
+    }
+  ],
+  "databases": [
+    {
+      "id": "core",
+      "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
+      "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    },
+    {
+      "id": "joined-index",
+      "path": "tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db",
+      "sha256": "ff55a8f7ba44f729060fa1e65256d99d2d00c1ca08a93d4d48bd2cd5def7501d"
+    },
+    {
+      "id": "wildcard-namespace",
+      "path": "tests/fixtures/wildcard_namespace/sqlite-3.54.0-wildcard-namespace.db",
+      "sha256": "3cd9f9ba82e454c829c8edb811d3d8e38d2e05df56ff3af5f8367e80da7b379e"
+    }
+  ],
+  "limits": {
+    "binding_operations": 256,
+    "cases": 512,
+    "child_seconds": 10,
+    "corpus_bytes": 4194304,
+    "operations": 1024,
+    "oracle_bytes": 67108864,
+    "output_bytes": 16777216,
+    "result_columns": 256,
+    "result_rows": 4096,
+    "sql_bytes": 65536,
+    "stderr_bytes": 1048576,
+    "value_bytes": 1048576
+  },
+  "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "schema_version": 1,
+  "supported_matrix": [
+    "wildcard-namespace",
+    "prepare-errors"
+  ]
+}

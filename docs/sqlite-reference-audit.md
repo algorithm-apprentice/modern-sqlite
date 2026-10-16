@@ -7,9 +7,9 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5, D1, D3, and D2 are corrected and verified by merged PRs #205,
-  #204, #206, and #207. The preserved ADR-0094 now owns A1's bounded
-  correction; other findings remain open unless their own evidence states
+- Follow-up: A5, D1, D3, D2, and A1 are corrected and verified by merged PRs
+  #205, #204, #206, #207, and #208. ADR-0099 corrects A2's bounded wildcard
+  publication; other findings remain open unless their own evidence states
   otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
@@ -212,8 +212,7 @@ tree `fd6d37552664b798197fc01b3cc4b7b53d978de8`.
 ### A1. Upper-only index ranges admit SQL NULL keys
 
 Priority: **high, silent wrong results**.
-Correction: **resumed ADR-0094**, with its own review and delivery gates
-after the completed durability/lifecycle prerequisites.
+Status: **corrected by resumed ADR-0094/PR #208**.
 
 Using the unchanged joined-index fixture:
 
@@ -245,13 +244,16 @@ The pre-production fixture red observed `4` versus `7`; all 35 new native
 shard cases now pass without changing old records, fixtures, profiles, or
 the 512-case cap. Current Debug passes 1,480 tests. An exact replay of all
 2,511 frozen audit instances resolves 31 old differences and introduces no
-new or changed-unresolved outcome; native replay is unchanged. Remaining
-integrated qualification and exact-head gates are still required for
-delivery.
+new or changed-unresolved outcome; native replay is unchanged. All local and
+nine first-head hosted gates passed, including the unchanged original model
+in 4.18 seconds under its ten-second deadline. Merged commit
+`b1d60e4dc7324f79aff3165c4830735e8f473e1b` has the exact Sol-accepted
+tree `dab91619de35f297b28f81103d46a6171c1d86e9`.
 
 ### A2. Qualified left wildcards lose native RIGHT/FULL USING values
 
 Priority: **high, wrong values and metadata**.
+Status: **corrected by ADR-0099**, including exact wildcard name spelling.
 
 For a RIGHT/FULL join with `USING(id)` or `USING(t)`, native expansion of
 `a.*` can use the merged joined value, even though an explicitly written
@@ -260,14 +262,43 @@ left value for the qualified wildcard, losing unmatched-right keys and, for
 NOCASE matches, retaining the wrong spelling. FULL also retains a declared
 type where the native merged expression has none.
 
-Modern's `src/binder/bound_select.cpp:4426-4527` restricts joined-value
-expansion to unqualified wildcards. Pinned
-`src/select.c:6367-6387` deliberately omits a physical qualifier when the
-source lies to the left of a RIGHT/FULL USING boundary.
+At the audited revision, `src/binder/bound_select.cpp:4426-4527` restricts
+joined-value expansion to unqualified wildcards. Pinned
+`src/select.c:6015-6027,6358-6379` deliberately omits a physical qualifier
+when the source lies to the left of a RIGHT/FULL boundary and the name
+participates in any later USING clause.
 
 Repair wildcard expansion through the existing joined namespace and
 coalesce ownership, without changing direct qualified-column resolution.
 Recheck later USING boundaries and mixed chains, not only a two-source join.
+
+The bounded follow-up has 197 native/current instances, including different
+column spelling and affinity. Its 53 differences include later mixed
+boundaries and a coupled unqualified-RIGHT wildcard name discrepancy.
+Wildcard names must keep their owning declared spelling even when a resolved
+RIGHT value has another source's metadata. The original four cases are not
+the complete correction scope.
+
+ADR-0099 now selects generated qualification through the current core's
+existing source order and normalized USING links, then reuses canonical
+name resolution and provenance checks. Explicit qualified columns remain
+physical. The existing metadata builder keeps the wildcard owner's declared
+spelling while deriving type, affinity, and collation from the resolved value.
+All 197 exact follow-up instances now match native, resolving all 53 former
+differences. The frozen 2,511-instance replay against the post-A1 baseline
+resolves 12 further instances with no new or changed-unresolved outcome and
+unchanged native contracts; these overlapping counts are not added together.
+
+The permanent 48-case namespace shard includes 47 comparisons and one
+explicit unsupported control, including a native prepare-error control for
+an unrelated later same-name source. A small independent native metadata
+fixture records unequal name spelling and declared types; old fixtures,
+oracles, profiles, and the 512-case limit remain unchanged. Public and binder
+regressions failed before implementation. Complete Debug passes 1,485 tests,
+including source-read and real spill-write recovery and the expanded
+exhaustive allocation sweeps under the unchanged 1,024-allocation ceiling.
+GPT-5.6 Sol accepted the design and bounded implementation without blockers;
+the integrated exact-tree and delivery gates remain mandatory.
 
 ### A3. Predicate contexts use eager value-expression evaluation
 
@@ -446,9 +477,9 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1, A5, D3, and D2 have merged with exact-head hosted proof, and the preserved
-binder foundation is integrated. Resume A1 through ADR-0094's canonical
-range correction. Prioritize the remaining durable/lifecycle and
+D1, A5, D3, D2, and A1 have merged with exact-head hosted proof, and the
+preserved binder foundation is integrated. Continue A2 through ADR-0099's
+canonical wildcard publication. Prioritize the remaining durable/lifecycle and
 silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
 optimization remains preserved and is not treated as a delivered correction.
