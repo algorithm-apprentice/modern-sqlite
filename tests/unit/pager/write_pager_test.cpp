@@ -89,6 +89,7 @@ struct MemoryFileState {
   std::optional<DatabaseLock> failing_unlock;
   std::optional<std::size_t> failing_read_attempt;
   std::optional<std::size_t> failing_write_attempt;
+  std::optional<std::pair<FileOffset, ByteCount>> short_read;
   int lock_failures_remaining = 0;
   int unlock_failures_remaining = 0;
   int sync_failures_remaining = 0;
@@ -178,7 +179,13 @@ class MemoryFile final : public File {
       return ByteCount{0};
     }
     ++state_->read_count;
-    const std::size_t count = std::min(destination.size(), state_->bytes.size() - start);
+    std::size_t count = std::min(destination.size(), state_->bytes.size() - start);
+    if (state_->short_read.has_value() && state_->short_read->first == offset &&
+        destination.size() > state_->short_read->second.value()) {
+      count = std::min(count, state_->short_read->second.value());
+      state_->short_read.reset();
+      vfs_state_->trace.push_back("read-short:" + name_);
+    }
     std::ranges::copy_n(state_->bytes.begin() + static_cast<std::ptrdiff_t>(start),
                         static_cast<std::ptrdiff_t>(count), destination.begin());
     return ByteCount{count};
@@ -1259,6 +1266,55 @@ TEST(WritePager, ReopensAndRecoversAHotJournalBeforePublishingTheSnapshot) {
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(std::byte{2}, page->frame().bytes()[100]);
   }
+}
+
+TEST(WritePager, RetainsHotJournalWhenTheRecoveryHeaderReadIsShort) {
+  WritableEnvironment environment;
+  {
+    std::unique_ptr<Pager> crashed = OpenWritable(environment, 1);
+    ASSERT_NE(nullptr, crashed);
+    ASSERT_TRUE(crashed->BeginRead().has_value());
+    ASSERT_TRUE(crashed->BeginWrite().has_value());
+    {
+      auto writable = crashed->WritePage(PageNumber{2});
+      ASSERT_TRUE(writable.has_value());
+      writable->mutable_bytes()[100] = std::byte{0x7f};
+    }
+    {
+      const auto writable = crashed->WritePage(PageNumber{1});
+      ASSERT_TRUE(writable.has_value());
+    }
+    ASSERT_TRUE(crashed->ReadPage(PageNumber{1}).has_value());
+    ASSERT_TRUE(environment.JournalPresent());
+    ASSERT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
+  }
+
+  const auto journal = environment.JournalFile();
+  const std::size_t journal_size = journal->bytes.size();
+  journal->short_read = std::pair{FileOffset{0}, ByteCount{4}};
+  auto failed = OpenWritable(environment);
+  ASSERT_NE(nullptr, failed);
+  const auto recovered = failed->BeginRead();
+
+  EXPECT_FALSE(recovered.has_value());
+  if (!recovered.has_value()) {
+    EXPECT_EQ(ErrorCode::kIo, recovered.error().code());
+    EXPECT_EQ(10, recovered.error().primary_sqlite_code());
+    EXPECT_EQ(10 | (2 << 8), recovered.error().sqlite_code());
+  }
+  EXPECT_EQ(PagerState::kError, failed->state());
+  EXPECT_FALSE(failed->in_read_transaction());
+  EXPECT_EQ(nullptr, failed->header());
+  EXPECT_TRUE(environment.JournalPresent());
+  EXPECT_EQ(journal_size, journal->bytes.size());
+  EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
+  failed.reset();
+
+  auto retry = OpenWritable(environment);
+  ASSERT_NE(nullptr, retry);
+  ASSERT_TRUE(retry->BeginRead().has_value());
+  EXPECT_FALSE(environment.JournalPresent());
+  EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
 }
 
 TEST(WritePager, UpdatesTheChangeCounterOnlyOnceAcrossExclusiveLockRetry) {

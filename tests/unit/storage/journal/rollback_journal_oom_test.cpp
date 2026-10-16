@@ -57,9 +57,13 @@ void Arm(std::optional<std::size_t> failure) noexcept {
 }
 
 template <typename Runner>
-[[nodiscard]] bool ExhaustAllocations(Runner&& runner) {
+[[nodiscard]] bool ExhaustAllocations(
+    Runner&& runner, std::optional<modern_sqlite::ErrorCode> expected_failure = std::nullopt) {
   const ScenarioOutcome baseline = runner(std::nullopt);
-  if (!baseline.succeeded || !baseline.invariant_holds || baseline.allocations == 0) {
+  const bool expected_baseline = expected_failure.has_value()
+                                     ? !baseline.succeeded && baseline.error == *expected_failure
+                                     : baseline.succeeded;
+  if (!expected_baseline || !baseline.invariant_holds || baseline.allocations == 0) {
     return false;
   }
   for (std::size_t failure = 0; failure < baseline.allocations; ++failure) {
@@ -325,6 +329,39 @@ template <typename Runner>
   };
 }
 
+[[nodiscard]] ScenarioOutcome RunShortMetadataRead(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::FixedMemoryVfs vfs;
+  if (!vfs.LoadHotJournal(8)) {
+    return {};
+  }
+  auto created = modern_sqlite::RollbackJournal::Create(
+      vfs, "database.sqlite", modern_sqlite::test::FixedMemoryVfs::DatabaseProperties());
+  if (!created.has_value()) {
+    return {};
+  }
+  vfs.ShortJournalReadAt(modern_sqlite::FileOffset{0}, modern_sqlite::ByteCount{4});
+  modern_sqlite::test::CountingRecoveryTarget target;
+
+  Arm(failure);
+  const auto recovered = modern_sqlite::RecoverHotJournal(**created, target);
+  const std::size_t allocations = Disarm();
+  const auto error =
+      recovered.has_value() ? modern_sqlite::ErrorCode::kGeneric : recovered.error().code();
+  const bool preserved = vfs.journal_present() && target.prepare_count == 0U &&
+                         target.restore_count == 0U && target.sync_count == 0U &&
+                         target.complete_count == 0U;
+  const bool exact_error = error != modern_sqlite::ErrorCode::kIo ||
+                           (recovered.error().primary_sqlite_code() == 10 &&
+                            recovered.error().sqlite_code() == (10 | (2 << 8)));
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = recovered.has_value(),
+      .error = error,
+      .invariant_holds = preserved && exact_error,
+  };
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -377,6 +414,9 @@ int main() {
         return RunHotPlayback(failure, kSuperJournal);
       })) {
     return 9;
+  }
+  if (!ExhaustAllocations(RunShortMetadataRead, modern_sqlite::ErrorCode::kIo)) {
+    return 10;
   }
   return 0;
 }
