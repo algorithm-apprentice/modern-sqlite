@@ -328,9 +328,12 @@ top-level ORDER BY, then HAVING.
 Compound ORDER BY remains ADR-0056 output matching, not per-arm aggregate
 binding. A scratch clone is resolved against each arm with ordinary errors
 suppressed, compared with that arm's already bound outputs, and discarded.
-Only OOM escapes speculative matching. A match becomes an output reference
-and never changes an arm's aggregate status, invocation table, order, or
-aggregate-term count.
+Only OOM escapes speculative matching. For definitions without nested queries,
+a match becomes an output reference and never changes an arm's aggregate
+status, invocation table, order, or aggregate-term count. ADR-0092 separately
+specifies the query-containing result-reference exception: output matching
+still cannot create an aggregate core, but copied aggregate work uses the
+same invocation finalizer and preserves result, ORDER BY, then HAVING phases.
 
 ### 4. Preserve aggregate result and error contracts
 

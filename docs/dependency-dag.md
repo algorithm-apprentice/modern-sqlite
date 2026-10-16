@@ -145,8 +145,10 @@ owners and producers, with lazy inline emission inside one lexical bytecode
 region and separate binding/value dependencies. Source-free queries retain
 the verified value-call interface. ADR-0091 defines the next bounded outer
 expression-alias admission through immutable targets and the same capture
-contract. Query-containing alias instances and outer aggregate ownership
-remain ordered subquery follow-ups. Persistent constraints,
+contract. ADR-0092 defines query-containing result-reference instances
+through canonical template binding, delivered as ordered binder-foundation,
+expression-copy, and aggregate-ordering slices; outer aggregate ownership
+remains an ordered follow-up. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

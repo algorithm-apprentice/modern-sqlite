@@ -704,6 +704,13 @@ TEST(Binder, ReusesOriginalAliasSourcesAndRetainsDiscardedContextWithoutValueIds
                 BoundQueryId{1}},
            Case{"SELECT (SELECT 1),o.Name AS x FROM Items o WHERE (SELECT x) IS NOT NULL",
                 BoundQueryId{2}},
+           Case{"SELECT o.*,(SELECT 1),o.Name AS x FROM Items o "
+                "WHERE (SELECT x) IS NOT NULL",
+                BoundQueryId{2}},
+           Case{"SELECT o.*,(SELECT 1),o.Name AS x FROM Items o "
+                "WHERE (SELECT x) IS NOT NULL "
+                "UNION ALL SELECT *,1,Name FROM Items ORDER BY 7",
+                BoundQueryId{2}},
        }) {
     SCOPED_TRACE(test_case.sql);
     const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
@@ -778,9 +785,14 @@ TEST(Binder, ChecksAliasTargetWidthBeforeTheQueryDefinitionBoundary) {
   const auto catalog = TestCatalog();
   ExpectBindError("SELECT EXISTS(SELECT (SELECT 1,2) AS x WHERE EXISTS(SELECT x))", catalog,
                   BindErrorCode::kColumnCountMismatch, "row value misused");
+  ExpectBindError("SELECT EXISTS(SELECT *,(SELECT 1,2) AS x FROM Items WHERE EXISTS(SELECT x))",
+                  catalog, BindErrorCode::kColumnCountMismatch, "row value misused");
   for (const std::string_view sql : {
            "SELECT (SELECT 1) AS x WHERE (SELECT x)>0",
            "SELECT coalesce(1,(SELECT 1)) AS x WHERE (SELECT x)>0",
+           "SELECT o.*,(SELECT 1),coalesce(1,(SELECT 2)) AS x FROM Items o "
+           "WHERE (SELECT x)>0",
+           "SELECT *,EXISTS(SELECT 1) AS x FROM Items WHERE (SELECT x)>0",
            "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE EXISTS(SELECT x))",
            "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE (SELECT x)>0)",
        }) {
