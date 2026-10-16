@@ -160,6 +160,33 @@ all six final images pass native `integrity_check`. These focused results
 do not replace the remaining complete-matrix, static, exact-tree review, or
 hosted delivery requirements above.
 
+### Recovery-test directory ownership under parallel CTest
+
+The first published head, `d128225dffd38cb6c59e670777aa962db1349fed`,
+passed the serial local matrix but exposed a test-isolation defect in the
+existing shared write-Pager temporary-directory helper. Each CTest process
+started its counter at one and selected the same directory. Under the
+unchanged two-worker hosted schedule, the new and existing real-POSIX recovery
+tests could overwrite or delete one another's files. The macOS Release job
+failed both tests; a two-worker replay in a private temporary root reproduced
+both failures without changing production.
+
+Correct the existing helper rather than inventing a test-specific directory
+or weakening concurrency. Reserve each directory atomically with `mkdtemp`,
+following the existing POSIX test pattern, and remove only a directory that
+this instance successfully reserved. Keep the shared helper and its
+`DatabasePath()` interface; no second fixture implementation is added.
+The corrected helper passes an initial 40 Release executions under two-worker
+scheduling, and the private temporary root is empty afterward.
+
+Retain the workflow's two-worker scheduling and every original timeout.
+Require repeated parallel execution of the two recovery tests in each local
+configuration, then the complete compiler/sanitizer and inherited gates.
+The original serial matrix remains source-correction evidence, not proof of
+parallel fixture isolation. Publish the correction as a new reviewed commit,
+preserving the first published head and requiring all nine checks on the new
+exact head.
+
 ## References
 
 - ADR-0019: Virtual File System Contracts

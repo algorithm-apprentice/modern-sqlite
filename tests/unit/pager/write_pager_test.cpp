@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -488,30 +489,32 @@ class WritableEnvironment final {
 class TemporaryDirectory final {
  public:
   TemporaryDirectory() {
-    static std::uint64_t next_id = 0;
     std::error_code error;
-    path_ = std::filesystem::temp_directory_path(error);
+    const std::filesystem::path base = std::filesystem::temp_directory_path(error);
     if (error) {
       return;
     }
-    path_ /= "modern-sqlite-write-pager-" + std::to_string(++next_id);
-    std::filesystem::create_directories(path_, error);
-    valid_ = !error;
+    path_ = (base / "modern-sqlite-write-pager-XXXXXX").string();
+    valid_ = ::mkdtemp(path_.data()) != nullptr;
   }
 
   TemporaryDirectory(const TemporaryDirectory&) = delete;
   TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
 
   ~TemporaryDirectory() {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
+    if (valid_) {
+      std::error_code error;
+      std::filesystem::remove_all(path_, error);
+    }
   }
 
   [[nodiscard]] bool valid() const noexcept { return valid_; }
-  [[nodiscard]] std::filesystem::path DatabasePath() const { return path_ / "database.sqlite"; }
+  [[nodiscard]] std::filesystem::path DatabasePath() const {
+    return std::filesystem::path{path_} / "database.sqlite";
+  }
 
  private:
-  std::filesystem::path path_;
+  std::string path_;
   bool valid_ = false;
 };
 
