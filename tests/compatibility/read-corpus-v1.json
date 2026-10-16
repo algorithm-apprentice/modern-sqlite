@@ -3318,10 +3318,9 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
+      "expectation": "compare",
       "feature": "correlated-subquery",
       "id": "unsupported-correlated-scalar-query",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
       "operations": [
         {"op": "finalize"}
       ],
@@ -14231,6 +14230,7 @@
     "alter-defaults",
     "comma-cross-join",
     "conditional-join",
+    "correlated-subquery",
     "constant-select",
     "core-functions",
     "distinct-select",

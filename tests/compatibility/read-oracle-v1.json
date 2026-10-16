@@ -32821,12 +32821,34 @@
       }
     },
     {
-      "boundary": {
-        "first_step": "row",
-        "prepare": "statement"
-      },
-      "expectation": "unsupported",
-      "id": "unsupported-correlated-scalar-query"
+      "expectation": "compare",
+      "id": "unsupported-correlated-scalar-query",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "finalize",
+            "operation_index": 0,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "2853454c454354206f757465725f6974656d2e696429"
+            }
+          ],
+          "next_offset": 51,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     },
     {
       "boundary": {
@@ -143368,7 +143390,7 @@
     }
   ],
   "corpus_path": "tests/compatibility/read-corpus-v1.json",
-  "corpus_sha256": "652ef282d862813a877bdf68f1e331096434fc4d5ba65076c9d5c068eb4a72d1",
+  "corpus_sha256": "26cb13ba6272c99f5ba6b048694b31bf6759ac61296dec156dc9bc03415d4ba1",
   "databases": [
     {
       "id": "core",

@@ -479,6 +479,8 @@ TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
     const BoundSelect bound = BindOrThrow(sql, catalog);
     const BoundQuery& query = bound.root_query();
     EXPECT_EQ(BoundQueryId{0}, query.id);
+    EXPECT_FALSE(query.parent.has_value());
+    EXPECT_TRUE(query.captures.empty());
     EXPECT_EQ(0U, query.core_begin);
     EXPECT_EQ(bound.query_cores().size(), query.core_count);
     EXPECT_EQ(bound.compound_operators().data(), query.compound_operators.data());
@@ -555,7 +557,7 @@ TEST(Binder, PublishesScalarAffinityAndTypeWithoutBorrowingChildCollation) {
   EXPECT_EQ("INTEGER", values.result_columns()[0].declared_type);
 }
 
-TEST(Binder, RejectsScalarWidthParentAliasesAndUnadmittedCorrelation) {
+TEST(Binder, RejectsScalarWidthParentAliasesAndStagedQueryFeatures) {
   const auto catalog = TestCatalog();
   ExpectBindError("SELECT (SELECT id,Name FROM Items)", catalog,
                   BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
@@ -563,11 +565,196 @@ TEST(Binder, RejectsScalarWidthParentAliasesAndUnadmittedCorrelation) {
                   "no such column: x");
   ExpectBindError("SELECT (SELECT x),1 AS x", catalog, BindErrorCode::kNoSuchColumn,
                   "no such column: x");
-  ExpectBindError("SELECT (SELECT parent.id) FROM Items parent", catalog,
-                  BindErrorCode::kUnsupportedFeature, "correlated subqueries are not supported");
+  ExpectBindError("SELECT Name AS x FROM Items WHERE (SELECT x) IS NOT NULL", catalog,
+                  BindErrorCode::kUnsupportedFeature,
+                  "outer result-alias expansion is not supported");
+  ExpectBindError("SELECT (SELECT sum(parent.Score)) FROM Items parent", catalog,
+                  BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
   ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
                            BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
                            "subqueries in mutation statements");
+}
+
+TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies) {
+  const BoundSelect bound = BindOrThrow(
+      "SELECT (SELECT (SELECT o.Name||i.Name) FROM Items i WHERE i.id=o.id),"
+      "EXISTS(SELECT o.Score ORDER BY (SELECT o.Name)),(VALUES(o._rowid_)) FROM Items o",
+      TestCatalog());
+  ASSERT_EQ(5U, bound.query_count());
+  EXPECT_TRUE(bound.root_query().captures.empty());
+  const std::array parents{BoundQueryId{0}, BoundQueryId{1}, BoundQueryId{0}, BoundQueryId{0}};
+  const std::array<std::size_t, 4> counts{2, 2, 2, 1};
+  for (std::uint32_t index = 1; index < bound.query_count(); ++index) {
+    const BoundQuery& query = bound.query(BoundQueryId{index});
+    EXPECT_EQ(parents[index - 1U], query.parent);
+    ASSERT_EQ(counts[index - 1U], query.captures.size());
+    for (const BoundSourceCapture& capture : query.captures) {
+      if (index == 3U) {
+        EXPECT_FALSE(capture.value.has_value());
+      } else {
+        ASSERT_TRUE(capture.value.has_value());
+        EXPECT_EQ(capture.identity, BoundSourceLeafIdentityOf(bound.expression(*capture.value),
+                                                              bound.source_columns()));
+      }
+    }
+  }
+  EXPECT_EQ(BoundSourceId{0}, bound.query(BoundQueryId{1}).captures[0].identity.source);
+  EXPECT_EQ(BoundSourceId{1}, bound.query(BoundQueryId{2}).captures[1].identity.source);
+  EXPECT_TRUE(bound.query(BoundQueryId{3}).order_by.empty());
+  EXPECT_TRUE(bound.query(BoundQueryId{4}).captures[0].identity.is_rowid());
+
+  const auto captures =
+      [&bound](BoundQueryId query) -> std::optional<std::span<const BoundSourceCapture>> {
+    if (query.value() >= bound.query_count()) {
+      return std::nullopt;
+    }
+    return std::span<const BoundSourceCapture>{bound.query(query).captures};
+  };
+  for (const BoundSourceDependency dependency :
+       {BoundSourceDependency::kBinding, BoundSourceDependency::kValue}) {
+    std::size_t visited = 0;
+    auto visitor = [&](const BoundSourceLeafIdentity&, std::optional<BoundExpressionId>) {
+      ++visited;
+      return true;
+    };
+    EXPECT_TRUE(binder_detail::VisitSourceLeaves(bound.expressions(), bound.source_columns(),
+                                                 bound.result_columns()[1].expression, captures,
+                                                 dependency, visitor));
+    EXPECT_EQ(dependency == BoundSourceDependency::kBinding ? 2U : 0U, visited);
+    EXPECT_FALSE(binder_detail::VisitSourceLeaves(
+        bound.expressions(), bound.source_columns(),
+        BoundExpressionId{static_cast<std::uint32_t>(bound.expressions().size())}, captures,
+        dependency, visitor));
+  }
+}
+
+TEST(Binder, ResolvesOuterSourcesWithCanonicalQualificationAndFallbackRules) {
+  struct Case {
+    std::string_view sql;
+    std::size_t captures;
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test_case : {
+           Case{"SELECT (SELECT Name FROM Items i) FROM Items o", 0},
+           Case{"SELECT (SELECT o.Name FROM CustomCollation o) FROM Items o", 1},
+           Case{"SELECT (SELECT main.o.Name) FROM Items o", 1},
+           Case{"SELECT (SELECT \"Name\") FROM Items o", 1},
+           Case{"SELECT (SELECT TRUE) FROM Items o", 1},
+           Case{"SELECT (VALUES(o.Name),(o.Name)) FROM Items o", 1},
+           Case{"SELECT (SELECT o.rowid), (SELECT o._rowid_) FROM Items o", 1},
+           Case{"SELECT (SELECT id) FROM Items a FULL JOIN Items b USING(id)", 2},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
+    EXPECT_EQ(test_case.captures, bound.query(BoundQueryId{1}).captures.size());
+    EXPECT_TRUE(bound.root_query().captures.empty());
+  }
+  ExpectBindError("SELECT (SELECT Items.Name) FROM Items o", catalog, BindErrorCode::kNoSuchColumn,
+                  "no such column: Items.Name");
+  ExpectBindError("SELECT (SELECT z.Name FROM Items i) FROM Items o", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: z.Name");
+  ExpectBindError("SELECT (SELECT (SELECT Name) FROM Items a JOIN Items b) FROM Items o", catalog,
+                  BindErrorCode::kAmbiguousColumn, "ambiguous column name: Name");
+  for (const std::string_view sql : {
+           "SELECT (SELECT 1 LIMIT o.id) FROM Items o",
+           "SELECT (SELECT 1 LIMIT (SELECT o.id)) FROM Items o",
+           "SELECT (SELECT 1 LIMIT 1 OFFSET (SELECT o.id)) FROM Items o",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kNoSuchColumn, "no such column: o.id");
+  }
+}
+
+TEST(Binder, RetainsOwnAggregateBindingLeavesWithoutSnapshottingAncestorInputs) {
+  const auto catalog = TestCatalog();
+  const BoundSelect representative = BindOrThrow(
+      "SELECT count(*),(SELECT o.Name),EXISTS(SELECT o.Score ORDER BY o.rowid) FROM Items o",
+      catalog);
+  const auto& root = std::get<BoundSelectCore>(representative.query_cores()[0]);
+  ASSERT_TRUE(root.aggregate.has_value());
+  EXPECT_TRUE(root.aggregate->source_leaves.empty());
+  ASSERT_EQ(3U, root.aggregate->representative_leaves.size());
+  const std::array columns{BoundSourceColumnId{1}, BoundSourceColumnId{2}, BoundSourceColumnId{3}};
+  for (std::size_t index = 0; index < columns.size(); ++index) {
+    EXPECT_EQ((BoundSourceLeafIdentity{.source = BoundSourceId{0}, .column = columns[index]}),
+              BoundSourceLeafIdentityOf(
+                  representative.expression(root.aggregate->representative_leaves[index]),
+                  representative.source_columns()));
+  }
+  const BoundSelect incoming = BindOrThrow(
+      "SELECT (SELECT sum(i.Score+o.Score) FROM Items i GROUP BY i.id) FROM Items o", catalog);
+  const BoundQueryView child{incoming, BoundQueryId{1}};
+  ASSERT_EQ(1U, child.query().captures.size());
+  const auto& inner = std::get<BoundSelectCore>(child.query_cores()[0]);
+  ASSERT_TRUE(inner.aggregate.has_value());
+  ASSERT_EQ(2U, inner.aggregate->source_leaves.size());
+  EXPECT_TRUE(inner.aggregate->representative_leaves.empty());
+  for (const BoundExpressionId leaf : inner.aggregate->source_leaves) {
+    const auto identity =
+        BoundSourceLeafIdentityOf(incoming.expression(leaf), incoming.source_columns());
+    ASSERT_TRUE(identity.has_value());
+    EXPECT_EQ(inner.table_sources[0].id, identity->source);
+  }
+  ExpectBindError("SELECT (SELECT sum(o.Score) FROM Items i) FROM Items o", catalog,
+                  BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
+}
+
+TEST(Binder, PublishesGlobalOrderingRetentionWithTheNativeSimpleCountException) {
+  struct Case {
+    std::string_view sql;
+    std::size_t representatives;
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test_case :
+       {Case{"SELECT count(*) FROM Items o ORDER BY o.Name", 0},
+        Case{"SELECT count() FROM Items o ORDER BY (SELECT o.Name)", 0},
+        Case{"SELECT DISTINCT count(*) FROM Items o ORDER BY (SELECT o.Name)", 0},
+        Case{"SELECT count(*) FROM sqlite_schema s ORDER BY (SELECT s.sql)", 0},
+        Case{"SELECT count(*) FROM Items o WHERE o.id>0 ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT sum(o.id) FROM Items o ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT count(*) FROM Items o ORDER BY sum(o.id),(SELECT o.Name)", 1},
+        Case{"SELECT count(*) FILTER(WHERE 1) FROM Items o ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT count(o.id) FROM Items o ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT count(*) COLLATE BINARY FROM Items o ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT +count(*) FROM Items o ORDER BY (SELECT o.Name)", 1},
+        Case{"SELECT likely(count(*)) FROM Items o ORDER BY (SELECT o.Name)", 1}}) {
+    SCOPED_TRACE(test_case.sql);
+    const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
+    const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    ASSERT_TRUE(core.aggregate.has_value());
+    EXPECT_EQ(test_case.representatives, core.aggregate->representative_leaves.size());
+  }
+  constexpr std::string_view limited =
+      "SELECT count(*) FROM Items o ORDER BY (SELECT o.Name),(SELECT o.Score)";
+  ExpectBindError(limited, catalog, BindErrorCode::kAggregateTermLimitExceeded,
+                  "too many aggregate terms", BindEnvironment::Core(),
+                  BindOptions{.maximum_aggregate_terms = 1});
+  const BoundSelect accepted = BindOrThrow(limited, catalog, BindEnvironment::Core(),
+                                           BindOptions{.maximum_aggregate_terms = 2});
+  const auto& core = std::get<BoundSelectCore>(accepted.query_cores()[0]);
+  ASSERT_TRUE(core.aggregate.has_value());
+  EXPECT_TRUE(core.aggregate->representative_leaves.empty());
+}
+
+TEST(Binder, KeepsOnlyBindingCapturesForElidedGlobalOrdering) {
+  struct Case {
+    std::string_view sql;
+    bool value;
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test_case :
+       {Case{"SELECT (SELECT count(*) FROM Items i ORDER BY o.Name) FROM Items o", false},
+        Case{"SELECT (SELECT sum(i.id) FROM Items i ORDER BY o.Name) FROM Items o", false},
+        Case{"SELECT (SELECT sum(i.id) FROM Items i GROUP BY i.id ORDER BY o.Name) "
+             "FROM Items o",
+             true}}) {
+    SCOPED_TRACE(test_case.sql);
+    const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
+    const BoundQuery& child = bound.query(BoundQueryId{1});
+    ASSERT_EQ(1U, child.captures.size());
+    EXPECT_EQ(BoundSourceId{0}, child.captures[0].identity.source);
+    EXPECT_EQ(test_case.value, child.captures[0].value.has_value());
+  }
 }
 
 TEST(Binder, CountsNestedResolutionAndNormalizedJoinHeightsTogether) {
@@ -614,6 +801,24 @@ TEST(Binder, AppliesThePinnedCumulativeNestedSelectResolutionLimit) {
   const auto bound = BindSelectStatement(ParseTree(sql), TestCatalog());
   ASSERT_FALSE(bound.has_value());
   EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+}
+
+TEST(Binder, AppliesThePinnedCorrelatedSourceResolutionHeightBoundary) {
+  for (const std::size_t depth : {42U, 43U}) {
+    SCOPED_TRACE(depth);
+    std::string expression = "o.id";
+    for (std::size_t index = 0; index < depth; ++index) {
+      expression = "(SELECT " + expression + ")";
+    }
+    const auto bound =
+        BindSelectStatement(ParseTree("SELECT " + expression + " FROM Items o"), TestCatalog());
+    if (depth == 42U) {
+      ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+    } else {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+    }
+  }
 }
 
 TEST(Binder, ExpandsWildcardsAndPublishesDirectColumnMetadata) {

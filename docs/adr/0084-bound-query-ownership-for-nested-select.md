@@ -24,7 +24,9 @@ Independent pinned probes establish that:
   scalar subqueries do not implicitly inherit its column collation;
 - EXISTS binds its result expressions but skips ordinary result evaluation;
 - aggregate work and delayed aggregate errors still occur under EXISTS;
-- outer result aliases are not visible inside a nested SELECT; and
+- outer result aliases are not visible to a nested SELECT while the parent's
+  result list is being bound; later-clause visibility and alias expansion
+  require the separate contract described by ADR-0090; and
 - aggregate ownership across outer scopes needs explicit native-aligned
   resolution, not an assumption that every nested invocation is local.
 
@@ -62,9 +64,10 @@ or recursive smart-pointer graph. Destruction remains nonrecursive.
 
 Binding uses explicit query/core scope state and a shared parameter/expression
 context. Current-core sources win, missing local names may use admitted outer
-source scopes, and parent result aliases never become a name-resolution
-fallback. Correlation captures SQL values through the verified register
-interface; a callee cannot borrow a caller cursor.
+source scopes. Parent result aliases remain outside this initial admission;
+ADR-0090 distinguishes their later-clause visibility from source correlation.
+ADR-0090 defines lazy source correlation within one lexical bytecode region;
+a private callee still cannot borrow a caller cursor.
 
 Every query owns its aggregate legality, output width, clause metadata, and
 compiler destination. Outer-owned aggregate resolution is admitted only with
@@ -108,7 +111,9 @@ publishes one without ordinary projection, closes, and returns. Aggregate
 evaluation and finalization remain canonical.
 
 Uncorrelated evaluation is lazy and cached for the owning query execution
-lifetime. Correlated evaluation receives the current captured values.
+lifetime. ADR-0090 evaluates source-correlated producers inline, with source
+leaves read only at their reached expression sites rather than eagerly
+transferred into a private call.
 Reset/rebind, zero/early LIMIT, suspension, failures, and cleanup keep the
 current statement lifecycle. No runtime parsing, preparation, plan
 interpretation, nested session, private sorter, or alternate materialization

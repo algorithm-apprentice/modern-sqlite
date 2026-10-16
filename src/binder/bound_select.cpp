@@ -114,6 +114,7 @@ struct QueryBindingScope {
   std::vector<PendingAggregateInvocation> aggregates;
   const QueryBindingScope* outer = nullptr;
   bool sources_visible = false;
+  bool aliases_visible = false;
   bool binding_only = false;
 };
 
@@ -129,6 +130,7 @@ struct BindingArenaCheckpoint {
   std::size_t aggregate_invocations;
   std::size_t registered_collations;
   std::uint32_t next_source;
+  std::size_t captures;
 };
 
 struct DecodedNamePart {
@@ -1616,6 +1618,147 @@ class StatementBinder final {
   [[nodiscard]] BoundQuery& ActiveQuery() noexcept { return Query(active_query_); }
   [[nodiscard]] const BoundQuery& ActiveQuery() const noexcept { return Query(active_query_); }
 
+  [[nodiscard]] auto CaptureLookup() const noexcept {
+    return [this](BoundQueryId id) -> std::optional<std::span<const BoundSourceCapture>> {
+      if (id.value() > impl_->nested_queries.size()) {
+        return std::nullopt;
+      }
+      return std::span<const BoundSourceCapture>{Query(id).captures};
+    };
+  }
+
+  [[nodiscard]] bool OwnsActiveSource(BoundSourceId source) const noexcept {
+    return std::ranges::find(source_states_, source, &SourceState::id) != source_states_.end();
+  }
+
+  [[nodiscard]] bool OwnsQuerySource(BoundSourceId source) const noexcept {
+    return std::ranges::any_of(ActiveCores(), [source](const BoundQueryCore& core) {
+      const auto* select = std::get_if<BoundSelectCore>(&core);
+      return select != nullptr &&
+             std::ranges::find(select->table_sources, source, &BoundTableSource::id) !=
+                 select->table_sources.end();
+    });
+  }
+
+  [[nodiscard]] BindExpected<void> RecordCapturedSources(BoundExpressionId id) {
+    auto visitor = [&](const BoundSourceLeafIdentity& identity, std::optional<BoundExpressionId>) {
+      auto& captures = ActiveQuery().captures;
+      if (!OwnsActiveSource(identity.source) &&
+          std::ranges::find(captures, identity, &BoundSourceCapture::identity) == captures.end()) {
+        captures.push_back(BoundSourceCapture{.identity = identity});
+      }
+      return true;
+    };
+    if (!VisitSourceLeaves(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                           BoundSourceDependency::kBinding, visitor)) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "captured expression has invalid source dependencies"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> FinalizeQueryCaptures() {
+    if (ActiveQuery().captures.empty()) {
+      return {};
+    }
+    auto visitor = [&](const BoundSourceLeafIdentity& identity,
+                       std::optional<BoundExpressionId> value) {
+      if (OwnsQuerySource(identity.source)) {
+        return true;
+      }
+      auto& captures = ActiveQuery().captures;
+      const auto capture = std::ranges::find(captures, identity, &BoundSourceCapture::identity);
+      if (capture == captures.end() || !value.has_value()) {
+        return false;
+      }
+      if (!capture->value.has_value()) {
+        capture->value = *value;
+      }
+      return true;
+    };
+    bool valid = true;
+    const auto consume = [&](BoundExpressionId id) {
+      valid = valid && VisitSourceLeaves(impl_->expressions, impl_->source_columns, id,
+                                         CaptureLookup(), BoundSourceDependency::kValue, visitor);
+    };
+    const BoundQuery& query = ActiveQuery();
+    const bool compares_rows = std::ranges::any_of(
+        query.compound_operators,
+        [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
+    const bool needs_values =
+        query.destination != BoundQueryDestination::kExists ||
+        (compares_rows && !BoundQueryCanOmitSetComparisons(query, impl_->expressions));
+    const auto cores = ActiveCores();
+    for (const BoundQueryCore& core : cores) {
+      if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
+        for (const BoundTableSource& source : select->table_sources) {
+          if (source.on.has_value()) {
+            consume(*source.on);
+          }
+        }
+        if (select->where.has_value()) {
+          consume(*select->where);
+        }
+        if (needs_values) {
+          for (const BoundResultColumn& result : select->result_columns) {
+            consume(result.expression);
+          }
+        }
+        if (select->aggregate.has_value()) {
+          const BoundAggregateProgram& aggregate = *select->aggregate;
+          for (const BoundGroupingTerm& group : aggregate.group_by) {
+            consume(group.expression);
+          }
+          if (const auto having = aggregate.having; having.has_value()) {
+            consume(*having);
+          }
+          for (const BoundAggregateInvocationId id : aggregate.invocations) {
+            const BoundAggregateInvocation& invocation = impl_->aggregate_invocations[id.value()];
+            for (const BoundExpressionId argument : invocation.arguments) {
+              consume(argument);
+            }
+            if (invocation.filter.has_value()) {
+              consume(*invocation.filter);
+            }
+            if (impl_->aggregate_functions[invocation.function.value()].extremum ==
+                BoundAggregateExtremumKind::kNone) {
+              for (const BoundOrderingTerm& term : invocation.order_by) {
+                consume(term.expression);
+              }
+            }
+          }
+        }
+      } else if (needs_values) {
+        for (const auto& row : std::get<BoundValuesCore>(core).rows) {
+          for (const BoundExpressionId value : row) {
+            consume(value);
+          }
+        }
+      }
+    }
+    const auto* single_select =
+        cores.size() == 1U ? std::get_if<BoundSelectCore>(&cores.front()) : nullptr;
+    const bool elides_order_keys = single_select != nullptr &&
+                                   single_select->aggregate.has_value() &&
+                                   single_select->aggregate->group_by.empty();
+    if (!elides_order_keys) {
+      for (const BoundOrderingTerm& term : query.order_by) {
+        consume(term.expression);
+      }
+    }
+    if (query.limit.has_value()) {
+      consume(query.limit->limit);
+      if (query.limit->offset.has_value()) {
+        consume(*query.limit->offset);
+      }
+    }
+    if (!valid) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "query value has invalid capture ownership"));
+    }
+    return {};
+  }
+
   [[nodiscard]] std::span<const BoundQueryCore> ActiveCores() const noexcept {
     const BoundQuery& query = ActiveQuery();
     return std::span<const BoundQueryCore>{impl_->query_cores}.subspan(query.core_begin,
@@ -1701,7 +1844,7 @@ class StatementBinder final {
       }
     }
     PublishResultColumns();
-    return {};
+    return FinalizeQueryCaptures();
   }
 
   [[nodiscard]] BindExpected<void> BindSingleRowDemand(SourceSpan span) {
@@ -1758,10 +1901,12 @@ class StatementBinder final {
         .aggregate_invocations = impl_->aggregate_invocations.size(),
         .registered_collations = impl_->registered_collations.size(),
         .next_source = next_source_id_,
+        .captures = ActiveQuery().captures.size(),
     };
   }
 
-  void RestoreBindingArena(const BindingArenaCheckpoint& checkpoint) {
+  void RestoreBindingArena(const BindingArenaCheckpoint& checkpoint,
+                           bool preserve_capture_dependencies = false) {
     impl_->expressions.resize(checkpoint.expressions);
     while (pending_aggregates_.size() > checkpoint.pending_aggregates) {
       pending_aggregates_.pop_back();
@@ -1782,6 +1927,9 @@ class StatementBinder final {
     }
     impl_->registered_collations.resize(checkpoint.registered_collations);
     next_source_id_ = checkpoint.next_source;
+    if (!preserve_capture_dependencies) {
+      ActiveQuery().captures.resize(checkpoint.captures);
+    }
     for (auto& binding : query_bindings_) {
       if (binding.has_value() && binding->value() > checkpoint.queries) {
         binding.reset();
@@ -1797,7 +1945,7 @@ class StatementBinder final {
     const AggregateOccurrencePhase phase = active_aggregate_phase_;
     auto bound = compound ? BindCompoundOrderBy(select) : BindOrderBy(select);
     ActiveQuery().order_by.clear();
-    RestoreBindingArena(checkpoint);
+    RestoreBindingArena(checkpoint, true);
     active_aggregate_phase_ = phase;
     return bound;
   }
@@ -1822,6 +1970,7 @@ class StatementBinder final {
         .aggregates = std::move(pending_aggregates_),
         .outer = outer_scope_,
         .sources_visible = scope.source_columns,
+        .aliases_visible = scope.result_aliases,
         .binding_only = binding_only_,
     };
   }
@@ -1863,6 +2012,7 @@ class StatementBinder final {
       const BoundQueryId id{static_cast<std::uint32_t>(impl_->nested_queries.size() + 1U)};
       impl_->nested_queries.push_back(BoundQuery{
           .id = id,
+          .parent = active_query_,
           .destination = syntax.kind == SubqueryKind::kScalar ? BoundQueryDestination::kScalar
                                                               : BoundQueryDestination::kExists,
       });
@@ -1885,13 +2035,20 @@ class StatementBinder final {
                                              std::to_string(query.output_columns.size()) +
                                              " columns - expected 1"));
     }
-    return AppendExpression(
+    auto expression = AppendExpression(
         span, BoundSubqueryExpression{.query = *existing},
         ExpressionProperties{
             .affinity = query.destination == BoundQueryDestination::kScalar
                             ? Properties(ScalarResultExpression(*existing)).affinity
                             : TypeAffinity::kNone,
             .collation = std::nullopt});
+    if (!expression.has_value()) {
+      return std::unexpected(std::move(expression.error()));
+    }
+    if (auto captured = RecordCapturedSources(*expression); !captured.has_value()) {
+      return std::unexpected(std::move(captured.error()));
+    }
+    return *expression;
   }
 
   [[nodiscard]] BoundExpressionId ScalarResultExpression(BoundQueryId id) const {
@@ -1965,15 +2122,6 @@ class StatementBinder final {
     for (const Collation* collation : environment_.collations()) {
       impl_->registered_collations.emplace_back(collation->name());
     }
-  }
-
-  [[nodiscard]] bool IsActiveRowIdAlias(BoundSourceColumnId column) const noexcept {
-    const std::size_t index = column.value();
-    if (index < active_source_begin_ || index - active_source_begin_ >= active_source_count_) {
-      return false;
-    }
-    const BoundSourceColumn& source = impl_->source_columns[index];
-    return source.rowid_alias;
   }
 
   [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
@@ -2150,103 +2298,113 @@ class StatementBinder final {
     return {};
   }
 
-  void CollectAggregateLeaves(BoundExpressionId id, std::vector<BoundExpressionId>& leaves,
-                              std::vector<BoundSourceLeafIdentity>& identities) const {
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(id);
-        identity.has_value()) {
-      if (!std::ranges::contains(identities, *identity)) {
-        identities.push_back(*identity);
-        leaves.push_back(id);
+  [[nodiscard]] bool CollectAggregateLeaves(BoundExpressionId id,
+                                            std::vector<BoundSourceCapture>& leaves) const {
+    auto visitor = [&](const BoundSourceLeafIdentity& identity,
+                       std::optional<BoundExpressionId> value) {
+      if (!OwnsActiveSource(identity.source)) {
+        return true;
       }
-      return;
+      const auto existing = std::ranges::find(leaves, identity, &BoundSourceCapture::identity);
+      if (existing == leaves.end()) {
+        leaves.push_back(BoundSourceCapture{.identity = identity, .value = value});
+      } else if (!existing->value.has_value()) {
+        existing->value = value;
+      }
+      return true;
+    };
+    return VisitSourceLeaves(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                             BoundSourceDependency::kBinding, visitor);
+  }
+
+  [[nodiscard]] BindExpected<void> PublishAggregateLeaves(
+      std::span<const BoundSourceCapture> leaves, std::vector<BoundExpressionId>& output) {
+    for (const BoundSourceCapture& leaf : leaves) {
+      if (leaf.value.has_value()) {
+        output.push_back(*leaf.value);
+        continue;
+      }
+      auto value = leaf.identity.column.has_value() ? BindColumn(*leaf.identity.column, {})
+                                                    : BindRowId(leaf.identity.source, {});
+      if (!value.has_value()) {
+        return std::unexpected(std::move(value.error()));
+      }
+      output.push_back(*value);
     }
-    if (std::holds_alternative<BoundAggregateCallExpression>(expression.payload) ||
-        std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
-        std::holds_alternative<BoundParameterExpression>(expression.payload)) {
-      return;
+    return {};
+  }
+
+  [[nodiscard]] bool CanOmitCountOrderingRepresentatives(
+      const BoundAggregateProgram& program) const {
+    if (!program.group_by.empty() || program.having.has_value() || impl_->where.has_value() ||
+        impl_->table_sources.size() != 1U || impl_->result_columns.size() != 1U ||
+        program.invocations.size() != 1U) {
+      return false;
     }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      CollectAggregateLeaves(alias->target, leaves, identities);
-    } else if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-               unary != nullptr) {
-      CollectAggregateLeaves(unary->operand, leaves, identities);
-    } else if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-               binary != nullptr) {
-      CollectAggregateLeaves(binary->left, leaves, identities);
-      CollectAggregateLeaves(binary->right, leaves, identities);
-    } else if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-               comparison != nullptr) {
-      CollectAggregateLeaves(comparison->left, leaves, identities);
-      CollectAggregateLeaves(comparison->right, leaves, identities);
-    } else if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-               truth != nullptr) {
-      CollectAggregateLeaves(truth->operand, leaves, identities);
-    } else if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-               call != nullptr) {
-      for (const BoundExpressionId argument : call->arguments) {
-        CollectAggregateLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-               coalesce != nullptr) {
-      for (const BoundExpressionId argument : coalesce->arguments) {
-        CollectAggregateLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* conditional =
-                   std::get_if<BoundConditionalExpression>(&expression.payload);
-               conditional != nullptr) {
-      for (const BoundExpressionId argument : conditional->arguments) {
-        CollectAggregateLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-               likelihood != nullptr) {
-      CollectAggregateLeaves(likelihood->operand, leaves, identities);
-    } else if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-               collate != nullptr) {
-      CollectAggregateLeaves(collate->operand, leaves, identities);
+    const BoundSourceKind kind = impl_->table_sources.front().kind;
+    if (kind != BoundSourceKind::kCatalogTable && kind != BoundSourceKind::kSchemaTable) {
+      return false;
     }
+    const auto* call = std::get_if<BoundAggregateCallExpression>(
+        &impl_->expressions[impl_->result_columns.front().expression.value()].payload);
+    if (call == nullptr || call->invocation != program.invocations.front()) {
+      return false;
+    }
+    const BoundAggregateInvocation& invocation =
+        impl_->aggregate_invocations[call->invocation.value()];
+    return NamesEqual(impl_->aggregate_functions[invocation.function.value()].name, "count") &&
+           invocation.arguments.empty() && !invocation.distinct && !invocation.filter.has_value() &&
+           invocation.order_by.empty();
   }
 
   [[nodiscard]] BindExpected<void> AnalyzeAggregateLeaves(BoundAggregateProgram& program) {
-    std::vector<BoundSourceLeafIdentity> source_identities;
-    std::vector<BoundSourceLeafIdentity> representative_identities;
+    std::vector<BoundSourceCapture> source_leaves;
+    std::vector<BoundSourceCapture> representative_leaves;
+    bool valid = true;
+    const auto collect = [&](BoundExpressionId id, std::vector<BoundSourceCapture>& leaves) {
+      valid = valid && CollectAggregateLeaves(id, leaves);
+    };
     for (const BoundGroupingTerm& term : program.group_by) {
-      CollectAggregateLeaves(term.expression, program.source_leaves, source_identities);
+      collect(term.expression, source_leaves);
     }
     for (const BoundAggregateInvocationId id : program.invocations) {
       const BoundAggregateInvocation& invocation = impl_->aggregate_invocations[id.value()];
       for (const BoundExpressionId argument : invocation.arguments) {
-        CollectAggregateLeaves(argument, program.source_leaves, source_identities);
+        collect(argument, source_leaves);
       }
       if (invocation.filter.has_value()) {
-        CollectAggregateLeaves(*invocation.filter, program.source_leaves, source_identities);
+        collect(*invocation.filter, source_leaves);
       }
       const BoundAggregateFunction& function =
           impl_->aggregate_functions[invocation.function.value()];
       if (function.extremum == BoundAggregateExtremumKind::kNone) {
         for (const BoundOrderingTerm& term : invocation.order_by) {
-          CollectAggregateLeaves(term.expression, program.source_leaves, source_identities);
+          collect(term.expression, source_leaves);
         }
       }
     }
     for (const BoundResultColumn& result : impl_->result_columns) {
-      CollectAggregateLeaves(result.expression, program.representative_leaves,
-                             representative_identities);
+      collect(result.expression, representative_leaves);
     }
     for (const BoundOrderingTerm& term : ActiveQuery().order_by) {
-      CollectAggregateLeaves(term.expression, program.representative_leaves,
-                             representative_identities);
+      collect(term.expression, representative_leaves);
     }
     if (program.having.has_value()) {
-      CollectAggregateLeaves(*program.having, program.representative_leaves,
-                             representative_identities);
+      collect(*program.having, representative_leaves);
     }
 
-    std::vector<BoundSourceLeafIdentity> retained = source_identities;
-    for (const BoundSourceLeafIdentity& identity : representative_identities) {
-      if (!std::ranges::contains(retained, identity)) {
-        retained.push_back(identity);
+    if (!valid) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "aggregate has invalid retained source dependencies"));
+    }
+    std::vector<BoundSourceLeafIdentity> retained;
+    retained.reserve(source_leaves.size());
+    for (const BoundSourceCapture& leaf : source_leaves) {
+      retained.push_back(leaf.identity);
+    }
+    for (const BoundSourceCapture& leaf : representative_leaves) {
+      if (!std::ranges::contains(retained, leaf.identity)) {
+        retained.push_back(leaf.identity);
       }
     }
     if (retained.size() > options_.maximum_aggregate_terms) {
@@ -2258,7 +2416,14 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded, span,
                                          "too many aggregate terms"));
     }
-    return {};
+    if (CanOmitCountOrderingRepresentatives(program)) {
+      representative_leaves.clear();
+    }
+    if (auto published = PublishAggregateLeaves(source_leaves, program.source_leaves);
+        !published.has_value()) {
+      return published;
+    }
+    return PublishAggregateLeaves(representative_leaves, program.representative_leaves);
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundAggregateProgram>> FinalizeAggregateProgram() {
@@ -2398,7 +2563,8 @@ class StatementBinder final {
       if (SourceJoinPreservesLeft(bound_source.join) || has_right) {
         bool forward = false;
         auto visitor = [&](BoundSourceId owner) { forward = forward || owner > bound_source.id; };
-        if (!VisitSourceOwners(impl_->expressions, impl_->source_columns, *condition, visitor)) {
+        if (!VisitSourceOwners(impl_->expressions, impl_->source_columns, *condition,
+                               CaptureLookup(), visitor)) {
           return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
                                              tree_.expression(*on).span,
                                              "ON condition has invalid source dependencies"));
@@ -2489,7 +2655,7 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
                                          "too many columns in result set"));
     }
-    const BindScope empty_scope{.source_columns = false, .result_aliases = false};
+    const BindScope empty_scope{.source_columns = true, .result_aliases = false};
     std::vector<std::vector<BoundExpressionId>> rows;
     rows.reserve(core.rows.size());
     for (const std::vector<ExpressionId>& syntax_row : core.rows) {
@@ -2735,13 +2901,7 @@ class StatementBinder final {
     if (!compares_rows) {
       return {};
     }
-    const BoundQuery& query = ActiveQuery();
-    if (query.destination != BoundQueryDestination::kClient && query.order_by.empty() &&
-        query.limit.has_value() && !query.limit->offset.has_value() &&
-        BoundExpressionIsIntegerOne(impl_->expressions, query.limit->limit) &&
-        std::ranges::all_of(query.compound_operators, [](CompoundOperator operation) {
-          return operation == CompoundOperator::kUnion || operation == CompoundOperator::kUnionAll;
-        })) {
+    if (BoundQueryCanOmitSetComparisons(ActiveQuery(), impl_->expressions)) {
       return {};
     }
     for (const BoundCollationId collation : ActiveQuery().compound_collations) {
@@ -4331,7 +4491,8 @@ class StatementBinder final {
         } else {
           resolved = ResolveSourceName(
               value_column->name, span,
-              SourceQualification{.schema = catalog_->schema_name(), .name = source_name});
+              SourceQualification{.schema = catalog_->schema_name(), .name = source_name},
+              source_states_, impl_->table_sources);
         }
         if (!resolved.has_value()) {
           return std::unexpected(std::move(resolved.error()));
@@ -4682,16 +4843,20 @@ class StatementBinder final {
             parts->size() == 3U ? std::optional<std::string_view>{parts->front()} : std::nullopt,
         .name = (*parts)[parts->size() - 2U],
     };
-    auto resolved = ResolveSourceName(parts->back(), identifier.name.span, qualification);
+    auto resolved = ResolveSourceName(parts->back(), identifier.name.span, qualification,
+                                      source_states_, impl_->table_sources);
     if (!resolved.has_value()) {
       return std::unexpected(std::move(resolved.error()));
     }
     if (resolved->has_value()) {
       return **resolved;
     }
-    if (HasOuterSourceName(parts->back(), qualification)) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, identifier.name.span,
-                                         "correlated subqueries are not supported"));
+    auto outer = ResolveOuterSourceName(parts->back(), identifier.name.span, qualification);
+    if (!outer.has_value()) {
+      return std::unexpected(std::move(outer.error()));
+    }
+    if (outer->has_value()) {
+      return **outer;
     }
     return NoSuchColumn(identifier.name.span);
   }
@@ -4699,7 +4864,8 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSingleName(
       std::string_view name, SourceSpan span, BindScope scope) {
     if (scope.source_columns) {
-      auto resolved = ResolveSourceName(name, span, std::nullopt);
+      auto resolved =
+          ResolveSourceName(name, span, std::nullopt, source_states_, impl_->table_sources);
       if (!resolved.has_value() || resolved->has_value()) {
         return resolved;
       }
@@ -4722,31 +4888,39 @@ class StatementBinder final {
         }
       }
     }
-    if (scope.source_columns && HasOuterSourceName(name, std::nullopt)) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                         "correlated subqueries are not supported"));
+    if (scope.source_columns) {
+      return ResolveOuterSourceName(name, span, std::nullopt);
     }
     return std::optional<BoundExpressionId>{};
   }
 
-  [[nodiscard]] bool HasOuterSourceName(
-      std::string_view name, std::optional<SourceQualification> qualification) const noexcept {
+  [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveOuterSourceName(
+      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification) {
     for (const QueryBindingScope* scope = outer_scope_; scope != nullptr; scope = scope->outer) {
       if (!scope->sources_visible) {
-        continue;
+        break;
       }
-      for (const SourceState& source : scope->sources) {
-        if (qualification.has_value() && !QualifiedSourceMatches(source, *qualification)) {
-          continue;
+      auto resolved =
+          ResolveSourceName(name, span, qualification, scope->sources, scope->table_sources);
+      if (!resolved.has_value()) {
+        return std::unexpected(std::move(resolved.error()));
+      }
+      if (resolved->has_value()) {
+        if (auto captured = RecordCapturedSources(**resolved); !captured.has_value()) {
+          return std::unexpected(std::move(captured.error()));
         }
-        if (FindSourceColumn(source, name).has_value() ||
-            (RowIdAvailable(source) && (NamesEqual(name, "rowid") || NamesEqual(name, "_rowid_") ||
-                                        NamesEqual(name, "oid")))) {
-          return true;
+        return resolved;
+      }
+      if (!qualification.has_value() && scope->aliases_visible) {
+        for (const AliasEntry& alias : scope->aliases) {
+          if (NamesEqual(alias.name, name)) {
+            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                               "outer result-alias expansion is not supported"));
+          }
         }
       }
     }
-    return false;
+    return std::optional<BoundExpressionId>{};
   }
 
   [[nodiscard]] bool QualifiedSourceMatches(
@@ -4794,7 +4968,8 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSourceName(
-      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification) {
+      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification,
+      std::span<const SourceState> sources, std::span<const BoundTableSource> table_sources) {
     std::optional<BoundSourceColumnId> matched_column;
     std::optional<BoundExpressionId> matched_value;
     const auto matches = [&](const SourceState& source) {
@@ -4812,7 +4987,7 @@ class StatementBinder final {
       return BinderError(BindErrorCode::kAmbiguousColumn, span,
                          "ambiguous column name: " + resolved_name);
     };
-    for (const SourceState& source : source_states_) {
+    for (const SourceState& source : sources) {
       if (!matches(source)) {
         continue;
       }
@@ -4825,9 +5000,8 @@ class StatementBinder final {
           if (JoinedColumnRepresentative(*matched_column) != JoinedColumnRepresentative(*column)) {
             return std::unexpected(ambiguous());
           }
-          const auto owner =
-              std::ranges::find(impl_->table_sources, source.id, &BoundTableSource::id);
-          if (owner != impl_->table_sources.end()) {
+          const auto owner = std::ranges::find(table_sources, source.id, &BoundTableSource::id);
+          if (owner != table_sources.end()) {
             if (owner->join == SourceJoinKind::kRight) {
               matched_column = *column;
               matched_value.reset();
@@ -4868,7 +5042,7 @@ class StatementBinder final {
     }
     if (IsRowIdName(name)) {
       std::optional<BoundSourceId> matched_rowid;
-      for (const SourceState& source : source_states_) {
+      for (const SourceState& source : sources) {
         if (matches(source) && RowIdAvailable(source)) {
           if (matched_rowid.has_value()) {
             return std::unexpected(ambiguous());
@@ -4891,7 +5065,7 @@ class StatementBinder final {
                                                            SourceSpan span) {
     const BoundSourceColumn& column = impl_->source_columns[id.value()];
     const std::string_view collation_name =
-        IsActiveRowIdAlias(id) ? std::string_view{"BINARY"} : column.collation_name;
+        column.rowid_alias ? std::string_view{"BINARY"} : column.collation_name;
     BindExpected<std::optional<BoundCollationId>> collation =
         InternOptionalCollation(collation_name, span);
     if (!collation.has_value()) {
@@ -5206,6 +5380,31 @@ class StatementBinder final {
     if (call.distinct && arguments.size() != 1U) {
       return std::unexpected(BinderError(BindErrorCode::kWrongFunctionArity, span,
                                          "DISTINCT aggregates must have exactly one argument"));
+    }
+    bool local_source = false;
+    bool outer_source = false;
+    auto owner = [&](BoundSourceId source) {
+      local_source = local_source || OwnsActiveSource(source);
+      outer_source = outer_source || !OwnsActiveSource(source);
+    };
+    const auto inspect = [&](BoundExpressionId id) {
+      return VisitSourceOwners(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                               owner);
+    };
+    bool valid_ownership = std::ranges::all_of(arguments, inspect);
+    for (const BoundOrderingTerm& term : order_by) {
+      valid_ownership = valid_ownership && inspect(term.expression);
+    }
+    if (filter.has_value()) {
+      valid_ownership = valid_ownership && inspect(*filter);
+    }
+    if (!valid_ownership) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "aggregate has invalid source dependencies"));
+    }
+    if (outer_source && !local_source) {
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                         "outer-owned aggregates are not supported"));
     }
     const bool argument_reuses_single_order_key =
         arguments.size() == 1U && order_by.size() == 1U &&
@@ -5830,6 +6029,21 @@ bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
     id = unary->operand;
   }
   return false;
+}
+
+bool BoundQueryHasSingleRowDemand(const BoundQuery& query,
+                                  std::span<const BoundExpression> expressions) noexcept {
+  return query.limit.has_value() && !query.limit->offset.has_value() &&
+         BoundExpressionIsIntegerOne(expressions, query.limit->limit);
+}
+
+bool BoundQueryCanOmitSetComparisons(const BoundQuery& query,
+                                     std::span<const BoundExpression> expressions) noexcept {
+  return query.destination != BoundQueryDestination::kClient && query.order_by.empty() &&
+         BoundQueryHasSingleRowDemand(query, expressions) &&
+         std::ranges::all_of(query.compound_operators, [](CompoundOperator operation) {
+           return operation == CompoundOperator::kUnion || operation == CompoundOperator::kUnionAll;
+         });
 }
 
 BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept {

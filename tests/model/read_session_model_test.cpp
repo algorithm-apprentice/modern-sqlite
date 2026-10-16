@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1066,13 +1067,18 @@ void RunRightJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>&
   RequireStatus(statement.Finalize());
 }
 
-void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words) {
+void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& words,
+                      bool captures = false) {
   const auto left_count = static_cast<std::int64_t>(words[0] % 9U);
   const auto right_count = static_cast<std::int64_t>(words[1] % 9U);
   const std::int64_t shift = static_cast<std::int64_t>(words[2] % 3U) - 1;
   const std::string condition = shift == 0 ? "b.id=a.id AND ?3=0" : "b.id=a.id+?3";
+  const std::string projection =
+      captures ? "a.id,b.id,(SELECT coalesce(a.id,b.id)),(SELECT a.value),(SELECT b.nullable)"
+               : "a.id,b.id";
   ReadStatement statement =
-      Prepare(session, "SELECT a.id,b.id FROM model_rows a FULL JOIN model_rows b ON " + condition +
+      Prepare(session, "SELECT " + projection + " FROM model_rows a FULL JOIN model_rows b ON " +
+                           condition +
                            " AND a.id<=?1 AND b.id<=?2 "
                            "WHERE (a.id<=?1 OR a.id IS NULL) AND (b.id<=?2 OR b.id IS NULL) "
                            "ORDER BY a.id IS NULL,a.id,b.id");
@@ -1087,12 +1093,17 @@ void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& 
       return row.id <= right_count && row.id == left.id + shift;
     });
     ExpectRowStep(statement);
-    ASSERT_EQ(2U, statement.row().size());
+    ASSERT_EQ(captures ? 5U : 2U, statement.row().size());
     ExpectInteger(statement.row()[0], left.id);
     if (right == kRows.end()) {
       ExpectNullable(statement.row()[1], std::nullopt);
     } else {
       ExpectInteger(statement.row()[1], right->id);
+    }
+    if (captures) {
+      ExpectInteger(statement.row()[2], left.id);
+      ExpectInteger(statement.row()[3], left.value);
+      ExpectNullable(statement.row()[4], right == kRows.end() ? std::nullopt : right->nullable);
     }
   }
   for (const ModelRow& right : kRows) {
@@ -1106,12 +1117,106 @@ void RunFullJoinModel(ReadSession& session, const std::array<std::uint64_t, 4>& 
       continue;
     }
     ExpectRowStep(statement);
-    ASSERT_EQ(2U, statement.row().size());
+    ASSERT_EQ(captures ? 5U : 2U, statement.row().size());
     ExpectNullable(statement.row()[0], std::nullopt);
     ExpectInteger(statement.row()[1], right.id);
+    if (captures) {
+      ExpectInteger(statement.row()[2], right.id);
+      ExpectNullable(statement.row()[3], std::nullopt);
+      ExpectNullable(statement.row()[4], right.nullable);
+    }
   }
   ExpectDoneStep(statement);
   RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSessionModel, MatchesCorrelatedRowsGroupsAndNullExtendedSourcesAcrossRebindings) {
+  for (const bool file_backed : {false, true}) {
+    SplitMix64 random{kModelSeed};
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = file_backed ? TemporaryStoreMode::kFile : TemporaryStoreMode::kMemory,
+                .sorter_memory_threshold = ByteCount{32U * 1024U}},
+    };
+    ReadSession session = TakeValue(ReadSession::Open(FixturePath().string(), options));
+    ReadStatement rows =
+        Prepare(session,
+                "SELECT o.id,(SELECT i.value FROM model_rows i WHERE i.id>=o.id+?2 "
+                "ORDER BY i.id DESC LIMIT ?3 OFFSET ?4),"
+                "EXISTS(SELECT 1 FROM model_rows i WHERE i.nullable IS o.nullable AND i.id<=?5) "
+                "FROM model_rows o WHERE o.id<=?1 ORDER BY o.id");
+    ReadStatement groups =
+        Prepare(session,
+                "SELECT o.nullable IS NULL,sum((SELECT (SELECT o.value))),"
+                "(SELECT o.id),(SELECT (SELECT o.label)),EXISTS(SELECT 1 ORDER BY o.nullable) "
+                "FROM model_rows o WHERE o.id<=?1 GROUP BY o.nullable IS NULL ORDER BY 1");
+    for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
+      const std::array words{random.Next(), random.Next(), random.Next(), random.Next()};
+      const auto count = static_cast<std::int64_t>(words[0] % 9U);
+      const auto shift = static_cast<std::int64_t>(words[1] % 7U) - 3;
+      const auto limit = static_cast<std::int64_t>(words[2] % 4U) - 1;
+      const auto offset = static_cast<std::int64_t>(words[3] % 5U);
+      const auto exists_count = static_cast<std::int64_t>(words[1] % 9U);
+      SCOPED_TRACE(Trace(case_index, "correlated-rows-groups", words,
+                         "file_backend=" + std::to_string(file_backed)));
+      RequireStatus(rows.Reset());
+      RequireStatus(rows.Bind(1, SqlValue::Integer(count)));
+      RequireStatus(rows.Bind(2, SqlValue::Integer(shift)));
+      RequireStatus(rows.Bind(3, SqlValue::Integer(limit)));
+      RequireStatus(rows.Bind(4, SqlValue::Integer(offset)));
+      RequireStatus(rows.Bind(5, SqlValue::Integer(exists_count)));
+      for (const ModelRow& outer : kRows) {
+        if (outer.id > count) {
+          continue;
+        }
+        ExpectRowStep(rows);
+        ASSERT_EQ(3U, rows.row().size());
+        ExpectInteger(rows.row()[0], outer.id);
+        std::vector<const ModelRow*> matches;
+        for (const ModelRow& inner : kRows | std::views::reverse) {
+          if (inner.id >= outer.id + shift) {
+            matches.push_back(&inner);
+          }
+        }
+        const auto skipped = static_cast<std::size_t>(offset);
+        ExpectNullable(rows.row()[1], limit == 0 || skipped >= matches.size()
+                                          ? std::nullopt
+                                          : std::optional{matches[skipped]->value});
+        const bool exists = std::ranges::any_of(kRows, [&](const ModelRow& inner) {
+          return inner.id <= exists_count && inner.nullable == outer.nullable;
+        });
+        ExpectInteger(rows.row()[2], exists ? 1 : 0);
+      }
+      ExpectDoneStep(rows);
+      RequireStatus(groups.Reset());
+      RequireStatus(groups.Bind(1, SqlValue::Integer(count)));
+      for (const bool null_group : {false, true}) {
+        const ModelRow* representative = nullptr;
+        std::int64_t sum = 0;
+        for (const ModelRow& row : kRows) {
+          if (row.id <= count && row.nullable.has_value() != null_group) {
+            if (representative == nullptr) {
+              representative = &row;
+            }
+            sum += row.value;
+          }
+        }
+        if (representative == nullptr) {
+          continue;
+        }
+        ExpectRowStep(groups);
+        ASSERT_EQ(5U, groups.row().size());
+        ExpectInteger(groups.row()[0], null_group ? 1 : 0);
+        ExpectInteger(groups.row()[1], sum);
+        ExpectInteger(groups.row()[2], representative->id);
+        ExpectText(groups.row()[3], representative->label);
+        ExpectInteger(groups.row()[4], 1);
+      }
+      ExpectDoneStep(groups);
+      RunFullJoinModel(session, words, true);
+    }
+  }
 }
 
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {

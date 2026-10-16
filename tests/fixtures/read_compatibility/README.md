@@ -80,6 +80,15 @@ python3 tools/read_compatibility.py regenerate \
   --sqlite-h ./sqlite3.h
 ```
 
+The primary pair remains bounded at 512 records. Source-correlation evidence
+also uses `tests/compatibility/subquery-corpus-v1.json` and
+`tests/compatibility/subquery-oracle-v1.json`, with the same version-one
+schema, per-file limits, fixture hashes, profile, and generator. Regenerate
+that pair with the command above by substituting those two paths.
+Both pairs run through the same differential and clean-regeneration drivers;
+each includes native-valid staged boundaries and ordinary prepare-error
+controls for mismatch-classification regression tests.
+
 To enable direct extraction and clean-regeneration CTests, configure with all
 three pinned inputs:
 
@@ -98,7 +107,9 @@ ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5  sqlite3.h
 6da29de262fa702a09fdd4030417c93405258f5cfbce652b341bbcf4ec798d1a  tests/fixtures/read_compatibility/read-compatibility.sql
 9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905  tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db
 cf0982cb2f38c893359188a6ed11bd05ff541d5975a57d482f7fd367a4d02981  tests/compatibility/sqlite-oracle-profile-v1.json
-f0583f0d54bc8c2aa3bb70fa9ea46f87e002d3ca4fcb3be07a52df42503d3f04  tests/compatibility/read-corpus-v1.json
-50063dca75bd396f2bd7388c972aed3c8078f6729360736e2f3761823c416ae9  tests/compatibility/read-oracle-v1.json
+26cb13ba6272c99f5ba6b048694b31bf6759ac61296dec156dc9bc03415d4ba1  tests/compatibility/read-corpus-v1.json
+05b7a7d168e8d24091c397a199135d3be6dd47ed7b62183d712aa7b5cb9251e6  tests/compatibility/read-oracle-v1.json
+84ebe5d55e8706a070e3e18d23d0168bf6e76a75ef83433345416e8bf19f3482  tests/compatibility/subquery-corpus-v1.json
+a212b96b766992241dcea116b29f96ed7536590463e30e9e45b7fd72d022fd50  tests/compatibility/subquery-oracle-v1.json
 24f4c5b458af493128219c1961a6d13cef7c99278c24527e21a2a0f546688592  tools/read_compatibility.py
 ```

@@ -140,7 +140,11 @@ the same producer and canonical traversal emission. ADR-0088 defines the
 bounded canonical record-prefix comparison prerequisite for shared
 automatic-index integration. ADR-0089 defines that integration through
 configured-backend admission, canonical lookup relations, and borrowed
-source cursors. Persistent constraints,
+source cursors. ADR-0090 defines source correlation through the same query
+owners and producers, with lazy inline emission inside one lexical bytecode
+region and separate binding/value dependencies. Source-free queries retain
+the verified value-call interface. Outer result-alias expansion and outer
+aggregate ownership remain ordered subquery follow-ups. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

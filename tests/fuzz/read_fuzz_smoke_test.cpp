@@ -150,6 +150,20 @@ namespace {
       return false;
     }
   }
+  for (std::uint8_t kind = 4; kind < 10U; ++kind) {
+    for (const std::uint8_t exists : std::array<std::uint8_t, 2>{0, 1}) {
+      for (const std::uint8_t nesting : std::array<std::uint8_t, 3>{0, 1, 2}) {
+        const std::array<std::uint8_t, 8> input{0x03,    exists,  kind,    nesting,
+                                                nesting, nesting, nesting, nesting};
+        const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+        if (sql.find("model_rows o") == std::string::npos ||
+            (nesting == 1U && sql.find("AS captured_value") == std::string::npos) ||
+            !ExecuteSql(*session, sql)) {
+          return false;
+        }
+      }
+    }
+  }
   for (std::uint8_t kind = 0; kind < 4U; ++kind) {
     for (std::uint8_t key = 0; key < 6U; ++key) {
       for (std::uint8_t consumer = 0; consumer < 6U; ++consumer) {

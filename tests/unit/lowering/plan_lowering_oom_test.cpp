@@ -574,6 +574,22 @@ int main() try {
                        "GROUP BY a.id ORDER BY a.id",
                        kAutomaticOptions),
   };
+  const std::array<PhysicalPlan, 5> correlated_plans{
+      AggregateFixture(catalog,
+                       "SELECT (SELECT (SELECT o.Name)),"
+                       "EXISTS(SELECT 1 ORDER BY (SELECT o.Name)) FROM Items o"),
+      AggregateFixture(catalog, "SELECT count(*),EXISTS(SELECT o.Name ORDER BY o.id) FROM Items o"),
+      AggregateFixture(catalog,
+                       "SELECT (SELECT group_concat(i.Name ORDER BY i.id) FROM Items i "
+                       "WHERE i.id<=o.id GROUP BY i.Name ORDER BY 1 LIMIT ?1) AS x "
+                       "FROM Items o WHERE x IS NOT NULL"),
+      AggregateFixture(indexed_catalog,
+                       "SELECT (SELECT i.Payload FROM Items i WHERE i.Name=o.Name) FROM Items o"),
+      AggregateFixture(catalog,
+                       "SELECT (SELECT b.Name||o.Name FROM Items a JOIN Items b ON b.Name=a.Name "
+                       "WHERE a.id=o.id ORDER BY b.id LIMIT ?1) FROM Items o",
+                       kAutomaticOptions),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -644,6 +660,11 @@ int main() try {
   for (const PhysicalPlan& automatic_plan : automatic_plans) {
     if (!verify_oom(automatic_plan, 256U, true)) {
       return 2;
+    }
+  }
+  for (const PhysicalPlan& correlated_plan : correlated_plans) {
+    if (!verify_oom(correlated_plan, 256U)) {
+      return 3;
     }
   }
 
