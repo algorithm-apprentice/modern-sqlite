@@ -33,7 +33,7 @@ constexpr std::string_view kCanonicalPath = "/canonical/writable.db";
 constexpr std::size_t kPageSize = 512;
 constexpr std::uint32_t kSqliteVersion = 3'054'000;
 
-void Store32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t value) {
+void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) {
   StoreBigEndian<std::uint32_t>(
       std::span<std::byte, sizeof(value)>{bytes.data() + offset, sizeof(value)}, value);
 }
@@ -2544,6 +2544,127 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
     EXPECT_EQ(std::byte{2}, page->frame().bytes()[100]);
   }
   EXPECT_FALSE(std::filesystem::exists(database_path.string() + "-journal"));
+}
+
+TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
+  for (const std::optional<std::size_t> master_size :
+       std::array<std::optional<std::size_t>, 3>{std::nullopt, 0U, 1U}) {
+    SCOPED_TRACE(master_size.has_value() ? std::to_string(*master_size) : "missing");
+    const TemporaryDirectory directory;
+    ASSERT_TRUE(directory.valid());
+    const std::string database_path = directory.DatabasePath().string();
+    const std::string journal_path = database_path + "-journal";
+    const std::string master_path = database_path + "-mj000000900";
+    const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage());
+    ASSERT_TRUE(WriteBytes(database_path, original.view()));
+    PosixVfs vfs;
+    const WritablePagerOptions options{
+        .pager =
+            PagerOptions{
+                .empty_database_page_size = ByteCount{kPageSize},
+                .cache_capacity_pages = 1,
+            },
+        .journal =
+            RollbackJournalOptions{
+                .legacy_page_size = ByteCount{kPageSize},
+            },
+    };
+    {
+      auto crashed = Pager::OpenWritable(vfs, database_path, options);
+      ASSERT_TRUE(crashed.has_value());
+      ASSERT_TRUE((*crashed)->BeginRead().has_value());
+      ASSERT_TRUE((*crashed)->BeginWrite().has_value());
+      {
+        auto page = (*crashed)->WritePage(PageNumber{2});
+        ASSERT_TRUE(page.has_value());
+        page->mutable_bytes()[100] = std::byte{0x7f};
+      }
+      {
+        const auto header = (*crashed)->WritePage(PageNumber{1});
+        ASSERT_TRUE(header.has_value());
+      }
+      {
+        const auto trigger = (*crashed)->ReadPage(PageNumber{1});
+        ASSERT_TRUE(trigger.has_value());
+      }
+    }
+    ByteBuffer before_recovery{original.size()};
+    {
+      auto database = vfs.Open(database_path, FileOpenOptions{});
+      ASSERT_TRUE(database.has_value());
+      const auto read = database->file->ReadAt(before_recovery.mutable_view(), FileOffset{0});
+      ASSERT_TRUE(read.has_value());
+      ASSERT_TRUE(read->complete());
+      ASSERT_EQ(std::byte{0x7f}, before_recovery.view()[kPageSize + 100U]);
+    }
+    {
+      auto journal = vfs.Open(journal_path, FileOpenOptions{
+                                                .kind = FileKind::kMainJournal,
+                                                .access = FileAccessMode::kReadWrite,
+                                            });
+      ASSERT_TRUE(journal.has_value());
+      const auto size = journal->file->Size();
+      ASSERT_TRUE(size.has_value());
+      const ByteView name = AsBytes(master_path);
+      ByteBuffer trailer{ByteCount{4U + name.size() + 16U}};
+      Store32(trailer.mutable_view(), 0, static_cast<std::uint32_t>(0x40000000U / kPageSize + 1U));
+      ASSERT_TRUE(CopyBytes(trailer.mutable_view().subspan(4), name).has_value());
+      const std::size_t tail = 4U + name.size();
+      Store32(trailer.mutable_view(), tail, static_cast<std::uint32_t>(name.size()));
+      std::uint32_t checksum = 0;
+      for (const std::byte value : name) {
+        const auto signed_value = std::bit_cast<std::int8_t>(std::to_integer<std::uint8_t>(value));
+        checksum += static_cast<std::uint32_t>(static_cast<std::int32_t>(signed_value));
+      }
+      Store32(trailer.mutable_view(), tail + 4U, checksum);
+      ASSERT_TRUE(CopyBytes(trailer.mutable_view().subspan(tail + 8U),
+                            AsBytes("\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"))
+                      .has_value());
+      ASSERT_TRUE(journal->file->WriteAt(trailer.view(), FileOffset{size->value()}).has_value());
+      ASSERT_TRUE(journal->file->Sync(SyncOptions{}).has_value());
+    }
+    if (master_size.has_value()) {
+      auto master = vfs.Open(master_path, FileOpenOptions{
+                                              .kind = FileKind::kSuperJournal,
+                                              .access = FileAccessMode::kReadWrite,
+                                              .create = true,
+                                              .exclusive_create = true,
+                                          });
+      ASSERT_TRUE(master.has_value());
+      if (*master_size != 0U) {
+        const std::array<std::byte, 1> content{std::byte{1}};
+        ASSERT_TRUE(master->file->WriteAt(content, FileOffset{0}).has_value());
+      }
+      ASSERT_TRUE(master->file->Sync(SyncOptions{}).has_value());
+    }
+    const bool rollback = master_size.has_value() && *master_size != 0U;
+    {
+      auto recovered = Pager::OpenWritable(vfs, database_path, options);
+      ASSERT_TRUE(recovered.has_value());
+      ASSERT_TRUE((*recovered)->BeginRead().has_value());
+      {
+        const auto page = (*recovered)->ReadPage(PageNumber{2});
+        ASSERT_TRUE(page.has_value());
+        EXPECT_EQ(rollback ? std::byte{2} : std::byte{0x7f}, page->frame().bytes()[100]);
+      }
+      ASSERT_TRUE((*recovered)->EndRead().has_value());
+    }
+    {
+      auto database = vfs.Open(database_path, FileOpenOptions{});
+      ASSERT_TRUE(database.has_value());
+      ByteBuffer recovered_image{original.size()};
+      const auto read = database->file->ReadAt(recovered_image.mutable_view(), FileOffset{0});
+      const auto size = database->file->Size();
+      ASSERT_TRUE(read.has_value());
+      ASSERT_TRUE(read->complete());
+      ASSERT_TRUE(size.has_value());
+      EXPECT_EQ(original.size().value(), size->value());
+      EXPECT_TRUE(std::ranges::equal(rollback ? original.view() : before_recovery.view(),
+                                     recovered_image.view()));
+    }
+    EXPECT_FALSE(std::filesystem::exists(journal_path));
+    EXPECT_EQ(master_size.has_value(), std::filesystem::exists(master_path));
+  }
 }
 
 TEST(WritePager, EveryOnePageCommitCrashCutRecoversTheOldOrCommittedImage) {

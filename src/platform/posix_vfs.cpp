@@ -1815,33 +1815,25 @@ Status PosixVfs::DoDelete(std::string_view path, DirectorySync directory_sync) {
 }
 
 Result<bool> PosixVfs::DoAccess(std::string_view path, FileAccessQuery query) {
-  int mode = F_OK;
-  switch (query) {
-    case FileAccessQuery::kExists:
-      mode = F_OK;
-      break;
-    case FileAccessQuery::kRead:
-      mode = R_OK;
-      break;
-    case FileAccessQuery::kReadWrite:
-      mode = R_OK | W_OK;
-      break;
-  }
-
   const std::string owned_path{path};
+  const bool check_existence = query == FileAccessQuery::kExists;
+  const int mode = query == FileAccessQuery::kRead ? R_OK : R_OK | W_OK;
+  struct stat status{};
   int result = -1;
   do {
-    result = ::access(owned_path.c_str(), mode);
+    result =
+        check_existence ? ::stat(owned_path.c_str(), &status) : ::access(owned_path.c_str(), mode);
   } while (result == -1 && errno == EINTR);
   if (result == 0) {
-    return true;
+    return !check_existence || !S_ISREG(status.st_mode) || status.st_size > 0;
   }
   const int error_number = errno;
   if (error_number == ENOENT || error_number == ENOTDIR || error_number == EACCES ||
       error_number == EROFS) {
     return false;
   }
-  return std::unexpected(SystemError(ErrorCode::kIo, "access", path, error_number));
+  return std::unexpected(
+      SystemError(ErrorCode::kIo, check_existence ? "stat" : "access", path, error_number));
 }
 
 Result<std::string> PosixVfs::DoFullPath(std::string_view path) {
