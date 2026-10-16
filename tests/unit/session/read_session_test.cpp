@@ -848,6 +848,48 @@ TEST(ReadSession, ExecutesSourceCorrelatedScalarAndExistsPerOuterRow) {
   }
 }
 
+TEST(ReadSession, ExecutesOuterExpressionAliasesInNestedConsumers) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT o.id+?1 AS shifted FROM items o "
+                                             "WHERE (SELECT shifted)>?2 ORDER BY o.id");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(10)));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(12)));
+  for (const std::int64_t value : {13, 14}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(1U, statement.row().size());
+    EXPECT_EQ(value, IntegerValue(statement.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, RequiresOnlyExecutedOuterAliasComparisonsToResolveCollations) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  const auto live = session.Prepare(
+      Utf8View{"SELECT EXISTS(SELECT (1 COLLATE missing)=2 AS x WHERE (SELECT x)=0)"});
+  ASSERT_FALSE(live.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, live.error().code());
+
+  ReadStatement ignored =
+      PrepareStatement(session,
+                       "SELECT EXISTS(SELECT (1 COLLATE missing)=2 AS x WHERE EXISTS(SELECT x)),"
+                       "EXISTS(SELECT 1 COLLATE missing AS x WHERE (SELECT x)=1)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(ignored.Step()));
+  ASSERT_EQ(2U, ignored.row().size());
+  EXPECT_EQ(1, IntegerValue(ignored.row()[0]));
+  EXPECT_EQ(1, IntegerValue(ignored.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(ignored.Step()));
+
+  ReadStatement inherited =
+      PrepareStatement(session, "SELECT name AS x FROM items WHERE (SELECT x='ALPHA')");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(inherited.Step()));
+  EXPECT_EQ("alpha", TextValue(inherited.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(inherited.Step()));
+  ReadStatement scalar =
+      PrepareStatement(session, "SELECT name AS x FROM items WHERE (SELECT x)='ALPHA'");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(scalar.Step()));
+}
+
 TEST(ReadSession, CapturesMergedAndQualifiedFullJoinValuesIncludingNullRows) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -2454,6 +2496,41 @@ TEST(ReadSession, ExecutesSixtyFourJoinedCoveringPrefixesInOneSourcePipeline) {
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSession, RecordsOuterExpressionAliasFixedWorkBaseline) {
+  for (const bool source_value : {false, true}) {
+    for (const std::int64_t outer_rows : {1, 8, 32}) {
+      SCOPED_TRACE(source_value);
+      SCOPED_TRACE(outer_rows);
+      ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+      const std::string definition = source_value ? "o.id+1" : "1";
+      ReadStatement statement =
+          PrepareStatement(session, "SELECT " + definition +
+                                        " AS x FROM model_rows o "
+                                        "WHERE o.id<=?1 AND (SELECT (SELECT x))>0 ORDER BY o.id");
+      RequireStatus(statement.Bind(1, SqlValue::Integer(outer_rows)));
+      instrumentation::CounterCollection work;
+      {
+        const instrumentation::ScopedCounterCollection scope{work};
+        for (std::int64_t id = 1; id <= outer_rows; ++id) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          ASSERT_EQ(1U, statement.row().size());
+          EXPECT_EQ(source_value ? id + 1 : 1, IntegerValue(statement.row()[0]));
+        }
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+      const std::string prefix =
+          std::string{source_value ? "source_" : "constant_"} + std::to_string(outer_rows) + "_";
+      for (const auto counter :
+           {instrumentation::Counter::kVmInstructions, instrumentation::Counter::kPagesRead,
+            instrumentation::Counter::kBytesCopied}) {
+        RecordProperty(prefix + std::string{instrumentation::CounterName(counter)},
+                       std::to_string(work.Value(counter)));
+      }
+      EXPECT_GT(work.Value(instrumentation::Counter::kVmInstructions), 0U);
+    }
+  }
+}
+
 TEST(ReadSession, RecordsSourceCorrelatedScalarAndExistsFixedWorkBaseline) {
   struct Case {
     std::string_view name;

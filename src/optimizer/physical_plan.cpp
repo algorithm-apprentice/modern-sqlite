@@ -282,14 +282,14 @@ template <typename Bound>
 [[nodiscard]] auto CaptureLookup(const Bound& bound_select) noexcept {
   if constexpr (requires { bound_select.owner().query_count(); }) {
     return
-        [&bound_select](BoundQueryId query) -> std::optional<std::span<const BoundSourceCapture>> {
+        [&bound_select](BoundQueryId query) -> std::optional<std::span<const BoundQueryCapture>> {
           if (query.value() < bound_select.owner().query_count()) {
-            return std::span<const BoundSourceCapture>{bound_select.owner().query(query).captures};
+            return std::span<const BoundQueryCapture>{bound_select.owner().query(query).captures};
           }
           return std::nullopt;
         };
   } else {
-    return [](BoundQueryId) -> std::optional<std::span<const BoundSourceCapture>> {
+    return [](BoundQueryId) -> std::optional<std::span<const BoundQueryCapture>> {
       return std::nullopt;
     };
   }
@@ -298,9 +298,11 @@ template <typename Bound>
 template <typename Bound>
 [[nodiscard]] bool IsCapturedSource(const Bound& bound_select, BoundSourceId source) noexcept {
   if constexpr (requires { bound_select.query().captures; }) {
-    return std::ranges::any_of(
-        bound_select.query().captures,
-        [source](const BoundSourceCapture& capture) { return capture.identity.source == source; });
+    return std::ranges::any_of(bound_select.query().captures,
+                               [source](const BoundQueryCapture& dependency) {
+                                 const auto* capture = std::get_if<BoundSourceCapture>(&dependency);
+                                 return capture != nullptr && capture->identity.source == source;
+                               });
   }
   return false;
 }
@@ -1149,7 +1151,7 @@ struct RequiredSourceValues {
       MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
                                &required_rowid);
     }
-  } else {
+  } else if (BoundQueryRequiresResultValues(bound_select.query(), bound_select.expressions())) {
     const std::span<const BoundResultColumn> results =
         select_core != nullptr ? std::span<const BoundResultColumn>{select_core->result_columns}
                                : bound_select.result_columns();

@@ -557,6 +557,33 @@ TEST(Binder, PublishesScalarAffinityAndTypeWithoutBorrowingChildCollation) {
   EXPECT_EQ("INTEGER", values.result_columns()[0].declared_type);
 }
 
+TEST(Binder, DerivesResultValueDemandFromDestinationAndSetConsumers) {
+  const auto catalog = TestCatalog();
+  struct Case {
+    std::string_view suffix;
+    bool compares_values;
+  };
+  for (const bool scalar : {false, true}) {
+    SCOPED_TRACE(scalar);
+    for (const Case& test_case :
+         {Case{"", false}, Case{" LIMIT 1 OFFSET 1", false}, Case{" UNION SELECT 'other'", false},
+          Case{" UNION ALL SELECT 'other'", false}, Case{" INTERSECT SELECT 'other'", true},
+          Case{" EXCEPT SELECT 'other'", true},
+          Case{" UNION SELECT 'other' LIMIT 1 OFFSET 1", true},
+          Case{" UNION ALL SELECT 'other' LIMIT 1 OFFSET 1", false}}) {
+      SCOPED_TRACE(test_case.suffix);
+      const BoundSelect bound =
+          BindOrThrow(std::string{scalar ? "SELECT (" : "SELECT EXISTS("} +
+                          "SELECT Name AS x FROM Items WHERE EXISTS(SELECT x)" +
+                          std::string{test_case.suffix} + ")",
+                      catalog);
+      EXPECT_TRUE(BoundQueryRequiresResultValues(bound.root_query(), bound.expressions()));
+      EXPECT_EQ(scalar || test_case.compares_values,
+                BoundQueryRequiresResultValues(bound.query(BoundQueryId{1}), bound.expressions()));
+    }
+  }
+}
+
 TEST(Binder, RejectsScalarWidthParentAliasesAndStagedQueryFeatures) {
   const auto catalog = TestCatalog();
   ExpectBindError("SELECT (SELECT id,Name FROM Items)", catalog,
@@ -565,9 +592,9 @@ TEST(Binder, RejectsScalarWidthParentAliasesAndStagedQueryFeatures) {
                   "no such column: x");
   ExpectBindError("SELECT (SELECT x),1 AS x", catalog, BindErrorCode::kNoSuchColumn,
                   "no such column: x");
-  ExpectBindError("SELECT Name AS x FROM Items WHERE (SELECT x) IS NOT NULL", catalog,
+  ExpectBindError("SELECT (SELECT Name) AS x FROM Items WHERE (SELECT x) IS NOT NULL", catalog,
                   BindErrorCode::kUnsupportedFeature,
-                  "outer result-alias expansion is not supported");
+                  "outer result-alias definitions containing queries are not supported");
   ExpectBindError("SELECT (SELECT sum(parent.Score)) FROM Items parent", catalog,
                   BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
   ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
@@ -588,7 +615,10 @@ TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies
     const BoundQuery& query = bound.query(BoundQueryId{index});
     EXPECT_EQ(parents[index - 1U], query.parent);
     ASSERT_EQ(counts[index - 1U], query.captures.size());
-    for (const BoundSourceCapture& capture : query.captures) {
+    for (const BoundQueryCapture& dependency : query.captures) {
+      const auto* captured = std::get_if<BoundSourceCapture>(&dependency);
+      ASSERT_NE(nullptr, captured);
+      const BoundSourceCapture& capture = *captured;
       if (index == 3U) {
         EXPECT_FALSE(capture.value.has_value());
       } else {
@@ -598,17 +628,20 @@ TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies
       }
     }
   }
-  EXPECT_EQ(BoundSourceId{0}, bound.query(BoundQueryId{1}).captures[0].identity.source);
-  EXPECT_EQ(BoundSourceId{1}, bound.query(BoundQueryId{2}).captures[1].identity.source);
+  EXPECT_EQ(BoundSourceId{0},
+            std::get<BoundSourceCapture>(bound.query(BoundQueryId{1}).captures[0]).identity.source);
+  EXPECT_EQ(BoundSourceId{1},
+            std::get<BoundSourceCapture>(bound.query(BoundQueryId{2}).captures[1]).identity.source);
   EXPECT_TRUE(bound.query(BoundQueryId{3}).order_by.empty());
-  EXPECT_TRUE(bound.query(BoundQueryId{4}).captures[0].identity.is_rowid());
+  EXPECT_TRUE(
+      std::get<BoundSourceCapture>(bound.query(BoundQueryId{4}).captures[0]).identity.is_rowid());
 
   const auto captures =
-      [&bound](BoundQueryId query) -> std::optional<std::span<const BoundSourceCapture>> {
+      [&bound](BoundQueryId query) -> std::optional<std::span<const BoundQueryCapture>> {
     if (query.value() >= bound.query_count()) {
       return std::nullopt;
     }
-    return std::span<const BoundSourceCapture>{bound.query(query).captures};
+    return std::span<const BoundQueryCapture>{bound.query(query).captures};
   };
   for (const BoundSourceDependency dependency :
        {BoundSourceDependency::kBinding, BoundSourceDependency::kValue}) {
@@ -625,6 +658,135 @@ TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies
         bound.expressions(), bound.source_columns(),
         BoundExpressionId{static_cast<std::uint32_t>(bound.expressions().size())}, captures,
         dependency, visitor));
+  }
+}
+
+TEST(Binder, PropagatesFieldFreeAliasContextWithoutCapturingItsDefiningQuery) {
+  const auto catalog = TestCatalog();
+  const BoundSelect transitive =
+      BindOrThrow("SELECT 1 AS x FROM Items WHERE (SELECT (SELECT x))>0", catalog);
+  ASSERT_EQ(3U, transitive.query_count());
+  EXPECT_TRUE(transitive.root_query().captures.empty());
+  EXPECT_EQ(BoundQueryId{0}, transitive.query(BoundQueryId{1}).parent);
+  EXPECT_EQ(BoundQueryId{1}, transitive.query(BoundQueryId{2}).parent);
+  ASSERT_EQ(1U, transitive.query(BoundQueryId{1}).captures.size());
+  ASSERT_EQ(1U, transitive.query(BoundQueryId{2}).captures.size());
+  for (const BoundQueryId query : {BoundQueryId{1}, BoundQueryId{2}}) {
+    const auto* context =
+        std::get_if<BoundQueryContextCapture>(&transitive.query(query).captures[0]);
+    ASSERT_NE(nullptr, context);
+    EXPECT_EQ(BoundQueryId{0}, context->query);
+  }
+
+  const BoundSelect private_owner =
+      BindOrThrow("SELECT (SELECT 1 AS x WHERE (SELECT x)>0)", catalog);
+  ASSERT_EQ(3U, private_owner.query_count());
+  EXPECT_TRUE(private_owner.root_query().captures.empty());
+  EXPECT_TRUE(private_owner.query(BoundQueryId{1}).captures.empty());
+  ASSERT_EQ(1U, private_owner.query(BoundQueryId{2}).captures.size());
+  const auto* context =
+      std::get_if<BoundQueryContextCapture>(&private_owner.query(BoundQueryId{2}).captures[0]);
+  ASSERT_NE(nullptr, context);
+  EXPECT_EQ(BoundQueryId{1}, context->query);
+}
+
+TEST(Binder, ReusesOriginalAliasSourcesAndRetainsDiscardedContextWithoutValueIds) {
+  const auto catalog = TestCatalog();
+  struct Case {
+    std::string_view sql;
+    BoundQueryId child;
+  };
+  for (const Case& test_case : {
+           Case{"SELECT o.Name AS x FROM Items o "
+                "WHERE (SELECT x FROM Items o LIMIT 1) IS NOT NULL",
+                BoundQueryId{1}},
+           Case{"SELECT o.Name||o.Name AS x FROM Items o WHERE (SELECT x) IS NOT NULL",
+                BoundQueryId{1}},
+           Case{"SELECT (SELECT 1),o.Name AS x FROM Items o WHERE (SELECT x) IS NOT NULL",
+                BoundQueryId{2}},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
+    const BoundQuery& query = bound.query(test_case.child);
+    ASSERT_EQ(2U, query.captures.size());
+    const auto& context = std::get<BoundQueryContextCapture>(query.captures.at(0));
+    const auto& source = std::get<BoundSourceCapture>(query.captures.at(1));
+    EXPECT_EQ(BoundQueryId{0}, context.query);
+    EXPECT_EQ(BoundSourceId{0}, source.identity.source);
+    EXPECT_TRUE(source.value.has_value());
+  }
+  const BoundSelect discarded = BindOrThrow(
+      "SELECT o.Name AS x FROM Items o WHERE EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1)",
+      catalog);
+  ASSERT_EQ(2U, discarded.query_count());
+  const BoundQuery& query = discarded.query(BoundQueryId{1});
+  ASSERT_EQ(2U, query.captures.size());
+  EXPECT_TRUE(query.order_by.empty());
+  const auto& context = std::get<BoundQueryContextCapture>(query.captures.at(0));
+  const auto& source = std::get<BoundSourceCapture>(query.captures.at(1));
+  EXPECT_EQ(BoundQueryId{0}, context.query);
+  EXPECT_EQ(BoundSourceId{0}, source.identity.source);
+  EXPECT_FALSE(source.value.has_value());
+}
+
+TEST(Binder, PreservesOuterAliasVisibilityPrecedenceAndScopeBarriers) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT Name AS x,id AS x FROM Items WHERE (SELECT x) IS NOT NULL",
+           "SELECT 1 AS x FROM Items WHERE (SELECT 2 AS id WHERE (SELECT id)=2)=2",
+           "SELECT \"later\" AS x,id AS later FROM Items WHERE (SELECT x)='later'",
+           "SELECT id AS x FROM Items WHERE EXISTS(SELECT x ORDER BY x LIMIT 1)",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_TRUE(BindSelectStatement(ParseTree(sql), catalog).has_value());
+  }
+  for (const std::string_view sql : {
+           "SELECT Name AS x FROM Items o WHERE (SELECT o.x) IS NOT NULL",
+           "SELECT Name AS x FROM Items WHERE (SELECT 1 LIMIT x)>0",
+           "SELECT Name AS x FROM Items WHERE (SELECT 1 LIMIT (SELECT x))>0",
+           "SELECT Name AS x FROM Items WHERE (SELECT 1 LIMIT 1 OFFSET (SELECT x))>0",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kNoSuchColumn, rejected.error().code);
+  }
+}
+
+TEST(Binder, KeepsOuterAggregateAliasErrorsInTheirDefiningClause) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT sum(Score) AS x FROM Items WHERE (SELECT x)>0",
+           "SELECT sum(Score) AS x FROM Items GROUP BY (SELECT x)",
+           "SELECT sum(a.Score) AS x FROM Items a JOIN Items b ON (SELECT x)=b.id",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kAggregateMisuse,
+                    "misuse of aggregate function through result alias");
+  }
+  for (const std::string_view sql : {
+           "SELECT sum(Score) AS x FROM Items HAVING (SELECT x)>0",
+           "SELECT sum(Score) AS x FROM Items ORDER BY (SELECT x)",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
+                    "outer-owned aggregates are not supported");
+  }
+}
+
+TEST(Binder, ChecksAliasTargetWidthBeforeTheQueryDefinitionBoundary) {
+  const auto catalog = TestCatalog();
+  ExpectBindError("SELECT EXISTS(SELECT (SELECT 1,2) AS x WHERE EXISTS(SELECT x))", catalog,
+                  BindErrorCode::kColumnCountMismatch, "row value misused");
+  for (const std::string_view sql : {
+           "SELECT (SELECT 1) AS x WHERE (SELECT x)>0",
+           "SELECT coalesce(1,(SELECT 1)) AS x WHERE (SELECT x)>0",
+           "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE EXISTS(SELECT x))",
+           "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE (SELECT x)>0)",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
+                    "outer result-alias definitions containing queries are not supported");
   }
 }
 
@@ -752,8 +914,10 @@ TEST(Binder, KeepsOnlyBindingCapturesForElidedGlobalOrdering) {
     const BoundSelect bound = BindOrThrow(test_case.sql, catalog);
     const BoundQuery& child = bound.query(BoundQueryId{1});
     ASSERT_EQ(1U, child.captures.size());
-    EXPECT_EQ(BoundSourceId{0}, child.captures[0].identity.source);
-    EXPECT_EQ(test_case.value, child.captures[0].value.has_value());
+    const auto* capture = std::get_if<BoundSourceCapture>(&child.captures[0]);
+    ASSERT_NE(nullptr, capture);
+    EXPECT_EQ(BoundSourceId{0}, capture->identity.source);
+    EXPECT_EQ(test_case.value, capture->value.has_value());
   }
 }
 

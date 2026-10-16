@@ -571,7 +571,12 @@ int main(int argc, char** argv) try {
   if (first_failure == 0U) {
     for (const std::string_view sql :
          {"SELECT (SELECT coalesce(?1,o.value)) FROM storage_values o WHERE o.id=11",
-          "SELECT (SELECT iif(?1 IS NULL,o.value,1)) FROM storage_values o WHERE o.id=11"}) {
+          "SELECT (SELECT iif(?1 IS NULL,o.value,1)) FROM storage_values o WHERE o.id=11",
+          "SELECT EXISTS(SELECT o.value AS x FROM storage_values o "
+          "WHERE o.id=11 AND (SELECT coalesce(?1,x)) IS 1)",
+          "SELECT EXISTS(SELECT o.value AS x FROM storage_values o "
+          "WHERE o.id=11 AND (SELECT iif(?1 IS NULL,x,1)) IS 1)"}) {
+      const bool existence = sql.starts_with("SELECT EXISTS(");
       for (const bool taken : {false, true}) {
         const auto locks = std::make_shared<LockTrackingState>();
         auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks),
@@ -613,11 +618,13 @@ int main(int argc, char** argv) try {
         if (!recovered.has_value() || *recovered != ReadStep::kRow) {
           return 1;
         }
-        if (taken) {
+        if (taken && !existence) {
           const auto blob = statement.row()[0].blob_value();
           if (!blob.has_value() || blob->size() != 2000U) {
             return 1;
           }
+        } else if (taken && statement.row()[0].integer_value() != 0) {
+          return 1;
         }
         const auto done = statement.Step();
         if (!done.has_value() || *done != ReadStep::kDone || locks->shared_lock_held) {
@@ -719,6 +726,11 @@ int main(int argc, char** argv) try {
                        "ORDER BY x LIMIT ?2"},
       std::string_view{
           "SELECT count(*),EXISTS(SELECT (SELECT o.label) ORDER BY o.value) FROM model_rows o"},
+      std::string_view{"SELECT 1 AS x FROM model_rows WHERE (SELECT (SELECT x))>0"},
+      std::string_view{"SELECT o.label AS x FROM model_rows o WHERE o.id<=?1 "
+                       "AND EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1) ORDER BY (SELECT x)"},
+      std::string_view{"SELECT o.nullable IS NULL AS x,count(*) FROM model_rows o "
+                       "GROUP BY o.nullable IS NULL HAVING (SELECT x)>=0 ORDER BY x"},
   };
   const std::string joined_path = ReadCompatibilityFixturePath().string();
   for (const std::string_view prepare_sql : kArenaPrepareSql) {

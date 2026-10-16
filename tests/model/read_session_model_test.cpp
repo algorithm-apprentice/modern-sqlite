@@ -1219,6 +1219,54 @@ TEST(ReadSessionModel, MatchesCorrelatedRowsGroupsAndNullExtendedSourcesAcrossRe
   }
 }
 
+TEST(ReadSessionModel, MatchesOuterExpressionAliasesAcrossRebindingsAndBackends) {
+  for (const bool file_backed : {false, true}) {
+    SplitMix64 random{kModelSeed};
+    const ReadSessionOptions options{
+        .temporary_storage =
+            TemporaryStorageOptions{
+                .mode = file_backed ? TemporaryStoreMode::kFile : TemporaryStoreMode::kMemory,
+                .sorter_memory_threshold = ByteCount{32U * 1024U}},
+    };
+    ReadSession session = TakeValue(ReadSession::Open(FixturePath().string(), options));
+    ReadStatement statement =
+        Prepare(session,
+                "SELECT o.id,coalesce(o.nullable,o.value)+?2 AS x FROM model_rows o "
+                "WHERE o.id<=?1 AND (SELECT (SELECT x))>?3 ORDER BY (SELECT x) DESC,o.id");
+    for (std::size_t case_index = 0; case_index < kModelIterations; ++case_index) {
+      const std::array words{random.Next(), random.Next(), random.Next(), random.Next()};
+      const auto count = static_cast<std::int64_t>(words[0] % 33U);
+      const auto shift = static_cast<std::int64_t>(words[1] % 33U) - 16;
+      const auto floor = static_cast<std::int64_t>(words[2] % 101U) - 50;
+      SCOPED_TRACE(Trace(case_index, "outer-expression-alias", words,
+                         "file_backend=" + std::to_string(file_backed)));
+      RequireStatus(statement.Reset());
+      RequireStatus(statement.Bind(1, SqlValue::Integer(count)));
+      RequireStatus(statement.Bind(2, SqlValue::Integer(shift)));
+      RequireStatus(statement.Bind(3, SqlValue::Integer(floor)));
+      std::vector<std::pair<std::int64_t, std::int64_t>> expected;
+      for (const ModelRow& row : kRows) {
+        const std::int64_t value = row.nullable.value_or(row.value) + shift;
+        if (row.id <= count && value > floor) {
+          expected.emplace_back(value, row.id);
+        }
+      }
+      std::ranges::sort(expected, [](const auto& left, const auto& right) {
+        return left.first > right.first ||
+               (left.first == right.first && left.second < right.second);
+      });
+      for (const auto& [value, id] : expected) {
+        ExpectRowStep(statement);
+        ASSERT_EQ(2U, statement.row().size());
+        ExpectInteger(statement.row()[0], id);
+        ExpectInteger(statement.row()[1], value);
+      }
+      ExpectDoneStep(statement);
+    }
+    RequireStatus(statement.Finalize());
+  }
+}
+
 TEST(ReadSessionModel, MatchesDeterministicVectorModel) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   SplitMix64 random{kModelSeed};

@@ -706,6 +706,57 @@ TEST(PhysicalPlan, PlacesTransitiveAndInactiveCapturePredicatesAfterTheirSources
   EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{1}}), predicates.predicate_sources);
 }
 
+TEST(PhysicalPlan, DoesNotTreatAliasContextAsAnActualSourceDependency) {
+  const auto catalog = TestCatalog();
+  const PhysicalPlan point =
+      OptimizeOrThrow("SELECT 1 AS x FROM Items WHERE id=(SELECT x)", catalog);
+  EXPECT_TRUE(std::ranges::any_of(point.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalRowIdLookupNode>(node.payload);
+  }));
+  struct Case {
+    std::string_view definition;
+    BoundSourceId ready;
+  };
+  for (const Case& test_case : {Case{"1", BoundSourceId{0}}, Case{"b.Value", BoundSourceId{1}}}) {
+    SCOPED_TRACE(test_case.definition);
+    const PhysicalPlan plan =
+        OptimizeOrThrow("SELECT " + std::string{test_case.definition} +
+                            " AS x FROM Items a CROSS JOIN Items b WHERE (SELECT x)>0",
+                        catalog);
+    const auto filter = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalFilterNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), filter);
+    const auto& predicates = std::get<PhysicalFilterNode>(filter->payload);
+    EXPECT_TRUE(predicates.guards.empty());
+    EXPECT_EQ(std::vector{test_case.ready}, predicates.predicate_sources);
+  }
+}
+
+TEST(PhysicalPlan, DemandsOnlyExecutableAliasFieldsFromPrivateStoredIndexes) {
+  const auto catalog = IndexedCatalog();
+  for (const bool alias : {false, true}) {
+    SCOPED_TRACE(alias);
+    for (const bool live : {false, true}) {
+      SCOPED_TRACE(live);
+      const std::string value = alias ? "x" : "o.Payload";
+      const std::string predicate =
+          live ? "(SELECT length(" + value + "))>0" : "EXISTS(SELECT " + value + ")";
+      const PhysicalPlan plan = OptimizeOrThrow(
+          "SELECT EXISTS(SELECT o.Payload AS x FROM Items o "
+          "WHERE o.Code=?1 AND " +
+              predicate + ")",
+          catalog);
+      const PhysicalQueryView owner{plan, BoundQueryId{1}};
+      const auto index = std::ranges::find_if(owner.nodes(), [](const PhysicalNode& node) {
+        return std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+      });
+      ASSERT_NE(owner.nodes().end(), index);
+      EXPECT_EQ(!live, std::get<PhysicalIndexScanNode>(index->payload).covering);
+    }
+  }
+}
+
 TEST(PhysicalPlan, RetainsOnlyExecutableCapturedFieldsInStoredIndexCoverage) {
   struct Case {
     std::string_view sql;

@@ -574,7 +574,7 @@ int main() try {
                        "GROUP BY a.id ORDER BY a.id",
                        kAutomaticOptions),
   };
-  const std::array<PhysicalPlan, 5> correlated_plans{
+  const std::array<PhysicalPlan, 8> correlated_plans{
       AggregateFixture(catalog,
                        "SELECT (SELECT (SELECT o.Name)),"
                        "EXISTS(SELECT 1 ORDER BY (SELECT o.Name)) FROM Items o"),
@@ -589,6 +589,13 @@ int main() try {
                        "SELECT (SELECT b.Name||o.Name FROM Items a JOIN Items b ON b.Name=a.Name "
                        "WHERE a.id=o.id ORDER BY b.id LIMIT ?1) FROM Items o",
                        kAutomaticOptions),
+      AggregateFixture(catalog, "SELECT 1 AS x FROM Items WHERE (SELECT (SELECT x))>0"),
+      AggregateFixture(catalog,
+                       "SELECT Name AS x FROM Items WHERE "
+                       "EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1)"),
+      AggregateFixture(catalog,
+                       "SELECT Name AS x,count(*) FROM Items GROUP BY Name "
+                       "HAVING (SELECT x) IS NOT NULL"),
   };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,

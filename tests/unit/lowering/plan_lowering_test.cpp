@@ -989,6 +989,101 @@ TEST_F(ReadLoweringAggregateIntegration, LazilyCachesVolatileUncorrelatedQueries
   EXPECT_EQ(0U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, ReevaluatesConstantAliasContextWithoutSourceFields) {
+  const CustomEnvironment custom;
+  const auto rows = Execute("SELECT 1 AS x FROM Items WHERE (SELECT volatile_counter()+x)>0",
+                            custom.Binder(), custom.Vm());
+  ASSERT_GT(rows.size(), 1U);
+  EXPECT_EQ(rows.size(), callback_count);
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    EXPECT_EQ(1, row[0].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesAliasContextFrequencyAndSourceFreeCaching) {
+  const CustomEnvironment custom;
+  const std::size_t count = Execute("SELECT id FROM Items").size();
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::size_t rows;
+  };
+  for (const Case& test_case : {
+           Case{"SELECT 1 AS x FROM Items ORDER BY (SELECT volatile_counter()+x)", count, count},
+           Case{"SELECT 1 AS x FROM Items WHERE (SELECT (SELECT volatile_counter()+x))>0", count,
+                count},
+           Case{"SELECT 1 AS x FROM Items WHERE "
+                "EXISTS(SELECT x FROM Items WHERE volatile_counter()>0 LIMIT 1)",
+                count, count},
+           Case{"SELECT 1 AS x FROM Items WHERE "
+                "EXISTS(SELECT 1 FROM Items WHERE volatile_counter()>0 ORDER BY x LIMIT 1)",
+                count, count},
+           Case{"SELECT 1 AS x FROM Items WHERE "
+                "EXISTS(SELECT 1 FROM Items WHERE volatile_counter()>0 LIMIT 1)",
+                1, count},
+           Case{"SELECT 1 AS x FROM Items a CROSS JOIN Items b "
+                "WHERE (SELECT volatile_counter()+x)>0",
+                count, count * count},
+           Case{"SELECT 1 AS x FROM Items WHERE id=(SELECT volatile_counter()+x)", 1, 1},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    callback_count = 0;
+    const auto rows = Execute(test_case.sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(test_case.rows, rows.size());
+    EXPECT_EQ(test_case.calls, callback_count);
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      EXPECT_EQ(1, row[0].integer_value());
+    }
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, EvaluatesVolatileAliasesOnlyAtReachedSites) {
+  const CustomEnvironment custom;
+  const std::size_t count = Execute("SELECT id FROM Items").size();
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::size_t rows;
+  };
+  for (const Case& test_case : {
+           Case{"SELECT volatile_counter() AS x FROM Items WHERE (SELECT x)>0", 2U * count, count},
+           Case{"SELECT volatile_counter() AS x FROM Items WHERE (SELECT coalesce(1,x))=1", count,
+                count},
+           Case{"SELECT volatile_counter() AS x FROM Items WHERE (SELECT sum(x) FROM Items)>0",
+                count * (count + 1U), count},
+           Case{"SELECT (SELECT volatile_counter() AS x WHERE (SELECT x)>0) FROM Items", 2, count},
+           Case{"SELECT failing() AS x FROM Items WHERE (SELECT coalesce(1,x))=0", 0, 0},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    callback_count = 0;
+    const auto rows = Execute(test_case.sql, custom.Binder(), custom.Vm());
+    EXPECT_EQ(test_case.rows, rows.size());
+    EXPECT_EQ(test_case.calls, callback_count);
+  }
+}
+
+TEST(PlanLowering, KeepsAliasContextsInsideTheirNearestPrivateOwner) {
+  struct Case {
+    std::string_view sql;
+    std::size_t private_queries;
+  };
+  for (const Case& test_case : {
+           Case{"SELECT 1 AS x FROM Items WHERE (SELECT x)>0", 0},
+           Case{"SELECT (SELECT 1 AS x WHERE (SELECT x)>0)", 1},
+           Case{"SELECT 1 AS x FROM Items WHERE (SELECT (SELECT x))>0", 0},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    const BytecodeProgram program = LowerOrThrow(test_case.sql, TestCatalog());
+    EXPECT_EQ(test_case.private_queries, program.subroutines().size());
+    EXPECT_EQ(test_case.private_queries, program.verification_metrics().maximum_subroutine_depth);
+    EXPECT_FALSE(std::ranges::any_of(program.instructions(), [](const Instruction& instruction) {
+      return std::holds_alternative<ReadFieldInstruction>(instruction);
+    }));
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, UsesCanonicalPrivatePointAccessAndStatementGuards) {
   for (const std::int64_t allowed : {0, 1}) {
     const std::array parameters{SqlValue::Integer(allowed)};
@@ -1225,27 +1320,38 @@ TEST(PlanLowering, PreservesLazyCapturedFieldsAndNativeAggregateSnapshotPhases) 
 TEST(PlanLowering, OwnsCapturedOverflowValuesBeyondOnePageCacheAndSourceLifetimes) {
   test::WritePagerFixedVfs vfs{false};
   const CatalogSnapshotPtr catalog = InitializeCorrelatedSourceDatabase(vfs);
-  auto pager = test::OpenWritePager(vfs, 1U);
-  ASSERT_NE(nullptr, pager);
-  RequireStatus(pager->BeginRead());
-  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
-      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
-  const BytecodeProgram program = LowerOrThrow(
-      "SELECT o.id,(SELECT o.Name),(SELECT (SELECT o.Name)),"
-      "(SELECT i.Name FROM Items i WHERE i.id=o.id) FROM Items o ORDER BY o.id",
-      catalog);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation,
-                                VmEnvironment::Core(), &temporary);
-  RequireStatus(pager->EndRead());
-  pager.reset();
-  ASSERT_EQ(3U, rows.size());
-  for (std::size_t row = 0; row < rows.size(); ++row) {
-    ASSERT_EQ(4U, rows[row].size());
-    for (const std::size_t field : {1U, 2U, 3U}) {
-      const ByteView blob = BlobBytes(rows[row][field]);
-      ASSERT_EQ(4096U, blob.size());
-      EXPECT_EQ(static_cast<std::byte>(row + 1U), blob[0]);
-      EXPECT_TRUE(std::ranges::equal(BlobBytes(rows[row][1]), blob));
+  struct Case {
+    std::string_view sql;
+    std::size_t fields;
+  };
+  for (const Case& test_case : {
+           Case{"SELECT o.id,(SELECT o.Name),(SELECT (SELECT o.Name)),"
+                "(SELECT i.Name FROM Items i WHERE i.id=o.id) FROM Items o ORDER BY o.id",
+                4},
+           Case{"SELECT o.id,o.Name AS payload FROM Items o "
+                "WHERE (SELECT (SELECT length(payload)))=4096 ORDER BY o.id",
+                2},
+       }) {
+    SCOPED_TRACE(test_case.sql);
+    auto pager = test::OpenWritePager(vfs, 1U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+        vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+    const BytecodeProgram program = LowerOrThrow(test_case.sql, catalog);
+    const auto rows = ExecuteRows(program, *pager, catalog->version().generation,
+                                  VmEnvironment::Core(), &temporary);
+    RequireStatus(pager->EndRead());
+    pager.reset();
+    ASSERT_EQ(3U, rows.size());
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+      ASSERT_EQ(test_case.fields, rows[row].size());
+      for (std::size_t field = 1; field < test_case.fields; ++field) {
+        const ByteView blob = BlobBytes(rows[row][field]);
+        ASSERT_EQ(4096U, blob.size());
+        EXPECT_EQ(static_cast<std::byte>(row + 1U), blob[0]);
+        EXPECT_TRUE(std::ranges::equal(BlobBytes(rows[row][1]), blob));
+      }
     }
   }
 }
@@ -1266,16 +1372,21 @@ TEST(PlanLowering, SkipsUnreachedOuterOverflowReadsAndReportsTakenIoAndCorruptio
   const auto overflow_offset = static_cast<std::size_t>(cell.first_overflow_page()->value() - 1U) *
                                test::kWritePagerPageSize;
   std::ranges::fill(corrupt.mutable_view().subspan(overflow_offset, 4U), std::byte{0});
-  const std::array<std::string_view, 3> queries{
+  const std::array<std::string_view, 5> queries{
       "SELECT (SELECT coalesce(?1,o.Name)) FROM Items o",
       "SELECT (SELECT iif(?1 IS NULL,o.Name,1)) FROM Items o",
       "SELECT (SELECT coalesce(t.Value,o.Name)) FROM Plain t FULL JOIN Items o "
       "ON o.id=t.rowid-?1 WHERE o.id=1",
+      "SELECT EXISTS(SELECT o.Name AS x FROM Items o WHERE "
+      "(SELECT coalesce(?1,x)) IS 1)",
+      "SELECT EXISTS(SELECT o.Name AS x FROM Items o WHERE "
+      "(SELECT iif(?1 IS NULL,x,1)) IS 1)",
   };
   for (std::size_t query = 0; query < queries.size(); ++query) {
     for (const bool corrupt_input : {false, true}) {
       for (const bool taken : {false, true}) {
         const bool full_join = query == 2U;
+        const bool existence = queries[query].starts_with("SELECT EXISTS(");
         SCOPED_TRACE(queries[query]);
         SCOPED_TRACE(::testing::Message{} << "corrupt=" << corrupt_input << " taken=" << taken);
         vfs.LoadDatabase(corrupt_input ? corrupt.view() : valid.view());
@@ -1301,7 +1412,7 @@ TEST(PlanLowering, SkipsUnreachedOuterOverflowReadsAndReportsTakenIoAndCorruptio
           EXPECT_TRUE(vm.row().empty());
           EXPECT_EQ(VmState::kError, vm.state());
         } else {
-          for (std::size_t row = 0; row < (full_join ? 1U : 3U); ++row) {
+          for (std::size_t row = 0; row < (full_join || existence ? 1U : 3U); ++row) {
             ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
             if (full_join) {
               EXPECT_EQ("left", TextBytes(vm.row()[0]));
@@ -1349,6 +1460,26 @@ TEST_F(ReadLoweringAggregateIntegration, ExecutesDeepFlatQueryCallGraphs) {
   }
 }
 
+TEST_F(ReadLoweringAggregateIntegration, PreservesThePinnedOuterAliasDepthLimit) {
+  for (const std::string_view definition : {"1", "o.id"}) {
+    std::string expression = "x";
+    for (std::size_t depth = 0; depth < 43U; ++depth) {
+      expression = "(SELECT " + expression + ")";
+    }
+    const std::string prefix = "SELECT " + std::string{definition} + " AS x FROM Items o ORDER BY ";
+    const auto rows = Execute(prefix + expression);
+    ASSERT_GT(rows.size(), 1U);
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+      EXPECT_EQ(definition == "1" ? 1 : static_cast<std::int64_t>(row + 1U),
+                rows[row][0].integer_value());
+    }
+    const auto rejected =
+        BindSelectStatement(ParseTree(prefix + "(SELECT " + expression + ")"), catalog());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, rejected.error().code);
+  }
+}
+
 TEST(PlanLowering, RecoversCorrelatedQueryIoFailureWithAParentCursorOpen) {
   test::WritePagerFixedVfs vfs{false};
   InitializeMutationDatabase(vfs);
@@ -1360,29 +1491,36 @@ TEST(PlanLowering, RecoversCorrelatedQueryIoFailureWithAParentCursorOpen) {
   ASSERT_TRUE(ExecuteMutationProgram(
                   LowerMutationOrThrow("INSERT INTO Plain(Value) VALUES('parent')", catalog), vfs)
                   .has_value());
-  auto pager = test::OpenWritePager(vfs, 64U);
-  ASSERT_NE(nullptr, pager);
-  RequireStatus(pager->BeginRead());
-  const BytecodeProgram program = LowerOrThrow(
-      "SELECT p.Value,(SELECT Name||p.Value FROM Items WHERE id=p.rowid+8) FROM Plain p", catalog);
-  EXPECT_TRUE(program.subroutines().empty());
-  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
-  vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
-  const auto failed = vm.Step();
-  ASSERT_FALSE(failed.has_value());
-  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
-  EXPECT_EQ(VmState::kError, vm.state());
-  EXPECT_TRUE(vm.row().empty());
-  RequireStatus(vm.Reset());
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
-  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
-  EXPECT_EQ("parent", TextBytes(vm.row()[0]));
-  EXPECT_EQ("inline-parent", TextBytes(vm.row()[1]));
-  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
-  RequireStatus(pager->EndRead());
+  for (const std::string_view sql : {
+           "SELECT p.Value,(SELECT Name||p.Value FROM Items WHERE id=p.rowid+8) FROM Plain p",
+           "SELECT p.Value AS suffix,(SELECT Name||p.Value FROM Items WHERE id=p.rowid+8) "
+           "FROM Plain p WHERE "
+           "(SELECT Name||suffix FROM Items WHERE id=p.rowid+8) IS NOT NULL",
+       }) {
+    SCOPED_TRACE(sql);
+    auto pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    EXPECT_TRUE(program.subroutines().empty());
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
+    const auto failed = vm.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_EQ(VmState::kError, vm.state());
+    EXPECT_TRUE(vm.row().empty());
+    RequireStatus(vm.Reset());
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ("parent", TextBytes(vm.row()[0]));
+    EXPECT_EQ("inline-parent", TextBytes(vm.row()[1]));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(pager->EndRead());
+  }
 }
 
 TEST(PlanLowering, RecoversPrivateQueryIoFailureWithAParentCursorOpen) {
@@ -1446,6 +1584,9 @@ TEST(PlanLowering, RecoversPrivateAndInlineAggregatePmaWriteFailures) {
            "FROM Items a CROSS JOIN Items b)",
            "SELECT (SELECT group_concat(a.Name||p.Value ORDER BY b.id,a.id) "
            "FROM Items a CROSS JOIN Items b) FROM Plain p",
+           "SELECT p.Value AS suffix FROM Plain p WHERE "
+           "(SELECT group_concat(a.Name||suffix ORDER BY b.id,a.id) "
+           "FROM Items a CROSS JOIN Items b) IS NOT NULL",
        }) {
     SCOPED_TRACE(sql);
     const BytecodeProgram program = LowerOrThrow(sql, catalog);

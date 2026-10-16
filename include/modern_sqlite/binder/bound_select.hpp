@@ -203,6 +203,7 @@ struct BoundTruthTestExpression {
 
 struct BoundAliasReferenceExpression {
   BoundExpressionId target;
+  std::optional<BoundQueryId> context{};
 };
 
 struct BoundScalarCallExpression {
@@ -265,6 +266,12 @@ struct BoundSourceCapture {
   std::optional<BoundExpressionId> value{};
 };
 
+struct BoundQueryContextCapture {
+  BoundQueryId query{0};
+};
+
+using BoundQueryCapture = std::variant<BoundSourceCapture, BoundQueryContextCapture>;
+
 enum class BoundSourceDependency : std::uint8_t {
   kBinding,
   kValue,
@@ -277,17 +284,32 @@ enum class BoundSourceDependency : std::uint8_t {
                                                BoundExpressionId id) noexcept;
 
 namespace binder_detail {
+template <typename Capture>
+  requires(std::is_same_v<std::remove_const_t<Capture>, BoundQueryCapture>)
+[[nodiscard]] auto FindSourceCapture(std::span<Capture> captures,
+                                     const BoundSourceLeafIdentity& identity) noexcept
+    -> std::conditional_t<std::is_const_v<Capture>, const BoundSourceCapture*,
+                          BoundSourceCapture*> {
+  for (Capture& capture : captures) {
+    if (auto* source = std::get_if<BoundSourceCapture>(&capture);
+        source != nullptr && source->identity == identity) {
+      return source;
+    }
+  }
+  return nullptr;
+}
+
 template <typename CaptureLookup, typename Visitor>
-[[nodiscard]] bool VisitSourceLeaves(std::span<const BoundExpression> expressions,
-                                     std::span<const BoundSourceColumn> columns,
-                                     BoundExpressionId id, const CaptureLookup& captures,
-                                     BoundSourceDependency dependency, Visitor& visitor) {
+[[nodiscard]] bool VisitQueryDependencies(std::span<const BoundExpression> expressions,
+                                          std::span<const BoundSourceColumn> columns,
+                                          BoundExpressionId id, const CaptureLookup& captures,
+                                          BoundSourceDependency dependency, Visitor& visitor) {
   if (id.value() >= expressions.size()) {
     return false;
   }
   const BoundExpression& expression = expressions[id.value()];
   if (const auto identity = BoundSourceLeafIdentityOf(expression, columns); identity.has_value()) {
-    return visitor(*identity, std::optional{id});
+    return visitor(BoundQueryCapture{BoundSourceCapture{.identity = *identity, .value = id}});
   }
   return std::visit(
       [&](const auto& payload) -> bool {
@@ -301,9 +323,11 @@ template <typename CaptureLookup, typename Visitor>
           if (!inputs.has_value()) {
             return false;
           }
-          for (const BoundSourceCapture& capture : *inputs) {
-            if ((dependency == BoundSourceDependency::kBinding || capture.value.has_value()) &&
-                !visitor(capture.identity, capture.value)) {
+          for (const BoundQueryCapture& capture : *inputs) {
+            const auto* source = std::get_if<BoundSourceCapture>(&capture);
+            if ((dependency == BoundSourceDependency::kBinding || source == nullptr ||
+                 source->value.has_value()) &&
+                !visitor(capture)) {
               return false;
             }
           }
@@ -312,27 +336,44 @@ template <typename CaptureLookup, typename Visitor>
                              std::is_same_v<Payload, BoundTruthTestExpression> ||
                              std::is_same_v<Payload, BoundLikelihoodExpression> ||
                              std::is_same_v<Payload, BoundCollateExpression>) {
-          return VisitSourceLeaves(expressions, columns, payload.operand, captures, dependency,
-                                   visitor);
+          return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
+                                        visitor);
         } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
                              std::is_same_v<Payload, BoundComparisonExpression>) {
-          return VisitSourceLeaves(expressions, columns, payload.left, captures, dependency,
-                                   visitor) &&
-                 VisitSourceLeaves(expressions, columns, payload.right, captures, dependency,
-                                   visitor);
+          return VisitQueryDependencies(expressions, columns, payload.left, captures, dependency,
+                                        visitor) &&
+                 VisitQueryDependencies(expressions, columns, payload.right, captures, dependency,
+                                        visitor);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return VisitSourceLeaves(expressions, columns, payload.target, captures, dependency,
-                                   visitor);
+          if (payload.context.has_value() &&
+              !visitor(BoundQueryCapture{BoundQueryContextCapture{.query = *payload.context}})) {
+            return false;
+          }
+          return VisitQueryDependencies(expressions, columns, payload.target, captures, dependency,
+                                        visitor);
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
           return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
-            return VisitSourceLeaves(expressions, columns, argument, captures, dependency, visitor);
+            return VisitQueryDependencies(expressions, columns, argument, captures, dependency,
+                                          visitor);
           });
         }
         return false;
       },
       expression.payload);
+}
+
+template <typename CaptureLookup, typename Visitor>
+[[nodiscard]] bool VisitSourceLeaves(std::span<const BoundExpression> expressions,
+                                     std::span<const BoundSourceColumn> columns,
+                                     BoundExpressionId id, const CaptureLookup& captures,
+                                     BoundSourceDependency dependency, Visitor& visitor) {
+  auto source = [&](const BoundQueryCapture& capture) {
+    const auto* leaf = std::get_if<BoundSourceCapture>(&capture);
+    return leaf == nullptr || visitor(leaf->identity, leaf->value);
+  };
+  return VisitQueryDependencies(expressions, columns, id, captures, dependency, source);
 }
 
 template <typename CaptureLookup, typename Visitor>
@@ -455,7 +496,7 @@ struct BoundQuery {
   BoundQueryId id{0};
   std::optional<BoundQueryId> parent{};
   BoundQueryDestination destination = BoundQueryDestination::kClient;
-  std::vector<BoundSourceCapture> captures{};
+  std::vector<BoundQueryCapture> captures{};
   std::size_t core_begin = 0;
   std::size_t core_count = 0;
   std::vector<CompoundOperator> compound_operators{};
@@ -469,6 +510,9 @@ struct BoundQuery {
     const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
 
 [[nodiscard]] bool BoundQueryCanOmitSetComparisons(
+    const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
+
+[[nodiscard]] bool BoundQueryRequiresResultValues(
     const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
 
 enum class BindErrorCode : std::uint8_t {

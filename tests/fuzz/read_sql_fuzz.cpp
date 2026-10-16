@@ -206,7 +206,28 @@ class ByteReader final {
   static_cast<void>(input.Next());
   bool exists = input.Next() % 2U != 0U;
   std::string child;
-  const auto kind = input.Next() % 10U;
+  const auto kind = input.Next() % 14U;
+  if (kind >= 10U) {
+    const std::string bound = std::to_string(1U + input.Next() % 4U);
+    switch (kind) {
+      case 10:
+        return "SELECT 1 AS outer_value FROM model_rows o WHERE o.id<=" + bound +
+               " AND (SELECT (SELECT outer_value))=1 ORDER BY o.id";
+      case 11:
+        return "SELECT coalesce(o.nullable,o.value) AS outer_value FROM model_rows o "
+               "WHERE o.id<=" +
+               bound + " AND (SELECT outer_value) IS NOT NULL ORDER BY (SELECT outer_value),o.id";
+      case 12:
+        return "SELECT id AS outer_value FROM model_rows a FULL JOIN model_rows b USING(id) "
+               "WHERE (SELECT outer_value)<=" +
+               bound + " ORDER BY outer_value";
+      default:
+        return "SELECT o.nullable IS NULL AS outer_value,count(*) FROM model_rows o WHERE o.id<=" +
+               bound +
+               " GROUP BY o.nullable IS NULL HAVING (SELECT outer_value)>=0 "
+               "ORDER BY outer_value";
+    }
+  }
   switch (kind) {
     case 0:
       child = GeneratedCore(input, true);
