@@ -164,6 +164,16 @@ namespace {
       }
     }
   }
+  for (std::uint8_t kind = 10; kind < 14U; ++kind) {
+    for (const std::uint8_t prefix : std::array<std::uint8_t, 4>{0, 1, 2, 3}) {
+      const std::array<std::uint8_t, 8> input{0x03, 0x01, kind, prefix, 0x01, 0x02, 0x03, 0x00};
+      const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+      if (sql.find(" AS outer_value") == std::string::npos ||
+          sql.find("(SELECT ") == std::string::npos || !ExecuteSql(*session, sql)) {
+        return false;
+      }
+    }
+  }
   for (std::uint8_t kind = 0; kind < 4U; ++kind) {
     for (std::uint8_t key = 0; key < 6U; ++key) {
       for (std::uint8_t consumer = 0; consumer < 6U; ++consumer) {

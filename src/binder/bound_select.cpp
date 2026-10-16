@@ -47,6 +47,7 @@ struct AliasEntry {
   std::string name;
   BoundExpressionId target;
   std::size_t result_index = 0;
+  bool has_subqueries = false;
 };
 
 struct ParameterOccurrence {
@@ -54,10 +55,16 @@ struct ParameterOccurrence {
   SourceSpan span;
 };
 
+enum class AggregatePermission : std::uint8_t {
+  kProhibited,
+  kAllowed,
+  kGrouping,
+};
+
 struct BindScope {
   bool source_columns = true;
   bool result_aliases = false;
-  bool allow_aggregates = false;
+  AggregatePermission aggregates = AggregatePermission::kProhibited;
   bool requires_value = true;
 };
 
@@ -115,6 +122,7 @@ struct QueryBindingScope {
   const QueryBindingScope* outer = nullptr;
   bool sources_visible = false;
   bool aliases_visible = false;
+  AggregatePermission aggregates_allowed = AggregatePermission::kProhibited;
   bool binding_only = false;
 };
 
@@ -1619,11 +1627,11 @@ class StatementBinder final {
   [[nodiscard]] const BoundQuery& ActiveQuery() const noexcept { return Query(active_query_); }
 
   [[nodiscard]] auto CaptureLookup() const noexcept {
-    return [this](BoundQueryId id) -> std::optional<std::span<const BoundSourceCapture>> {
+    return [this](BoundQueryId id) -> std::optional<std::span<const BoundQueryCapture>> {
       if (id.value() > impl_->nested_queries.size()) {
         return std::nullopt;
       }
-      return std::span<const BoundSourceCapture>{Query(id).captures};
+      return std::span<const BoundQueryCapture>{Query(id).captures};
     };
   }
 
@@ -1640,19 +1648,30 @@ class StatementBinder final {
     });
   }
 
-  [[nodiscard]] BindExpected<void> RecordCapturedSources(BoundExpressionId id) {
-    auto visitor = [&](const BoundSourceLeafIdentity& identity, std::optional<BoundExpressionId>) {
+  [[nodiscard]] BindExpected<void> RecordQueryCaptures(BoundExpressionId id) {
+    auto visitor = [&](const BoundQueryCapture& dependency) {
       auto& captures = ActiveQuery().captures;
-      if (!OwnsActiveSource(identity.source) &&
-          std::ranges::find(captures, identity, &BoundSourceCapture::identity) == captures.end()) {
-        captures.push_back(BoundSourceCapture{.identity = identity});
+      if (const auto* source = std::get_if<BoundSourceCapture>(&dependency); source != nullptr) {
+        if (!OwnsActiveSource(source->identity.source) &&
+            FindSourceCapture(std::span{captures}, source->identity) == nullptr) {
+          captures.emplace_back(BoundSourceCapture{.identity = source->identity});
+        }
+      } else {
+        const auto context = std::get<BoundQueryContextCapture>(dependency);
+        const bool recorded = std::ranges::any_of(captures, [context](const auto& capture) {
+          const auto* existing = std::get_if<BoundQueryContextCapture>(&capture);
+          return existing != nullptr && existing->query == context.query;
+        });
+        if (context.query != active_query_ && !recorded) {
+          captures.emplace_back(context);
+        }
       }
       return true;
     };
-    if (!VisitSourceLeaves(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
-                           BoundSourceDependency::kBinding, visitor)) {
+    if (!VisitQueryDependencies(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                                BoundSourceDependency::kBinding, visitor)) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
-                                         "captured expression has invalid source dependencies"));
+                                         "captured expression has invalid query dependencies"));
     }
     return {};
   }
@@ -1667,8 +1686,8 @@ class StatementBinder final {
         return true;
       }
       auto& captures = ActiveQuery().captures;
-      const auto capture = std::ranges::find(captures, identity, &BoundSourceCapture::identity);
-      if (capture == captures.end() || !value.has_value()) {
+      auto* capture = FindSourceCapture(std::span{captures}, identity);
+      if (capture == nullptr || !value.has_value()) {
         return false;
       }
       if (!capture->value.has_value()) {
@@ -1682,12 +1701,7 @@ class StatementBinder final {
                                          CaptureLookup(), BoundSourceDependency::kValue, visitor);
     };
     const BoundQuery& query = ActiveQuery();
-    const bool compares_rows = std::ranges::any_of(
-        query.compound_operators,
-        [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
-    const bool needs_values =
-        query.destination != BoundQueryDestination::kExists ||
-        (compares_rows && !BoundQueryCanOmitSetComparisons(query, impl_->expressions));
+    const bool needs_values = BoundQueryRequiresResultValues(query, impl_->expressions);
     const auto cores = ActiveCores();
     for (const BoundQueryCore& core : cores) {
       if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
@@ -1971,6 +1985,7 @@ class StatementBinder final {
         .outer = outer_scope_,
         .sources_visible = scope.source_columns,
         .aliases_visible = scope.result_aliases,
+        .aggregates_allowed = scope.aggregates,
         .binding_only = binding_only_,
     };
   }
@@ -2045,7 +2060,7 @@ class StatementBinder final {
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
-    if (auto captured = RecordCapturedSources(*expression); !captured.has_value()) {
+    if (auto captured = RecordQueryCaptures(*expression); !captured.has_value()) {
       return std::unexpected(std::move(captured.error()));
     }
     return *expression;
@@ -2592,7 +2607,7 @@ class StatementBinder final {
           BindExpression(*core.having, BindScope{
                                            .source_columns = true,
                                            .result_aliases = true,
-                                           .allow_aggregates = true,
+                                           .aggregates = AggregatePermission::kAllowed,
                                        });
       if (!having.has_value()) {
         return std::unexpected(std::move(having.error()));
@@ -3022,7 +3037,7 @@ class StatementBinder final {
               BindScope{
                   .source_columns = true,
                   .result_aliases = false,
-                  .allow_aggregates = true,
+                  .aggregates = AggregatePermission::kAllowed,
                   .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
               });
           if (!bound.has_value()) {
@@ -3110,7 +3125,7 @@ class StatementBinder final {
         expression = BindExpression(syntax, BindScope{
                                                 .source_columns = true,
                                                 .result_aliases = true,
-                                                .allow_aggregates = true,
+                                                .aggregates = AggregatePermission::kGrouping,
                                             });
       }
       if (!expression.has_value()) {
@@ -3851,12 +3866,13 @@ class StatementBinder final {
         continue;
       }
 
+      const std::size_t first_query = impl_->nested_queries.size();
       BindExpected<BoundExpressionId> bound = BindExpression(
           result.expression,
           BindScope{
               .source_columns = true,
               .result_aliases = false,
-              .allow_aggregates = true,
+              .aggregates = AggregatePermission::kAllowed,
               .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
           });
       if (!bound.has_value()) {
@@ -3882,6 +3898,7 @@ class StatementBinder final {
             .name = std::move(*alias),
             .target = *bound,
             .result_index = impl_->result_columns.size(),
+            .has_subqueries = impl_->nested_queries.size() != first_query,
         });
       }
 
@@ -4307,9 +4324,11 @@ class StatementBinder final {
                                BindScope{
                                    .source_columns = true,
                                    .result_aliases = true,
-                                   .allow_aggregates =
-                                       active_core_is_aggregate_ ||
-                                       ActiveQuery().destination == BoundQueryDestination::kExists,
+                                   .aggregates = active_core_is_aggregate_ ||
+                                                         ActiveQuery().destination ==
+                                                             BoundQueryDestination::kExists
+                                                     ? AggregatePermission::kAllowed
+                                                     : AggregatePermission::kProhibited,
                                    .requires_value =
                                        ActiveQuery().destination != BoundQueryDestination::kExists,
                                });
@@ -4861,6 +4880,52 @@ class StatementBinder final {
     return NoSuchColumn(identifier.name.span);
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> BindAliasReference(
+      const AliasEntry& alias, SourceSpan span, AggregatePermission aggregates,
+      std::optional<BoundQueryId> context = std::nullopt) {
+    const ExpressionProperties properties = Properties(alias.target);
+    if (properties.contains_aggregate) {
+      if (aggregates == AggregatePermission::kProhibited ||
+          (context.has_value() && aggregates == AggregatePermission::kGrouping)) {
+        return std::unexpected(BinderError(BindErrorCode::kAggregateMisuse, span,
+                                           "misuse of aggregate function through result alias"));
+      }
+      if (context.has_value()) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                           "outer-owned aggregates are not supported"));
+      }
+    }
+    if (context.has_value()) {
+      const auto* subquery =
+          std::get_if<BoundSubqueryExpression>(&impl_->expressions[alias.target.value()].payload);
+      if (subquery != nullptr) {
+        const BoundQuery& query = Query(subquery->query);
+        if (query.destination == BoundQueryDestination::kScalar &&
+            query.output_columns.size() != 1U) {
+          return std::unexpected(
+              BinderError(BindErrorCode::kColumnCountMismatch, span, "row value misused"));
+        }
+      }
+      if (alias.has_subqueries) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kUnsupportedFeature, span,
+                        "outer result-alias definitions containing queries are not supported"));
+      }
+    }
+    auto expression = AppendExpression(
+        span, BoundAliasReferenceExpression{.target = alias.target, .context = context},
+        properties);
+    if (!expression.has_value()) {
+      return std::unexpected(std::move(expression.error()));
+    }
+    if (context.has_value()) {
+      if (auto captured = RecordQueryCaptures(*expression); !captured.has_value()) {
+        return std::unexpected(std::move(captured.error()));
+      }
+    }
+    return *expression;
+  }
+
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSingleName(
       std::string_view name, SourceSpan span, BindScope scope) {
     if (scope.source_columns) {
@@ -4873,14 +4938,7 @@ class StatementBinder final {
     if (scope.result_aliases) {
       for (const AliasEntry& alias : aliases_) {
         if (NamesEqual(alias.name, name)) {
-          const ExpressionProperties properties = Properties(alias.target);
-          if (properties.contains_aggregate && !scope.allow_aggregates) {
-            return std::unexpected(
-                BinderError(BindErrorCode::kAggregateMisuse, span,
-                            "misuse of aggregate function through result alias"));
-          }
-          BindExpected<BoundExpressionId> expression = AppendExpression(
-              span, BoundAliasReferenceExpression{.target = alias.target}, properties);
+          auto expression = BindAliasReference(alias, span, scope.aggregates);
           if (!expression.has_value()) {
             return std::unexpected(std::move(expression.error()));
           }
@@ -4906,7 +4964,7 @@ class StatementBinder final {
         return std::unexpected(std::move(resolved.error()));
       }
       if (resolved->has_value()) {
-        if (auto captured = RecordCapturedSources(**resolved); !captured.has_value()) {
+        if (auto captured = RecordQueryCaptures(**resolved); !captured.has_value()) {
           return std::unexpected(std::move(captured.error()));
         }
         return resolved;
@@ -4914,8 +4972,12 @@ class StatementBinder final {
       if (!qualification.has_value() && scope->aliases_visible) {
         for (const AliasEntry& alias : scope->aliases) {
           if (NamesEqual(alias.name, name)) {
-            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                               "outer result-alias expansion is not supported"));
+            auto expression =
+                BindAliasReference(alias, span, scope->aggregates_allowed, scope->query);
+            if (!expression.has_value()) {
+              return std::unexpected(std::move(expression.error()));
+            }
+            return std::optional{*expression};
           }
         }
       }
@@ -5298,7 +5360,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundOrderingTerm> BindAggregateOrderingTerm(const OrderingTerm& term,
                                                                           BindScope scope) {
-    scope.allow_aggregates = false;
+    scope.aggregates = AggregatePermission::kProhibited;
     BindExpected<BoundExpressionId> expression = BindExpression(term.expression, scope);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
@@ -5337,7 +5399,7 @@ class StatementBinder final {
     BindScope argument_scope = scope;
     argument_scope.requires_value =
         scope.requires_value || active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy;
-    argument_scope.allow_aggregates = false;
+    argument_scope.aggregates = AggregatePermission::kProhibited;
     std::vector<BoundExpressionId> arguments;
     if (!has_wildcard) {
       BindExpected<std::vector<BoundExpressionId>> bound =
@@ -5347,7 +5409,7 @@ class StatementBinder final {
       }
       arguments = std::move(*bound);
     }
-    if (!scope.allow_aggregates) {
+    if (scope.aggregates == AggregatePermission::kProhibited) {
       return std::unexpected(
           BinderError(BindErrorCode::kAggregateMisuse, span,
                       "misuse of aggregate function " + std::string{function.name()} + "()"));
@@ -5368,7 +5430,7 @@ class StatementBinder final {
     std::optional<BoundExpressionId> filter;
     if (call.filter.has_value()) {
       BindScope filter_scope = scope;
-      filter_scope.allow_aggregates = false;
+      filter_scope.aggregates = AggregatePermission::kProhibited;
       filter_scope.requires_value = argument_scope.requires_value;
       BindExpected<BoundExpressionId> bound = BindExpression(*call.filter, filter_scope);
       if (!bound.has_value()) {
@@ -6044,6 +6106,15 @@ bool BoundQueryCanOmitSetComparisons(const BoundQuery& query,
          std::ranges::all_of(query.compound_operators, [](CompoundOperator operation) {
            return operation == CompoundOperator::kUnion || operation == CompoundOperator::kUnionAll;
          });
+}
+
+bool BoundQueryRequiresResultValues(const BoundQuery& query,
+                                    std::span<const BoundExpression> expressions) noexcept {
+  const bool compares_rows = std::ranges::any_of(
+      query.compound_operators,
+      [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
+  return query.destination != BoundQueryDestination::kExists ||
+         (compares_rows && !BoundQueryCanOmitSetComparisons(query, expressions));
 }
 
 BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept {

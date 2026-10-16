@@ -143,8 +143,10 @@ configured-backend admission, canonical lookup relations, and borrowed
 source cursors. ADR-0090 defines source correlation through the same query
 owners and producers, with lazy inline emission inside one lexical bytecode
 region and separate binding/value dependencies. Source-free queries retain
-the verified value-call interface. Outer result-alias expansion and outer
-aggregate ownership remain ordered subquery follow-ups. Persistent constraints,
+the verified value-call interface. ADR-0091 defines the next bounded outer
+expression-alias admission through immutable targets and the same capture
+contract. Query-containing alias instances and outer aggregate ownership
+remain ordered subquery follow-ups. Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
 add their own crash evidence. No later compatibility-expansion node begins

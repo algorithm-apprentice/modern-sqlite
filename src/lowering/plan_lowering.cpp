@@ -5461,8 +5461,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return this;
     }
     const auto& captures = bound_select_->query().captures;
-    const auto capture = std::ranges::find(captures, identity, &BoundSourceCapture::identity);
-    if (capture == captures.end()) {
+    const auto* capture = binder_detail::FindSourceCapture(std::span{captures}, identity);
+    if (capture == nullptr) {
       return this;
     }
     if (!capture->value.has_value() || inline_parent_ == nullptr) {

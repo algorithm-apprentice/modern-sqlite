@@ -94,3 +94,4 @@ their corresponding implementation begins.
 88. [ADR-0088: Bounded Index Record-Prefix Comparison](0088-bounded-index-record-prefix-comparison.md)
 89. [ADR-0089: Automatic Covering Join Indexes](0089-automatic-covering-join-indexes.md)
 90. [ADR-0090: Source-Correlated Scalar and EXISTS Queries](0090-source-correlated-scalar-and-exists-queries.md)
+91. [ADR-0091: Lexical Outer Expression Aliases](0091-lexical-outer-expression-aliases.md)

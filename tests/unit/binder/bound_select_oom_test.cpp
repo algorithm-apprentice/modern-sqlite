@@ -176,7 +176,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 16> full_sweep_sqls{
+  const std::array<std::string_view, 19> full_sweep_sqls{
       kAggregateSql,
       "SELECT a.*,b.Name FROM Items a CROSS JOIN Items b WHERE a.id=?1 "
       "ORDER BY b.Name LIMIT ?2",
@@ -200,6 +200,9 @@ int main() try {
       "SELECT o.id,(SELECT DISTINCT i.Name FROM Items i WHERE i.id<=o.id "
       "ORDER BY i.Name LIMIT ?1) AS x FROM Items o WHERE x IS NOT NULL",
       "SELECT (SELECT id) FROM Items a FULL JOIN Items b USING(id)",
+      "SELECT 1 AS x FROM Items WHERE (SELECT (SELECT x))>0",
+      "SELECT Name AS x FROM Items WHERE EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1)",
+      "SELECT Name AS x,count(*) FROM Items GROUP BY Name HAVING (SELECT x) IS NOT NULL",
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);
