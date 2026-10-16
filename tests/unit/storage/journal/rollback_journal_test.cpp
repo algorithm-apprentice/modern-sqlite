@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
@@ -54,6 +55,7 @@ struct MemoryFileState {
   bool fail_publish_write = false;
   bool fail_next_read = false;
   std::optional<std::uint64_t> failing_read_offset;
+  std::optional<std::pair<FileOffset, ByteCount>> short_read;
   bool fail_next_size = false;
   bool fail_next_write = false;
   bool fail_next_truncate = false;
@@ -95,7 +97,11 @@ class MemoryFile final : public File {
     if (start >= state_->bytes.size()) {
       return ByteCount{0};
     }
-    const std::size_t count = std::min(destination.size(), state_->bytes.size() - start);
+    std::size_t count = std::min(destination.size(), state_->bytes.size() - start);
+    if (state_->short_read.has_value() && state_->short_read->first == offset) {
+      count = std::min(count, state_->short_read->second.value());
+      state_->short_read.reset();
+    }
     std::ranges::copy(ByteView{state_->bytes}.subspan(start, count), destination.begin());
     return ByteCount{count};
   }
@@ -243,6 +249,10 @@ class MemoryVfs final : public Vfs {
 
   void FailReadAt(std::string_view path, std::uint64_t offset) {
     files_.at(std::string{path})->failing_read_offset = offset;
+  }
+
+  void ShortReadAt(std::string_view path, FileOffset offset, ByteCount maximum_bytes) {
+    files_.at(std::string{path})->short_read = std::pair{offset, maximum_bytes};
   }
 
   void FailNextSize(std::string_view path) { files_.at(std::string{path})->fail_next_size = true; }
@@ -1364,6 +1374,134 @@ TEST(RollbackJournalFailures, PropagatesPlaybackReadMetadataErrorsWithoutDeletin
   EXPECT_EQ(ErrorCode::kIo, recovered.error().code());
   EXPECT_FALSE(target.prepared_info.has_value());
   EXPECT_TRUE(vfs.HasFile("/database.sqlite-journal"));
+}
+
+TEST(RollbackJournalFailures, RetainsJournalOnShortSizeAdmittedHeaderReads) {
+  for (const std::uint64_t offset : {0U, 1536U}) {
+    SCOPED_TRACE(offset);
+    MemoryVfs vfs;
+    const FileProperties properties = Properties(ByteCount{512});
+    {
+      std::unique_ptr<RollbackJournal> writer = CreateJournal(vfs, properties);
+      ASSERT_NE(nullptr, writer);
+      std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*writer);
+      ASSERT_NE(nullptr, transaction);
+      for (const PageNumber page : {PageNumber{1}, PageNumber{2}}) {
+        const auto bytes = Page(static_cast<std::byte>(page.value()));
+        ASSERT_TRUE(transaction
+                        ->CapturePage(JournalPageImage{
+                            .page_number = page,
+                            .bytes = bytes,
+                        })
+                        .has_value());
+        ASSERT_TRUE(transaction->SyncJournal().has_value());
+      }
+    }
+    const auto journal_bytes = ByteBuffer::CopyOf(vfs.Bytes("/database.sqlite-journal"));
+    vfs.ShortReadAt("/database.sqlite-journal", FileOffset{offset}, ByteCount{4});
+    auto recovery = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, recovery);
+    RecordingTarget target;
+
+    const auto recovered = RecoverHotJournal(*recovery, target);
+
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(ErrorCode::kIo, recovered.error().code());
+    EXPECT_EQ(10, recovered.error().primary_sqlite_code());
+    EXPECT_EQ(10 | (2 << 8), recovered.error().sqlite_code());
+    EXPECT_FALSE(target.completed_info.has_value());
+    EXPECT_EQ(0U, target.sync_count);
+    EXPECT_EQ(offset == 0U ? 0U : 1U, target.restored_pages.size());
+    EXPECT_TRUE(vfs.HasFile("/database.sqlite-journal"));
+    EXPECT_TRUE(std::ranges::equal(journal_bytes.view(), vfs.Bytes("/database.sqlite-journal")));
+    recovery.reset();
+
+    auto retry = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, retry);
+    RecordingTarget retried;
+    ASSERT_TRUE(RecoverHotJournal(*retry, retried).has_value());
+    EXPECT_EQ((std::vector<PageNumber>{PageNumber{1}, PageNumber{2}}), retried.restored_pages);
+    EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
+  }
+}
+
+TEST(RollbackJournalFailures, RetainsJournalOnShortSuperJournalMetadataReads) {
+  for (const bool short_name : {false, true}) {
+    SCOPED_TRACE(short_name);
+    MemoryVfs vfs;
+    const FileProperties properties = Properties(ByteCount{512});
+    {
+      auto writer = CreateJournal(vfs, properties);
+      ASSERT_NE(nullptr, writer);
+      auto transaction = BeginTransaction(*writer);
+      ASSERT_NE(nullptr, transaction);
+      const auto bytes = Page(std::byte{0x6d});
+      ASSERT_TRUE(transaction
+                      ->CapturePage(JournalPageImage{
+                          .page_number = PageNumber{1},
+                          .bytes = bytes,
+                      })
+                      .has_value());
+      ASSERT_TRUE(transaction->SyncJournal().has_value());
+    }
+    constexpr std::string_view kSuperJournal = "/database.sqlite-mj000000900";
+    AppendSuperJournal(vfs.MutableBytes("/database.sqlite-journal"), kSuperJournal);
+    const auto journal_size = vfs.Bytes("/database.sqlite-journal").size();
+    const auto offset = journal_size - 16U - (short_name ? kSuperJournal.size() : 0U);
+    vfs.ShortReadAt("/database.sqlite-journal", FileOffset{offset}, ByteCount{4});
+    auto recovery = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, recovery);
+    RecordingTarget target;
+
+    const auto recovered = RecoverHotJournal(*recovery, target);
+
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(ErrorCode::kIo, recovered.error().code());
+    EXPECT_EQ(10, recovered.error().primary_sqlite_code());
+    EXPECT_EQ(10 | (2 << 8), recovered.error().sqlite_code());
+    EXPECT_FALSE(target.prepared_info.has_value());
+    EXPECT_TRUE(target.restored_pages.empty());
+    EXPECT_TRUE(vfs.HasFile("/database.sqlite-journal"));
+    EXPECT_EQ(journal_size, vfs.Bytes("/database.sqlite-journal").size());
+    recovery.reset();
+
+    auto retry = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, retry);
+    ASSERT_TRUE(RecoverHotJournal(*retry, target).has_value());
+    EXPECT_FALSE(target.prepared_info.has_value());
+    EXPECT_TRUE(target.restored_pages.empty());
+    EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
+  }
+}
+
+TEST(RollbackJournalPlayback, StillToleratesShortPageRecordReadsWithinTheReportedSize) {
+  MemoryVfs vfs;
+  const FileProperties properties = Properties(ByteCount{512});
+  {
+    auto writer = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, writer);
+    auto transaction = BeginTransaction(*writer);
+    ASSERT_NE(nullptr, transaction);
+    const auto bytes = Page(std::byte{0x6d});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{1},
+                        .bytes = bytes,
+                    })
+                    .has_value());
+    ASSERT_TRUE(transaction->SyncJournal().has_value());
+  }
+  vfs.ShortReadAt("/database.sqlite-journal", FileOffset{512}, ByteCount{4});
+  auto recovery = CreateJournal(vfs, properties);
+  ASSERT_NE(nullptr, recovery);
+  RecordingTarget target;
+
+  ASSERT_TRUE(RecoverHotJournal(*recovery, target).has_value());
+
+  EXPECT_TRUE(target.restored_pages.empty());
+  EXPECT_TRUE(target.completed_info.has_value());
+  EXPECT_EQ(1U, target.sync_count);
+  EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
 }
 
 TEST(RollbackJournalFailures, PropagatesSuperJournalAccessErrors) {

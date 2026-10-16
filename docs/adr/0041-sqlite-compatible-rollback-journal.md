@@ -391,7 +391,7 @@ modifying database pages.
 After a valid first header, each of the following ends playback successfully at
 the last complete valid record:
 
-- a short later header;
+- a later header sector physically truncated according to file size;
 - invalid later magic;
 - a short page record;
 - page number zero;
@@ -400,7 +400,10 @@ the last complete valid record:
 - arithmetic that would move beyond the representable file range.
 
 The parser does not hide VFS read or file-size errors. Those propagate through
-`JournalPlayback::Next()`.
+`JournalPlayback::Next()`. ADR-0095 supersedes the former ambiguous "short
+later header" wording: a short read within size-admitted header or
+super-journal metadata is an I/O error, while short page records retain
+SQLite's tolerated crash-tail handling.
 
 Pages above the first header's original database size may still be emitted;
 ADR-0040 performs the authoritative playback-size filter before applying an

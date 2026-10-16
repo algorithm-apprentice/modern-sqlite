@@ -5,8 +5,10 @@ preserves SQLite's durable file-format and observable database semantics while
 rebuilding the implementation around explicit ownership, testable durability
 boundaries, strict dependency direction, and an AI-native development model.
 
-The project is currently in build-system bootstrap. It contains no production
-database code and must not be used with production data.
+The project is currently implementing advanced SQL compatibility. Storage,
+rollback transactions, and admitted read/write SQL slices are implemented,
+but SQLite compatibility is incomplete and known audit findings remain.
+It must not be used with production data.
 
 ## Reference snapshot
 
@@ -51,6 +53,7 @@ source-level coupling.
 - [SQLite source analysis and target architecture](docs/architecture.md)
 - [Implementation dependency DAG](docs/dependency-dag.md)
 - [Architecture decision records](docs/adr/README.md)
+- [Implemented-engine SQLite reference audit](docs/sqlite-reference-audit.md)
 - [Pinned read-performance baseline](docs/performance/read-baseline.md)
 - [AI project manifest](project/manifest.json)
 - [Machine-readable module graph](project/module-graph.json)
