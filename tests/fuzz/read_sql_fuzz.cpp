@@ -206,7 +206,8 @@ class ByteReader final {
   static_cast<void>(input.Next());
   bool exists = input.Next() % 2U != 0U;
   std::string child;
-  switch (input.Next() % 4U) {
+  const auto kind = input.Next() % 10U;
+  switch (kind) {
     case 0:
       child = GeneratedCore(input, true);
       break;
@@ -217,8 +218,33 @@ class ByteReader final {
       child = GenerateAggregateSql(bytes);
       exists = true;
       break;
-    default:
+    case 3:
       child = GenerateJoinSql(bytes);
+      exists = true;
+      break;
+    case 4:
+      child = "SELECT i.label FROM model_rows i WHERE i.id>=o.id+" +
+              std::to_string(input.Next() % 3U) + " ORDER BY i.id LIMIT " +
+              std::to_string(input.Next() % 3U) + " OFFSET " + std::to_string(input.Next() % 3U);
+      break;
+    case 5:
+      child = "VALUES(o.value),(o.nullable)";
+      break;
+    case 6:
+      child =
+          "SELECT count(*) FROM model_rows i WHERE i.nullable IS o.nullable "
+          "GROUP BY i.id%3 ORDER BY 1";
+      break;
+    case 7:
+      child = "SELECT (SELECT o.label) UNION ALL SELECT o.label ORDER BY 1";
+      break;
+    case 8:
+      child =
+          "SELECT b.label||o.label FROM model_rows a LEFT JOIN model_rows b "
+          "ON b.id=a.id AND b.id<=o.id WHERE a.id<=3 ORDER BY a.id";
+      break;
+    default:
+      child = "SELECT o.nullable FROM model_rows i WHERE i.id<=3 ORDER BY (SELECT o.value)";
       exists = true;
       break;
   }
@@ -227,7 +253,13 @@ class ByteReader final {
   for (std::size_t depth = 0; depth < nesting; ++depth) {
     sql = "SELECT (" + sql + ")";
   }
-  return sql + " FROM model_rows WHERE id<=" + std::to_string(1U + input.Next() % 4U);
+  if (kind >= 4U && input.Next() % 2U != 0U) {
+    return sql + " AS captured_value FROM model_rows o WHERE o.id<=" +
+           std::to_string(1U + input.Next() % 4U) +
+           " AND captured_value IS NOT NULL ORDER BY captured_value,o.id";
+  }
+  return sql + (kind >= 4U ? " FROM model_rows o WHERE id<=" : " FROM model_rows WHERE id<=") +
+         std::to_string(1U + input.Next() % 4U);
 }
 
 [[nodiscard]] bool IsJoinedIndexInput(std::span<const std::uint8_t> input) {

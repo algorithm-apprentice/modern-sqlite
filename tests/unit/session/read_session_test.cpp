@@ -817,6 +817,65 @@ TEST(ReadSession, ExecutesScalarAndExistsQueriesThroughPrivateReadCalls) {
   EXPECT_EQ(1, IntegerValue(statement.row()[1]));
 }
 
+TEST(ReadSession, ExecutesSourceCorrelatedScalarAndExistsPerOuterRow) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT o.id,o.name,(SELECT o.name),"
+                       "(SELECT i.id FROM model_rows i WHERE i.id=o.id),"
+                       "EXISTS(SELECT 1 FROM model_rows i WHERE i.id=o.id AND i.id>?1) "
+                       "FROM items o ORDER BY o.id");
+  ASSERT_EQ(5U, statement.result_columns().size());
+  EXPECT_EQ("TEXT", statement.result_columns()[2].declared_type);
+  EXPECT_EQ("INTEGER", statement.result_columns()[3].declared_type);
+  for (const std::int64_t threshold : {2, 3}) {
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(threshold)));
+    for (std::int64_t id = 1; id <= 4; ++id) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      ASSERT_EQ(5U, statement.row().size());
+      EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+      EXPECT_EQ(statement.row()[1].type(), statement.row()[2].type());
+      if (statement.row()[1].type() == SqlValueType::kText) {
+        EXPECT_EQ(TextValue(statement.row()[1]), TextValue(statement.row()[2]));
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[2].type());
+      }
+      EXPECT_EQ(id, IntegerValue(statement.row()[3]));
+      EXPECT_EQ(id > threshold ? 1 : 0, IntegerValue(statement.row()[4]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, CapturesMergedAndQualifiedFullJoinValuesIncludingNullRows) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT a.id,b.id,score,(SELECT score),a.score,(SELECT a.score),"
+                       "b.score,(SELECT b.score) FROM items a FULL JOIN items b USING(score) "
+                       "ORDER BY coalesce(a.id,b.id),a.id");
+  bool saw_left_only = false;
+  bool saw_right_only = false;
+  std::size_t rows = 0;
+  while (TakeValue(statement.Step()) == ReadStep::kRow) {
+    ++rows;
+    saw_right_only = saw_right_only || statement.row()[0].type() == SqlValueType::kNull;
+    saw_left_only = saw_left_only || statement.row()[1].type() == SqlValueType::kNull;
+    for (const std::size_t field : {2U, 4U, 6U}) {
+      const SqlValue& direct = statement.row()[field];
+      const SqlValue& captured = statement.row()[field + 1U];
+      EXPECT_EQ(direct.type(), captured.type());
+      if (direct.type() != SqlValueType::kNull) {
+        EXPECT_EQ(direct.real_value(), captured.real_value());
+      }
+    }
+  }
+  EXPECT_GT(rows, 4U);
+  EXPECT_TRUE(saw_left_only);
+  EXPECT_TRUE(saw_right_only);
+}
+
 TEST(ReadSession, IgnoresExistsDistinctProjectionWithoutIgnoringBinding) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
@@ -2395,6 +2454,56 @@ TEST(ReadSession, ExecutesSixtyFourJoinedCoveringPrefixesInOneSourcePipeline) {
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(ReadSession, RecordsSourceCorrelatedScalarAndExistsFixedWorkBaseline) {
+  struct Case {
+    std::string_view name;
+    std::string_view projection;
+    bool grouped = false;
+  };
+  for (const Case& test_case :
+       {Case{.name = "transitive", .projection = "(SELECT (SELECT o.id)),EXISTS(SELECT o.label)"},
+        Case{.name = "point",
+             .projection = "(SELECT i.id FROM model_rows i WHERE i.id=o.id),"
+                           "EXISTS(SELECT 1 FROM model_rows i WHERE i.id=o.id)"},
+        Case{.name = "grouped",
+             .projection = "(SELECT sum(i.id) FROM model_rows i WHERE i.id<=o.id "
+                           "GROUP BY i.id%2 ORDER BY 1 DESC),"
+                           "EXISTS(SELECT 1 FROM model_rows i WHERE i.id>o.id)",
+             .grouped = true}}) {
+    for (const std::int64_t outer_rows : {1, 8, 32}) {
+      SCOPED_TRACE(test_case.name);
+      SCOPED_TRACE(outer_rows);
+      ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+      ReadStatement statement =
+          PrepareStatement(session, "SELECT o.id," + std::string{test_case.projection} +
+                                        " FROM model_rows o WHERE o.id<=?1 ORDER BY o.id");
+      RequireStatus(statement.Bind(1, SqlValue::Integer(outer_rows)));
+      instrumentation::CounterCollection work;
+      {
+        const instrumentation::ScopedCounterCollection scope{work};
+        for (std::int64_t id = 1; id <= outer_rows; ++id) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          ASSERT_EQ(3U, statement.row().size());
+          EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+          EXPECT_EQ(test_case.grouped ? (id + 1) * (id + 1) / 4 : id,
+                    IntegerValue(statement.row()[1]));
+          EXPECT_EQ(test_case.grouped && id == 32 ? 0 : 1, IntegerValue(statement.row()[2]));
+        }
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+      const std::string prefix =
+          std::string{test_case.name} + "_" + std::to_string(outer_rows) + "_";
+      for (const auto counter :
+           {instrumentation::Counter::kVmInstructions, instrumentation::Counter::kPagesRead,
+            instrumentation::Counter::kBytesCopied}) {
+        RecordProperty(prefix + std::string{instrumentation::CounterName(counter)},
+                       std::to_string(work.Value(counter)));
+      }
+      EXPECT_GT(work.Value(instrumentation::Counter::kVmInstructions), 0U);
+    }
+  }
+}
+
 TEST(ReadSession, BoundsJoinedCoveringEqualityWorkByIndexedPrefixes) {
   ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
   ReadStatement statement = PrepareStatement(

@@ -58,6 +58,8 @@ struct SubqueryCallBinding {
   std::optional<SubroutineId> subroutine;
 };
 
+class PlanLowerer;
+
 struct StatementLoweringState {
   std::size_t next_register = 0;
   bool expression_layout_initialized = false;
@@ -74,6 +76,7 @@ struct StatementLoweringState {
   std::vector<NamedSymbol> symbol_names;
   std::optional<SymbolId> binary_symbol;
   std::vector<SubqueryCallBinding> subqueries;
+  std::vector<std::unique_ptr<PlanLowerer>> query_frames;
 };
 
 class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServices,
@@ -178,6 +181,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
  private:
+  enum class ReadPlanKind : std::uint8_t {
+    kOrdinary,
+    kDistinct,
+    kStreaming,
+    kSet,
+    kOrderedCompound,
+    kGlobalAggregate,
+    kGroupedAggregate,
+  };
+
   [[nodiscard]] LoweringResult<void> PrepareReadLayout() {
     if (bound_select_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound SELECT does not retain a catalog"));
@@ -200,6 +213,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!inspected.has_value()) {
       return std::unexpected(std::move(inspected.error()));
     }
+    read_plan_kind_ = grouped_aggregate_query_  ? ReadPlanKind::kGroupedAggregate
+                      : global_aggregate_query_ ? ReadPlanKind::kGlobalAggregate
+                      : ordered_compound_       ? ReadPlanKind::kOrderedCompound
+                      : set_query_              ? ReadPlanKind::kSet
+                      : streaming_query_        ? ReadPlanKind::kStreaming
+                      : distinct_ != nullptr    ? ReadPlanKind::kDistinct
+                                                : ReadPlanKind::kOrdinary;
     LoweringResult<void> layout =
         streaming_aggregate_query_ ? BuildStreamingAggregateRegisterLayout()
         : grouped_aggregate_query_ ? BuildGroupedAggregateRegisterLayout()
@@ -227,7 +247,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(prepared.error()));
     }
     const std::size_t nested_count = bound_select_->owner().query_count() - 1U;
-    std::vector<std::unique_ptr<PlanLowerer>> children;
+    auto& children = statement_.query_frames;
     children.reserve(nested_count);
     statement_.subqueries.resize(nested_count);
     bool snapshot = RequiresReadSnapshot();
@@ -315,6 +335,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> AddReadDescriptors() {
+    if (read_descriptors_added_) {
+      return {};
+    }
+    auto added = BuildReadDescriptors();
+    if (added.has_value()) {
+      read_descriptors_added_ = true;
+    }
+    return added;
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildReadDescriptors() {
     if (global_aggregate_query_ || grouped_aggregate_query_) {
       if (auto descriptors = AddGlobalAggregateDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
@@ -362,14 +393,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitReadPlan() {
-    return grouped_aggregate_query_  ? EmitGroupedAggregatePlan()
-           : global_aggregate_query_ ? EmitGlobalAggregatePlan()
-           : ordered_compound_
-               ? EmitOrderedCompoundPlan()
-               : (set_query_ ? EmitSetPlan()
-                             : (streaming_query_
-                                    ? EmitStreamingPlan()
-                                    : (distinct_ != nullptr ? EmitDistinctPlan() : EmitPlan())));
+    switch (read_plan_kind_) {
+      case ReadPlanKind::kOrdinary:
+        return EmitPlan();
+      case ReadPlanKind::kDistinct:
+        return EmitDistinctPlan();
+      case ReadPlanKind::kStreaming:
+        return EmitStreamingPlan();
+      case ReadPlanKind::kSet:
+        return EmitSetPlan();
+      case ReadPlanKind::kOrderedCompound:
+        return EmitOrderedCompoundPlan();
+      case ReadPlanKind::kGlobalAggregate:
+        return EmitGlobalAggregatePlan();
+      case ReadPlanKind::kGroupedAggregate:
+        return EmitGroupedAggregatePlan();
+    }
+    return std::unexpected(InternalFailure("query emission strategy is invalid"));
   }
 
   [[nodiscard]] LoweringResult<void> EmitSubqueryCacheInitialization() {
@@ -408,14 +448,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return descriptors;
     }
+    if (auto bound = BindLabel(AssumeValue(call.entry)); !bound.has_value()) {
+      return bound;
+    }
+    if (auto emitted = EmitNestedQueryBody(); !emitted.has_value()) {
+      return emitted;
+    }
+    auto one = EnsureOneConstant();
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto ready = Append(LoadConstantInstruction{.constant = *one, .output = call.ready});
+        !ready.has_value()) {
+      return ready;
+    }
+    if (auto bound = BindLabel(AssumeValue(call.last)); !bound.has_value()) {
+      return bound;
+    }
+    return Append(ReturnSubroutineInstruction{.subroutine = *call.subroutine});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNestedQueryBody() {
+    if (active_aggregate_output_.has_value() || aggregate_core_stopped_label_.has_value() ||
+        aggregate_core_completion_label_.has_value()) {
+      return std::unexpected(InternalFailure("query emission retains an active output context"));
+    }
+    limit_initialized_ = false;
+    ordering_runtime_ = OrderingRuntime::kNone;
+    aggregate_expression_source_ = lowering_internal::AggregateExpressionSource::AccessRow;
+    grouped_output_phase_ = false;
     auto completed = CreateLabel();
     if (!completed.has_value()) {
       return std::unexpected(std::move(completed.error()));
     }
     subquery_completion_ = *completed;
-    if (auto bound = BindLabel(AssumeValue(call.entry)); !bound.has_value()) {
-      return bound;
-    }
+    const SubqueryCallBinding& call = statement_.subqueries[bound_select_->query().id.value() - 1U];
     auto initial = bound_select_->query().destination == BoundQueryDestination::kExists
                        ? EnsureZeroConstant()
                        : EnsureNullConstant();
@@ -430,21 +497,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto emitted = EmitReadPlan(); !emitted.has_value()) {
       return emitted;
     }
-    if (auto bound = BindLabel(*completed); !bound.has_value()) {
-      return bound;
+    return BindLabel(*completed);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitInlineQuery(PlanLowerer& parent) {
+    if (bound_select_->query().parent != parent.bound_select_->query().id) {
+      return std::unexpected(InternalFailure("inline query has an invalid lexical parent"));
     }
-    auto one = EnsureOneConstant();
-    if (!one.has_value()) {
-      return std::unexpected(std::move(one.error()));
+    if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
+      return descriptors;
     }
-    if (auto ready = Append(LoadConstantInstruction{.constant = *one, .output = call.ready});
-        !ready.has_value()) {
-      return ready;
-    }
-    if (auto bound = BindLabel(AssumeValue(call.last)); !bound.has_value()) {
-      return bound;
-    }
-    return Append(ReturnSubroutineInstruction{.subroutine = *call.subroutine});
+    PlanLowerer* previous = std::exchange(inline_parent_, &parent);
+    auto emitted = EmitNestedQueryBody();
+    inline_parent_ = previous;
+    return emitted;
   }
 
   [[nodiscard]] LowerPlanResult RunMutation() {
@@ -945,7 +1011,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<CursorId> index_cursor{};
     std::optional<RelationId> relation{};
     std::optional<SorterId> group_sorter{};
-    std::vector<BoundExpressionId> global_representative_leaves{};
+    std::span<const BoundExpressionId> global_representative_leaves{};
     std::vector<BoundExpressionId> grouped_retained_leaves{};
     bool global_filtered_controller_defaults = false;
   };
@@ -1413,65 +1479,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  void CollectAggregateRepresentativeLeaves(
-      BoundExpressionId id, std::vector<BoundExpressionId>* leaves,
-      std::vector<BoundSourceLeafIdentity>* identities) const {
-    const BoundExpression& expression = expressions_[id.value()];
-    if (const std::optional<BoundSourceLeafIdentity> identity = AggregateIdentity(id);
-        identity.has_value()) {
-      if (!std::ranges::contains(*identities, *identity)) {
-        identities->push_back(*identity);
-        leaves->push_back(id);
-      }
-      return;
-    }
-    if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
-        std::holds_alternative<BoundParameterExpression>(expression.payload) ||
-        std::holds_alternative<BoundAggregateCallExpression>(expression.payload)) {
-      return;
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      CollectAggregateRepresentativeLeaves(alias->target, leaves, identities);
-    } else if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-               unary != nullptr) {
-      CollectAggregateRepresentativeLeaves(unary->operand, leaves, identities);
-    } else if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-               binary != nullptr) {
-      CollectAggregateRepresentativeLeaves(binary->left, leaves, identities);
-      CollectAggregateRepresentativeLeaves(binary->right, leaves, identities);
-    } else if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-               comparison != nullptr) {
-      CollectAggregateRepresentativeLeaves(comparison->left, leaves, identities);
-      CollectAggregateRepresentativeLeaves(comparison->right, leaves, identities);
-    } else if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-               truth != nullptr) {
-      CollectAggregateRepresentativeLeaves(truth->operand, leaves, identities);
-    } else if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-               call != nullptr) {
-      for (const BoundExpressionId argument : call->arguments) {
-        CollectAggregateRepresentativeLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-               coalesce != nullptr) {
-      for (const BoundExpressionId argument : coalesce->arguments) {
-        CollectAggregateRepresentativeLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* conditional =
-                   std::get_if<BoundConditionalExpression>(&expression.payload);
-               conditional != nullptr) {
-      for (const BoundExpressionId argument : conditional->arguments) {
-        CollectAggregateRepresentativeLeaves(argument, leaves, identities);
-      }
-    } else if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-               likelihood != nullptr) {
-      CollectAggregateRepresentativeLeaves(likelihood->operand, leaves, identities);
-    } else if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-               collate != nullptr) {
-      CollectAggregateRepresentativeLeaves(collate->operand, leaves, identities);
-    }
-  }
-
   [[nodiscard]] bool ExpressionIsDirectGroupedRepresentative(BoundExpressionId id) const {
     const BoundExpression& expression = expressions_[id.value()];
     if (std::holds_alternative<BoundColumnExpression>(expression.payload) ||
@@ -1507,15 +1514,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           UnsupportedFailure("grouped or DISTINCT aggregate lowering is not implemented"));
     }
     aggregate_program_ = &*aggregate_core_->aggregate;
-    std::vector<BoundSourceLeafIdentity> representative_identities;
-    for (const BoundResultColumn& result : aggregate_core_->result_columns) {
-      CollectAggregateRepresentativeLeaves(result.expression, &global_representative_leaves_,
-                                           &representative_identities);
-    }
-    if (aggregate_program_->having.has_value()) {
-      CollectAggregateRepresentativeLeaves(
-          *aggregate_program_->having, &global_representative_leaves_, &representative_identities);
-    }
+    global_representative_leaves_ = aggregate_program_->representative_leaves;
     global_representative_query_ = !global_representative_leaves_.empty();
     for (const BoundAggregateInvocationId invocation_id : aggregate_program_->invocations) {
       if (invocation_id.value() >= aggregate_invocations_.size()) {
@@ -2959,16 +2958,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     SetStreamingAggregateCoreBasics(*core);
     if (select->aggregate->group_by.empty()) {
-      core->global_representative_leaves.clear();
-      std::vector<BoundSourceLeafIdentity> identities;
-      for (const BoundResultColumn& result : select->result_columns) {
-        CollectAggregateRepresentativeLeaves(result.expression, &core->global_representative_leaves,
-                                             &identities);
-      }
-      if (select->aggregate->having.has_value()) {
-        CollectAggregateRepresentativeLeaves(*select->aggregate->having,
-                                             &core->global_representative_leaves, &identities);
-      }
+      core->global_representative_leaves = select->aggregate->representative_leaves;
       global_representative_query_ = !core->global_representative_leaves.empty();
     } else {
       if (auto retained = BuildGroupedRetainedLeaves(); !retained.has_value()) {
@@ -5064,6 +5054,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                 " columns - expected 1"));
     }
     SubqueryCallBinding& call = statement_.subqueries[query.value() - 1U];
+    if (!target.captures.empty()) {
+      if (query.value() > statement_.query_frames.size()) {
+        return std::unexpected(InternalFailure("inline query has no prepared compiler frame"));
+      }
+      if (auto emitted = statement_.query_frames[query.value() - 1U]->EmitInlineQuery(*this);
+          !emitted.has_value()) {
+        return emitted;
+      }
+      return Append(CopyInstruction{.input = call.result, .output = destination});
+    }
     if (!call.subroutine.has_value()) {
       auto entry = CreateLabel();
       auto last = CreateLabel();
@@ -5367,6 +5367,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitColumnValue(const BoundColumnExpression& column,
                                                      RegisterId destination) {
+    if (bound_select_ != nullptr) {
+      const BoundExpression expression{.payload = column};
+      const auto identity = BoundSourceLeafIdentityOf(expression, bound_select_->source_columns());
+      auto owner = SourceFrame(AssumeValue(identity));
+      if (!owner.has_value()) {
+        return std::unexpected(std::move(owner.error()));
+      }
+      if (*owner != this) {
+        return (*owner)->EmitColumnValue(column, destination);
+      }
+    }
     if ((grouped_aggregate_query_ || global_representative_query_) &&
         aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
       const std::optional<RegisterId> source = GroupedColumnRegister(column.column);
@@ -5421,6 +5432,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitRowIdValue(const BoundRowIdExpression& rowid,
                                                     RegisterId destination) {
+    auto owner = SourceFrame(BoundSourceLeafIdentity{.source = rowid.source});
+    if (!owner.has_value()) {
+      return std::unexpected(std::move(owner.error()));
+    }
+    if (*owner != this) {
+      return (*owner)->EmitRowIdValue(rowid, destination);
+    }
     if ((grouped_aggregate_query_ || global_representative_query_) &&
         aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
       const std::optional<RegisterId> source = GroupedRowIdRegister(rowid.source);
@@ -5436,6 +5454,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       });
     }
     return EmitCursorRowIdValue(rowid.source, destination);
+  }
+
+  [[nodiscard]] LoweringResult<PlanLowerer*> SourceFrame(const BoundSourceLeafIdentity& identity) {
+    if (bound_select_ == nullptr) {
+      return this;
+    }
+    const auto& captures = bound_select_->query().captures;
+    const auto capture = std::ranges::find(captures, identity, &BoundSourceCapture::identity);
+    if (capture == captures.end()) {
+      return this;
+    }
+    if (!capture->value.has_value() || inline_parent_ == nullptr) {
+      return std::unexpected(InternalFailure("source leaf has no live lexical compiler frame"));
+    }
+    return inline_parent_->SourceFrame(identity);
   }
 
   [[nodiscard]] LoweringResult<void> EmitUnaryValue(const BoundUnaryExpression& unary,
@@ -8988,7 +9021,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return mapped;
       }
     } else {
-      global_representative_leaves_.clear();
+      global_representative_leaves_ = {};
       global_representative_registers_.clear();
       global_representative_register_map_.clear();
     }
@@ -14565,6 +14598,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   ProgramLimits limits_;
   StatementLoweringState& statement_;
   std::optional<Label> subquery_completion_;
+  ReadPlanKind read_plan_kind_ = ReadPlanKind::kOrdinary;
+  bool read_descriptors_added_ = false;
+  // Borrows an active compiler frame during inline emission, never a runtime cursor.
+  PlanLowerer* inline_parent_ = nullptr;
 
   const PhysicalNode* leaf_ = nullptr;
   const PhysicalTableScanNode* table_scan_ = nullptr;
@@ -14655,7 +14692,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::vector<RegisterId> streaming_global_representative_registers_;
   std::vector<RegisterId> streaming_grouped_representative_registers_;
   std::vector<RegisterId> streaming_grouped_retained_registers_;
-  std::vector<BoundExpressionId> global_representative_leaves_;
+  std::span<const BoundExpressionId> global_representative_leaves_;
   std::vector<RegisterId> global_representative_registers_;
   std::vector<AggregateLeafRegister> global_representative_register_map_;
 

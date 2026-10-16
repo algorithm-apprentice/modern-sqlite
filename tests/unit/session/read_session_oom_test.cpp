@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -26,11 +27,12 @@ namespace {
 
 std::atomic<std::size_t> allocation_index = 0;
 std::size_t failing_allocation = 0;
+std::size_t minimum_failing_size = std::numeric_limits<std::size_t>::max();
 bool inject_failure = false;
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
+  if (inject_failure && (index == failing_allocation || size >= minimum_failing_size)) {
     throw std::bad_alloc{};
   }
   if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr) {
@@ -41,7 +43,7 @@ bool inject_failure = false;
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
+  if (inject_failure && (index == failing_allocation || size >= minimum_failing_size)) {
     throw std::bad_alloc{};
   }
   void* memory = nullptr;
@@ -278,7 +280,7 @@ struct TemporaryConsumerCase {
   bool joined_index_fixture = false;
 };
 
-constexpr std::array<TemporaryConsumerCase, 27> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 31> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -351,6 +353,22 @@ constexpr std::array<TemporaryConsumerCase, 27> kTemporaryConsumers{
                           .sql = "SELECT EXISTS(SELECT label FROM model_rows WHERE id<=?1 "
                                  "INTERSECT SELECT label FROM model_rows WHERE id<=?2 "
                                  "LIMIT -1 OFFSET 1)"},
+    TemporaryConsumerCase{
+        .name = "correlated_order",
+        .sql = "SELECT (SELECT i.label FROM model_rows i WHERE i.id<=o.id AND i.id<=?1 "
+               "ORDER BY i.label DESC LIMIT ?2) FROM model_rows o WHERE o.id<=2"},
+    TemporaryConsumerCase{
+        .name = "correlated_grouped",
+        .sql = "SELECT (SELECT group_concat(i.label ORDER BY i.id DESC) FROM model_rows i "
+               "WHERE i.id<=o.id+?1/8 GROUP BY i.id%3 ORDER BY 1 LIMIT ?2) FROM items o"},
+    TemporaryConsumerCase{
+        .name = "correlated_set",
+        .sql = "SELECT EXISTS(SELECT i.label FROM model_rows i WHERE i.id<=o.id+?1/8 "
+               "INTERSECT SELECT j.label FROM model_rows j WHERE j.id<=?2/8) FROM items o"},
+    TemporaryConsumerCase{
+        .name = "correlated_joined_aggregate",
+        .sql = "SELECT (SELECT group_concat(b.name||o.name ORDER BY b.id) FROM items a "
+               "LEFT JOIN items b ON b.id=a.id WHERE a.id<=?1/8) FROM items o LIMIT ?2"},
     TemporaryConsumerCase{.name = "joined_index_full_aggregate",
                           .sql = "SELECT group_concat(b.id ORDER BY b.id DESC) FROM probe_rows p "
                                  "FULL JOIN key_rows b ON b.text_key=p.text_key "
@@ -550,6 +568,65 @@ int main(int argc, char** argv) try {
   const std::size_t first_failure = partition.value_or(0U);
   const std::size_t failure_stride = partition.has_value() ? kAllocationPartitions : 1U;
 
+  if (first_failure == 0U) {
+    for (const std::string_view sql :
+         {"SELECT (SELECT coalesce(?1,o.value)) FROM storage_values o WHERE o.id=11",
+          "SELECT (SELECT iif(?1 IS NULL,o.value,1)) FROM storage_values o WHERE o.id=11"}) {
+      for (const bool taken : {false, true}) {
+        const auto locks = std::make_shared<LockTrackingState>();
+        auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks),
+                                         ReadCompatibilityFixturePath().string());
+        if (!session.has_value()) {
+          return 1;
+        }
+        ReadStatement statement = Prepare(*session, sql);
+        if (!statement.Bind(1, taken ? SqlValue{} : SqlValue::Integer(1)).has_value()) {
+          return 1;
+        }
+        failing_allocation = std::numeric_limits<std::size_t>::max();
+        minimum_failing_size = 2000U;
+        inject_failure = true;
+        const auto stepped = statement.Step();
+        inject_failure = false;
+        minimum_failing_size = std::numeric_limits<std::size_t>::max();
+        if (taken) {
+          if (stepped.has_value() || !IsOutOfMemory(stepped.error()) || locks->shared_lock_held) {
+            std::cerr << "taken correlated overflow read did not report and clean up OOM\n";
+            return 1;
+          }
+          const Status reset = statement.Reset();
+          if (reset.has_value() || !IsOutOfMemory(reset.error())) {
+            return 1;
+          }
+        } else {
+          if (!stepped.has_value() || *stepped != ReadStep::kRow ||
+              statement.row()[0].integer_value() != 1) {
+            std::cerr << "skipped correlated overflow read allocated its unused source value\n";
+            return 1;
+          }
+          const auto done = statement.Step();
+          if (!done.has_value() || *done != ReadStep::kDone || !statement.Reset().has_value()) {
+            return 1;
+          }
+        }
+        const auto recovered = statement.Step();
+        if (!recovered.has_value() || *recovered != ReadStep::kRow) {
+          return 1;
+        }
+        if (taken) {
+          const auto blob = statement.row()[0].blob_value();
+          if (!blob.has_value() || blob->size() != 2000U) {
+            return 1;
+          }
+        }
+        const auto done = statement.Step();
+        if (!done.has_value() || *done != ReadStep::kDone || locks->shared_lock_held) {
+          return 1;
+        }
+      }
+    }
+  }
+
   const std::vector<char> empty_bytes;
   const std::vector<char> v1 = ReadBytes(FixturePath("sqlite-3.54.0-session-v1.db"));
   const std::vector<char> v2 = ReadBytes(FixturePath("sqlite-3.54.0-session-v2.db"));
@@ -637,6 +714,11 @@ int main(int argc, char** argv) try {
       std::string_view{
           "SELECT (SELECT (SELECT label FROM model_rows ORDER BY label DESC LIMIT ?1)),"
           "EXISTS(SELECT sum(id) FROM model_rows HAVING sum(id)>?2)"},
+      std::string_view{"SELECT o.id,(SELECT i.label FROM model_rows i WHERE i.id<=o.id "
+                       "ORDER BY i.label DESC LIMIT ?1) AS x FROM model_rows o WHERE x IS NOT NULL "
+                       "ORDER BY x LIMIT ?2"},
+      std::string_view{
+          "SELECT count(*),EXISTS(SELECT (SELECT o.label) ORDER BY o.value) FROM model_rows o"},
   };
   const std::string joined_path = ReadCompatibilityFixturePath().string();
   for (const std::string_view prepare_sql : kArenaPrepareSql) {

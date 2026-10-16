@@ -339,7 +339,7 @@ int main() try {
       PhysicalFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
       PhysicalFixture(indexed_catalog, "SELECT Payload,min(Name) FROM Items"),
   };
-  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{43U, 39U, 48U, 53U, 59U};
+  constexpr std::array<std::size_t, 5> kExpectedAggregateAllocations{43U, 39U, 48U, 53U, 57U};
   std::unique_ptr<BytecodeProgram> aggregate_published;
   for (std::size_t plan_index = 0; plan_index < aggregate_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -352,6 +352,8 @@ int main() try {
       }
       const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
       if (allocations != kExpectedAggregateAllocations[plan_index]) {
+        std::fprintf(stderr, "aggregate plan %zu expected %zu allocations, got %zu\n", plan_index,
+                     kExpectedAggregateAllocations[plan_index], allocations);
         return 1;
       }
       if (plan_index + 1U == aggregate_plans.size() && aggregate_published == nullptr) {

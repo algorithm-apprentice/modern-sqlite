@@ -1,0 +1,2904 @@
+{
+  "cases": [
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-direct-metadata",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e6e616d65292c2853454c454354206f2e73636f7265292c2853454c454354206f2e7061796c6f6164292c2853454c454354206f2e7175616e74697479292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-direct-rowid-spellings",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e726f776964292c2853454c454354206f2e5f726f7769645f292c2853454c454354206f2e6f6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-transitive-source-free-frames",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354202853454c454354202853454c454354206f2e6e616d652929292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-transitive-source-frames",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e69642b2853454c454354206f2e69642b692e6964292046524f4d206974656d73206920574845524520692e69643d6f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-nearest-owner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e69642b2853454c454354206964292046524f4d206974656d73206920574845524520692e69643d6f2e69642b31292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-column-before-outer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542069642046524f4d206974656d73206920574845524520692e69643d6f2e69642b31292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-alias-before-outer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542039204153207175616e746974792046524f4d2073746f726167655f76616c7565732069205748455245207175616e746974793d6f2e69642b38204c494d49542031292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-qualified-outer-fallback",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e6e616d652046524f4d2073746f726167655f76616c756573206f205748455245206f2e69643d31292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-qualified-parent-after-empty-values",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2856414c554553286f2e6e616d6529292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-values-first-row",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2856414c554553286f2e6e616d65292c286f2e63617465676f727929292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-quoted-identifier-before-string",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420226e616d6522292c2853454c45435420226d697373696e6722292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-boolean-fallback",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542074727565292c2853454c4543542066616c7365292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-child-guard",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e6e616d652046524f4d206974656d732069205748455245206f2e69643e3220414e4420692e69643d6f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-own-row-not-invariant-key",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642046524f4d206974656d73206f205748455245206f2e69643d2853454c454354206f2e696429204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-ancestor-rowid-key",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e6e616d652046524f4d206974656d73206920574845524520692e69643d6f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-ancestor-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e6e616d652046524f4d206974656d73206920574845524520692e69643e3d6f2e6964204f5244455220425920692e69642044455343204c494d49542031204f46465345542031292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-empty-child",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e6e616d652046524f4d206974656d73206920574845524520692e69643d3939292c4558495354532853454c454354206f2e7061796c6f61642046524f4d206974656d73206920574845524520692e69643d3939292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-zero-limit",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e6e616d65204c494d49542030292c4558495354532853454c454354206f2e7061796c6f6164204c494d49542030292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-lazy-coalesce",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f616c65736365286f2e63617465676f72792c6f2e6e616d6529292c2853454c45435420636f616c6573636528312c616273282d39323233333732303336383534373735383038292b6f2e696429292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-lazy-conditional",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420696966286f2e69643d312c6f2e6e616d652c6f2e63617465676f727929292c2853454c45435420696966286f2e69643d302c616273282d39323233333732303336383534373735383038292c6f2e696429292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-ignored-projection",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c45435420616273282d39323233333732303336383534373735383038292b6f2e6964292c4558495354532853454c454354206f2e7061796c6f61642046524f4d206974656d73206920574845524520692e69643d6f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-discarded-order",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c4543542031204f52444552204259202853454c454354206f2e6e616d6529292c4558495354532853454c45435420312046524f4d206974656d732069204f524445522042592073756d28692e7175616e74697479292b6f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-discarded-parameters",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354203f372b6f2e6964204f52444552204259202853454c454354203f332b6f2e73636f726529292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-transitive-binding-predicate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d7320612043524f5353204a4f494e206974656d732062205748455245202853454c454354202853454c45435420622e696429293d612e696420414e44204558495354532853454c45435420622e6e616d6529204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-bound-join-predicate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e202853454c45435420622e6964293d612e6964204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-source-free-child-cache",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e69642b2853454c454354206d617828692e6964292046524f4d206974656d73206929292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-private-ancestor-local-capture",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354202853454c45435420692e6e616d65292046524f4d206974656d73206920574845524520692e69643d32292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-aggregate-with-outer-argument",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-aggregate-with-outer-filter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542073756d28692e6964292046494c54455220285748455245206f2e69643c692e6964292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-aggregate-with-local-filter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542073756d286f2e6964292046494c5445522028574845524520692e69643c6f2e6964292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-local-aggregate-order",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542067726f75705f636f6e63617428692e6e616d65204f52444552204259206f2e69642c692e69642044455343292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-child-grouping",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d7320692047524f555020425920692e63617465676f727920484156494e472073756d28692e6964293e6f2e6964204f5244455220425920312044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-grouping-key",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e74282a292046524f4d206974656d7320692047524f5550204259206f2e6964292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-group-argument",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e696425322c73756d282853454c454354206f2e696429292c67726f75705f636f6e636174282853454c454354206f2e6e616d6529204f52444552204259206f2e69642044455343292046524f4d206974656d73206f2047524f5550204259206f2e69642532204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-group-representative",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e696425322c2853454c454354206f2e6964292c2853454c454354202853454c454354206f2e6e616d6529292c636f756e74282a292046524f4d206974656d73206f2047524f5550204259206f2e69642532204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-global-representative",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d286f2e6964292c2853454c454354206f2e6e616d65292c2853454c454354206f2e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-min-representative",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d696e286f2e6e616d65292c2853454c454354206f2e6964292c2853454c454354206f2e6e616d65292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-outer-max-representative",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d6178286f2e6964292c2853454c454354206f2e6964292c2853454c454354206f2e6e616d65292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-binding-only-aggregate-retention",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e696425322c636f756e74282a292c4558495354532853454c454354206f2e6e616d65204f52444552204259202853454c454354206f2e7061796c6f616429292c2853454c454354206f2e6964204c494d49542030292046524f4d206974656d73206f2047524f5550204259206f2e69642532204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-global-aggregate-argument-laziness",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c45435420636f616c65736365286f2e69642c616273282d39323233333732303336383534373735383038292929292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-left-null-extension",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c2853454c45435420622e6e616d65292c2853454c45435420612e6e616d65292046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e69642b31204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-right-null-extension",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c2853454c45435420612e6e616d65292c2853454c45435420622e6e616d65292046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20622e69643d612e69642b31204f5244455220425920622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-full-null-extension",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c2853454c45435420636f616c6573636528612e6e616d652c622e6e616d6529292c2853454c45435420612e6e616d65292c2853454c45435420622e6e616d65292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e69643d612e69642b31204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-full-using-merged",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642c612e69642c622e69642c2853454c454354206964292c2853454c45435420612e6e616d65292c2853454c45435420622e76616c7565292046524f4d206974656d7320612046554c4c204a4f494e2073746f726167655f76616c7565732062205553494e47286964292057484552452069643c3d36204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-natural-merged",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642c2853454c454354206964292c2853454c45435420612e6c6162656c292c2853454c45435420622e6c6162656c292046524f4d206d6f64656c5f726f77732061204e41545552414c204c454654204a4f494e206d6f64656c5f726f777320622057484552452069643c3d34204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-joined-child",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420622e6e616d652046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e696420414e4420622e69643c6f2e696420574845524520612e69643c3d32204f5244455220425920612e69642044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-set-union-all",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e696420554e494f4e20414c4c2053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643c3d32204f5244455220425920312044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-set-union-all",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354206f2e696420554e494f4e20414c4c2053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d32292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-set-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e696420554e494f4e2053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643c3d32204f5244455220425920312044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-set-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354206f2e696420554e494f4e2053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d32292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-set-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e6964204558434550542053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643c3d32204f5244455220425920312044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-set-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354206f2e6964204558434550542053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d32292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-set-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e696420494e544552534543542053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643c3d32204f5244455220425920312044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-set-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354206f2e696420494e544552534543542053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d32292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-direct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e69642920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-values",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202856414c554553286f2e6964292c286f2e69642b31292920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-point",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d6f2e69642920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-ordered",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420692e69642046524f4d206974656d73206920574845524520692e69643c3d6f2e6964204f5244455220425920692e6e616d652920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542044495354494e435420692e7175616e746974792b6f2e69642046524f4d206974656d732069204f5244455220425920312920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-global",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d7320692920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-ordered-group",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d7320692047524f555020425920692e6964204f5244455220425920312920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-sorted-group",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d7320692047524f555020425920692e63617465676f7279204f5244455220425920312920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-union-all",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e696420554e494f4e20414c4c2053454c454354206f2e69642b312920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e696420554e494f4e2053454c454354206f2e69642b31204f52444552204259203120444553432920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e696420554e494f4e2053454c4543542031204558434550542053454c45435420322920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e696420494e544552534543542053454c45435420692e69642046524f4d206974656d73206920574845524520692e69643e312920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-repeated-alias-joined",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420622e69642b6f2e69642046524f4d206974656d732061204a4f494e206974656d732062204f4e20622e69643d612e6964204f5244455220425920612e69642920415320782046524f4d206974656d73206f2057484552452078204953204e4f54204e554c4c204f5244455220425920782c6f2e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-stored-covering-key",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e746578745f6b65792046524f4d206b65795f726f7773206b205748455245206b2e746578745f6b65793d702e746578745f6b6579204f52444552204259206b2e6e756d657269635f6b657920444553432c6b2e6964204c494d49542031292046524f4d2070726f62655f726f77732070204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-stored-noncovering-value",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e7061796c6f61642046524f4d206b65795f726f7773206b205748455245206b2e746578745f6b65793d702e746578745f6b6579204f52444552204259206b2e6e756d657269635f6b657920444553432c6b2e6964204c494d49542031292046524f4d2070726f62655f726f77732070204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-stored-default-value",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e64656661756c745f746578742046524f4d206b65795f726f7773206b205748455245206b2e746578745f6b65793d702e746578745f6b6579204f52444552204259206b2e6e756d657269635f6b657920444553432c6b2e6964204c494d49542031292046524f4d2070726f62655f726f77732070204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-ancestor-stored-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e7061796c6f61642046524f4d206b65795f726f7773206b205748455245206b2e6e756d657269635f6b65793e3d702e6e756d657269635f6b657920414e44206b2e7265616c5f6b65793c702e6964204f52444552204259206b2e6e756d657269635f6b657920444553432c6b2e6964292046524f4d2070726f62655f726f77732070204f5244455220425920702e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-parent-covering-child-field",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e746578745f6b6579292c2853454c454354206b2e6e756d657269635f6b6579292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f7773206b204f4e206b2e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c6b2e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-parent-noncovering-child-field",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420702e69642c2853454c454354206b2e7061796c6f6164292c2853454c454354206b2e64656661756c745f74657874292046524f4d2070726f62655f726f77732070204a4f494e206b65795f726f7773206b204f4e206b2e746578745f6b65793d702e746578745f6b6579204f5244455220425920702e69642c6b2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-parent-automatic-covering-field",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c622e69642c2853454c45435420622e6c6162656c292c2853454c454354202853454c45435420622e76616c756529292c4558495354532853454c45435420622e6e756c6c61626c65292046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643c3d34204f5244455220425920612e69642c622e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-child-automatic-covering-field",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420622e6c6162656c7c7c6f2e6e616d652046524f4d206d6f64656c5f726f77732061204a4f494e206d6f64656c5f726f77732062204f4e20622e76616c75653d612e76616c756520574845524520612e69643c3d6f2e6964204f5244455220425920612e69642044455343292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-without-rowid",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e612c2853454c454354206f2e61292c2853454c45435420692e632046524f4d207772206920574845524520692e613d6f2e61292046524f4d207772206f204f52444552204259206f2e61"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-added-column-defaults",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c454354206f2e746578745f64656661756c74292c2853454c454354206f2e7265616c5f64656661756c74292c2853454c454354206f2e6e756c6c5f64656661756c74292c2853454c454354206f2e696e74656765725f64656661756c74292046524f4d20616c7465726564206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-captured-storage-classes",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c747970656f66282853454c454354206f2e76616c756529292c2853454c454354206f2e76616c7565292046524f4d2073746f726167655f76616c756573206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-captured-overflow-lazy",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f616c6573636528312c6f2e76616c756529292c2853454c45435420696966286f2e69643c31302c6f2e76616c75652c4e554c4c29292046524f4d2073746f726167655f76616c756573206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-private-inline-grandchild",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206d6178282853454c45435420692e696429292046524f4d206974656d732069292c2853454c454354202853454c45435420692e6e616d65292046524f4d206974656d73206920574845524520692e69643d3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-exists-local-aggregate-work",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c4558495354532853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d732069292c4558495354532853454c45435420636f756e74286f2e6964292046494c54455228574845524520692e69643e6f2e6964292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-range-demand-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "index": 3,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 3,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-1"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "2"
+          }
+        },
+        {
+          "index": 3,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "index": 3,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "2"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e6e616d652046524f4d206974656d73206920574845524520692e69643e3d6f2e69642b3f31204f5244455220425920692e6964204c494d4954203f32204f4646534554203f33292c4558495354532853454c45435420692e69642046524f4d206974656d73206920574845524520692e69643d6f2e69642b3f31292046524f4d206974656d73206f204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-suspend-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420692e6e616d652046524f4d206974656d73206920574845524520692e69643d6f2e69642b3f31292c2853454c454354202853454c454354206f2e6e616d6529292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-typed-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "9"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "610062",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e69642c2853454c45435420636f616c65736365283f312c6f2e76616c756529292046524f4d2073746f726167655f76616c756573206f205748455245206f2e69643e3d3130204f52444552204259206f2e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "execution-errors",
+      "id": "correlated-taken-expression-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420696966286f2e69643d312c616273282d39323233333732303336383534373735383038292c6f2e696429292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "execution-errors",
+      "id": "correlated-runtime-limit-type-error",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "626164",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6964204c494d4954203f31292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-prepare-error-control",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206d697373696e675f636f6c756d6e292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-ambiguous-nearest-frame",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206964292046524f4d206974656d7320612043524f5353204a4f494e206974656d732062"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-hidden-base-qualifier",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206974656d732e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-unrelated-qualifier",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206d697373696e672e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-invisible-select-alias",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e6964204153206f757465725f616c6961732c2853454c454354206f757465725f616c696173292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-limit-source-barrier",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6964204c494d4954206f2e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-nested-limit-source-barrier",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6964204c494d4954202853454c454354206f2e696429292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-offset-source-barrier",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6964204c494d49542031204f4646534554206f2e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-scalar-width",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e69642c6f2e6e616d65292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-discarded-order-name-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354206f2e6964204f52444552204259206d697373696e675f636f6c756d6e292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-aggregate-clause-misuse",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d286f2e6964292057484552452073756d286f2e6964293e30292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-source-depth-1",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6964292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-source-depth-8",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354206f2e696429292929292929292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "correlated-subquery",
+      "id": "correlated-source-depth-42",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354206f2e69642929292929292929292929292929292929292929292929292929292929292929292929292929292929292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "correlated-source-depth-43",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354202853454c454354206f2e6964292929292929292929292929292929292929292929292929292929292929292929292929292929292929292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "correlated-subquery",
+      "id": "correlated-unsupported-outer-alias",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206f2e6964204153206f757465725f616c6961732046524f4d206974656d73206f205748455245202853454c454354206f757465725f616c696173293e30"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "correlated-subquery",
+      "id": "correlated-unsupported-outer-aggregate",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d286f2e7175616e7469747929292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "correlated-subquery",
+      "id": "correlated-unsupported-outer-filter-owner",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d2831292046494c544552285748455245206f2e69643e3029292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "correlated-subquery",
+      "id": "correlated-unsupported-discarded-outer-aggregate",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542031204f524445522042592073756d286f2e7175616e7469747929292046524f4d206974656d73206f"
+    }
+  ],
+  "databases": [
+    {
+      "id": "core",
+      "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
+      "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    },
+    {
+      "id": "joined-index",
+      "path": "tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db",
+      "sha256": "ff55a8f7ba44f729060fa1e65256d99d2d00c1ca08a93d4d48bd2cd5def7501d"
+    }
+  ],
+  "limits": {
+    "binding_operations": 256,
+    "cases": 512,
+    "child_seconds": 10,
+    "corpus_bytes": 4194304,
+    "operations": 1024,
+    "oracle_bytes": 67108864,
+    "output_bytes": 16777216,
+    "result_columns": 256,
+    "result_rows": 4096,
+    "sql_bytes": 65536,
+    "stderr_bytes": 1048576,
+    "value_bytes": 1048576
+  },
+  "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "schema_version": 1,
+  "supported_matrix": [
+    "correlated-subquery",
+    "execution-errors",
+    "prepare-errors"
+  ]
+}

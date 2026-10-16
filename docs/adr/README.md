@@ -93,3 +93,4 @@ their corresponding implementation begins.
 87. [ADR-0087: Parameterized Joined Index Range Access](0087-parameterized-joined-index-range-access.md)
 88. [ADR-0088: Bounded Index Record-Prefix Comparison](0088-bounded-index-record-prefix-comparison.md)
 89. [ADR-0089: Automatic Covering Join Indexes](0089-automatic-covering-join-indexes.md)
+90. [ADR-0090: Source-Correlated Scalar and EXISTS Queries](0090-source-correlated-scalar-and-exists-queries.md)

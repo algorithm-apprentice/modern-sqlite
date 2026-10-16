@@ -260,6 +260,16 @@ struct BoundSourceLeafIdentity {
   constexpr auto operator<=>(const BoundSourceLeafIdentity&) const noexcept = default;
 };
 
+struct BoundSourceCapture {
+  BoundSourceLeafIdentity identity{};
+  std::optional<BoundExpressionId> value{};
+};
+
+enum class BoundSourceDependency : std::uint8_t {
+  kBinding,
+  kValue,
+};
+
 [[nodiscard]] std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
     const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept;
 
@@ -267,46 +277,75 @@ struct BoundSourceLeafIdentity {
                                                BoundExpressionId id) noexcept;
 
 namespace binder_detail {
-template <typename Visitor>
-[[nodiscard]] bool VisitSourceOwners(std::span<const BoundExpression> expressions,
+template <typename CaptureLookup, typename Visitor>
+[[nodiscard]] bool VisitSourceLeaves(std::span<const BoundExpression> expressions,
                                      std::span<const BoundSourceColumn> columns,
-                                     BoundExpressionId id, Visitor& visitor) {
+                                     BoundExpressionId id, const CaptureLookup& captures,
+                                     BoundSourceDependency dependency, Visitor& visitor) {
   if (id.value() >= expressions.size()) {
     return false;
   }
   const BoundExpression& expression = expressions[id.value()];
   if (const auto identity = BoundSourceLeafIdentityOf(expression, columns); identity.has_value()) {
-    visitor(identity->source);
-    return true;
+    return visitor(*identity, std::optional{id});
   }
   return std::visit(
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
                       std::is_same_v<Payload, BoundParameterExpression> ||
-                      std::is_same_v<Payload, BoundSubqueryExpression>) {
+                      std::is_same_v<Payload, BoundAggregateCallExpression>) {
+          return true;
+        } else if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
+          const auto inputs = captures(payload.query);
+          if (!inputs.has_value()) {
+            return false;
+          }
+          for (const BoundSourceCapture& capture : *inputs) {
+            if ((dependency == BoundSourceDependency::kBinding || capture.value.has_value()) &&
+                !visitor(capture.identity, capture.value)) {
+              return false;
+            }
+          }
           return true;
         } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                              std::is_same_v<Payload, BoundTruthTestExpression> ||
                              std::is_same_v<Payload, BoundLikelihoodExpression> ||
                              std::is_same_v<Payload, BoundCollateExpression>) {
-          return VisitSourceOwners(expressions, columns, payload.operand, visitor);
+          return VisitSourceLeaves(expressions, columns, payload.operand, captures, dependency,
+                                   visitor);
         } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
                              std::is_same_v<Payload, BoundComparisonExpression>) {
-          return VisitSourceOwners(expressions, columns, payload.left, visitor) &&
-                 VisitSourceOwners(expressions, columns, payload.right, visitor);
+          return VisitSourceLeaves(expressions, columns, payload.left, captures, dependency,
+                                   visitor) &&
+                 VisitSourceLeaves(expressions, columns, payload.right, captures, dependency,
+                                   visitor);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return VisitSourceOwners(expressions, columns, payload.target, visitor);
+          return VisitSourceLeaves(expressions, columns, payload.target, captures, dependency,
+                                   visitor);
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
           return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
-            return VisitSourceOwners(expressions, columns, argument, visitor);
+            return VisitSourceLeaves(expressions, columns, argument, captures, dependency, visitor);
           });
         }
         return false;
       },
       expression.payload);
+}
+
+template <typename CaptureLookup, typename Visitor>
+[[nodiscard]] bool VisitSourceOwners(std::span<const BoundExpression> expressions,
+                                     std::span<const BoundSourceColumn> columns,
+                                     BoundExpressionId id, const CaptureLookup& captures,
+                                     Visitor& visitor) {
+  auto owner = [&](const BoundSourceLeafIdentity& identity, std::optional<BoundExpressionId>) {
+    visitor(identity.source);
+    return true;
+  };
+  return VisitSourceLeaves(expressions, columns, id, captures, BoundSourceDependency::kBinding,
+                           owner);
 }
 }  // namespace binder_detail
 
@@ -414,7 +453,9 @@ enum class BoundQueryDestination : std::uint8_t {
 
 struct BoundQuery {
   BoundQueryId id{0};
+  std::optional<BoundQueryId> parent{};
   BoundQueryDestination destination = BoundQueryDestination::kClient;
+  std::vector<BoundSourceCapture> captures{};
   std::size_t core_begin = 0;
   std::size_t core_count = 0;
   std::vector<CompoundOperator> compound_operators{};
@@ -423,6 +464,12 @@ struct BoundQuery {
   std::vector<BoundOrderingTerm> order_by{};
   std::optional<BoundLimit> limit{};
 };
+
+[[nodiscard]] bool BoundQueryHasSingleRowDemand(
+    const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
+
+[[nodiscard]] bool BoundQueryCanOmitSetComparisons(
+    const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
 
 enum class BindErrorCode : std::uint8_t {
   kInvalidInput,

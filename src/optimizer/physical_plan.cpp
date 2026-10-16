@@ -278,17 +278,46 @@ template <typename Bound>
   return std::nullopt;
 }
 
+template <typename Bound>
+[[nodiscard]] auto CaptureLookup(const Bound& bound_select) noexcept {
+  if constexpr (requires { bound_select.owner().query_count(); }) {
+    return
+        [&bound_select](BoundQueryId query) -> std::optional<std::span<const BoundSourceCapture>> {
+          if (query.value() < bound_select.owner().query_count()) {
+            return std::span<const BoundSourceCapture>{bound_select.owner().query(query).captures};
+          }
+          return std::nullopt;
+        };
+  } else {
+    return [](BoundQueryId) -> std::optional<std::span<const BoundSourceCapture>> {
+      return std::nullopt;
+    };
+  }
+}
+
+template <typename Bound>
+[[nodiscard]] bool IsCapturedSource(const Bound& bound_select, BoundSourceId source) noexcept {
+  if constexpr (requires { bound_select.query().captures; }) {
+    return std::ranges::any_of(
+        bound_select.query().captures,
+        [source](const BoundSourceCapture& capture) { return capture.identity.source == source; });
+  }
+  return false;
+}
+
 template <typename Bound, typename Visitor>
 [[nodiscard]] bool VisitExpressionSources(const Bound& bound_select, BoundExpressionId id,
                                           Visitor& visitor) {
   return binder_detail::VisitSourceOwners(bound_select.expressions(), bound_select.source_columns(),
-                                          id, visitor);
+                                          id, CaptureLookup(bound_select), visitor);
 }
 
 template <typename Bound>
 [[nodiscard]] bool ExpressionDependsOnSource(const Bound& bound_select, BoundExpressionId id) {
   bool depends = false;
-  auto visitor = [&](BoundSourceId) { depends = true; };
+  auto visitor = [&](BoundSourceId source) {
+    depends = depends || !IsCapturedSource(bound_select, source);
+  };
   return !VisitExpressionSources(bound_select, id, visitor) || depends;
 }
 
@@ -312,6 +341,9 @@ template <typename Bound>
     BoundSourceId ready = floor;
     bool valid = true;
     auto visitor = [&](BoundSourceId source) {
+      if (IsCapturedSource(bound_select, source)) {
+        return;
+      }
       if (std::ranges::find(core.table_sources, source, &BoundTableSource::id) ==
           core.table_sources.end()) {
         valid = false;
@@ -438,7 +470,9 @@ template <typename Bound>
                                                    BoundExpressionId expression,
                                                    BoundSourceId source) {
   bool available = ExpressionIsDeterministic(bound_select, expression);
-  auto visitor = [&](BoundSourceId owner) { available = available && owner < source; };
+  auto visitor = [&](BoundSourceId owner) {
+    available = available && (IsCapturedSource(bound_select, owner) || owner < source);
+  };
   return VisitExpressionSources(bound_select, expression, visitor) && available;
 }
 
@@ -562,9 +596,7 @@ template <typename Bound>
 }
 
 [[nodiscard]] bool IsUnionLimitOne(const BoundQueryView& bound_select) {
-  const BoundLimit* limit = bound_select.limit();
-  return limit != nullptr && !limit->offset.has_value() &&
-         BoundExpressionIsIntegerOne(bound_select.expressions(), limit->limit);
+  return BoundQueryHasSingleRowDemand(bound_select.query(), bound_select.expressions());
 }
 
 [[nodiscard]] bool IsSetBarrier(CompoundOperator operation) noexcept {
@@ -1033,48 +1065,25 @@ struct IndexConstraintMatch {
 
 void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId source_id,
                               BoundExpressionId id, std::vector<bool>* columns, bool* rowid) {
-  if (!IsValidExpressionId(bound_select, id)) {
-    return;
-  }
-  const BoundExpression& expression = bound_select.expression(id);
-  if (const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
-      identity.has_value()) {
-    if (identity->source != source_id) {
-      return;
+  auto visitor = [&](const BoundSourceLeafIdentity& identity, std::optional<BoundExpressionId>) {
+    if (identity.source != source_id) {
+      return true;
     }
-    if (!identity->column.has_value()) {
+    if (!identity.column.has_value()) {
       *rowid = true;
     } else {
-      const auto column = bound_select.source_columns()[identity->column->value()].catalog_column;
+      const auto column = bound_select.source_columns()[identity.column->value()].catalog_column;
       if (column.has_value() && column->value < columns->size()) {
         (*columns)[column->value] = true;
       }
     }
-    return;
+    return true;
+  };
+  if (!binder_detail::VisitSourceLeaves(bound_select.expressions(), bound_select.source_columns(),
+                                        id, CaptureLookup(bound_select),
+                                        BoundSourceDependency::kValue, visitor)) {
+    std::terminate();
   }
-  std::visit(
-      [&](const auto& payload) {
-        using Payload = std::decay_t<decltype(payload)>;
-        if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                      std::is_same_v<Payload, BoundTruthTestExpression> ||
-                      std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                      std::is_same_v<Payload, BoundCollateExpression>) {
-          MarkRequiredSourceValues(bound_select, source_id, payload.operand, columns, rowid);
-        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
-                             std::is_same_v<Payload, BoundComparisonExpression>) {
-          MarkRequiredSourceValues(bound_select, source_id, payload.left, columns, rowid);
-          MarkRequiredSourceValues(bound_select, source_id, payload.right, columns, rowid);
-        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          MarkRequiredSourceValues(bound_select, source_id, payload.target, columns, rowid);
-        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
-                             std::is_same_v<Payload, BoundCoalesceExpression> ||
-                             std::is_same_v<Payload, BoundConditionalExpression>) {
-          for (const BoundExpressionId argument : payload.arguments) {
-            MarkRequiredSourceValues(bound_select, source_id, argument, columns, rowid);
-          }
-        }
-      },
-      expression.payload);
 }
 
 struct RequiredSourceValues {
@@ -1110,24 +1119,35 @@ struct RequiredSourceValues {
   }
   if (select_core != nullptr && select_core->aggregate.has_value()) {
     const BoundAggregateProgram& aggregate = *select_core->aggregate;
-    for (const BoundExpressionId expression : aggregate.source_leaves) {
-      MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
-                               &required_rowid);
-    }
     if (aggregate.group_by.empty()) {
-      for (const BoundResultColumn& result : select_core->result_columns) {
-        MarkRequiredSourceValues(bound_select, source_id, result.expression, &required_columns,
-                                 &required_rowid);
-      }
-      if (aggregate.having.has_value()) {
-        MarkRequiredSourceValues(bound_select, source_id, *aggregate.having, &required_columns,
-                                 &required_rowid);
+      for (const BoundAggregateInvocationId id : aggregate.invocations) {
+        const BoundAggregateInvocation& invocation =
+            bound_select.aggregate_invocations()[id.value()];
+        for (const BoundExpressionId argument : invocation.arguments) {
+          MarkRequiredSourceValues(bound_select, source_id, argument, &required_columns,
+                                   &required_rowid);
+        }
+        if (invocation.filter.has_value()) {
+          MarkRequiredSourceValues(bound_select, source_id, *invocation.filter, &required_columns,
+                                   &required_rowid);
+        }
+        if (bound_select.aggregate_functions()[invocation.function.value()].extremum ==
+            BoundAggregateExtremumKind::kNone) {
+          for (const BoundOrderingTerm& term : invocation.order_by) {
+            MarkRequiredSourceValues(bound_select, source_id, term.expression, &required_columns,
+                                     &required_rowid);
+          }
+        }
       }
     } else {
-      for (const BoundExpressionId expression : aggregate.representative_leaves) {
+      for (const BoundExpressionId expression : aggregate.source_leaves) {
         MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
                                  &required_rowid);
       }
+    }
+    for (const BoundExpressionId expression : aggregate.representative_leaves) {
+      MarkRequiredSourceValues(bound_select, source_id, expression, &required_columns,
+                               &required_rowid);
     }
   } else {
     const std::span<const BoundResultColumn> results =

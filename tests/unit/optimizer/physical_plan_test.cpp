@@ -668,6 +668,154 @@ TEST(PhysicalPlan, PlansAndExplainsLexicallyOwnedScalarAndExistsQueries) {
   EXPECT_NE(std::string::npos, explanation.find("USING INTEGER PRIMARY KEY"));
 }
 
+TEST(PhysicalPlan, AdmitsAncestorProbeKeysAndGuardsButNotTheProducersOwnRow) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT (SELECT i.Name FROM Items i WHERE o.Value>0 AND i.id=o.id) FROM Items o",
+      TestCatalog());
+  const PhysicalQueryView child{plan, BoundQueryId{1}};
+  EXPECT_TRUE(std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalRowIdLookupNode>(node.payload);
+  }));
+  const auto guard = std::ranges::find_if(child.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalGuardNode>(node.payload);
+  });
+  ASSERT_NE(child.nodes().end(), guard);
+  EXPECT_EQ(1U, std::get<PhysicalGuardNode>(guard->payload).predicates.size());
+
+  for (const std::string_view sql :
+       {"SELECT o.id FROM Items o WHERE o.id=(SELECT o.id)",
+        "SELECT o.id FROM Items o WHERE o.id=(SELECT i.id FROM Items i WHERE i.id=o.id)"}) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan self = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_NE(nullptr, self.selected_candidate());
+    EXPECT_EQ(PhysicalAccessKind::kTableScan, self.selected_candidate()->kind);
+  }
+}
+
+TEST(PhysicalPlan, PlacesTransitiveAndInactiveCapturePredicatesAfterTheirSources) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+      "WHERE (SELECT (SELECT b.Value))>a.Value AND EXISTS(SELECT b.Name)",
+      TestCatalog());
+  const auto filter = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalFilterNode>(node.payload);
+  });
+  ASSERT_NE(plan.nodes().end(), filter);
+  const auto& predicates = std::get<PhysicalFilterNode>(filter->payload);
+  EXPECT_TRUE(predicates.guards.empty());
+  EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{1}}), predicates.predicate_sources);
+}
+
+TEST(PhysicalPlan, RetainsOnlyExecutableCapturedFieldsInStoredIndexCoverage) {
+  struct Case {
+    std::string_view sql;
+    bool parent_covering;
+    bool indexed_child = false;
+  };
+  for (const Case& test_case :
+       {Case{.sql = "SELECT (SELECT o.Payload) FROM Items o WHERE o.Code=?1",
+             .parent_covering = false},
+        Case{.sql = "SELECT EXISTS(SELECT o.Payload) FROM Items o WHERE o.Code=?1",
+             .parent_covering = true},
+        Case{.sql = "SELECT (SELECT i.Payload FROM Items i WHERE i.Code=o.Code) "
+                    "FROM Items o WHERE o.Code=?1",
+             .parent_covering = true,
+             .indexed_child = true}}) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test_case.sql, IndexedCatalog());
+    const auto index = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), index);
+    EXPECT_EQ(test_case.parent_covering, std::get<PhysicalIndexScanNode>(index->payload).covering);
+    if (test_case.indexed_child) {
+      const PhysicalQueryView child{plan, BoundQueryId{1}};
+      const auto child_index = std::ranges::find_if(child.nodes(), [](const PhysicalNode& node) {
+        return std::holds_alternative<PhysicalIndexScanNode>(node.payload);
+      });
+      ASSERT_NE(child.nodes().end(), child_index);
+      const auto& access = std::get<PhysicalIndexScanNode>(child_index->payload);
+      EXPECT_FALSE(access.covering);
+      ASSERT_EQ(1U, access.equalities.size());
+      EXPECT_EQ(ColumnId{4}, access.equalities.front().column);
+    }
+  }
+}
+
+TEST(PhysicalPlan, IncludesExecutableCapturesInAutomaticCoveringPayloads) {
+  for (const bool inactive : {false, true}) {
+    SCOPED_TRACE(inactive);
+    const std::string sql =
+        std::string{inactive ? "SELECT EXISTS(SELECT b.Value)" : "SELECT (SELECT b.Value)"} +
+        " FROM Items a JOIN Items b ON b.Name=a.Name";
+    const PhysicalPlan plan =
+        OptimizeOrThrow(sql, TestCatalog(), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    const auto automatic = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), automatic);
+    EXPECT_EQ(inactive ? std::vector<ColumnId>{} : std::vector{ColumnId{2}},
+              std::get<PhysicalAutomaticIndexNode>(automatic->payload).covering_columns);
+  }
+}
+
+TEST(PhysicalPlan, RetainsAggregateSnapshotsButSkipsInactiveGlobalInputsInIndexCoverage) {
+  struct Case {
+    std::string_view sql;
+    bool covering;
+  };
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  for (const Case& test_case :
+       {Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 ORDER BY o.Payload",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 "
+                    "ORDER BY (SELECT o.Payload)",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 "
+                    "ORDER BY EXISTS(SELECT o.Payload)",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o CROSS JOIN Items i "
+                    "WHERE o.Code=?1 AND i.Code=?1 ORDER BY (SELECT o.Payload)",
+             .covering = false},
+        Case{.sql = "SELECT sum(EXISTS(SELECT o.Payload)) FROM Items o WHERE o.Code=?1",
+             .covering = true},
+        Case{.sql = "SELECT count(*) FILTER(WHERE EXISTS(SELECT o.Payload)) "
+                    "FROM Items o WHERE o.Code=?1",
+             .covering = true},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 "
+                    "ORDER BY sum(EXISTS(SELECT o.Payload))",
+             .covering = true},
+        Case{.sql = "SELECT (SELECT count(*) FROM Items i WHERE i.Code=?1 "
+                    "ORDER BY o.Payload) FROM Items o WHERE o.Code=?1",
+             .covering = true},
+        Case{.sql = "SELECT count(*),EXISTS(SELECT o.Payload) FROM Items o WHERE o.Code=?1",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 "
+                    "HAVING EXISTS(SELECT o.Payload)",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 ORDER BY sum(o.Payload)",
+             .covering = false},
+        Case{.sql = "SELECT sum(EXISTS(SELECT o.Payload)) FROM Items o WHERE o.Code=?1 "
+                    "GROUP BY o.Code",
+             .covering = false},
+        Case{.sql = "SELECT (SELECT count(*) FROM Items i WHERE i.Code=?1 "
+                    "GROUP BY i.Code ORDER BY o.Payload) FROM Items o WHERE o.Code=?1",
+             .covering = false},
+        Case{.sql = "SELECT count(*) FROM Items o WHERE o.Code=?1 "
+                    "GROUP BY o.Code ORDER BY (SELECT o.Payload)",
+             .covering = false}}) {
+    SCOPED_TRACE(test_case.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test_case.sql, catalog);
+    const auto index = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      const auto* access = std::get_if<PhysicalIndexScanNode>(&node.payload);
+      return access != nullptr && access->source == BoundSourceId{0};
+    });
+    ASSERT_NE(plan.nodes().end(), index);
+    EXPECT_EQ(test_case.covering, std::get<PhysicalIndexScanNode>(index->payload).covering);
+  }
+}
+
 TEST(PhysicalPlan, PlansGlobalAggregate) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   BuildLogicalPlanResult logical =

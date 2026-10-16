@@ -82,9 +82,33 @@ class ReadCompatibilityTest(unittest.TestCase):
                 )
 
             oracle = json.loads(self.arguments.oracle.read_text())
+            oracle_cases = {case["id"]: case for case in oracle["cases"]}
+            unsupported_controls = [
+                case["id"]
+                for case in corpus["cases"]
+                if case["expectation"] == "unsupported"
+                and case["modern_rejection"]["phase"] == "prepare"
+                and oracle_cases[case["id"]]["boundary"]["prepare"]
+                == "statement"
+            ]
+            prepare_error_controls = [
+                case["id"]
+                for case in corpus["cases"]
+                if case["expectation"] == "compare"
+                and oracle_cases[case["id"]]["outcome"]["kind"]
+                == "prepare_error"
+            ]
+            self.assertTrue(
+                unsupported_controls,
+                "each corpus requires a native-valid unsupported prepare control",
+            )
+            self.assertTrue(
+                prepare_error_controls,
+                "each corpus requires an ordinary prepare-error control",
+            )
             scenarios = [
-                ("unsupported-join", "unsupported boundary regression"),
-                ("syntax-error", "compatibility mismatch"),
+                (unsupported_controls[0], "unsupported boundary regression"),
+                (prepare_error_controls[0], "compatibility mismatch"),
             ]
             for case_id, classification in scenarios:
                 with self.subTest(case_id=case_id):
@@ -97,8 +121,10 @@ class ReadCompatibilityTest(unittest.TestCase):
                         {"op": "finalize"}
                     ]
 
-                    corpus_path = (
-                        root / "tests/compatibility/read-corpus-v1.json"
+                    corpus_path = root / (
+                        self.arguments.corpus.resolve().relative_to(
+                            self.arguments.repository_root.resolve()
+                        )
                     )
                     corpus_path.parent.mkdir(parents=True, exist_ok=True)
                     corpus_path.write_text(
@@ -114,9 +140,12 @@ class ReadCompatibilityTest(unittest.TestCase):
                     modified_oracle["corpus_sha256"] = hashlib.sha256(
                         corpus_path.read_bytes()
                     ).hexdigest()
-                    oracle_path = (
-                        root / "tests/compatibility/read-oracle-v1.json"
+                    oracle_path = root / (
+                        self.arguments.oracle.resolve().relative_to(
+                            self.arguments.repository_root.resolve()
+                        )
                     )
+                    oracle_path.parent.mkdir(parents=True, exist_ok=True)
                     oracle_path.write_text(
                         json.dumps(
                             modified_oracle,

@@ -56,8 +56,11 @@ it only when a read subroutine is present; the ordinary and value-only
 preparation paths retain their previous allocation behavior.
 
 Caller-owned cursors cannot be borrowed, repositioned, or closed by a body.
-Correlation passes SQL values through the existing register interface.
-Capability borrowing or sharing requires a later explicit contract.
+Cross-region correlation would pass SQL values through the existing register
+interface. ADR-0090 instead defines on-demand correlated producer emission
+inside one lexical region; it does not share capabilities across a private
+call boundary. Capability borrowing or sharing across regions requires a
+later explicit contract.
 
 ### 3. Require closed private resources on every normal return
 
