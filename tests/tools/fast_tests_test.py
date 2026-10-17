@@ -95,7 +95,7 @@ def cmake_quote(value: str) -> str:
     return "[=[" + value + "]=]"
 
 
-class FastLocalTest(unittest.TestCase):
+class FastLocalTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -173,6 +173,8 @@ class FastLocalTest(unittest.TestCase):
         }
         self.assertEqual({}, live)
 
+
+class FastLocalExecutionTest(FastLocalTestCase):
     def test_accounts_complete_unit_union_and_preserves_standalone_exit_policy(self) -> None:
         result = self.run_tool()
         self.assertEqual(0, result.returncode, result.stderr)
@@ -197,6 +199,8 @@ class FastLocalTest(unittest.TestCase):
         self.assert_owned_group_has_no_live_members()
         self.assertFalse((self.root / "timeout-escaped").exists())
 
+
+class FastLocalProtocolTest(FastLocalTestCase):
     def test_rejects_duplicate_start(self) -> None:
         self.set_mode("duplicate-event")
         result = self.run_tool()
@@ -264,6 +268,8 @@ class FastLocalTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("capture limit", result.stderr.lower())
 
+
+class FastLocalProcessTest(FastLocalTestCase):
     def test_cleans_descendants_after_successful_leader_exit(self) -> None:
         self.set_mode("descendant")
         self.configure_cases(standalone=False)
@@ -342,6 +348,8 @@ class FastLocalTest(unittest.TestCase):
         inspect.assert_called_once_with(12345)
         process.wait.assert_called_once_with()
 
+
+class FastLocalEvidenceTest(FastLocalTestCase):
     def test_binary_drift_invalidates_an_otherwise_successful_run(self) -> None:
         self.set_mode("binary-drift")
         result = self.run_tool()

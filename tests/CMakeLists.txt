@@ -1844,20 +1844,30 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-foreach(verification_tool IN ITEMS verification fast_local)
-  if(verification_tool STREQUAL "verification")
-    set(verification_test "verification_test.py")
-  else()
-    set(verification_test "fast_tests_test.py")
-  endif()
+add_test(
+  NAME tools.verification
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest
+    "tests/tools/verification_test.py"
+)
+set_tests_properties(
+  tools.verification
+  PROPERTIES
+    LABELS tools
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+foreach(fast_local_suite IN ITEMS Execution Protocol Process Evidence)
+  string(TOLOWER "${fast_local_suite}" fast_local_suffix)
   add_test(
-    NAME "tools.${verification_tool}"
+    NAME "tools.fast_local_${fast_local_suffix}"
     COMMAND
       "${Python3_EXECUTABLE}" -m unittest
-      "tests/tools/${verification_test}"
+      "tests.tools.fast_tests_test.FastLocal${fast_local_suite}Test"
   )
   set_tests_properties(
-    "tools.${verification_tool}"
+    "tools.fast_local_${fast_local_suffix}"
     PROPERTIES
       LABELS tools
       TIMEOUT 30
