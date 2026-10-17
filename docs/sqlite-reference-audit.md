@@ -7,10 +7,10 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5, D1, D3, D2, and A1 are corrected and verified by merged PRs
-  #205, #204, #206, #207, and #208. ADR-0099 corrects A2's bounded wildcard
-  publication; other findings remain open unless their own evidence states
-  otherwise.
+- Follow-up: A5, D1, D3, D2, A1, and A2 are corrected and verified by merged PRs
+  #205, #204, #206, #207, #208, and #209. ADR-0100 corrects R1's canonical
+  function numeric-type correction; other findings remain open unless their
+  own evidence states otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -299,6 +299,11 @@ including source-read and real spill-write recovery and the expanded
 exhaustive allocation sweeps under the unchanged 1,024-allocation ceiling.
 GPT-5.6 Sol accepted the design and bounded implementation without blockers;
 the integrated exact-tree and delivery gates remain mandatory.
+The accepted exact tree `439285f23cf7c8030726bf692e64717c0e94e678`
+passed every local gate and all nine first-head hosted checks, including the
+unchanged original model in 4.58 seconds under its ten-second deadline.
+PR #209 squash merged as `b692920e590e2f9eebd25dff7e775eb379fb84c4`;
+merged main and only the confirmed merged branch were verified before cleanup.
 
 ### A3. Predicate contexts use eager value-expression evaluation
 
@@ -389,6 +394,7 @@ not claimed resolved.
 ### R1. Aggregate numeric TEXT classification crosses embedded NUL
 
 Priority: **high, wrong aggregate storage class and potential overflow phase**.
+Status: **corrected by ADR-0100**.
 
 Exact public traces independently reproduce both directions:
 
@@ -397,13 +403,42 @@ Exact public traces independently reproduce both directions:
 - TEXT hex `393030373139393235343734303939320078`
   (`9007199254740992`, NUL, `x`) is native REAL but Modern INTEGER.
 
-`src/runtime/function_registry.cpp:248-307` inspects the complete explicit
-TEXT view for exponent/decimal syntax before ordinary affinity. Native
+At the audited revision, `src/runtime/function_registry.cpp:248-307`
+inspects the complete explicit TEXT view for exponent/decimal syntax before
+ordinary affinity. Native
 `src/vdbe.c:329-365,436-448` uses zero-terminated real parsing followed by
 the exact integer-range rule or a successful full-length integer parse.
 Simply truncating before NUL is not a complete correction. SUM/TOTAL/AVG
 share this conversion and need one canonical helper plus overflow-latch
 regressions.
+
+The post-A2 bounded baseline compares 168 instances on the unchanged core
+fixture and profile: 20 of 91 TEXT cases and six of 36 overflow/lifecycle
+cases differ, while all 36 BLOB and five scalar controls match.
+
+ADR-0100 now reuses the shared value scanner, full-length integer parser,
+exactness predicates, and REAL conversion through one function numeric-type
+operation. Ordinary affinity, CAST, arithmetic, and the numeric state remain
+separate and unchanged. All 168 exact instances now match native, resolving
+the 26 former differences with unchanged native outcomes. All 2,511 frozen
+post-A2 cross-feature outcomes remain unchanged; that earlier population did
+not reproduce these parameter-driven NUL cases.
+
+The standard numeric-type shard adds 54 cases, including 53 comparisons and
+one unsupported control. It covers both required prepare-control kinds,
+types and exact REAL bits, full-length and 51-bit boundaries, error/reset
+phases, grouped/modifier/compound/private consumers, and cross-type rebinding.
+It reuses the unchanged core fixture, profile, protocol, and limits, and
+retains every old corpus and oracle byte. The existing lower/BLOB-to-TEXT
+path provides a source-free raw seed without new syntax or generator changes.
+
+Focused aggregate and public-session regressions failed before production
+changes. Current Debug passes 1,492 tests with every inherited name retained.
+The focused 25 cases and complete 1,432-case fast unit tier pass. The existing
+allocation helper retains its original numeric case and exact two-allocation
+contract, adding long NUL TEXT paths and successful same-state reset/reuse
+after each injected failure. GPT-5.6 Sol accepted design and implementation
+without blockers; integrated exact-tree and delivery gates remain mandatory.
 
 ### R2. REAL storage conversion loses native IntReal serial-form rules
 
@@ -477,10 +512,10 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1, A5, D3, D2, and A1 have merged with exact-head hosted proof, and the
-preserved binder foundation is integrated. Continue A2 through ADR-0099's
-canonical wildcard publication. Prioritize the remaining durable/lifecycle and
-silent-result defects according to their reproduced scope. The earlier
+D1, A5, D3, D2, A1, and A2 have merged with exact-head hosted proof, and the
+preserved binder foundation is integrated. Continue R1 through ADR-0100's
+canonical function numeric typing. Prioritize the remaining durable/lifecycle
+and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
 optimization remains preserved and is not treated as a delivered correction.
 

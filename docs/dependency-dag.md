@@ -163,6 +163,8 @@ borrowed index boundaries and existing key blocks in every range consumer.
 ADR-0099 corrects generated wildcard publication across preserving USING
 boundaries through the canonical joined namespace without changing explicit
 physical qualification.
+ADR-0100 corrects function numeric typing through the canonical SQL-value
+parsers while preserving distinct affinity, CAST, and arithmetic behavior.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

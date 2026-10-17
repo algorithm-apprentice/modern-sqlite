@@ -475,6 +475,53 @@ TEST(CoreAggregateTest, CountHandlesEmptyNullAndZeroArgumentInputs) {
   ExpectInteger(count_value.Finalize(values), 2);
 }
 
+TEST(CoreAggregateTest, NumericTextClassificationUsesFirstNullAndFullIntegerFallback) {
+  const AggregateFunction& sum = ResolveAggregate("sum", 1);
+
+  AggregateState small = sum.CreateState();
+  StepOne(sum, small, TextValue(std::string_view{"1\0e2", 4}));
+  ExpectInteger(sum.Finalize(small), 1);
+
+  AggregateState large = sum.CreateState();
+  StepOne(sum, large, TextValue(std::string_view{"9007199254740992\0x", 18}));
+  ExpectReal(sum.Finalize(large), 9007199254740992.0);
+}
+
+TEST(CoreAggregateTest, NumericTextClassificationPreservesAndClearsOverflowLatch) {
+  const AggregateFunction& sum = ResolveAggregate("sum", 1);
+  for (const bool negative : {false, true}) {
+    SCOPED_TRACE(negative);
+    const std::int64_t first = negative ? std::numeric_limits<std::int64_t>::min()
+                                        : std::numeric_limits<std::int64_t>::max();
+    const std::int64_t second = negative ? -1 : 1;
+
+    AggregateState retained = sum.CreateState();
+    StepOne(sum, retained, SqlValue::Integer(first));
+    StepOne(sum, retained, SqlValue::Integer(second));
+    StepOne(sum, retained, TextValue(std::string_view{"1\0e2", 4}));
+    const auto overflow = sum.Finalize(retained);
+    EXPECT_FALSE(overflow.has_value());
+    if (!overflow.has_value()) {
+      EXPECT_EQ(ErrorCode::kGeneric, overflow.error().code());
+      EXPECT_EQ("integer overflow", overflow.error().message());
+    }
+    EXPECT_TRUE(retained.finalized());
+    EXPECT_FALSE(retained.initialized());
+
+    AggregateState cleared = sum.CreateState();
+    StepOne(sum, cleared, SqlValue::Integer(first));
+    StepOne(sum, cleared, SqlValue::Integer(second));
+    StepOne(sum, cleared, TextValue(std::string_view{"2251799813685248\0x", 18}));
+    const auto real = sum.Finalize(cleared);
+    ExpectReal(real, static_cast<double>(first) + 2251799813685248.0);
+    EXPECT_TRUE(cleared.finalized());
+    EXPECT_FALSE(cleared.initialized());
+    cleared.Reset();
+    StepOne(sum, cleared, SqlValue::Integer(2));
+    ExpectInteger(sum.Finalize(cleared), 2);
+  }
+}
+
 TEST(CoreAggregateTest, NumericAggregatesMatchSQLiteTypesOverflowAndCompensation) {
   const AggregateFunction& sum = ResolveAggregate("sum", 1);
   const AggregateFunction& total = ResolveAggregate("total", 1);

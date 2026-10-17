@@ -76,6 +76,12 @@ struct DecimalPrefix {
   bool has_real_syntax = false;
 };
 
+enum class NumericTextConversion : std::uint8_t {
+  kNumericAffinity,
+  kRealAffinity,
+  kFunctionNumericType,
+};
+
 [[nodiscard]] constexpr bool IsDigit(char value) noexcept { return value >= '0' && value <= '9'; }
 
 [[nodiscard]] std::size_t SkipSqliteSpaces(std::string_view input, std::size_t offset) noexcept {
@@ -233,8 +239,9 @@ struct DecimalPrefix {
   return prefix.has_digits && SkipSqliteSpaces(input, prefix.end) == input.size();
 }
 
-[[nodiscard]] std::optional<SqlValue> TryApplyNumericTextAffinity(std::string_view bytes,
-                                                                  bool force_real) {
+[[nodiscard]] std::optional<SqlValue> TryApplyNumericTextAffinity(
+    std::string_view bytes, NumericTextConversion conversion) {
+  const bool force_real = conversion == NumericTextConversion::kRealAffinity;
   const IntegerPrefix integer = ParseIntegerPrefix(bytes);
   if (integer.has_digits && !integer.overflow &&
       SkipSqliteSpaces(bytes, integer.end) == bytes.size()) {
@@ -248,7 +255,12 @@ struct DecimalPrefix {
     return std::nullopt;
   }
   const double real = ParseDouble(numeric_input, prefix);
-  if (const auto exact_integer = AffinityInteger(real); exact_integer.has_value()) {
+  if (conversion == NumericTextConversion::kFunctionNumericType) {
+    const std::int64_t exact_integer = TruncateRealToInteger(real);
+    if (!prefix.has_real_syntax && RealSameAsInteger(real, exact_integer)) {
+      return SqlValue::Integer(exact_integer);
+    }
+  } else if (const auto exact_integer = AffinityInteger(real); exact_integer.has_value()) {
     return force_real ? SqlValue::Real(static_cast<double>(*exact_integer))
                       : SqlValue::Integer(*exact_integer);
   }
@@ -491,7 +503,9 @@ SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity) {
 
   if (value.type() == SqlValueType::kText) {
     auto converted = TryApplyNumericTextAffinity(SqlValueAccess::Text(value).bytes(),
-                                                 affinity == TypeAffinity::kReal);
+                                                 affinity == TypeAffinity::kReal
+                                                     ? NumericTextConversion::kRealAffinity
+                                                     : NumericTextConversion::kNumericAffinity);
     if (converted.has_value()) {
       return std::move(*converted);
     }
@@ -504,6 +518,18 @@ SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity) {
     if (const auto integer = AffinityInteger(SqlValueAccess::Real(value)); integer.has_value()) {
       return SqlValue::Integer(*integer);
     }
+  }
+  return value;
+}
+
+SqlValue ApplyNumericType(SqlValue value) {
+  if (value.type() != SqlValueType::kText) {
+    return value;
+  }
+  auto converted = TryApplyNumericTextAffinity(SqlValueAccess::Text(value).bytes(),
+                                               NumericTextConversion::kFunctionNumericType);
+  if (converted.has_value()) {
+    return std::move(*converted);
   }
   return value;
 }

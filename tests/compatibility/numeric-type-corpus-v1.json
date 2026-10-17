@@ -1,0 +1,1859 @@
+{
+  "cases": [
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-integer-before-nul-exponent",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-signed-leading-zero-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2b303031006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-space-before-nul",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "3120006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-integer-negative-zero",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d30006539",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-decimal-before-nul",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "312e30006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-exponent-before-nul",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "3165300078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-incomplete-exponent-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31650078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-nonnumeric-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "6162630031",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-leading-nul",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "0031",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-empty-text-literal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282727292c746f74616c282727292c61766728272729"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-fractional-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2e35006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-real-overflow",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31653330390078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-real-underflow",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31652d3430300078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-long-owned-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "3030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-below-negative-exact-limit",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d323235313739393831333638353234390078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-negative-exact-limit",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-below-positive-exact-limit",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "323235313739393831333638353234370078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-positive-exact-limit",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-large-nul-needs-full-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-large-full-length-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "39303037313939323534373430393933",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-maximum-full-length-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "39323233333732303336383534373735383037",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-minimum-full-length-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d39323233333732303336383534373735383038",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-outside-full-length-integer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "39323233333732303336383534373735383038",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-large-decimal-remains-real",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "323235313739393831333638353234382e300078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-blob-integer-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-blob-decimal-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "312e30006532",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-blob-empty-literal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28582727292c746f74616c28582727292c6176672858272729"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-blob-hexadecimal-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "30783130",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-blob-long-prefix",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "3030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031006532",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-scalar-0",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-scalar-1",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-scalar-2",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "9223372036854775807"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-scalar-3",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "bits": "3ff0000000000000",
+            "type": "real"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-scalar-4",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "bits": "8000000000000000",
+            "type": "real"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-sum-0",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-total-0",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420746f74616c28636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-avg-0",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542061766728636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-sum-1",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-sum-2",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-positive-sum-3",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a393232333337323033363835343737353830372c30292c6e756c6c6966282869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-negative-sum-0",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a2d393232333337323033363835343737353830382c30292c6e756c6c6966282d2869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-negative-sum-1",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a2d393232333337323033363835343737353830382c30292c6e756c6c6966282d2869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-negative-sum-2",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a2d393232333337323033363835343737353830382c30292c6e756c6c6966282d2869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-overflow-negative-sum-3",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "2d323235313739393831333638353234380078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d28636f616c65736365286e756c6c6966282869643d31292a2d393232333337323033363835343737353830382c30292c6e756c6c6966282d2869643d32292c30292c3f3129204f52444552204259206964292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-grouped-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420696425322c73756d283f31292c746f74616c283f31292c617667283f31292046524f4d206d6f64656c5f726f77732057484552452069643c3d342047524f55502042592069642532204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-distinct-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d2844495354494e4354203f31292c746f74616c2844495354494e4354203f31292c6176672844495354494e4354203f31292046524f4d206d6f64656c5f726f77732057484552452069643c3d34"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-filter-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292046494c54455228574845524520696425323d31292c746f74616c283f31292046494c54455228574845524520696425323d31292c617667283f31292046494c54455228574845524520696425323d31292046524f4d206d6f64656c5f726f77732057484552452069643c3d34"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-local-order-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31204f524445522042592069642044455343292c746f74616c283f31204f52444552204259206964292c617667283f31204f524445522042592069642044455343292046524f4d206d6f64656c5f726f77732057484552452069643c3d33"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-compound-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f312920554e494f4e20414c4c2053454c4543542073756d283f3129204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-private-consumer",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542073756d283f3129292c4558495354532853454c4543542073756d283f3129292c747970656f66283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-sql-only-nul-text",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d286c6f77657228582733313030363533322729292c73756d286c6f776572285827333933303330333733313339333933323335333433373334333033393339333230303738272929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "function-numeric-type",
+      "id": "numeric-reset-cross-type-rebinding",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "393030373139393235343734303939320078",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "31006532",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "bits": "3ff0000000000000",
+            "type": "real"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d283f31292c747970656f66283f31292c746f74616c283f31292c617667283f3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "numeric-syntax-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542029"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "write",
+      "id": "numeric-unsupported-write",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "494e5345525420494e544f206974656d732869642c6e616d65292056414c5545532839392c2777726974652729"
+    }
+  ],
+  "databases": [
+    {
+      "id": "core",
+      "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
+      "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    }
+  ],
+  "limits": {
+    "binding_operations": 256,
+    "cases": 512,
+    "child_seconds": 10,
+    "corpus_bytes": 4194304,
+    "operations": 1024,
+    "oracle_bytes": 67108864,
+    "output_bytes": 16777216,
+    "result_columns": 256,
+    "result_rows": 4096,
+    "sql_bytes": 65536,
+    "stderr_bytes": 1048576,
+    "value_bytes": 1048576
+  },
+  "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "schema_version": 1,
+  "supported_matrix": [
+    "function-numeric-type",
+    "prepare-errors"
+  ]
+}

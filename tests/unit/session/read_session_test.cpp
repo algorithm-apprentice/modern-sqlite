@@ -3111,6 +3111,70 @@ TEST(ReadSession, RecoversAggregateCompoundAfterInjectedSpillFailure) {
   RequireStatus(statement.Finalize());
 }
 
+TEST(ReadSession, RebindsNumericTextAggregatesWithoutChangingInputTypes) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT sum(?1),typeof(?1),total(?1),avg(?1),?1");
+  struct Case {
+    std::string_view bytes;
+    SqlValueType type;
+    std::int64_t integer = 0;
+    double real = 0.0;
+    bool blob = false;
+  };
+  const std::array cases{
+      Case{.bytes = std::string_view{"1\0e2", 4},
+           .type = SqlValueType::kInteger,
+           .integer = 1,
+           .real = 1.0},
+      Case{.bytes = std::string_view{"9007199254740992\0x", 18},
+           .type = SqlValueType::kReal,
+           .real = 9007199254740992.0},
+      Case{.bytes = std::string_view{"-2251799813685248\0x", 19},
+           .type = SqlValueType::kInteger,
+           .integer = -2251799813685248,
+           .real = -2251799813685248.0},
+      Case{.bytes = std::string_view{"2251799813685248\0x", 18},
+           .type = SqlValueType::kReal,
+           .real = 2251799813685248.0},
+      Case{.bytes = std::string_view{"1.0\0x", 5}, .type = SqlValueType::kReal, .real = 1.0},
+      Case{.bytes = std::string_view{"1e\0x", 4}, .type = SqlValueType::kReal, .real = 1.0},
+      Case{.bytes = {}, .type = SqlValueType::kReal},
+      Case{.bytes = std::string_view{"1\0e2", 4},
+           .type = SqlValueType::kReal,
+           .real = 1.0,
+           .blob = true},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.bytes);
+    RequireStatus(statement.Bind(1, test.blob
+                                        ? SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(test.bytes)))
+                                        : SqlValue::Text(std::string{test.bytes})));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(5U, statement.row().size());
+    EXPECT_EQ(test.type, statement.row()[0].type());
+    if (test.type == SqlValueType::kInteger) {
+      EXPECT_EQ(test.integer, statement.row()[0].integer_value());
+    } else {
+      EXPECT_EQ(test.real, statement.row()[0].real_value());
+    }
+    EXPECT_EQ(test.blob ? "blob" : "text", TextValue(statement.row()[1]));
+    EXPECT_EQ(test.real, statement.row()[2].real_value());
+    EXPECT_EQ(test.real, statement.row()[3].real_value());
+    if (test.blob) {
+      ASSERT_TRUE(statement.row()[4].blob_value().has_value());
+      EXPECT_EQ(test.bytes, AsStringView(*statement.row()[4].blob_value()));
+    } else {
+      EXPECT_EQ(test.bytes, TextValue(statement.row()[4]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1.0, statement.row()[0].real_value());
+  RequireStatus(statement.Finalize());
+}
+
 TEST(ReadSession, ExecutesAndResetsGlobalCount) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   ReadStatement statement = PrepareStatement(session, "SELECT count() FROM items");

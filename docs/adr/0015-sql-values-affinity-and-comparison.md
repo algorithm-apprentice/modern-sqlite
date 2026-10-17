@@ -33,6 +33,10 @@ ordering, and `src/util.c` for decimal conversion.
   materializes a REAL result.
 - Affinity recognizes SQLite ASCII whitespace and decimal syntax only.
   Hexadecimal-looking text such as `0x10` is not converted.
+- ADR-0100 defines canonical function numeric typing separately from affinity:
+  preserve REAL syntax, classify the first-NUL decimal view, and admit integer
+  TEXT only through exact 51-bit round-trip or complete original-length
+  integer parsing. Existing numeric storage classes and BLOB remain unchanged.
 - Forced casts follow SQLite's prefix rules: INTEGER consumes a decimal
   integer prefix and saturates overflow; REAL consumes a decimal floating
   prefix and returns 0.0 when no prefix exists; NUMERIC chooses INTEGER or

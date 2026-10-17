@@ -2021,6 +2021,28 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       TIMEOUT 30
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
+  add_test(
+    NAME differential.numeric_type_oracle_regeneration
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/differential/sqlite_oracle_regeneration_test.py"
+      --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --corpus
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/numeric-type-corpus-v1.json"
+      --oracle
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/numeric-type-oracle-v1.json"
+      --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    differential.numeric_type_oracle_regeneration
+    PROPERTIES
+      LABELS differential
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
 endif()
 
 add_test(
@@ -2098,6 +2120,26 @@ add_test(
 )
 set_tests_properties(
   differential.namespace_compatibility
+  PROPERTIES
+    LABELS differential
+    TIMEOUT 60
+)
+
+add_test(
+  NAME differential.numeric_type_compatibility
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+    --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --corpus
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/numeric-type-corpus-v1.json"
+    --oracle
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/numeric-type-oracle-v1.json"
+)
+set_tests_properties(
+  differential.numeric_type_compatibility
   PROPERTIES
     LABELS differential
     TIMEOUT 60

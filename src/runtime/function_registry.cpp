@@ -246,22 +246,11 @@ void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t v
 }
 
 [[nodiscard]] SqlValue NumericAggregateValue(const SqlValue& value) {
-  if (value.type() == SqlValueType::kInteger || value.type() == SqlValueType::kReal ||
-      value.type() == SqlValueType::kNull) {
-    return value.Clone();
+  SqlValue numeric = ApplyNumericType(value.Clone());
+  if (numeric.type() == SqlValueType::kText || numeric.type() == SqlValueType::kBlob) {
+    return CastValue(std::move(numeric), CastTarget::kReal);
   }
-  if (value.type() == SqlValueType::kBlob) {
-    return CastValue(value.Clone(), CastTarget::kReal);
-  }
-  const std::string_view text = RequiredText(value);
-  if (text.find_first_of(".eE") != std::string_view::npos) {
-    return CastValue(value.Clone(), CastTarget::kReal);
-  }
-  SqlValue numeric = ApplyAffinity(value.Clone(), TypeAffinity::kNumeric);
-  if (numeric.type() == SqlValueType::kInteger || numeric.type() == SqlValueType::kReal) {
-    return numeric;
-  }
-  return CastValue(std::move(numeric), CastTarget::kReal);
+  return numeric;
 }
 
 [[nodiscard]] Result<AggregateStepEffect> StepCount(CountAggregateState& state,
