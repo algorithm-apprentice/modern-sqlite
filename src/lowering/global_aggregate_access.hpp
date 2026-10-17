@@ -19,6 +19,7 @@ class GlobalAggregateAccessServices {
   [[nodiscard]] virtual LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                             RegisterId destination) = 0;
   [[nodiscard]] virtual LoweringResult<RegisterId> EmitRowIdLookupKey(BoundExpressionId id) = 0;
+  [[nodiscard]] virtual LoweringResult<SymbolId> EnsureBinarySymbol() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitLimitInitialization(
       std::optional<Label> completion) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateGuards(Label empty_input) = 0;
@@ -46,6 +47,7 @@ struct GlobalAggregateAccessInput {
   const PhysicalNode* leaf = nullptr;
   const PhysicalTableScanNode* table_scan = nullptr;
   const PhysicalRowIdLookupNode* rowid_lookup = nullptr;
+  const PhysicalRowIdRangeNode* rowid_range = nullptr;
   const PhysicalIndexScanNode* index_scan = nullptr;
   const PhysicalFilterNode* filter = nullptr;
   const PhysicalLimitNode* limit = nullptr;
@@ -55,6 +57,8 @@ struct GlobalAggregateAccessInput {
   std::optional<RegisterId> index_key_first{};
   std::uint32_t index_key_capacity = 0;
   std::optional<RegisterId> index_rowid_register{};
+  std::optional<RegisterId> rowid_range_rowid_register{};
+  std::optional<RegisterId> rowid_range_comparison_register{};
   std::optional<ConstantId> indexed_min_max_null_constant{};
 };
 

@@ -7,6 +7,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -208,6 +209,111 @@ struct ShiftArguments {
     return std::nullopt;
   }
   return converted;
+}
+
+enum class RowIdSeekDisposition : std::uint8_t {
+  kSeek,
+  kFirst,
+  kLast,
+  kMissing,
+};
+
+struct RowIdSeekTarget {
+  RowIdSeekDisposition disposition = RowIdSeekDisposition::kMissing;
+  std::int64_t rowid = 0;
+  BtreeSeekMode mode = BtreeSeekMode::kEqual;
+};
+
+[[nodiscard]] RowIdSeekTarget NonNumericRowIdSeek(RowIdSeekMode mode) noexcept {
+  switch (mode) {
+    case RowIdSeekMode::kEqual:
+    case RowIdSeekMode::kGreaterOrEqual:
+    case RowIdSeekMode::kGreater:
+      return {};
+    case RowIdSeekMode::kLessOrEqual:
+    case RowIdSeekMode::kLess:
+      return RowIdSeekTarget{.disposition = RowIdSeekDisposition::kLast};
+  }
+  return {};
+}
+
+[[nodiscard]] BtreeSeekMode BtreeMode(RowIdSeekMode mode) noexcept {
+  switch (mode) {
+    case RowIdSeekMode::kEqual:
+      return BtreeSeekMode::kEqual;
+    case RowIdSeekMode::kGreaterOrEqual:
+      return BtreeSeekMode::kGreaterOrEqual;
+    case RowIdSeekMode::kGreater:
+      return BtreeSeekMode::kGreater;
+    case RowIdSeekMode::kLessOrEqual:
+      return BtreeSeekMode::kLessOrEqual;
+    case RowIdSeekMode::kLess:
+      return BtreeSeekMode::kLess;
+  }
+  return BtreeSeekMode::kEqual;
+}
+
+[[nodiscard]] RowIdSeekTarget ConvertRowIdSeek(const SqlValue& value, RowIdSeekMode mode) {
+  if (mode == RowIdSeekMode::kEqual) {
+    const std::optional<std::int64_t> rowid = LosslessRowId(value);
+    return rowid.has_value()
+               ? RowIdSeekTarget{
+                     .disposition = RowIdSeekDisposition::kSeek,
+                     .rowid = *rowid,
+                     .mode = BtreeSeekMode::kEqual,
+                 }
+               : RowIdSeekTarget{};
+  }
+  if (value.type() == SqlValueType::kNull) {
+    return {};
+  }
+
+  const SqlValue numeric = value.type() == SqlValueType::kText
+                               ? ApplyAffinity(value.Clone(), TypeAffinity::kNumeric)
+                               : value.Clone();
+  if (numeric.type() == SqlValueType::kInteger) {
+    const auto integer = numeric.integer_value();
+    if (!integer.has_value()) {
+      std::terminate();
+    }
+    return RowIdSeekTarget{
+        .disposition = RowIdSeekDisposition::kSeek,
+        .rowid = *integer,
+        .mode = BtreeMode(mode),
+    };
+  }
+  if (numeric.type() != SqlValueType::kReal) {
+    return NonNumericRowIdSeek(mode);
+  }
+  const auto real_value = numeric.real_value();
+  if (!real_value.has_value()) {
+    std::terminate();
+  }
+  const double real = *real_value;
+  if (std::isnan(real)) {
+    return {};
+  }
+  const std::int64_t rowid = CoerceIntegerForBitwise(numeric);
+  const std::strong_ordering comparison = CompareSqlIntegerAndReal(rowid, real);
+  RowIdSeekMode adjusted = mode;
+  if (comparison == std::strong_ordering::greater) {
+    if (adjusted == RowIdSeekMode::kGreater) {
+      adjusted = RowIdSeekMode::kGreaterOrEqual;
+    } else if (adjusted == RowIdSeekMode::kLessOrEqual) {
+      adjusted = RowIdSeekMode::kLess;
+    }
+  } else if (comparison == std::strong_ordering::less) {
+    if (adjusted == RowIdSeekMode::kGreaterOrEqual) {
+      adjusted = RowIdSeekMode::kGreater;
+    } else if (adjusted == RowIdSeekMode::kLess) {
+      adjusted = RowIdSeekMode::kLessOrEqual;
+    }
+  }
+  return RowIdSeekTarget{
+      .disposition = RowIdSeekDisposition::kSeek,
+      .rowid = rowid,
+      .mode = BtreeMode(adjusted),
+  };
 }
 
 [[nodiscard]] SqlValue ApplyStorageAffinity(SqlValue value, TypeAffinity affinity) {
@@ -2175,22 +2281,25 @@ struct Vm::Impl {
     if (cursor == nullptr) {
       return std::unexpected(VmError(ErrorCode::kInternal, "rowid seek used a non-table cursor"));
     }
-    const std::optional<std::int64_t> rowid = LosslessRowId(Register(operation.key));
-    if (!rowid.has_value()) {
+    const RowIdSeekTarget target = ConvertRowIdSeek(Register(operation.key), operation.mode);
+    if (target.disposition == RowIdSeekDisposition::kMissing) {
       program_counter_ = operation.missing_target.value();
       return std::nullopt;
     }
-    BtreeSeekMode mode = BtreeSeekMode::kEqual;
-    switch (operation.mode) {
-      case RowIdSeekMode::kEqual:
-        break;
-      case RowIdSeekMode::kGreater:
-        mode = BtreeSeekMode::kGreater;
-        break;
-      default:
-        return std::unexpected(VmError(ErrorCode::kInternal, "unknown rowid seek mode"));
-    }
-    auto found = cursor->Seek(*rowid, mode);
+    const auto position = [&]() -> Result<bool> {
+      switch (target.disposition) {
+        case RowIdSeekDisposition::kSeek:
+          return cursor->Seek(target.rowid, target.mode);
+        case RowIdSeekDisposition::kFirst:
+          return cursor->First();
+        case RowIdSeekDisposition::kLast:
+          return cursor->Last();
+        case RowIdSeekDisposition::kMissing:
+          break;
+      }
+      return false;
+    };
+    auto found = position();
     if (!found.has_value()) {
       return std::unexpected(std::move(found.error()));
     }

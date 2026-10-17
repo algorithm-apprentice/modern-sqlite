@@ -617,6 +617,19 @@ int main() try {
       AggregateFixture(indexed_catalog,
                        "SELECT count(b.Payload) FROM Items a FULL JOIN Items b ON b.Name<a.Name"),
   };
+  const std::array<PhysicalPlan, 7> rowid_range_plans{
+      DistinctFixture(indexed_catalog, "SELECT Payload FROM Items WHERE id<?1"),
+      AggregateFixture(indexed_catalog, "SELECT count(*) FROM Items WHERE id>=?1"),
+      AggregateFixture(indexed_catalog, "SELECT id,count(*) FROM Items WHERE id>?1 GROUP BY id"),
+      DistinctFixture(indexed_catalog, "SELECT DISTINCT Name FROM Items WHERE id<=?1"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT id FROM Items WHERE id<?1 "
+                      "UNION ALL SELECT id FROM Items WHERE id>?2"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT (SELECT Payload FROM Items WHERE id<?1),"
+                      "EXISTS(SELECT 1 FROM Items WHERE id>?2)"),
+      DistinctFixture(indexed_catalog, "SELECT id FROM Items WHERE id=?1 UNION SELECT 99 LIMIT 1"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -695,6 +708,11 @@ int main() try {
     }
   }
   for (const PhysicalPlan& range_plan : null_range_plans) {
+    if (!verify_oom(range_plan, 256U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& range_plan : rowid_range_plans) {
     if (!verify_oom(range_plan, 256U)) {
       return 1;
     }

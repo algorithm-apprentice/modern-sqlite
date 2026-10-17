@@ -1005,6 +1005,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalSingleRowNode* single_row = nullptr;
     const PhysicalTableScanNode* table_scan = nullptr;
     const PhysicalRowIdLookupNode* rowid_lookup = nullptr;
+    const PhysicalRowIdRangeNode* rowid_range = nullptr;
     const PhysicalIndexScanNode* index_scan = nullptr;
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::vector<JoinedSourcePlan> joined_sources{};
@@ -1112,8 +1113,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const auto has_access = [](const StreamingCorePlan& core) {
       return core.empty != nullptr || core.single_row != nullptr || core.table_scan != nullptr ||
-             core.rowid_lookup != nullptr || core.index_scan != nullptr || core.values != nullptr ||
-             core.join != nullptr || !core.joined_sources.empty();
+             core.rowid_lookup != nullptr || core.rowid_range != nullptr ||
+             core.index_scan != nullptr || core.values != nullptr || core.join != nullptr ||
+             !core.joined_sources.empty();
     };
     std::vector<std::optional<std::size_t>> node_cores(nodes.size());
     std::vector<PhysicalCompoundStrategy> compound_strategies;
@@ -1186,6 +1188,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           core.rowid_lookup = lookup;
         }
         node_cores[index] = lookup->core_index;
+        streaming_requires_snapshot_ = true;
+      } else if (const auto* range = std::get_if<PhysicalRowIdRangeNode>(&physical.payload);
+                 range != nullptr) {
+        auto joined = InspectJoinedAccess(physical, range->core_index, range->source);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
+        }
+        StreamingCorePlan& core = streaming_cores_[range->core_index];
+        if (!*joined) {
+          if (has_access(core)) {
+            return std::unexpected(InternalFailure("streaming rowid-range core is invalid"));
+          }
+          core.leaf = &physical;
+          core.rowid_range = range;
+        }
+        node_cores[index] = range->core_index;
         streaming_requires_snapshot_ = true;
       } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&physical.payload);
                  index_scan != nullptr) {
@@ -1358,8 +1376,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (std::holds_alternative<BoundValuesCore>(*core.bound)) {
         if (core.values == nullptr || core.empty != nullptr || core.single_row != nullptr ||
             core.table_scan != nullptr || core.rowid_lookup != nullptr ||
-            core.index_scan != nullptr || core.filter != nullptr || core.aggregate != nullptr ||
-            core.having != nullptr || core.projection != nullptr || core.distinct != nullptr) {
+            core.rowid_range != nullptr || core.index_scan != nullptr || core.filter != nullptr ||
+            core.aggregate != nullptr || core.having != nullptr || core.projection != nullptr ||
+            core.distinct != nullptr) {
           return std::unexpected(InternalFailure("streaming VALUES core shape is invalid"));
         }
         continue;
@@ -1371,7 +1390,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("streaming SELECT core shape is invalid"));
       }
       const bool has_cursor_access = core.table_scan != nullptr || core.rowid_lookup != nullptr ||
-                                     core.index_scan != nullptr || core.join != nullptr;
+                                     core.rowid_range != nullptr || core.index_scan != nullptr ||
+                                     core.join != nullptr;
       const bool source_matches = !select.table_sources.empty()
                                       ? has_cursor_access || core.empty != nullptr
                                       : core.single_row != nullptr || core.empty != nullptr;
@@ -1387,8 +1407,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       if (!select.aggregate.has_value()) {
-        if (core.aggregate != nullptr || core.having != nullptr || core.empty != nullptr ||
-            core.rowid_lookup != nullptr || core.index_scan != nullptr) {
+        if (core.aggregate != nullptr || core.having != nullptr) {
           return std::unexpected(
               InternalFailure("ordinary streaming SELECT retained aggregate access metadata"));
         }
@@ -1429,7 +1448,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
-    if (!std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) && table_scan_ == nullptr) {
+    rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
+    rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&leaf_->payload);
+    if (!std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) &&
+        !std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) && table_scan_ == nullptr &&
+        rowid_lookup_ == nullptr && rowid_range_ == nullptr) {
       return std::unexpected(UnsupportedFailure("simple DISTINCT access kind is not implemented"));
     }
 
@@ -1532,6 +1555,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
     rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
+    rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&leaf_->payload);
     index_scan_ = std::get_if<PhysicalIndexScanNode>(&leaf_->payload);
     for (std::size_t index = 1; index < nodes.size(); ++index) {
       const PhysicalNode& node = nodes[index];
@@ -1606,7 +1630,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) && table_scan_ == nullptr &&
-        rowid_lookup_ == nullptr && index_scan_ == nullptr) {
+        rowid_lookup_ == nullptr && rowid_range_ == nullptr && index_scan_ == nullptr) {
       return std::unexpected(InternalFailure("global aggregate access node is invalid"));
     }
     global_aggregate_query_ = true;
@@ -1636,6 +1660,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
     rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
+    rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&leaf_->payload);
     index_scan_ = std::get_if<PhysicalIndexScanNode>(&leaf_->payload);
     for (std::size_t index = 1; index < nodes.size(); ++index) {
       const PhysicalNode& node = nodes[index];
@@ -1706,7 +1731,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload) && table_scan_ == nullptr &&
-        rowid_lookup_ == nullptr && index_scan_ == nullptr) {
+        rowid_lookup_ == nullptr && rowid_range_ == nullptr && index_scan_ == nullptr) {
       return std::unexpected(InternalFailure("grouped aggregate access node is invalid"));
     }
     grouped_aggregate_query_ = true;
@@ -1744,6 +1769,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     leaf_ = &nodes.front();
     table_scan_ = std::get_if<PhysicalTableScanNode>(&leaf_->payload);
     rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
+    rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&leaf_->payload);
     index_scan_ = std::get_if<PhysicalIndexScanNode>(&leaf_->payload);
     for (std::size_t index = 1; index < nodes.size(); ++index) {
       const PhysicalNode& node = nodes[index];
@@ -1805,6 +1831,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !std::holds_alternative<PhysicalEmptyNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalTableScanNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalRowIdLookupNode>(leaf_->payload) &&
+        !std::holds_alternative<PhysicalRowIdRangeNode>(leaf_->payload) &&
         !std::holds_alternative<PhysicalIndexScanNode>(leaf_->payload)) {
       return std::unexpected(InternalFailure("physical plan has an invalid access node"));
     }
@@ -2035,6 +2062,35 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] static bool RowIdRangeHasEnd(const PhysicalRowIdRangeNode& range) noexcept {
+    return range.direction == PhysicalScanDirection::kForward ? range.upper.has_value()
+                                                              : range.lower.has_value();
+  }
+
+  [[nodiscard]] bool HasRowIdRangeEndAccess() const noexcept {
+    return (rowid_range_ != nullptr && RowIdRangeHasEnd(*rowid_range_)) ||
+           std::ranges::any_of(streaming_cores_, [](const StreamingCorePlan& core) {
+             return core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range);
+           });
+  }
+
+  [[nodiscard]] LoweringResult<void> AllocateRowIdRangeRegisters() {
+    if (!HasRowIdRangeEndAccess()) {
+      return {};
+    }
+    auto rowid = AllocateRegisters(1);
+    auto comparison = AllocateRegisters(1);
+    if (!rowid.has_value()) {
+      return std::unexpected(std::move(rowid.error()));
+    }
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    rowid_range_rowid_register_ = *rowid;
+    rowid_range_comparison_register_ = *comparison;
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> BuildGlobalAggregateRegisterLayout() {
     if (aggregate_program_ == nullptr) {
       return std::unexpected(InternalFailure("global aggregate metadata is unavailable"));
@@ -2067,6 +2123,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto access = AllocateAggregateAccessRegisters(nullable_indexed_min_max);
         !access.has_value()) {
       return access;
+    }
+    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+      return range;
     }
     return FinishRegisterLayout();
   }
@@ -2457,6 +2516,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto access = AllocateAggregateAccessRegisters(false); !access.has_value()) {
       return access;
     }
+    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+      return range;
+    }
     return FinishRegisterLayout();
   }
 
@@ -2571,6 +2633,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       index_rowid_register_ = *rowid;
     }
+    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+      return range;
+    }
 
     return FinishRegisterLayout();
   }
@@ -2629,7 +2694,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         comparison_register_ = *comparison_register;
       }
 
-      if (table_scan_ != nullptr || advanced_order_ != nullptr) {
+      if (table_scan_ != nullptr || rowid_lookup_ != nullptr || rowid_range_ != nullptr ||
+          advanced_order_ != nullptr) {
         if (!zero_register_.has_value()) {
           auto zero_register = AllocateRegisters(1);
           if (!zero_register.has_value()) {
@@ -2652,6 +2718,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
+    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+      return range;
+    }
     return FinishRegisterLayout();
   }
 
@@ -2787,6 +2856,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         offset_register_ = *offset_register;
         comparison_register_ = *comparison_register;
       }
+    }
+    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+      return range;
     }
     return FinishRegisterLayout();
   }
@@ -3662,8 +3734,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> AddStreamingCursorDescriptor(StreamingCorePlan& core,
                                                                   const BoundSelectCore& select) {
-    if (core.table_scan == nullptr || select.table_sources.size() != 1U ||
-        core.table_scan->source != select.table_sources.front().id) {
+    const std::optional<BoundSourceId> source =
+        core.table_scan != nullptr     ? std::optional{core.table_scan->source}
+        : core.rowid_lookup != nullptr ? std::optional{core.rowid_lookup->source}
+        : core.rowid_range != nullptr  ? std::optional{core.rowid_range->source}
+                                       : std::nullopt;
+    if (!source.has_value() || select.table_sources.size() != 1U ||
+        *source != select.table_sources.front().id) {
       return std::unexpected(InternalFailure("streaming cursor metadata is invalid"));
     }
     SetStreamingCoreContext(core);
@@ -3736,6 +3813,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             }
             table_scan_ = std::get_if<PhysicalTableScanNode>(&joined.access->payload);
             rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&joined.access->payload);
+            rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&joined.access->payload);
             index_scan_ = std::get_if<PhysicalIndexScanNode>(&joined.access->payload);
             leaf_ = joined.access;
             active_source_column_begin_ = source.source_column_begin;
@@ -3761,7 +3839,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             }
           }
         }
-        if (core.table_scan != nullptr && core.aggregate == nullptr) {
+        if ((core.table_scan != nullptr || core.rowid_lookup != nullptr ||
+             core.rowid_range != nullptr) &&
+            core.aggregate == nullptr) {
           if (auto cursor = AddStreamingCursorDescriptor(core, *select); !cursor.has_value()) {
             return cursor;
           }
@@ -4254,6 +4334,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const std::optional<BoundSourceId> source_id =
         table_scan_ != nullptr     ? std::optional{table_scan_->source}
         : rowid_lookup_ != nullptr ? std::optional{rowid_lookup_->source}
+        : rowid_range_ != nullptr  ? std::optional{rowid_range_->source}
         : index_scan_ != nullptr   ? std::optional{index_scan_->source}
                                    : std::nullopt;
     if (!source_id.has_value()) {
@@ -4359,6 +4440,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       source_kind = rowid_lookup_->source_kind;
       access_table = rowid_lookup_->table;
       root_page = rowid_lookup_->root_page.value;
+    } else if (rowid_range_ != nullptr) {
+      source_kind = rowid_range_->source_kind;
+      access_table = rowid_range_->table;
+      root_page = rowid_range_->root_page.value;
     } else if (index_scan_ != nullptr && !index_scan_->covering) {
       source_kind = BoundSourceKind::kCatalogTable;
       access_table = index_scan_->table;
@@ -4968,7 +5053,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return *maximum_integer_constant_;
   }
 
-  [[nodiscard]] LoweringResult<SymbolId> EnsureBinarySymbol() {
+  [[nodiscard]] LoweringResult<SymbolId> EnsureBinarySymbol() override {
     if (!binary_symbol_.has_value()) {
       auto symbol = SymbolForName("BINARY");
       if (!symbol.has_value()) {
@@ -7916,6 +8001,205 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitRowIdRange(const PhysicalRowIdRangeNode& range) {
+    if (!cursor_.has_value()) {
+      return std::unexpected(InternalFailure("rowid range has no cursor"));
+    }
+    auto resolved = lowering_internal::ResolveRowIdTraversal(range);
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    const lowering_internal::RowIdTraversal& traversal = *resolved;
+    if (traversal.end != nullptr && (!rowid_range_rowid_register_.has_value() ||
+                                     !rowid_range_comparison_register_.has_value())) {
+      return std::unexpected(InternalFailure("rowid range end resources are incomplete"));
+    }
+
+    std::optional<Label> closed_completion;
+    if (NeedsPreopenCompletion()) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      closed_completion = *label;
+    }
+    if (auto limit = EmitLimitInitialization(closed_completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
+      return guards;
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+
+    auto unpositioned = CreateLabel();
+    auto row_loop = CreateLabel();
+    auto advance = CreateLabel();
+    if (!unpositioned.has_value()) {
+      return std::unexpected(std::move(unpositioned.error()));
+    }
+    if (!row_loop.has_value()) {
+      return std::unexpected(std::move(row_loop.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (traversal.start != nullptr) {
+      const RegisterId key = Home(traversal.start->key);
+      if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
+        return emitted;
+      }
+      auto sought =
+          ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
+                                   AssumeValue(cursor_), key, *unpositioned, traversal.start_mode),
+                               "unable to emit rowid range seek");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
+    } else {
+      ProgramResult<InstructionAddress> positioned =
+          traversal.reverse ? AssumeValue(builder_).EmitLast(AssumeValue(cursor_), *unpositioned)
+                            : AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *unpositioned);
+      auto rewound =
+          ConvertProgramResult(std::move(positioned), "unable to emit rowid range positioning");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+
+    std::optional<Label> positioned_end;
+    std::optional<RegisterId> end_key;
+    if (traversal.end != nullptr) {
+      const RegisterId key = Home(traversal.end->key);
+      if (auto emitted = EmitExpression(traversal.end->key, key); !emitted.has_value()) {
+        return emitted;
+      }
+      end_key = key;
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_end = *label;
+    }
+    if (auto bound = BindLabel(*row_loop); !bound.has_value()) {
+      return bound;
+    }
+    if (positioned_end.has_value()) {
+      auto binary = EnsureBinarySymbol();
+      if (!binary.has_value()) {
+        return std::unexpected(std::move(binary.error()));
+      }
+      if (auto read = Append(ReadRowIdInstruction{
+              .cursor = AssumeValue(cursor_),
+              .output = AssumeValue(rowid_range_rowid_register_),
+          });
+          !read.has_value()) {
+        return read;
+      }
+      if (auto compared = Append(CompareInstruction{
+              .comparison = traversal.end_comparison,
+              .affinity = TypeAffinity::kNumeric,
+              .collation = *binary,
+              .left = AssumeValue(rowid_range_rowid_register_),
+              .right = AssumeValue(end_key),
+              .output = AssumeValue(rowid_range_comparison_register_),
+          });
+          !compared.has_value()) {
+        return compared;
+      }
+      if (auto jumped = EmitJumpIf(AssumeValue(rowid_range_comparison_register_),
+                                   JumpCondition::kIfTrueOrNull, *positioned_end);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (auto filters = EmitFilters(*advance); !filters.has_value()) {
+      return filters;
+    }
+    if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+      return offset;
+    }
+    if (auto projection = EmitProjection(*advance); !projection.has_value()) {
+      return projection;
+    }
+
+    std::optional<Label> limit_completion;
+    if (AppliesLimitToSourceRows()) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      limit_completion = *label;
+      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
+          !one_register_.has_value()) {
+        return std::unexpected(InternalFailure("rowid range LIMIT has no loop registers"));
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+          !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto decremented = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(one_register_),
+              .output = AssumeValue(limit_register_),
+          });
+          !decremented.has_value()) {
+        return decremented;
+      }
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse, *limit_completion);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    ProgramResult<InstructionAddress> advanced =
+        traversal.reverse ? AssumeValue(builder_).EmitPrevious(AssumeValue(cursor_), *row_loop)
+                          : AssumeValue(builder_).EmitNext(AssumeValue(cursor_), *row_loop);
+    auto next = ConvertProgramResult(std::move(advanced), "unable to emit rowid range advance");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    if (auto bound = BindLabel(*unpositioned); !bound.has_value()) {
+      return bound;
+    }
+    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+      return completed;
+    }
+    if (positioned_end.has_value()) {
+      if (auto bound = BindLabel(*positioned_end); !bound.has_value()) {
+        return bound;
+      }
+      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+        return completed;
+      }
+    }
+    if (limit_completion.has_value()) {
+      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+        return completed;
+      }
+    }
+    if (closed_completion.has_value()) {
+      if (auto bound = BindLabel(*closed_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto completed = EmitReadCompletion(); !completed.has_value()) {
+        return completed;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> EmitMutationPredicates(
       std::span<const BoundExpressionId> predicates, Label rejected) {
     for (const BoundExpressionId predicate : predicates) {
@@ -9297,6 +9581,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     leaf_ = core.leaf;
     table_scan_ = core.table_scan;
     rowid_lookup_ = core.rowid_lookup;
+    rowid_range_ = core.rowid_range;
     index_scan_ = core.index_scan;
     distinct_ = core.distinct;
     distinct_relation_ = core.relation;
@@ -9402,6 +9687,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     leaf_ = nullptr;
     table_scan_ = nullptr;
     rowid_lookup_ = nullptr;
+    rowid_range_ = nullptr;
     index_scan_ = nullptr;
     filter_ = nullptr;
     projection_ = nullptr;
@@ -10450,18 +10736,204 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return lowering_internal::EmitGroupedAggregateCompletion(*input, *this);
   }
 
-  [[nodiscard]] LoweringResult<void> EmitStreamingTableCore(const StreamingCorePlan& core,
-                                                            const BoundSelectCore& select,
-                                                            Label final_completion) {
+  template <typename Consume>
+  [[nodiscard]] LoweringResult<void> EmitStreamingCursorRows(
+      const StreamingCorePlan& core, Label unpositioned_completion,
+      std::optional<Label> positioned_completion, std::optional<Label> consumed_completion,
+      Consume&& consume) {
+    if (!core.cursor.has_value()) {
+      return std::unexpected(InternalFailure("streaming cursor access has no cursor"));
+    }
+    const CursorId cursor = *core.cursor;
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+      return opened;
+    }
+    if (core.rowid_lookup != nullptr) {
+      auto key = EmitRowIdLookupKey(core.rowid_lookup->key);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      auto sought = ConvertProgramResult(
+          AssumeValue(builder_).EmitSeekRowId(cursor, *key, unpositioned_completion),
+          "unable to emit streaming rowid seek");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
+      const bool may_reject = core.filter != nullptr && !core.filter->predicates.empty();
+      if (!positioned_completion.has_value() && (!consumed_completion.has_value() || may_reject)) {
+        return std::unexpected(
+            InternalFailure("streaming rowid seek has no positioned completion"));
+      }
+      const Label rejected = positioned_completion.has_value() ? *positioned_completion
+                                                               : AssumeValue(consumed_completion);
+      if (auto consumed = std::forward<Consume>(consume)(rejected); !consumed.has_value()) {
+        return consumed;
+      }
+      const Label completed = consumed_completion.has_value() ? *consumed_completion
+                                                              : AssumeValue(positioned_completion);
+      return EmitJump(completed);
+    }
+
+    auto row = CreateLabel();
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    const bool may_reject = core.filter != nullptr && !core.filter->predicates.empty();
+    std::optional<Label> advance;
+    if (!consumed_completion.has_value() || may_reject) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      advance = *label;
+    }
+    bool reverse = false;
+    std::optional<lowering_internal::RowIdTraversal> range_traversal;
+    std::optional<Label> positioned_end;
+    std::optional<RegisterId> end_key;
+    if (core.rowid_range != nullptr) {
+      auto resolved = lowering_internal::ResolveRowIdTraversal(*core.rowid_range);
+      if (!resolved.has_value()) {
+        return std::unexpected(std::move(resolved.error()));
+      }
+      range_traversal = *resolved;
+      if (range_traversal->end != nullptr && (!rowid_range_rowid_register_.has_value() ||
+                                              !rowid_range_comparison_register_.has_value())) {
+        return std::unexpected(
+            InternalFailure("streaming rowid range end registers are incomplete"));
+      }
+      reverse = range_traversal->reverse;
+      if (range_traversal->start != nullptr) {
+        const RegisterId key = Home(range_traversal->start->key);
+        if (auto emitted = EmitExpression(range_traversal->start->key, key); !emitted.has_value()) {
+          return emitted;
+        }
+        auto sought = ConvertProgramResult(
+            AssumeValue(builder_).EmitSeekRowId(cursor, key, unpositioned_completion,
+                                                range_traversal->start_mode),
+            "unable to emit streaming rowid range seek");
+        if (!sought.has_value()) {
+          return std::unexpected(std::move(sought.error()));
+        }
+      } else {
+        ProgramResult<InstructionAddress> positioned =
+            reverse ? AssumeValue(builder_).EmitLast(cursor, unpositioned_completion)
+                    : AssumeValue(builder_).EmitRewind(cursor, unpositioned_completion);
+        auto rewound = ConvertProgramResult(std::move(positioned),
+                                            "unable to emit streaming rowid range positioning");
+        if (!rewound.has_value()) {
+          return std::unexpected(std::move(rewound.error()));
+        }
+      }
+      if (range_traversal->end != nullptr) {
+        const RegisterId key = Home(range_traversal->end->key);
+        if (auto emitted = EmitExpression(range_traversal->end->key, key); !emitted.has_value()) {
+          return emitted;
+        }
+        end_key = key;
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        positioned_end = *label;
+      }
+    } else {
+      if (core.table_scan == nullptr) {
+        return std::unexpected(InternalFailure("streaming cursor access kind is unsupported"));
+      }
+      reverse = core.table_scan->direction == PhysicalScanDirection::kReverse;
+      ProgramResult<InstructionAddress> positioned =
+          reverse ? AssumeValue(builder_).EmitLast(cursor, unpositioned_completion)
+                  : AssumeValue(builder_).EmitRewind(cursor, unpositioned_completion);
+      auto rewound =
+          ConvertProgramResult(std::move(positioned), "unable to emit streaming table positioning");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (positioned_end.has_value()) {
+      auto binary = EnsureBinarySymbol();
+      if (!binary.has_value()) {
+        return std::unexpected(std::move(binary.error()));
+      }
+      if (auto read = Append(ReadRowIdInstruction{
+              .cursor = cursor,
+              .output = AssumeValue(rowid_range_rowid_register_),
+          });
+          !read.has_value()) {
+        return read;
+      }
+      if (auto compared = Append(CompareInstruction{
+              .comparison = AssumeValue(range_traversal).end_comparison,
+              .affinity = TypeAffinity::kNumeric,
+              .collation = *binary,
+              .left = AssumeValue(rowid_range_rowid_register_),
+              .right = AssumeValue(end_key),
+              .output = AssumeValue(rowid_range_comparison_register_),
+          });
+          !compared.has_value()) {
+        return compared;
+      }
+      if (auto jumped = EmitJumpIf(AssumeValue(rowid_range_comparison_register_),
+                                   JumpCondition::kIfTrueOrNull, *positioned_end);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    const Label rejected = advance.has_value() ? *advance : AssumeValue(consumed_completion);
+    if (auto consumed = std::forward<Consume>(consume)(rejected); !consumed.has_value()) {
+      return consumed;
+    }
+    if (consumed_completion.has_value()) {
+      if (auto jumped = EmitJump(*consumed_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (advance.has_value()) {
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      ProgramResult<InstructionAddress> advanced =
+          reverse ? AssumeValue(builder_).EmitPrevious(cursor, *row)
+                  : AssumeValue(builder_).EmitNext(cursor, *row);
+      auto next =
+          ConvertProgramResult(std::move(advanced), "unable to emit streaming cursor advance");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+      if (auto jumped = EmitJump(unpositioned_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (positioned_end.has_value()) {
+      if (!positioned_completion.has_value()) {
+        return std::unexpected(
+            InternalFailure("streaming rowid range has no positioned completion"));
+      }
+      if (auto bound = BindLabel(*positioned_end); !bound.has_value()) {
+        return bound;
+      }
+      if (auto jumped = EmitJump(*positioned_completion); !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingCursorCore(const StreamingCorePlan& core,
+                                                             const BoundSelectCore& select,
+                                                             Label final_completion) {
     if (!core.cursor.has_value()) {
       return std::unexpected(InternalFailure("streaming table core has no cursor"));
     }
     SetStreamingCoreContext(core);
-    const CursorId cursor = *core.cursor;
     auto after_core = CreateLabel();
     auto opened_completion = CreateLabel();
-    auto row = CreateLabel();
-    auto advance = CreateLabel();
+    std::optional<Label> positioned_completion;
     std::optional<Label> limit_completion;
     if (!after_core.has_value()) {
       return std::unexpected(std::move(after_core.error()));
@@ -10469,11 +10941,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!opened_completion.has_value()) {
       return std::unexpected(std::move(opened_completion.error()));
     }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
+    if (core.rowid_lookup != nullptr ||
+        (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_completion = *label;
     }
     if (limit_ != nullptr) {
       auto label = CreateLabel();
@@ -10491,46 +10965,29 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return opened;
       }
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
-      return opened;
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *opened_completion),
-                             "unable to emit streaming table rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
-      return filters;
-    }
-    if (!core.relation.has_value()) {
-      if (auto offset = EmitOffset(*advance); !offset.has_value()) {
-        return offset;
+    const auto consume = [&](Label advance) -> LoweringResult<void> {
+      if (auto filters = EmitStreamingFilters(core, advance); !filters.has_value()) {
+        return filters;
       }
-    }
-    if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
-      return projected;
-    }
-    if (auto membership = EmitStreamingMembership(core, *advance); !membership.has_value()) {
-      return membership;
-    }
-    const Label row_limit_completion =
-        limit_completion.has_value() ? *limit_completion : final_completion;
-    if (auto result =
-            EmitStreamingResult(*advance, row_limit_completion, core.relation.has_value());
-        !result.has_value()) {
-      return result;
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                     "unable to emit streaming table advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
+      if (!core.relation.has_value()) {
+        if (auto offset = EmitOffset(advance); !offset.has_value()) {
+          return offset;
+        }
+      }
+      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+        return projected;
+      }
+      if (auto membership = EmitStreamingMembership(core, advance); !membership.has_value()) {
+        return membership;
+      }
+      const Label row_limit_completion =
+          limit_completion.has_value() ? *limit_completion : final_completion;
+      return EmitStreamingResult(advance, row_limit_completion, core.relation.has_value());
+    };
+    if (auto rows = EmitStreamingCursorRows(core, *opened_completion, positioned_completion,
+                                            std::nullopt, consume);
+        !rows.has_value()) {
+      return rows;
     }
     if (auto bound = BindLabel(*opened_completion); !bound.has_value()) {
       return bound;
@@ -10540,6 +10997,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto jumped = EmitJump(*after_core); !jumped.has_value()) {
       return jumped;
+    }
+    if (positioned_completion.has_value()) {
+      if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = EmitStreamingClose(core, true); !closed.has_value()) {
+        return closed;
+      }
+      if (auto jumped = EmitJump(*after_core); !jumped.has_value()) {
+        return jumped;
+      }
     }
     if (limit_completion.has_value()) {
       if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
@@ -10553,6 +11021,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     return BindLabel(*after_core);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingEmptyCore(const StreamingCorePlan& core) {
+    SetStreamingCoreContext(core);
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto guards = EmitStreamingGuards(core, *completion); !guards.has_value()) {
+      return guards;
+    }
+    return BindLabel(*completion);
   }
 
   [[nodiscard]] LoweringResult<void> EmitStreamingSingleCore(const StreamingCorePlan& core,
@@ -10821,8 +11301,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         continue;
       }
-      if (core.table_scan != nullptr) {
-        if (auto emitted = EmitStreamingTableCore(core, select, *completion);
+      if (core.empty != nullptr) {
+        if (auto emitted = EmitStreamingEmptyCore(core); !emitted.has_value()) {
+          return emitted;
+        }
+        continue;
+      }
+      if (core.table_scan != nullptr || core.rowid_lookup != nullptr ||
+          core.rowid_range != nullptr) {
+        if (auto emitted = EmitStreamingCursorCore(core, select, *completion);
             !emitted.has_value()) {
           return emitted;
         }
@@ -10999,6 +11486,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitStreamingGuards(core, *skipped); !guards.has_value()) {
       return guards;
     }
+    if (core.empty != nullptr) {
+      return BindLabel(*skipped);
+    }
     if (core.relation.has_value()) {
       if (auto opened = Append(OpenRelationInstruction{.relation = *core.relation});
           !opened.has_value()) {
@@ -11006,64 +11496,69 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     const bool complete_row = OrderedLayoutUsesInputFields(layout);
-    if (core.table_scan != nullptr) {
+    if (core.table_scan != nullptr || core.rowid_lookup != nullptr || core.rowid_range != nullptr) {
       if (!core.cursor.has_value()) {
-        return std::unexpected(InternalFailure("ordered compound table core has no cursor"));
+        return std::unexpected(InternalFailure("ordered compound cursor core has no cursor"));
       }
-      const CursorId cursor = *core.cursor;
       auto done = CreateLabel();
-      auto row = CreateLabel();
-      auto advance = CreateLabel();
+      auto closed = CreateLabel();
+      std::optional<Label> positioned_done;
       if (!done.has_value()) {
         return std::unexpected(std::move(done.error()));
       }
-      if (!row.has_value()) {
-        return std::unexpected(std::move(row.error()));
+      if (!closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
       }
-      if (!advance.has_value()) {
-        return std::unexpected(std::move(advance.error()));
-      }
-      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
-        return opened;
-      }
-      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                          "unable to emit ordered compound table rewind");
-      if (!rewound.has_value()) {
-        return std::unexpected(std::move(rewound.error()));
-      }
-      if (auto bound = BindLabel(*row); !bound.has_value()) {
-        return bound;
-      }
-      if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
-        return filters;
-      }
-      if (complete_row) {
-        if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Ordered);
-            !projected.has_value()) {
-          return projected;
+      if (core.rowid_lookup != nullptr ||
+          (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
         }
-        if (auto membership = EmitStreamingMembership(core, *advance); !membership.has_value()) {
-          return membership;
+        positioned_done = *label;
+      }
+      const auto consume = [&](Label advance) -> LoweringResult<void> {
+        if (auto filters = EmitStreamingFilters(core, advance); !filters.has_value()) {
+          return filters;
         }
-      }
-      if (auto candidate =
-              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *advance);
-          !candidate.has_value()) {
-        return candidate;
-      }
-      if (auto bound = BindLabel(*advance); !bound.has_value()) {
-        return bound;
-      }
-      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                       "unable to emit ordered compound table advance");
-      if (!next.has_value()) {
-        return std::unexpected(std::move(next.error()));
+        if (complete_row) {
+          if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Ordered);
+              !projected.has_value()) {
+            return projected;
+          }
+          if (auto membership = EmitStreamingMembership(core, advance); !membership.has_value()) {
+            return membership;
+          }
+        }
+        return EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, advance);
+      };
+      if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, std::nullopt, consume);
+          !rows.has_value()) {
+        return rows;
       }
       if (auto bound = BindLabel(*done); !bound.has_value()) {
         return bound;
       }
-      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
-        return closed;
+      if (auto close = Append(CloseCursorInstruction{.cursor = *core.cursor}); !close.has_value()) {
+        return close;
+      }
+      if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
+        return jumped;
+      }
+      if (positioned_done.has_value()) {
+        if (auto bound = BindLabel(*positioned_done); !bound.has_value()) {
+          return bound;
+        }
+        if (auto close = Append(CloseCursorInstruction{.cursor = *core.cursor});
+            !close.has_value()) {
+          return close;
+        }
+        if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
+          return jumped;
+        }
+      }
+      if (auto bound = BindLabel(*closed); !bound.has_value()) {
+        return bound;
       }
     } else {
       if (auto filters = EmitStreamingFilters(core, *skipped); !filters.has_value()) {
@@ -13221,58 +13716,67 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return guards;
       }
     }
-    if (core.table_scan != nullptr) {
+    if (core.empty != nullptr) {
+      return BindLabel(*after);
+    }
+    if (core.table_scan != nullptr || core.rowid_lookup != nullptr || core.rowid_range != nullptr) {
       if (!core.cursor.has_value()) {
-        return std::unexpected(InternalFailure("set table core has no cursor"));
+        return std::unexpected(InternalFailure("set cursor core has no cursor"));
       }
-      const CursorId cursor = *core.cursor;
       auto done = CreateLabel();
-      auto row = CreateLabel();
-      auto advance = CreateLabel();
+      auto closed = CreateLabel();
+      std::optional<Label> positioned_done;
       if (!done.has_value()) {
         return std::unexpected(std::move(done.error()));
       }
-      if (!row.has_value()) {
-        return std::unexpected(std::move(row.error()));
+      if (!closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
       }
-      if (!advance.has_value()) {
-        return std::unexpected(std::move(advance.error()));
+      if (core.rowid_lookup != nullptr ||
+          (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        positioned_done = *label;
       }
-      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
-        return opened;
-      }
-      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                          "unable to emit set table rewind");
-      if (!rewound.has_value()) {
-        return std::unexpected(std::move(rewound.error()));
-      }
-      if (auto bound = BindLabel(*row); !bound.has_value()) {
-        return bound;
-      }
-      if (auto filters = EmitStreamingFilters(core, *advance); !filters.has_value()) {
-        return filters;
-      }
-      if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
-          !projected.has_value()) {
-        return projected;
-      }
-      if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
-          !inserted.has_value()) {
-        return inserted;
-      }
-      if (auto bound = BindLabel(*advance); !bound.has_value()) {
-        return bound;
-      }
-      auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                       "unable to emit set table advance");
-      if (!next.has_value()) {
-        return std::unexpected(std::move(next.error()));
+      const auto consume = [&](Label advance) -> LoweringResult<void> {
+        if (auto filters = EmitStreamingFilters(core, advance); !filters.has_value()) {
+          return filters;
+        }
+        if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
+            !projected.has_value()) {
+          return projected;
+        }
+        return EmitMaterializedSetInsert(target, count, distinct_membership);
+      };
+      if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, std::nullopt, consume);
+          !rows.has_value()) {
+        return rows;
       }
       if (auto bound = BindLabel(*done); !bound.has_value()) {
         return bound;
       }
-      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
-        return closed;
+      if (auto close = Append(CloseCursorInstruction{.cursor = *core.cursor}); !close.has_value()) {
+        return close;
+      }
+      if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
+        return jumped;
+      }
+      if (positioned_done.has_value()) {
+        if (auto bound = BindLabel(*positioned_done); !bound.has_value()) {
+          return bound;
+        }
+        if (auto close = Append(CloseCursorInstruction{.cursor = *core.cursor});
+            !close.has_value()) {
+          return close;
+        }
+        if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
+          return jumped;
+        }
+      }
+      if (auto bound = BindLabel(*closed); !bound.has_value()) {
+        return bound;
       }
     } else {
       if (auto filters = EmitStreamingFilters(core, *after); !filters.has_value()) {
@@ -13857,73 +14361,79 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitStreamingGuards(core, *next_core); !guards.has_value()) {
       return std::unexpected(std::move(guards.error()));
     }
-    if (core.table_scan != nullptr) {
+    if (core.empty != nullptr) {
+      if (auto bound = BindLabel(*next_core); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      return false;
+    }
+    if (core.table_scan != nullptr || core.rowid_lookup != nullptr || core.rowid_range != nullptr) {
       if (!core.cursor.has_value()) {
-        return std::unexpected(InternalFailure("LIMIT-one table core has no cursor"));
+        return std::unexpected(InternalFailure("LIMIT-one cursor core has no cursor"));
       }
       const CursorId cursor = *core.cursor;
       auto done = CreateLabel();
-      auto row = CreateLabel();
-      std::optional<Label> advance;
-      if (core.filter != nullptr && !core.filter->predicates.empty()) {
-        auto created = CreateLabel();
-        if (!created.has_value()) {
-          return std::unexpected(std::move(created.error()));
-        }
-        advance = *created;
-      }
+      auto matched = CreateLabel();
+      std::optional<Label> positioned_done;
       if (!done.has_value()) {
         return std::unexpected(std::move(done.error()));
       }
-      if (!row.has_value()) {
-        return std::unexpected(std::move(row.error()));
+      if (!matched.has_value()) {
+        return std::unexpected(std::move(matched.error()));
       }
-      if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                          "unable to emit LIMIT-one table rewind");
-      if (!rewound.has_value()) {
-        return std::unexpected(std::move(rewound.error()));
-      }
-      if (auto bound = BindLabel(*row); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto filters = EmitStreamingFilters(core, advance.value_or(*done));
-          !filters.has_value()) {
-        return std::unexpected(std::move(filters.error()));
-      }
-      if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
-        return std::unexpected(std::move(projected.error()));
-      }
-      if (auto result = Append(ResultRowInstruction{
-              .first = result_block_first_,
-              .count = static_cast<std::uint32_t>(select.result_columns.size()),
-          });
-          !result.has_value()) {
-        return std::unexpected(std::move(result.error()));
-      }
-      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (advance.has_value()) {
-        if (auto bound = BindLabel(*advance); !bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
+      if ((core.rowid_lookup != nullptr && core.filter != nullptr &&
+           !core.filter->predicates.empty()) ||
+          (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
         }
-        auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                         "unable to emit LIMIT-one table advance");
-        if (!next.has_value()) {
-          return std::unexpected(std::move(next.error()));
+        positioned_done = *label;
+      }
+      const auto consume = [&](Label rejected) -> LoweringResult<void> {
+        if (auto filters = EmitStreamingFilters(core, rejected); !filters.has_value()) {
+          return filters;
         }
+        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
+          return projected;
+        }
+        return Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(select.result_columns.size()),
+        });
+      };
+      if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, *matched, consume);
+          !rows.has_value()) {
+        return std::unexpected(std::move(rows.error()));
       }
       if (auto bound = BindLabel(*done); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
       if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
         return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(*next_core); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
+      }
+      if (positioned_done.has_value()) {
+        if (auto bound = BindLabel(*positioned_done); !bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+          return std::unexpected(std::move(closed.error()));
+        }
+        if (auto jumped = EmitJump(*next_core); !jumped.has_value()) {
+          return std::unexpected(std::move(jumped.error()));
+        }
+      }
+      if (auto bound = BindLabel(*matched); !bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = cursor}); !closed.has_value()) {
+        return std::unexpected(std::move(closed.error()));
+      }
+      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
+        return std::unexpected(std::move(jumped.error()));
       }
       if (auto bound = BindLabel(*next_core); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
@@ -14045,8 +14555,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
         } else {
           const auto& select = std::get<BoundSelectCore>(*core.bound);
-          if (core.table_scan != nullptr) {
-            if (auto emitted = EmitStreamingTableCore(core, select, *completion);
+          if (core.empty != nullptr) {
+            if (auto emitted = EmitStreamingEmptyCore(core); !emitted.has_value()) {
+              return emitted;
+            }
+            continue;
+          }
+          if (core.table_scan != nullptr || core.rowid_lookup != nullptr ||
+              core.rowid_range != nullptr) {
+            if (auto emitted = EmitStreamingCursorCore(core, select, *completion);
                 !emitted.has_value()) {
               return emitted;
             }
@@ -14334,9 +14851,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return advanced_order_ == nullptr ? Append(HaltInstruction{}) : EmitDistinctSorterDrain();
   }
 
+  [[nodiscard]] LoweringResult<void> EmitDistinctEmpty() {
+    auto completion = CreateLabel();
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto guards = EmitDistinctGuards(*completion); !guards.has_value()) {
+      return guards;
+    }
+    if (auto bound = BindLabel(*completion); !bound.has_value()) {
+      return bound;
+    }
+    return Append(HaltInstruction{});
+  }
+
   [[nodiscard]] LoweringResult<void> EmitDistinctTableScan() {
-    if (table_scan_ == nullptr || !cursor_.has_value() || !distinct_relation_.has_value()) {
-      return std::unexpected(InternalFailure("DISTINCT table scan resources are incomplete"));
+    if ((table_scan_ == nullptr && rowid_lookup_ == nullptr && rowid_range_ == nullptr) ||
+        !cursor_.has_value() || !distinct_relation_.has_value()) {
+      return std::unexpected(InternalFailure("DISTINCT cursor resources are incomplete"));
     }
     const CursorId cursor = AssumeValue(cursor_);
     const RelationId relation = AssumeValue(distinct_relation_);
@@ -14366,54 +14901,38 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return opened;
       }
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
-      return opened;
-    }
-
     auto unpositioned_completion = CreateLabel();
-    auto row = CreateLabel();
-    auto advance = CreateLabel();
     std::optional<Label> positioned_completion;
     if (!unpositioned_completion.has_value()) {
       return std::unexpected(std::move(unpositioned_completion.error()));
     }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    if (limit_ != nullptr && advanced_order_ == nullptr) {
+    if ((limit_ != nullptr && advanced_order_ == nullptr) || rowid_lookup_ != nullptr ||
+        (rowid_range_ != nullptr && RowIdRangeHasEnd(*rowid_range_))) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
       }
       positioned_completion = *label;
     }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *unpositioned_completion),
-                             "unable to emit DISTINCT table rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto filters = EmitFilters(*advance); !filters.has_value()) {
-      return filters;
-    }
-    if (auto projected = EmitDistinctProjection(); !projected.has_value()) {
-      return projected;
-    }
-    if (auto inserted = EmitDistinctMembership(*advance); !inserted.has_value()) {
-      return inserted;
-    }
-    if (advanced_order_ != nullptr) {
-      if (auto ordered = EmitDistinctOrderedCandidate(); !ordered.has_value()) {
-        return ordered;
+    StreamingCorePlan access;
+    access.table_scan = table_scan_;
+    access.rowid_lookup = rowid_lookup_;
+    access.rowid_range = rowid_range_;
+    access.cursor = cursor_;
+    const auto consume = [&](Label advance) -> LoweringResult<void> {
+      if (auto filters = EmitFilters(advance); !filters.has_value()) {
+        return filters;
       }
-    } else {
-      if (auto offset = EmitOffset(*advance); !offset.has_value()) {
+      if (auto projected = EmitDistinctProjection(); !projected.has_value()) {
+        return projected;
+      }
+      if (auto inserted = EmitDistinctMembership(advance); !inserted.has_value()) {
+        return inserted;
+      }
+      if (advanced_order_ != nullptr) {
+        return EmitDistinctOrderedCandidate();
+      }
+      if (auto offset = EmitOffset(advance); !offset.has_value()) {
         return offset;
       }
       if (auto result = Append(ResultRowInstruction{
@@ -14423,26 +14942,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !result.has_value()) {
         return result;
       }
-      if (limit_ != nullptr) {
-        if (!positioned_completion.has_value()) {
-          return std::unexpected(InternalFailure("DISTINCT LIMIT completion is unavailable"));
-        }
-        if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
-                .advance = *advance,
-                .completion = AssumeValue(positioned_completion),
-            });
-            !limited.has_value()) {
-          return limited;
-        }
+      if (limit_ == nullptr) {
+        return {};
       }
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
-                                     "unable to emit DISTINCT table advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
+      if (!positioned_completion.has_value()) {
+        return std::unexpected(InternalFailure("DISTINCT LIMIT completion is unavailable"));
+      }
+      return EmitDistinctLimitAfterRow(DistinctLimitTargets{
+          .advance = advance,
+          .completion = AssumeValue(positioned_completion),
+      });
+    };
+    if (auto rows = EmitStreamingCursorRows(access, *unpositioned_completion, positioned_completion,
+                                            std::nullopt, consume);
+        !rows.has_value()) {
+      return rows;
     }
     if (auto bound = BindLabel(*unpositioned_completion); !bound.has_value()) {
       return bound;
@@ -14545,7 +15059,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctPlan() {
-    if (table_scan_ != nullptr) {
+    if (std::holds_alternative<PhysicalEmptyNode>(leaf_->payload)) {
+      return EmitDistinctEmpty();
+    }
+    if (table_scan_ != nullptr || rowid_lookup_ != nullptr || rowid_range_ != nullptr) {
       return EmitDistinctTableScan();
     }
     if (std::holds_alternative<PhysicalSingleRowNode>(leaf_->payload)) {
@@ -14577,6 +15094,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf_->payload);
         lookup != nullptr) {
       return EmitRowIdLookup(*lookup);
+    }
+    if (const auto* range = std::get_if<PhysicalRowIdRangeNode>(&leaf_->payload);
+        range != nullptr) {
+      return EmitRowIdRange(*range);
     }
     if (const auto* index = std::get_if<PhysicalIndexScanNode>(&leaf_->payload); index != nullptr) {
       return index->covering ? EmitCoveringIndexScan(*index) : EmitNoncoveringIndexScan(*index);
@@ -14716,6 +15237,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .leaf = leaf_,
             .table_scan = table_scan_,
             .rowid_lookup = rowid_lookup_,
+            .rowid_range = rowid_range_,
             .index_scan = index_scan_,
             .filter = filter_,
             .limit = active_aggregate_output_.has_value() ? nullptr : limit_,
@@ -14725,6 +15247,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .index_key_first = index_key_first_,
             .index_key_capacity = index_key_capacity_,
             .index_rowid_register = index_rowid_register_,
+            .rowid_range_rowid_register = rowid_range_rowid_register_,
+            .rowid_range_comparison_register = rowid_range_comparison_register_,
             .indexed_min_max_null_constant = indexed_min_max_null_constant_,
         },
         *this);
@@ -14892,11 +15416,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool IsRowLoopAccess() const noexcept {
-    return table_scan_ != nullptr || index_scan_ != nullptr;
+    return table_scan_ != nullptr || rowid_range_ != nullptr || index_scan_ != nullptr;
   }
 
   [[nodiscard]] bool IsCursorAccess() const noexcept {
-    return table_scan_ != nullptr || rowid_lookup_ != nullptr || index_scan_ != nullptr;
+    return table_scan_ != nullptr || rowid_lookup_ != nullptr || rowid_range_ != nullptr ||
+           index_scan_ != nullptr;
   }
 
   enum class OrderingRuntime : std::uint8_t {
@@ -14937,6 +15462,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   const PhysicalNode* leaf_ = nullptr;
   const PhysicalTableScanNode* table_scan_ = nullptr;
   const PhysicalRowIdLookupNode* rowid_lookup_ = nullptr;
+  const PhysicalRowIdRangeNode* rowid_range_ = nullptr;
   const PhysicalIndexScanNode* index_scan_ = nullptr;
   const PhysicalGuardNode* guard_ = nullptr;
   const PhysicalFilterNode* filter_ = nullptr;
@@ -14993,6 +15519,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<RegisterId> index_key_first_;
   std::uint32_t index_key_capacity_ = 0;
   std::optional<RegisterId> index_rowid_register_;
+  std::optional<RegisterId> rowid_range_rowid_register_;
+  std::optional<RegisterId> rowid_range_comparison_register_;
   std::optional<RegisterId> sorter_record_first_;
   std::optional<RegisterId> top_n_bound_register_;
   std::optional<RegisterId> maximum_integer_register_;

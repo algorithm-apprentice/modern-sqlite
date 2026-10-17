@@ -2050,7 +2050,7 @@ TEST(PhysicalPlan, OptimizesDistinctValuesAndCompoundQueries) {
   }
 }
 
-TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
+TEST(PhysicalPlan, PublishesCanonicalAdvancedAccessAndMembership) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const PhysicalPlan values = OptimizeOrThrow("VALUES(1),(2)", catalog);
@@ -2064,16 +2064,17 @@ TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
   const PhysicalPlan distinct =
       OptimizeOrThrow("SELECT DISTINCT Name FROM Items WHERE id=1", catalog);
   ASSERT_EQ(4U, distinct.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(distinct.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(distinct.nodes()[0].payload));
   EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(distinct.nodes()[1].payload));
   EXPECT_TRUE(std::holds_alternative<PhysicalProjectionNode>(distinct.nodes()[2].payload));
   const auto& node = std::get<PhysicalDistinctNode>(distinct.nodes()[3].payload);
   EXPECT_EQ(PhysicalDistinctStrategy::kEphemeralMembership, node.strategy);
-  EXPECT_TRUE(distinct.candidates().empty());
-  EXPECT_FALSE(distinct.selected_candidate_index().has_value());
-  EXPECT_EQ(nullptr, distinct.selected_candidate());
+  ASSERT_EQ(1U, distinct.core_access_plans().size());
+  EXPECT_EQ(0U, distinct.core_access_plans()[0].core_index);
+  ASSERT_NE(nullptr, distinct.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, distinct.selected_candidate()->kind);
   EXPECT_EQ(
-      "CORE 0 SCAN \"Items\"\n"
+      "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid=?)\n"
       "DISTINCT CORE 0 USING EPHEMERAL RELATION",
       ExplainPhysicalPlan(distinct));
 
@@ -2084,8 +2085,9 @@ TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
   });
   ASSERT_NE(guarded.nodes().end(), filter);
   const auto& guarded_filter = std::get<PhysicalFilterNode>(filter->payload);
-  ASSERT_EQ(1U, guarded_filter.predicates.size());
+  EXPECT_TRUE(guarded_filter.predicates.empty());
   ASSERT_EQ(1U, guarded_filter.guards.size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(guarded.nodes()[0].payload));
 }
 
 TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
@@ -2507,6 +2509,159 @@ TEST(PhysicalPlan, RecognizesCompatibleRowIdSpellingsAndTieBreaksLookup) {
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, tiny.selected_candidate()->kind);
 }
 
+TEST(PhysicalPlan, SelectsRowIdRangeBeforeResidualPredicates) {
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE Name=?1 AND id<?2", TestCatalog());
+  EXPECT_EQ("SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)", ExplainPhysicalPlan(plan));
+}
+
+TEST(PhysicalPlan, NormalizesAndPublishesRowIdRangeBounds) {
+  struct Case {
+    std::string_view sql;
+    bool lower;
+    bool inclusive;
+    std::string_view explain;
+  };
+  constexpr std::array cases{
+      Case{.sql = "SELECT Name FROM Items WHERE id>?1",
+           .lower = true,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1<id",
+           .lower = true,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id>=?1",
+           .lower = true,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1<=id",
+           .lower = true,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id<?1",
+           .lower = false,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1>id",
+           .lower = false,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id<=?1",
+           .lower = false,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1>=id",
+           .lower = false,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<=?)"},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, TestCatalog());
+    const auto& range = std::get<PhysicalRowIdRangeNode>(plan.nodes()[0].payload);
+    const std::optional<PhysicalRangeBound>& bound = test.lower ? range.lower : range.upper;
+    ASSERT_TRUE(bound.has_value());
+    EXPECT_EQ(test.inclusive, bound->inclusive);
+    EXPECT_EQ(test.lower, range.lower.has_value());
+    EXPECT_EQ(!test.lower, range.upper.has_value());
+    ASSERT_NE(nullptr, plan.selected_candidate());
+    EXPECT_EQ(PhysicalAccessKind::kRowIdRange, plan.selected_candidate()->kind);
+    EXPECT_EQ(1U, plan.selected_candidate()->range_bound_count);
+    EXPECT_EQ(test.explain, ExplainPhysicalPlan(plan));
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(plan.selected_candidate_index(),
+              std::optional{plan.core_access_plans()[0].selected_candidate});
+  }
+
+  const PhysicalPlan bounded =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id>?1 AND id<=?2", TestCatalog());
+  const auto& range = std::get<PhysicalRowIdRangeNode>(bounded.nodes()[0].payload);
+  ASSERT_TRUE(range.lower.has_value());
+  ASSERT_TRUE(range.upper.has_value());
+  EXPECT_FALSE(range.lower->inclusive);
+  EXPECT_TRUE(range.upper->inclusive);
+  EXPECT_EQ(2U, bounded.selected_candidate()->range_bound_count);
+  EXPECT_LT(bounded.selected_candidate()->cost.estimated_output_rows,
+            bounded.candidates()[0].cost.estimated_output_rows);
+  EXPECT_LT(bounded.selected_candidate()->cost.work_units, bounded.candidates()[0].cost.work_units);
+  EXPECT_EQ("SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>? AND rowid<=?)",
+            ExplainPhysicalPlan(bounded));
+
+  const PhysicalPlan zero_estimate =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id<1", TestCatalog("Items", 0));
+  ASSERT_EQ(2U, zero_estimate.candidates().size());
+  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[0].cost);
+  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[1].cost);
+  ASSERT_NE(nullptr, zero_estimate.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdRange, zero_estimate.selected_candidate()->kind);
+}
+
+TEST(PhysicalPlan, KeepsLaterRowIdBoundsResidualAndRejectsAccessBarriers) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan repeated =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id>?1 AND id>=?2", catalog);
+  const auto& range = std::get<PhysicalRowIdRangeNode>(repeated.nodes()[0].payload);
+  ASSERT_TRUE(range.lower.has_value());
+  const auto& first = std::get<BoundParameterExpression>(
+      repeated.logical_plan().bound_select().expression(range.lower->key).payload);
+  EXPECT_EQ(0U, first.parameter.value());
+  const auto& filter = std::get<PhysicalFilterNode>(repeated.nodes()[1].payload);
+  ASSERT_EQ(1U, filter.predicates.size());
+  const auto& residual = std::get<BoundComparisonExpression>(
+      repeated.logical_plan().bound_select().expression(filter.predicates[0]).payload);
+  const auto& second = std::get<BoundParameterExpression>(
+      repeated.logical_plan().bound_select().expression(residual.right).payload);
+  EXPECT_EQ(1U, second.parameter.value());
+
+  constexpr std::array<std::string_view, 3> barriers{
+      "SELECT Name FROM Items WHERE +id>?1",
+      "SELECT Name FROM Items WHERE id>Name",
+      "SELECT key FROM wr WHERE key>'a'",
+  };
+  for (const std::string_view sql : barriers) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    EXPECT_FALSE(std::holds_alternative<PhysicalRowIdRangeNode>(plan.nodes()[0].payload));
+  }
+}
+
+TEST(PhysicalPlan, PublishesRowIdRangesForEveryNonjoinedCoreAndAggregateDirection) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan compound = OptimizeOrThrow(
+      "SELECT id FROM Items WHERE id<2 UNION ALL SELECT id FROM Items WHERE id>=2", catalog);
+  ASSERT_EQ(2U, compound.core_access_plans().size());
+  for (std::size_t core = 0; core < compound.core_access_plans().size(); ++core) {
+    EXPECT_EQ(core, compound.core_access_plans()[core].core_index);
+    const auto& selected = compound.core_access_plans()[core];
+    ASSERT_LT(selected.selected_candidate, selected.candidates.size());
+    EXPECT_EQ(PhysicalAccessKind::kRowIdRange,
+              selected.candidates[selected.selected_candidate].kind);
+  }
+  EXPECT_TRUE(
+      std::ranges::equal(compound.core_access_plans()[0].candidates, compound.candidates()));
+
+  const PhysicalPlan maximum = OptimizeOrThrow("SELECT max(id) FROM Items WHERE id<3", catalog);
+  const auto& reverse = std::get<PhysicalRowIdRangeNode>(maximum.nodes()[0].payload);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, reverse.direction);
+  EXPECT_EQ(
+      "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?) REVERSE\n"
+      "AGGREGATE CORE 0 INDEXED MIN/MAX",
+      ExplainPhysicalPlan(maximum));
+
+  const PhysicalPlan grouped = OptimizeOrThrow(
+      "SELECT id,count() FROM Items "
+      "WHERE (NULL OR abs(id-id-9223372036854775807-1)) AND id<0 "
+      "GROUP BY id ORDER BY id",
+      catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(grouped.nodes()[0].payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(grouped).strategy);
+
+  const PhysicalPlan schema =
+      OptimizeOrThrow("SELECT name FROM main.sqlite_schema WHERE rowid<3", catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(schema.nodes()[0].payload));
+}
+
 TEST(PhysicalPlan, PreservesFirstOriginalRowIdKeyAndResidualOccurrences) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan collated =
@@ -2596,12 +2751,11 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
       "ORDER BY Name DESC NULLS FIRST LIMIT ? OFFSET ?",
       catalog);
 
-  ASSERT_EQ(5U, plan.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
-  EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(plan.nodes()[1].payload));
+  ASSERT_EQ(4U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(plan.nodes()[0].payload));
 
-  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[2].payload);
-  EXPECT_EQ(PhysicalNodeId{1}, sort.input);
+  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
+  EXPECT_EQ(PhysicalNodeId{0}, sort.input);
   EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, sort.schedule);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
   EXPECT_FALSE(sort.input_order_satisfied);
@@ -2620,10 +2774,10 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
   EXPECT_EQ(logical_order.payload_expressions, sort.payload_expressions);
   EXPECT_EQ(logical_order.output_fields, sort.output_fields);
 
-  const auto& limit = std::get<PhysicalLimitNode>(plan.nodes()[3].payload);
-  EXPECT_EQ(PhysicalNodeId{2}, limit.input);
-  const auto& output = std::get<PhysicalOutputNode>(plan.nodes()[4].payload);
-  EXPECT_EQ(PhysicalNodeId{3}, output.input);
+  const auto& limit = std::get<PhysicalLimitNode>(plan.nodes()[2].payload);
+  EXPECT_EQ(PhysicalNodeId{1}, limit.input);
+  const auto& output = std::get<PhysicalOutputNode>(plan.nodes()[3].payload);
+  EXPECT_EQ(PhysicalNodeId{2}, output.input);
   EXPECT_EQ(plan.logical_plan().root(), output.logical_output);
 }
 
@@ -2672,7 +2826,7 @@ TEST(PhysicalPlan, IncludesOrderingExpressionsInCoveringIndexRequirements) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT id,Score FROM Items ORDER BY Category,id", catalog);
 
-  ASSERT_EQ(2U, plan.candidates().size());
+  ASSERT_EQ(4U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, plan.selected_candidate()->index);
   EXPECT_TRUE(plan.selected_candidate()->covering);
@@ -2690,7 +2844,7 @@ TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
       "WHERE Category=?1 AND Score>=?2 AND Score<?3",
       catalog);
 
-  ASSERT_EQ(3U, plan.candidates().size());
+  ASSERT_EQ(4U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ((AccessPathCost{
                 .estimated_input_rows = 4096,
@@ -2755,7 +2909,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
 
   const PhysicalPlan full = OptimizeOrThrow("SELECT Category, Score FROM Items", catalog);
-  ASSERT_EQ(2U, full.candidates().size());
+  ASSERT_EQ(4U, full.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, full.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, full.selected_candidate()->index);
   EXPECT_EQ((AccessPathCost{
@@ -2789,7 +2943,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
 
   const PhysicalPlan selective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Category=?1", catalog);
-  ASSERT_EQ(2U, selective_noncovering.candidates().size());
+  ASSERT_EQ(4U, selective_noncovering.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, selective_noncovering.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, selective_noncovering.selected_candidate()->index);
   EXPECT_FALSE(selective_noncovering.selected_candidate()->covering);
@@ -2807,10 +2961,12 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
 
   const PhysicalPlan unselective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Flag=?1", catalog);
-  ASSERT_EQ(2U, unselective_noncovering.candidates().size());
+  ASSERT_EQ(4U, unselective_noncovering.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, unselective_noncovering.selected_candidate()->kind);
-  EXPECT_EQ(IndexId{2}, unselective_noncovering.candidates()[1].index);
-  EXPECT_FALSE(unselective_noncovering.candidates()[1].covering);
+  const auto flag_index = std::ranges::find(unselective_noncovering.candidates(),
+                                            std::optional{IndexId{2}}, &AccessPathCandidate::index);
+  ASSERT_NE(unselective_noncovering.candidates().end(), flag_index);
+  EXPECT_FALSE(flag_index->covering);
 }
 
 TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
@@ -2818,7 +2974,7 @@ TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT id, Score FROM Items WHERE id=?1 AND Category=?2", catalog);
 
-  ASSERT_EQ(3U, plan.candidates().size());
+  ASSERT_EQ(5U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, plan.candidates()[1].kind);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.candidates()[2].kind);

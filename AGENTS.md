@@ -29,8 +29,17 @@ benchmark reports, pull-request text, and commit messages.
 - Use documentation-first development. Architectural or behavioral decisions
   require an ADR before implementation.
 - Develop exactly one coherent DAG node at a time.
-- Keep each pull request reviewable. An oversized DAG node must be divided
-  into ordered stacked pull requests, each containing one coherent slice.
+- Keep each pull request reviewable. An oversized DAG node normally uses one
+  coherent slice per ordered pull request. An accepted delivery ADR may batch
+  two through four related, buildable slice commits; every commit requires
+  accepted design, focused red/green or a green refactor baseline, complete
+  fast units, implementation review, ledger evidence, and node/ADR
+  traceability before the next slice begins. ADR-0106 alone authorizes the
+  seven-commit node-43 prerequisite-closure exception.
+- Run integrated closing gates against the final exact batch head. Changing an
+  earlier slice invalidates every dependent suffix's evidence and review until
+  that suffix is requalified. No later DAG node begins before the active node
+  is complete.
 - Continue autonomously through reviewed slices without waiting for routine
   user replies. Merge only after all required review and validation gates pass.
 - Review design documents and code changes before committing them.

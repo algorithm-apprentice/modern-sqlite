@@ -1157,6 +1157,598 @@
         }
       ],
       "sql_hex": "494e5345525420494e544f206974656d732869642c6e616d65292056414c5545532839392c2777726974652729"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-lower-exclusive",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643e39204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-lower-inclusive",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643e3d3130204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-upper-exclusive",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643c34204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-upper-inclusive",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643c3d33204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-two-sided",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643e3320414e442069643c3d36204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-reversed-operands",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f777320574845524520333c696420414e4420363e3d6964204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-typed-lower-rebinding",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "9"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "392e35",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "bits": "4023000000000000",
+            "type": "real"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "616263",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "00",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292c73756d286964292046524f4d206b65795f726f77732057484552452069643e3f31"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-typed-upper-rebinding",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "null"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "9"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "392e35",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "bits": "4023000000000000",
+            "type": "real"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "616263",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "hex": "00",
+            "type": "blob"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292c73756d286964292046524f4d206b65795f726f77732057484552452069643c3f31"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-skips-unused-end",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643e393920414e442069643c616273282d3932323333373230333638353437373538303829"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542044495354494e43542069642046524f4d206b65795f726f77732057484552452069643c34204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-compound-arms",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643c3320554e494f4e20414c4c2053454c4543542069642046524f4d206b65795f726f77732057484552452069643e3130204f52444552204259206964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-max-reverse",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d6178286964292046524f4d206b65795f726f77732057484552452069643c3130"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-schema-table",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d2073716c6974655f736368656d6120574845524520726f7769643c313030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-aliases",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f7773205748455245205f726f7769645f3e3d313020414e44206f69643c3d3131"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-demand-one-client",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643c3320554e494f4e2053454c454354203939204c494d49542031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-demand-one-exists",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542069642046524f4d206b65795f726f77732057484552452069643c3020554e494f4e2053454c4543542069642046524f4d206b65795f726f77732057484552452069643c30204c494d4954203129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-range-demand-one-scalar",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542069642046524f4d206b65795f726f77732057484552452069643c3020554e494f4e2053454c4543542069642046524f4d206b65795f726f77732057484552452069643c30204c494d4954203129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-lookup-demand-one-client",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206b65795f726f77732057484552452069643d3120554e494f4e2053454c454354203939204c494d49542031"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-lookup-demand-one-exists",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542069642046524f4d206b65795f726f77732057484552452069643d393920554e494f4e2053454c4543542069642046524f4d206b65795f726f77732057484552452069643d3938204c494d4954203129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "index-range",
+      "id": "rowid-lookup-demand-one-scalar",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542069642046524f4d206b65795f726f77732057484552452069643d393920554e494f4e2053454c4543542069642046524f4d206b65795f726f77732057484552452069643d3938204c494d4954203129"
     }
   ],
   "databases": [

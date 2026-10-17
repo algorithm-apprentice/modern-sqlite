@@ -349,6 +349,15 @@ instruction preserve that ceiling. Implementation review separately caught
 grouped-key recomputation; the final branch entry reuses the retained
 representative register and preserves nondeterministic callback counts.
 
+ADR-0105 addresses the remaining access mechanism directly: a typed
+single-source rowid range candidate, SQLite-compatible rowid seek conversion,
+and the canonical table row loop. It does not reorder residuals or expand
+joined/mutation access. The frozen predicate matrix is now 20/20 exact: the
+empty `id<0` range stops before the earlier residual overflow, matching the
+reference evaluation phase. The existing index-range shard now preserves all
+35 prior records and adds 20 rowid access records, for 54 native comparisons
+and one unchanged unsupported write boundary.
+
 ### A4. Joined ON readiness and access-key phases remain incomplete
 
 Priority: **medium correctness; prerequisite for computed-key admission**.
@@ -599,8 +608,12 @@ verified. ADR-0103 corrected B2 in PR #213 as
 passed; the unchanged original sanitizer model passed in 3.28 seconds under
 its ten-second deadline. Main, parent, trailer, and named branch cleanup were
 verified. ADR-0104 corrects conditional predicate branching in the current
-slice without claiming the independent rowid-range/access schedule. Exact-tree
-review and hosted delivery gates remain required.
+slice; PR #214 merged as `dee4020e73f61bd1b1b2349ed4e97278d55c1288`,
+accepted tree `a684376db7308f865a50b59de0f6518e8b6a5d89`. All nine final-head
+hosted checks passed, including the unchanged original model in 6.38 seconds
+under its ten-second deadline. Main, parent, trailer, and named branch cleanup
+were verified. ADR-0105 next addresses the independent rowid-range
+access schedule.
 Prioritize the remaining durable/lifecycle
 and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
