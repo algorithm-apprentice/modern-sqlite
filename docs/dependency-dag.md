@@ -193,6 +193,9 @@ domains.
 ADR-0108 preserves SQLite's path-dependent REAL/IntReal serial forms through
 explicit table-record affinity ownership, complete new-row affinity when an
 index is affected, and raw stored-value index-key reconstruction.
+ADR-0109 makes the index-range end edge logically unpositioned in the typed
+bytecode verifier while preserving readable fallthrough candidates and
+ordinary virtual NULL rows.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

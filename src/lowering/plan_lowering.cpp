@@ -7514,7 +7514,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     std::optional<Label> positioned_completion;
-    if (has_end_key || AppliesLimitToSourceRows()) {
+    if (AppliesLimitToSourceRows()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -7528,7 +7528,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       auto checked = ConvertProgramResult(
           EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, AssumeValue(cursor_),
                                      AssumeValue(index_key_first_), end_key_count,
-                                     AssumeValue(positioned_completion)),
+                                     *unpositioned_completion),
           "unable to emit covering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
@@ -7696,16 +7696,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<Label> positioned_completion;
     if (has_end_key) {
       auto first = CreateLabel();
-      auto positioned = CreateLabel();
       if (!first.has_value()) {
         return std::unexpected(std::move(first.error()));
       }
-      if (!positioned.has_value()) {
-        return std::unexpected(std::move(positioned.error()));
-      }
       first_end = *first;
-      positioned_completion = *positioned;
-    } else if (AppliesLimitToSourceRows()) {
+    }
+    if (AppliesLimitToSourceRows()) {
       auto positioned = CreateLabel();
       if (!positioned.has_value()) {
         return std::unexpected(std::move(positioned.error()));
@@ -7753,11 +7749,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (has_end_key) {
-      auto checked = ConvertProgramResult(
-          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, index_cursor,
-                                     AssumeValue(index_key_first_), end_key_count,
-                                     AssumeValue(positioned_completion)),
-          "unable to emit noncovering index end check");
+      auto checked =
+          ConvertProgramResult(EmitIndexTraversalEndCheck(
+                                   AssumeValue(builder_), index, traversal, index_cursor,
+                                   AssumeValue(index_key_first_), end_key_count, *index_exhausted),
+                               "unable to emit noncovering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }

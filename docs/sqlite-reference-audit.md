@@ -621,15 +621,21 @@ and whole-file diagnostics remain unchanged.
 
 ## Direct-bytecode verifier/runtime finding
 
-The verifier's virtual NULL-row/range-check state at
-`src/bytecode/program.cpp:2982-2988,3146-3156` disagrees with runtime
-`src/vm/vm.cpp:2259-2264`, which clears logical NULL publication on the
-range-end edge. An executable
-`NullRow -> CheckIndexRange -> ReadField` program verifies, then fails with
-`SQLITE_MISUSE` because the B-tree cursor is not positioned. A no-range
-control verifies and returns the logical NULL row. No current SQL lowering
-path has been established; this is a confirmed bytecode contract finding,
-not a demonstrated SQL defect.
+Status: **corrected by ADR-0109**.
+
+The verifier previously published positioned/readable state to both
+`CheckIndexRangeInstruction` edges. Runtime clears logical NULL publication
+on the range-end edge, so an executable
+`NullRow -> CheckIndexRange -> ReadField` program verified and then failed
+because the B-tree cursor was not positioned.
+
+ADR-0109 keeps ordinary NULL rows and range fallthrough readable, but publishes
+open/unpositioned state to `end_target`. Covering range exhaustion now uses the
+existing unpositioned completion label; noncovering first/subsequent ends use
+their state-compatible first-end and index-exhausted labels; positioned LIMIT
+completion remains separate. Direct bytecode rejects range-end reads, accepts
+seek-miss/range-end unpositioned merges, and preserves the no-range NULL-row
+control.
 
 ## Repair ordering and remaining verification
 

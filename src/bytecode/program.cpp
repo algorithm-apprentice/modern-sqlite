@@ -3171,10 +3171,11 @@ struct ProgramAnalysis {
             if (auto result = require_range(operation.first_key, operation.key_count); !result) {
               return result;
             }
-            if (auto result = merge_state(operation.end_target.value(), state); !result) {
+            if (auto result = fallthrough(); !result) {
               return result;
             }
-            return fallthrough();
+            set_cursor_state(operation.cursor, CursorState::kUnpositioned);
+            return merge_state(operation.end_target.value(), state);
           } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction> ||
                                std::is_same_v<Operation, ReadRowIdInstruction>) {
             if (auto result = require_positioned(operation.cursor); !result) {
