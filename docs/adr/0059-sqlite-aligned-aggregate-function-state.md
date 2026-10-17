@@ -245,8 +245,12 @@ Each non-NULL argument first receives SQLite numeric-type coercion:
   numeric prefix exists; and
 - NULL is ignored.
 
-TEXT numeric classification stops at the first embedded NUL before deciding
-whether decimal-point or exponent syntax forces REAL.
+ADR-0100 routes TEXT classification through the canonical function numeric-type
+operation, distinct from ordinary numeric affinity. Decimal validity and real
+syntax stop at the first NUL. Integer syntax selects INTEGER only through the
+exact `[-2^51, 2^51)` round-trip rule or a successful integer parse over the
+complete original byte length. Decimal/exponent syntax stays REAL; remaining
+TEXT and BLOB use the existing forced REAL conversion.
 
 Integer mode uses checked signed addition. On overflow it:
 

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -132,14 +133,15 @@ struct StepOutcome {
   };
 }
 
-[[nodiscard]] StepOutcome RunNumeric(std::optional<std::size_t> failure) {
+[[nodiscard]] StepOutcome RunNumeric(std::optional<std::size_t> failure, const std::string& text,
+                                     modern_sqlite::SqlValueType expected_type) {
   using namespace modern_sqlite;
   const AggregateFunction* const function = Resolve("sum", 1);
   if (function == nullptr) {
     return {};
   }
   AggregateState state = function->CreateState();
-  const std::array arguments{SqlValue::Text(std::string(256U, '7'))};
+  const std::array arguments{SqlValue::Text(text)};
   allocation_index.store(0, std::memory_order_relaxed);
   if (failure.has_value()) {
     failing_allocation = *failure;
@@ -156,16 +158,27 @@ struct StepOutcome {
   inject_failure = false;
   const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
   if (!stepped.has_value()) {
+    const bool returned_oom = IsOutOfMemory(stepped.error());
+    state.Reset();
+    const auto repeated = function->Step(
+        state, AggregateFunctionContext{BinaryCollation(), ByteCount{1024}}, arguments);
+    if (!repeated.has_value()) {
+      throw std::runtime_error{"numeric aggregate failed after allocation-error reset"};
+    }
+    const auto recovered = function->Finalize(state);
+    if (!recovered.has_value() || recovered->type() != expected_type) {
+      throw std::runtime_error{"numeric aggregate did not recover its result type"};
+    }
     return StepOutcome{
         .allocations = allocations,
-        .returned_oom = IsOutOfMemory(stepped.error()),
+        .returned_oom = returned_oom,
     };
   }
   const Result<SqlValue> finalized = function->Finalize(state);
   return StepOutcome{
       .allocations = allocations,
       .step_succeeded = true,
-      .final_succeeded = finalized.has_value(),
+      .final_succeeded = finalized.has_value() && finalized->type() == expected_type,
   };
 }
 
@@ -289,8 +302,25 @@ int main() try {
   if (!ExhaustImmediateFailures(RunMin, 2U)) {
     return 2;
   }
-  if (!ExhaustImmediateFailures(RunNumeric, 2U)) {
-    return 3;
+  struct NumericCase {
+    std::string text;
+    modern_sqlite::SqlValueType type;
+  };
+  const std::array numeric_cases{
+      NumericCase{.text = std::string(256U, '7'), .type = modern_sqlite::SqlValueType::kReal},
+      NumericCase{.text = std::string(256U, '0') + std::string{"1\0e2", 4},
+                  .type = modern_sqlite::SqlValueType::kInteger},
+      NumericCase{.text = std::string(256U, '0') + std::string{"9007199254740992\0x", 18},
+                  .type = modern_sqlite::SqlValueType::kReal},
+  };
+  for (const NumericCase& numeric : numeric_cases) {
+    if (!ExhaustImmediateFailures(
+            [&numeric](std::optional<std::size_t> failure) {
+              return RunNumeric(failure, numeric.text, numeric.type);
+            },
+            2U)) {
+      return 3;
+    }
   }
   if (!ExhaustImmediateFailures(RunFirstSeparatorConversion, 3U)) {
     return 4;

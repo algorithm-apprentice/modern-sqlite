@@ -90,6 +90,7 @@ class SqlValue {
 };
 
 [[nodiscard]] SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity);
+[[nodiscard]] SqlValue ApplyNumericType(SqlValue value);
 [[nodiscard]] SqlValue CastValue(SqlValue value, CastTarget target);
 [[nodiscard]] SqlValue CoerceNumericForArithmetic(const SqlValue& value);
 [[nodiscard]] std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept;

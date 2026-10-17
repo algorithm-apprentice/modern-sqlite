@@ -306,6 +306,104 @@ TEST(SqlAffinity, RealAffinityMaterializesRealValuesOnlyForNumericInputs) {
   ExpectNull(ApplyAffinity(SqlValue{}, TypeAffinity::kReal));
 }
 
+TEST(SqlNumericType, PreservesRealSyntaxAndUsesOriginalLengthIntegerFallback) {
+  struct Case {
+    std::string_view bytes;
+    SqlValueType type = SqlValueType::kInteger;
+    std::int64_t integer = 0;
+    double real = 0.0;
+  };
+  const std::array cases{
+      Case{.bytes = std::string_view{"1\0e2", 4}, .integer = 1},
+      Case{.bytes = std::string_view{"1 \0e2", 5}, .integer = 1},
+      Case{.bytes = std::string_view{"9007199254740992\0x", 18},
+           .type = SqlValueType::kReal,
+           .real = 9007199254740992.0},
+      Case{.bytes = "9007199254740993", .integer = INT64_C(9007199254740993)},
+      Case{.bytes = std::string_view{"2251799813685247\0x", 18},
+           .integer = INT64_C(2251799813685247)},
+      Case{.bytes = std::string_view{"2251799813685248\0x", 18},
+           .type = SqlValueType::kReal,
+           .real = 2251799813685248.0},
+      Case{.bytes = std::string_view{"-2251799813685248\0x", 19},
+           .integer = -INT64_C(2251799813685248)},
+      Case{.bytes = std::string_view{"-2251799813685249\0x", 19},
+           .type = SqlValueType::kReal,
+           .real = -2251799813685249.0},
+      Case{.bytes = "9223372036854775807", .integer = std::numeric_limits<std::int64_t>::max()},
+      Case{.bytes = "-9223372036854775808", .integer = std::numeric_limits<std::int64_t>::min()},
+      Case{.bytes = std::string_view{"9223372036854775807\0x", 21},
+           .type = SqlValueType::kReal,
+           .real = 9223372036854775808.0},
+      Case{.bytes = std::string_view{"-9223372036854775808\0x", 22},
+           .type = SqlValueType::kReal,
+           .real = -9223372036854775808.0},
+      Case{.bytes = std::string_view{"1.0\0x", 5}, .type = SqlValueType::kReal, .real = 1.0},
+      Case{.bytes = std::string_view{"1e0\0x", 5}, .type = SqlValueType::kReal, .real = 1.0},
+      Case{.bytes = "1e-400", .type = SqlValueType::kReal},
+      Case{.bytes = "1e309",
+           .type = SqlValueType::kReal,
+           .real = std::numeric_limits<double>::infinity()},
+      Case{.bytes = "-0.0", .type = SqlValueType::kReal, .real = -0.0},
+      Case{.bytes = std::string_view{"-0\0e2", 5}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.bytes);
+    const SqlValue value = ApplyNumericType(TextValue(test.bytes));
+    if (test.type == SqlValueType::kInteger) {
+      ExpectInteger(value, test.integer);
+    } else {
+      ExpectReal(value, test.real);
+      if (value.real_value().has_value()) {
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(test.real),
+                  std::bit_cast<std::uint64_t>(*value.real_value()));
+      }
+    }
+  }
+}
+
+TEST(SqlNumericType, RetainsUnconvertedOwnershipAndDistinctConversionPolicies) {
+  for (const std::string_view bytes : {"", "1x", "1e", "0x10", "+", "."}) {
+    ExpectText(ApplyNumericType(TextValue(bytes)), bytes);
+  }
+  const std::string incomplete{"1e\0x", 4};
+  ExpectText(ApplyNumericType(TextValue(incomplete)), incomplete);
+  const std::string malformed{"\xff\0x", 3};
+  ExpectText(ApplyNumericType(TextValue(malformed)), malformed);
+
+  const std::string payload(256, 'x');
+  SqlValue text = TextValue(payload);
+  ASSERT_TRUE(text.text_value().has_value());
+  const char* const text_data = text.text_value()->data();
+  const SqlValue retained_text = ApplyNumericType(std::move(text));
+  ExpectText(retained_text, payload);
+  ASSERT_TRUE(retained_text.text_value().has_value());
+  EXPECT_EQ(text_data, retained_text.text_value()->data());
+
+  const std::string bytes{"1\0e2", 4};
+  SqlValue blob = BlobValue(bytes);
+  ASSERT_TRUE(blob.blob_value().has_value());
+  const std::byte* const blob_data = blob.blob_value()->data();
+  const SqlValue retained_blob = ApplyNumericType(std::move(blob));
+  ExpectBlob(retained_blob, bytes);
+  ASSERT_TRUE(retained_blob.blob_value().has_value());
+  EXPECT_EQ(blob_data, retained_blob.blob_value()->data());
+
+  ExpectInteger(ApplyNumericType(SqlValue::Integer(1)), 1);
+  ExpectReal(ApplyNumericType(SqlValue::Real(1.0)), 1.0);
+  ExpectNull(ApplyNumericType(SqlValue{}));
+  const SqlValue zero = ApplyNumericType(SqlValue::Real(-0.0));
+  ASSERT_TRUE(zero.real_value().has_value());
+  EXPECT_TRUE(std::signbit(*zero.real_value()));
+  ExpectReal(ApplyNumericType(SqlValue::Real(std::numeric_limits<double>::infinity())),
+             std::numeric_limits<double>::infinity());
+
+  ExpectReal(ApplyNumericType(TextValue("1.0")), 1.0);
+  ExpectInteger(ApplyAffinity(TextValue("1.0"), TypeAffinity::kNumeric), 1);
+  ExpectInteger(CastValue(TextValue("1.0"), CastTarget::kNumeric), 1);
+  ExpectReal(CoerceNumericForArithmetic(TextValue("1.0")), 1.0);
+}
+
 TEST(SqlCast, IntegerConsumesPrefixesTruncatesAndSaturates) {
   struct Case {
     std::string_view input;
