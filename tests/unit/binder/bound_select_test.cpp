@@ -584,7 +584,7 @@ TEST(Binder, DerivesResultValueDemandFromDestinationAndSetConsumers) {
   }
 }
 
-TEST(Binder, RejectsScalarWidthParentAliasesAndStagedQueryFeatures) {
+TEST(Binder, RejectsScalarWidthParentAliasesAndMutationQueryFeatures) {
   const auto catalog = TestCatalog();
   ExpectBindError("SELECT (SELECT id,Name FROM Items)", catalog,
                   BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
@@ -592,9 +592,10 @@ TEST(Binder, RejectsScalarWidthParentAliasesAndStagedQueryFeatures) {
                   "no such column: x");
   ExpectBindError("SELECT (SELECT x),1 AS x", catalog, BindErrorCode::kNoSuchColumn,
                   "no such column: x");
-  ExpectBindError("SELECT (SELECT Name) AS x FROM Items WHERE (SELECT x) IS NOT NULL", catalog,
-                  BindErrorCode::kUnsupportedFeature,
-                  "outer result-alias definitions containing queries are not supported");
+  EXPECT_TRUE(
+      BindSelectStatement(
+          ParseTree("SELECT (SELECT Name) AS x FROM Items WHERE (SELECT x) IS NOT NULL"), catalog)
+          .has_value());
   ExpectBindError("SELECT (SELECT sum(parent.Score)) FROM Items parent", catalog,
                   BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
   ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
@@ -794,11 +795,143 @@ TEST(Binder, ChecksAliasTargetWidthBeforeTheQueryDefinitionBoundary) {
            "WHERE (SELECT x)>0",
            "SELECT *,EXISTS(SELECT 1) AS x FROM Items WHERE (SELECT x)>0",
            "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE EXISTS(SELECT x))",
-           "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE (SELECT x)>0)",
        }) {
     SCOPED_TRACE(sql);
-    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
-                    "outer result-alias definitions containing queries are not supported");
+    EXPECT_TRUE(BindSelectStatement(ParseTree(sql), catalog).has_value());
+  }
+  ExpectBindError("SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE (SELECT x)>0)", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+}
+
+TEST(Binder, InstantiatesQueryContainingResultReferencesWithFreshOwners) {
+  const auto catalog = TestCatalog();
+  const BoundSelect local = BindOrThrow("SELECT (SELECT 1) AS x FROM Items WHERE x+x>0", catalog);
+  ASSERT_EQ(4U, local.query_count());
+  for (const BoundQueryId query : {BoundQueryId{1}, BoundQueryId{2}, BoundQueryId{3}}) {
+    EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, local.query(query).parent);
+  }
+  const auto* original = std::get_if<BoundSubqueryExpression>(
+      &local.expression(local.result_columns()[0].expression).payload);
+  ASSERT_NE(nullptr, original);
+  EXPECT_EQ(BoundQueryId{1}, original->query);
+
+  const BoundSelect shadowed = BindOrThrow(
+      "SELECT (SELECT o.Name) AS x FROM Items o "
+      "WHERE (SELECT x FROM Items o WHERE o.id=1) IS NOT NULL",
+      catalog);
+  ASSERT_EQ(4U, shadowed.query_count());
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, shadowed.query(BoundQueryId{2}).parent);
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{2}}, shadowed.query(BoundQueryId{3}).parent);
+  ASSERT_EQ(1U, shadowed.query(BoundQueryId{3}).captures.size());
+  const auto* captured =
+      std::get_if<BoundSourceCapture>(&shadowed.query(BoundQueryId{3}).captures.front());
+  ASSERT_NE(nullptr, captured);
+  EXPECT_EQ(BoundSourceId{0}, captured->identity.source);
+
+  EXPECT_TRUE(
+      BindSelectStatement(ParseTree("SELECT EXISTS("
+                                    "SELECT coalesce(1,(SELECT 1,2)) AS x WHERE EXISTS(SELECT x))"),
+                          catalog)
+          .has_value());
+  ExpectBindError("SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x WHERE x)", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+
+  for (const std::string_view sql : {
+           "SELECT coalesce((SELECT NULL),\"later\") AS x,Name AS later "
+           "FROM Items WHERE (SELECT x)='later'",
+           "SELECT coalesce((SELECT NULL),true) AS x FROM Items "
+           "WHERE (SELECT 0 AS true WHERE x=1)=0",
+           "SELECT EXISTS(SELECT coalesce((SELECT NULL),(1 COLLATE missing)=2) AS x "
+           "WHERE EXISTS(SELECT x))",
+           "SELECT EXISTS(SELECT coalesce(1,(SELECT 1,2)) AS x ORDER BY x+0)",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_TRUE(BindSelectStatement(ParseTree(sql), catalog).has_value());
+  }
+  ExpectBindError(
+      "SELECT EXISTS(SELECT coalesce((SELECT NULL),(1 COLLATE missing)=2) AS x WHERE x=0)", catalog,
+      BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  ExpectBindError("SELECT EXISTS(SELECT ((1 COLLATE missing)=2) AS x WHERE x)", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  ExpectBindError("SELECT EXISTS(SELECT Value=1 FROM CustomCollation GROUP BY 1)", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  ExpectBindError("SELECT EXISTS(SELECT (SELECT 1,2) INTERSECT SELECT 1)", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+  for (const std::string_view sql : {
+           "SELECT EXISTS(VALUES((SELECT 1,2)))",
+           "SELECT EXISTS(VALUES((1 COLLATE missing)=2))",
+           "SELECT EXISTS(VALUES(1),((SELECT 1,2)))",
+           "SELECT EXISTS(SELECT sum(id) FROM Items INTERSECT SELECT 1)",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_TRUE(BindSelectStatement(ParseTree(sql), catalog).has_value());
+  }
+  ExpectBindError("SELECT EXISTS(VALUES((SELECT 1,2)) INTERSECT VALUES(1))", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+  ExpectBindError(
+      "SELECT EXISTS(VALUES(1,Value=1),((SELECT 1,2),1) INTERSECT VALUES(1,1)) "
+      "FROM CustomCollation",
+      catalog, BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  for (const std::string_view sql : {
+           "SELECT (SELECT 1) AS x,(SELECT x)",
+           "SELECT (SELECT 1) AS x FROM Items o WHERE (SELECT o.x)>0",
+           "SELECT (SELECT 1) AS x FROM Items WHERE (SELECT 1 LIMIT x)>0",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kNoSuchColumn, rejected.error().code);
+  }
+}
+
+TEST(Binder, PreservesQueryCopyOrderingGroupingAndValidatedDepth) {
+  const auto catalog = TestCatalog();
+  const BoundSelect direct = BindOrThrow("SELECT (SELECT 1) AS x ORDER BY x", catalog);
+  EXPECT_EQ(2U, direct.query_count());
+  const BoundSelect ordered = BindOrThrow("SELECT (SELECT 1) AS x ORDER BY x+0", catalog);
+  EXPECT_EQ(3U, ordered.query_count());
+  const BoundSelect nested_order =
+      BindOrThrow("SELECT (SELECT 1) AS x ORDER BY (SELECT x)", catalog);
+  ASSERT_EQ(4U, nested_order.query_count());
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{2}},
+            nested_order.query(BoundQueryId{3}).parent);
+
+  const BoundSelect grouped =
+      BindOrThrow("SELECT (SELECT 1),count() FROM Items GROUP BY 1,1", catalog);
+  ASSERT_EQ(4U, grouped.query_count());
+  const auto& core = std::get<BoundSelectCore>(grouped.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  ASSERT_EQ(2U, core.aggregate->group_by.size());
+  const auto copied_query = [&](BoundExpressionId expression) {
+    const auto* alias =
+        std::get_if<BoundAliasReferenceExpression>(&grouped.expression(expression).payload);
+    EXPECT_NE(nullptr, alias);
+    const BoundExpressionId target = alias == nullptr ? expression : alias->target;
+    const auto* query = std::get_if<BoundSubqueryExpression>(&grouped.expression(target).payload);
+    EXPECT_NE(nullptr, query);
+    return query == nullptr ? BoundQueryId{0} : query->query;
+  };
+  EXPECT_EQ(BoundQueryId{2}, copied_query(core.aggregate->group_by[0].expression));
+  EXPECT_EQ(BoundQueryId{3}, copied_query(core.aggregate->group_by[1].expression));
+  EXPECT_EQ(std::optional<std::size_t>{0}, core.aggregate->group_by[0].result_column);
+  EXPECT_EQ(std::optional<std::size_t>{0}, core.aggregate->group_by[1].result_column);
+
+  const auto nested = [](std::string expression, std::size_t depth) {
+    for (std::size_t index = 0; index < depth; ++index) {
+      expression = "(SELECT " + expression + ")";
+    }
+    return expression;
+  };
+  const std::string accepted =
+      "SELECT " + nested("1", 43) + " AS x FROM Items WHERE " + nested("x", 43) + ">0";
+  EXPECT_TRUE(BindSelectStatement(ParseTree(accepted), catalog).has_value());
+  for (const std::pair<std::size_t, std::size_t> depths :
+       {std::pair{44U, 1U}, std::pair{1U, 44U}}) {
+    const std::string rejected = "SELECT " + nested("1", depths.first) + " AS x FROM Items WHERE " +
+                                 nested("x", depths.second) + ">0";
+    const auto bound = BindSelectStatement(ParseTree(rejected), catalog);
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
   }
 }
 
