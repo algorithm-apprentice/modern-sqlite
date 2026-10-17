@@ -10018,33 +10018,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
              lookup->constraint->predicate == predicate.predicate &&
              lookup->constraint->conjunct_position == predicate.conjunct_position;
     }
-    if (const auto* index = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
-        index != nullptr) {
-      if (std::ranges::any_of(index->equalities, [&](const auto& equality) {
-            return equality.origin == PhysicalPredicateOrigin::kOn &&
-                   equality.predicate == predicate.predicate &&
-                   equality.conjunct_position == predicate.conjunct_position;
-          })) {
-        return true;
-      }
-      return index->range.has_value() &&
-             ((index->range->lower.has_value() &&
-               index->range->lower->origin == PhysicalPredicateOrigin::kOn &&
-               index->range->lower->predicate == predicate.predicate &&
-               index->range->lower->conjunct_position == predicate.conjunct_position) ||
-              (index->range->upper.has_value() &&
-               index->range->upper->origin == PhysicalPredicateOrigin::kOn &&
-               index->range->upper->predicate == predicate.predicate &&
-               index->range->upper->conjunct_position == predicate.conjunct_position));
-    }
-    if (const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&source.access->payload);
-        automatic != nullptr) {
-      return std::ranges::any_of(automatic->equalities, [&](const auto& equality) {
-        return equality.origin == PhysicalPredicateOrigin::kOn &&
-               equality.predicate == predicate.predicate &&
-               equality.conjunct_position == predicate.conjunct_position;
-      });
-    }
     return false;
   }
 

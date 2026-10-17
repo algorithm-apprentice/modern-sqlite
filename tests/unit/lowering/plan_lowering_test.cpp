@@ -1234,6 +1234,23 @@ TEST_F(ReadLoweringJoinedPhase, MatchesJoinedOnReadinessAndCandidateMissPhases) 
                std::runtime_error);
 }
 
+TEST_F(ReadLoweringJoinedPhase, RetainsStoredIndexAffinityResiduals) {
+  const auto rows = Execute(
+      "SELECT p.id,b.id FROM probe_rows p JOIN key_rows b "
+      "ON b.text_key=p.raw_key ORDER BY p.id,b.id");
+  constexpr std::array<std::array<std::int64_t, 2>, 4> kExpected{{
+      {2, 4},
+      {2, 5},
+      {4, 8},
+      {4, 9},
+  }};
+  ASSERT_EQ(kExpected.size(), rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(kExpected[index][0], rows[index][0].integer_value());
+    EXPECT_EQ(kExpected[index][1], rows[index][1].integer_value());
+  }
+}
+
 TEST_F(ReadLoweringAutomaticJoin,
        PreservesAutomaticSourcesAcrossOrderingDistinctAndAggregateConsumers) {
   const auto ordered = Execute(

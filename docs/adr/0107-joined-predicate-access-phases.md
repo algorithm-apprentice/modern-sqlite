@@ -96,16 +96,18 @@ list.
 WHERE guards and predicates retain their existing `PhysicalFilterNode`
 ownership and schedule. This ADR does not move WHERE terms into ON metadata.
 
-### 2. Publish and consume selected access-term identity
+### 2. Publish access-term identity and consume exact rowid terms
 
 Extend the existing physical rowid lookup with the selected original
 predicate and conjunct position. Existing stored-index and automatic-index
-equalities/ranges already publish that identity.
+equalities/ranges continue to publish their identity for validation.
 
 Lowering uses one `AccessConsumesPredicate` query over the selected physical
-source access. A selected equality/range term initializes the cursor and is
-not emitted again as an ON residual. Every unselected term executes exactly
-once at its published phase.
+source access. A selected exact rowid equality initializes the typed seek and
+is not emitted again as an ON residual. Stored-index and automatic-index
+constraints retain their existing ON residual recheck because current
+candidate positioning is not an exact substitute for all affinity/collation
+comparisons. Every other term executes at its published phase.
 
 Consumption matches the owning physical join, predicate identity, and
 conjunct position. Expression identity alone is insufficient because alias
@@ -140,7 +142,8 @@ from the original bound conjuncts and requires:
 - source-ready key dependencies;
 - exact predicate/key orientation;
 - one selected identity per access constraint;
-- no selected ON term emitted as an ON residual;
+- no selected exact-rowid ON term emitted as an ON residual;
+- unchanged stored/automatic-index ON residual rechecks;
 - unchanged selected-WHERE residual ownership; and
 - all original ON conjuncts represented exactly once in the placement list.
 
@@ -236,7 +239,8 @@ Add focused reds for:
 - LEFT/RIGHT/FULL missing computed probes that skip sibling errors;
 - LEFT/RIGHT/FULL deterministic scalar keys that execute before a false
   sibling;
-- access-term non-reexecution;
+- exact-rowid access-term non-reexecution and unchanged stored/automatic
+  residual rechecks;
 - exact virtual-row and RIGHT/FULL replay behavior; and
 - deterministic versus nondeterministic scalar key admission.
 
@@ -290,7 +294,7 @@ The arithmetic control remains 652 instructions, 768 comparisons, and
 reduces VM work by 99.4% and passes the accepted 1,024-instruction,
 1,024-comparison, and 13-page limits.
 
-The final commit-level fast tier passes 1,374 batched and 89 isolated tests.
+The final commit-level fast tier passes 1,375 batched and 89 isolated tests.
 Optimizer/lowering OOM and allocation executables pass. Focused ASan/UBSan
 tests cover exact placement, single key evaluation, readiness errors, and
 outer candidate misses. Formatting, changed-translation-unit clang-tidy,
@@ -303,7 +307,8 @@ Positive:
 
 - ON errors and callbacks follow explicit SQLite-aligned readiness and
   preservation phases.
-- Selected access predicates are evaluated once.
+- Selected exact-rowid ON predicates are evaluated once; stored/automatic
+  constraints retain their residual comparison.
 - Deterministic scalar rowid probes eliminate the remaining repeated-scan
   gap in this matrix.
 - One placement representation serves every joined consumer.
@@ -320,7 +325,7 @@ Negative:
 ### Keep complete ON expressions at the candidate
 
 Rejected because empty inputs suppress source-free/left-ready errors and
-selected access terms are reevaluated.
+selected exact-rowid access terms are reevaluated.
 
 ### Hoist all deterministic ON expressions
 
