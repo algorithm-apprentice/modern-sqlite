@@ -168,6 +168,8 @@ parsers while preserving distinct affinity, CAST, and arithmetic behavior.
 ADR-0101 contains expected codec/page/read-cursor ownership and diagnostic
 allocation failures at their existing typed boundaries without changing
 borrowed decoding or persistent behavior.
+ADR-0102 defines change-aware local verification and bounded fast-local unit
+execution while retaining isolated qualification and required hosted gates.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

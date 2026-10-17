@@ -74,6 +74,24 @@ Tests belong to the module that introduces the behavior. Do not defer unit,
 format, malformed-input, failure-injection, or ownership tests to a later
 "testing phase".
 
+## Verification efficiency
+
+- Use `python3 tools/verify.py plan --base-ref <base>` to select local closing
+  checks from the actual change. A plan is not execution evidence; unknown
+  changes escalate and outstanding compiler/hosted requirements stay explicit.
+- The focused regression and complete fast unit tier remain mandatory.
+  `tools/run_fast_tests.py` is an optional bounded fast-local layer, not a
+  substitute for isolated qualification, models, or required hosted gates.
+- Run configuration-independent checks once per unchanged-input local plan.
+  Use `tools/verify.py run-shared` to reconcile every excluded configuration
+  against the owner before reusing its result; missing/different instances fail.
+  Do not repeat successful matching work after review-only or documentation
+  updates, and do not reuse differently configured or incomplete evidence.
+- Use `tools/verify.py build-native` for the canonical native targets rather
+  than rebuilding unrelated default-ALL tests. Keep native timings isolated.
+- Follow ADR-0102 and `docs/verification.md`; preserve assertions, workloads,
+  allocation limits, thresholds, and deadlines.
+
 ## Architecture rules
 
 - Dependencies point only downward in `docs/architecture.md`.

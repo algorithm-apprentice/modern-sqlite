@@ -1844,6 +1844,27 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+foreach(verification_tool IN ITEMS verification fast_local)
+  if(verification_tool STREQUAL "verification")
+    set(verification_test "verification_test.py")
+  else()
+    set(verification_test "fast_tests_test.py")
+  endif()
+  add_test(
+    NAME "tools.${verification_tool}"
+    COMMAND
+      "${Python3_EXECUTABLE}" -m unittest
+      "tests/tools/${verification_test}"
+  )
+  set_tests_properties(
+    "tools.${verification_tool}"
+    PROPERTIES
+      LABELS tools
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endforeach()
+
 add_test(
   NAME cli.storage_inspector
   COMMAND
@@ -2144,3 +2165,6 @@ set_tests_properties(
     LABELS differential
     TIMEOUT 60
 )
+
+include("${PROJECT_SOURCE_DIR}/cmake/Verification.cmake")
+modern_sqlite_label_shared_verification_tests()

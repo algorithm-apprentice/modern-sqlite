@@ -48,7 +48,9 @@
     "nextReadyNode": "python3 tools/project_graph.py next-ready --json",
     "configure": "cmake --preset dev-debug",
     "build": "cmake --build --preset dev-debug",
-    "test": "ctest --preset dev-debug"
+    "test": "ctest --preset dev-debug",
+    "testFastLocal": "python3 tools/run_fast_tests.py --build-directory build/dev-debug",
+    "planVerification": "python3 tools/verify.py plan --base-ref origin/main"
   },
   "currentNode": "implement-advanced-sql",
   "currentNodeState": "in_progress"

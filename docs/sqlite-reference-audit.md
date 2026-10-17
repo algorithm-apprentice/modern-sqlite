@@ -7,10 +7,11 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5, D1, D3, D2, A1, A2, and R1 are corrected and verified by merged
-  PRs #205, #204, #206, #207, #208, #209, and #210. ADR-0101 corrects B1's
-  bounded typed read-allocation correction; other findings remain open unless
-  their own evidence states otherwise.
+- Follow-up: A5, D1, D3, D2, A1, A2, R1, and B1 are corrected and verified by
+  merged PRs #205, #204, #206, #207, #208, #209, #210, and #211. ADR-0102 separately
+  improves verification efficiency without changing these corrections or
+  required gates; other findings remain open unless their own evidence states
+  otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -522,6 +523,11 @@ and Modern outcomes remain unchanged. Old comparison repetitions, allocation
 ceilings, fixtures, oracles, profiles, workloads, and resource controls are
 unchanged. GPT-5.6 Sol accepted the amended design and implementation without
 remaining blockers; integrated exact-tree and delivery gates remain mandatory.
+All unchanged-input local conditions and nine first-head hosted checks
+passed on the accepted tree `67bee264a726fbf8d3254b4933e21409f2a3e054`.
+The original unchanged model passed in 2.52 seconds under its ten-second
+deadline. PR #211 merged as `fd693a8d45d192e92ed888670d3e76e7a980dbbf`;
+main, parent, trailer, and named merged-branch cleanup were verified.
 
 ### B2. Writable payload reads consume an unused overflow link
 
@@ -555,9 +561,10 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1, A5, D3, D2, A1, A2, and R1 have merged with exact-head hosted proof, and the
-preserved binder foundation is integrated. Continue B1 through ADR-0101's
-typed read-allocation boundaries. Prioritize the remaining durable/lifecycle
+D1, A5, D3, D2, A1, A2, R1, and B1 have merged with exact-head hosted proof,
+and the preserved binder foundation is integrated. The user-requested
+ADR-0102 verification-efficiency slice precedes further corrections.
+Prioritize the remaining durable/lifecycle
 and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
 optimization remains preserved and is not treated as a delivered correction.
