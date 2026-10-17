@@ -71,6 +71,12 @@ class VerificationPlanTest(unittest.TestCase):
         self.assertEqual("full", plan["profile"])
         self.assertIn("foundation", plan["domains"])
 
+    def test_vm_change_uses_the_known_sql_domain(self) -> None:
+        plan = self.run_plan("src/vm/vm.cpp")
+        self.assertEqual("targeted", plan["profile"])
+        self.assertIn("sql", plan["domains"])
+        self.assertNotIn("unknown", plan["domains"])
+
     def test_durable_and_shared_cache_changes_escalate_to_full(self) -> None:
         for path in (
             "src/storage/btree/writer_internal.cpp",

@@ -42,6 +42,8 @@ class AggregateModifierServices {
 
   [[nodiscard]] virtual LoweringResult<void> EmitAggregateExpression(
       BoundExpressionId id, RegisterId destination, AggregateExpressionSource source) = 0;
+  [[nodiscard]] virtual LoweringResult<void> EmitAggregatePredicate(
+      BoundExpressionId id, Label rejected, AggregateExpressionSource source) = 0;
 };
 
 struct AggregateModifierInput {

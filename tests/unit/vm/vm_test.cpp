@@ -2819,6 +2819,12 @@ TEST_F(VmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrue, SqlValue::Integer(1)), 1);
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrue, SqlValue{}), 0);
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalse, SqlValue::Integer(0)), 1);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(1)), 1);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(0)), 0);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue{}), 1);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(0)), 1);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(1)), 0);
+  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue{}), 1);
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNull, SqlValue{}), 1);
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue::Integer(0)), 1);
   ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue{}), 0);

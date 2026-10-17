@@ -172,6 +172,9 @@ ADR-0102 defines change-aware local verification and bounded fast-local unit
 execution while retaining isolated qualification and required hosted gates.
 ADR-0103 corrects the writable payload reader's consumed overflow-link
 boundary while retaining strict whole-file diagnostics.
+ADR-0104 defines one conditional branch emitter for all current
+predicate contexts while preserving scalar value-expression semantics and
+existing optimizer placement.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

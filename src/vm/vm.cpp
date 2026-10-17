@@ -1158,6 +1158,12 @@ struct Vm::Impl {
       case JumpCondition::kIfFalse:
         should_jump = TruthValue(input) == SqlTruthValue::kFalse;
         break;
+      case JumpCondition::kIfTrueOrNull:
+        should_jump = TruthValue(input) != SqlTruthValue::kFalse;
+        break;
+      case JumpCondition::kIfFalseOrNull:
+        should_jump = TruthValue(input) != SqlTruthValue::kTrue;
+        break;
       case JumpCondition::kIfNull:
         should_jump = input.type() == SqlValueType::kNull;
         break;

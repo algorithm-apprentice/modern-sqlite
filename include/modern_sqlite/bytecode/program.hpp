@@ -152,6 +152,8 @@ enum class BinaryOperation : std::uint8_t {
 enum class JumpCondition : std::uint8_t {
   kIfTrue,
   kIfFalse,
+  kIfTrueOrNull,
+  kIfFalseOrNull,
   kIfNull,
   kIfNotNull,
 };

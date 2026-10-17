@@ -863,6 +863,160 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, ShortCircuitsDeadLogicalPredicateBranches) {
+  const CustomEnvironment custom;
+  const auto rows = Execute("SELECT id FROM items WHERE id>0 OR failing() ORDER BY id",
+                            custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ShortCircuitsDeadIifConditionBranches) {
+  const CustomEnvironment custom;
+  const auto rows = Execute("SELECT iif(id>0 OR failing(),id,0) FROM items ORDER BY id",
+                            custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ShortCircuitsDeadAggregateFilterBranches) {
+  const CustomEnvironment custom;
+  const auto rows = Execute(
+      "SELECT count(*) FILTER (WHERE id>0 OR failing()),"
+      "count(DISTINCT id) FILTER (WHERE id>0 OR failing()),"
+      "group_concat(id ORDER BY id) FILTER (WHERE id>0 OR failing()) FROM items",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(3, rows[0][0].integer_value());
+  EXPECT_EQ(3, rows[0][1].integer_value());
+  EXPECT_EQ("1,2,3", TextBytes(rows[0][2]));
+  EXPECT_EQ(0U, callback_count);
+
+  const auto grouped = Execute(
+      "SELECT name,count(*) FILTER (WHERE id>0 OR failing()) "
+      "FROM items GROUP BY name ORDER BY name",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, grouped.size());
+  for (const auto& row : grouped) {
+    EXPECT_EQ(1, row[1].integer_value());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesPredicateTruthTestNullSemantics) {
+  const CustomEnvironment custom;
+  for (const std::string_view sql : {
+           "SELECT 1 WHERE (1 OR failing()) IS TRUE",
+           "SELECT 1 WHERE (0 AND failing()) IS NOT TRUE",
+           "SELECT 1 WHERE (0 AND failing()) IS FALSE",
+           "SELECT 1 WHERE (1 OR failing()) IS NOT FALSE",
+           "SELECT 1 WHERE NULL IS NOT TRUE",
+           "SELECT 1 WHERE NULL IS NOT FALSE",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rows = Execute(sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+  }
+  for (const std::string_view sql : {
+           "SELECT 1 WHERE NULL IS TRUE",
+           "SELECT 1 WHERE NULL IS FALSE",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_TRUE(Execute(sql, custom.Binder(), custom.Vm()).empty());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, MatchesConditionalQueryOperandScheduling) {
+  const CustomEnvironment custom;
+  for (const std::string_view sql : {
+           "SELECT 1 WHERE (SELECT failing()) OR 1",
+           "SELECT 1 WHERE (SELECT failing())=NULL",
+           "SELECT 1 WHERE NULL=(SELECT failing())",
+           "SELECT 1 WHERE (SELECT NULL)=(SELECT failing())",
+       }) {
+    SCOPED_TRACE(sql);
+    callback_count = 0;
+    const auto rows = Execute(sql, custom.Binder(), custom.Vm());
+    if (sql == std::string_view{"SELECT 1 WHERE (SELECT failing()) OR 1"}) {
+      ASSERT_EQ(1U, rows.size());
+    } else {
+      EXPECT_TRUE(rows.empty());
+    }
+    EXPECT_EQ(0U, callback_count);
+  }
+
+  callback_count = 0;
+  EXPECT_THROW(static_cast<void>(
+                   Execute("SELECT 1 WHERE (SELECT failing())=1", custom.Binder(), custom.Vm())),
+               std::runtime_error);
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  EXPECT_THROW(static_cast<void>(Execute("SELECT 1 WHERE (SELECT failing()) IS NULL",
+                                         custom.Binder(), custom.Vm())),
+               std::runtime_error);
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT 1 FROM items WHERE id=1 AND (SELECT failing())=name",
+                                custom.Binder(), custom.Vm())),
+      std::runtime_error);
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  EXPECT_TRUE(Execute("SELECT 1 FROM items WHERE id=3 AND (SELECT failing())=score",
+                      custom.Binder(), custom.Vm())
+                  .empty());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const auto null_extended = Execute(
+      "SELECT iif(b.name=(SELECT failing()+a.id),1,0) "
+      "FROM items a LEFT JOIN items b ON b.id<0 ORDER BY a.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, null_extended.size());
+  for (const auto& row : null_extended) {
+    EXPECT_EQ(0, row[0].integer_value());
+  }
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsScalarValuesAndConstantGuardsEager) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  EXPECT_THROW(static_cast<void>(
+                   Execute("SELECT id>0 OR failing() FROM items", custom.Binder(), custom.Vm())),
+               std::runtime_error);
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT id FROM items WHERE id<0 AND deterministic_failing()",
+                                custom.Binder(), custom.Vm())),
+      std::runtime_error);
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ReusesGroupedKeysInConditionalBranches) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT volatile_counter()>3 AS k,count() FROM items "
+      "GROUP BY 1 HAVING k OR count()=0",
+      custom.Binder(), custom.Vm());
+  EXPECT_TRUE(rows.empty());
+  EXPECT_EQ(3U, callback_count);
+}
+
 class ReadLoweringAutomaticJoin : public ReadLoweringAggregateIntegration {
  protected:
   void SetUp() override {
@@ -1986,15 +2140,17 @@ TEST_F(ReadLoweringJoin, EvaluatesFullOnOnceAndNeverMarksVirtualRightRows) {
   EXPECT_EQ(3U, right_only);
 }
 
-TEST_F(ReadLoweringJoin, KeepsComputedJoinKeysInTheirExistingCandidatePhase) {
+TEST_F(ReadLoweringJoin, ShortCircuitsComputedJoinKeysWithinTheirExistingCandidatePhase) {
   const auto rows = Execute(
       "SELECT count() FROM items a JOIN items b ON 0 "
       "AND b.id=abs(a.id-a.id-9223372036854775807-1)");
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(0, rows[0][0].integer_value());
-  EXPECT_THROW(static_cast<void>(Execute("SELECT count() FROM items a JOIN items b ON a.id<0 "
-                                         "AND b.id=abs(a.id-a.id-9223372036854775807-1)")),
-               std::runtime_error);
+  const auto guarded = Execute(
+      "SELECT count() FROM items a JOIN items b ON a.id<0 "
+      "AND b.id=abs(a.id-a.id-9223372036854775807-1)");
+  ASSERT_EQ(1U, guarded.size());
+  EXPECT_EQ(0, guarded[0][0].integer_value());
 }
 
 TEST_F(ReadLoweringJoin, KeepsComputedProbesBehindForwardOnCallbacks) {
@@ -6605,6 +6761,31 @@ TEST(DeleteLowering, ExecutesExactAndScanDeletesWithStatementRollback) {
   ASSERT_EQ(2U, restored.size());
   EXPECT_EQ(1, restored[0].first);
   EXPECT_EQ(2, restored[1].first);
+}
+
+TEST(DeleteLowering, ShortCircuitsDeadLogicalPredicateBranches) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+
+  const BytecodeProgram insert =
+      LowerMutationOrThrow("INSERT INTO Items(id,Name,Score) VALUES(?1,?2,?3)", catalog);
+  for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+    std::vector<SqlValue> parameters;
+    parameters.push_back(SqlValue::Integer(rowid));
+    parameters.push_back(SqlValue::Text("row-" + std::to_string(rowid)));
+    parameters.push_back(SqlValue::Integer(rowid));
+    static_cast<void>(TakeValue(ExecuteMutationProgram(insert, vfs, parameters)));
+  }
+
+  callback_count = 0;
+  const BytecodeProgram remove =
+      LowerMutationOrThrow("DELETE FROM Items WHERE id>0 OR failing()", catalog, custom.Binder());
+  const MutationOutcome outcome = TakeValue(ExecuteMutationProgram(remove, vfs, {}, custom.Vm()));
+  EXPECT_EQ(3U, outcome.changes);
+  EXPECT_EQ(0U, callback_count);
+  EXPECT_TRUE(ReadMutationRows(vfs).empty());
 }
 
 TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {

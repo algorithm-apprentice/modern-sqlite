@@ -216,10 +216,6 @@ class AggregateModifierEmitter final {
     return {};
   }
 
-  [[nodiscard]] static RegisterId Home(BoundExpressionId id) noexcept {
-    return RegisterId{id.value()};
-  }
-
   [[nodiscard]] const AggregateModifierRuntime& Runtime(
       BoundAggregateInvocationId invocation_id) const noexcept {
     return AssumeValue(input_.runtimes[invocation_id.value()]);
@@ -310,14 +306,7 @@ class AggregateModifierEmitter final {
 
   [[nodiscard]] LoweringResult<void> EmitFilter(BoundExpressionId filter, Label rejected,
                                                 AggregateExpressionSource source) {
-    const RegisterId value = Home(filter);
-    if (auto emitted = EmitExpression(filter, value, source); !emitted.has_value()) {
-      return emitted;
-    }
-    if (auto jumped = EmitJumpIf(value, JumpCondition::kIfFalse, rejected); !jumped.has_value()) {
-      return jumped;
-    }
-    return EmitJumpIf(value, JumpCondition::kIfNull, rejected);
+    return services_->EmitAggregatePredicate(filter, rejected, source);
   }
 
   [[nodiscard]] LoweringResult<void> EmitArguments(const BoundAggregateInvocation& invocation,

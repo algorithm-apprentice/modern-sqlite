@@ -383,6 +383,8 @@ int main() try {
       }
       const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
       if (allocations != kExpectedGroupedAllocations[plan_index]) {
+        std::fprintf(stderr, "grouped plan %zu expected %zu allocations, got %zu\n", plan_index,
+                     kExpectedGroupedAllocations[plan_index], allocations);
         return 1;
       }
       if (plan_index + 1U == grouped_plans.size() && grouped_published == nullptr) {
@@ -403,7 +405,7 @@ int main() try {
                       "count(DISTINCT id) FILTER (WHERE id>?1) "
                       "FROM Items GROUP BY Name||'' ORDER BY 1"),
   };
-  constexpr std::array<std::size_t, 3> kExpectedModifierAllocations{57U, 66U, 78U};
+  constexpr std::array<std::size_t, 3> kExpectedModifierAllocations{56U, 66U, 78U};
   std::unique_ptr<BytecodeProgram> modifier_published;
   for (std::size_t plan_index = 0; plan_index < modifier_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -416,6 +418,8 @@ int main() try {
       }
       const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
       if (allocations != kExpectedModifierAllocations[plan_index]) {
+        std::fprintf(stderr, "modifier plan %zu expected %zu allocations, got %zu\n", plan_index,
+                     kExpectedModifierAllocations[plan_index], allocations);
         return 1;
       }
       if (plan_index + 1U == modifier_plans.size() && modifier_published == nullptr) {

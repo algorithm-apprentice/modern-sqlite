@@ -300,6 +300,8 @@ template <typename T>
   switch (condition) {
     case JumpCondition::kIfTrue:
     case JumpCondition::kIfFalse:
+    case JumpCondition::kIfTrueOrNull:
+    case JumpCondition::kIfFalseOrNull:
     case JumpCondition::kIfNull:
     case JumpCondition::kIfNotNull:
       return true;

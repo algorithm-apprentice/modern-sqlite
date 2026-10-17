@@ -14,6 +14,7 @@
     "differential.index_range_oracle_regeneration",
     "differential.namespace_oracle_regeneration",
     "differential.numeric_type_oracle_regeneration",
+    "differential.conditional_predicate_oracle_regeneration",
     "performance.read_performance_tool",
     "performance.write_performance_tool",
     "performance.index_performance_tool",
@@ -98,7 +99,7 @@
         "src/binder/**", "src/bytecode/**", "src/catalog/**", "src/lowering/**",
         "src/optimizer/**", "src/planner/**", "src/session/**", "src/runtime/**",
         "src/syntax/**", "src/text/**", "src/temporary_storage/**",
-        "src/instrumentation/**"
+        "src/instrumentation/**", "src/vm/**"
       ]
     },
     {
