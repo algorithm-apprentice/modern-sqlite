@@ -106,3 +106,4 @@ their corresponding implementation begins.
 101. [ADR-0101: Typed Read Allocation Boundaries](0101-typed-read-allocation-boundaries.md)
 102. [ADR-0102: Change-Aware Verification](0102-change-aware-verification.md)
 103. [ADR-0103: Consumed Writable Overflow Links](0103-consumed-writable-overflow-links.md)
+104. [ADR-0104: Conditional Predicate Branch Emission](0104-conditional-predicate-branch-emission.md)

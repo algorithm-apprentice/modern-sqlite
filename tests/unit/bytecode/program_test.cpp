@@ -3122,6 +3122,19 @@ TEST(BytecodeProgramTest, RejectsInvalidOperandsResultShapeAndText) {
   invalid_target.instructions[0] = JumpInstruction{.target = Address(9)};
   EXPECT_EQ(VerifyError(invalid_target), ProgramErrorCode::kInvalidBranchTarget);
 
+  auto invalid_condition = ScalarProgramInput();
+  invalid_condition.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      JumpIfInstruction{
+          .condition = static_cast<JumpCondition>(0xff),
+          .input = Reg(0),
+          .target = Address(3),
+      },
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(VerifyError(invalid_condition), ProgramErrorCode::kInvalidEnumValue);
+
   auto invalid_shape = ScalarProgramInput();
   invalid_shape.instructions[1] = ResultRowInstruction{.first = Reg(0), .count = 0};
   EXPECT_EQ(VerifyError(invalid_shape), ProgramErrorCode::kResultShapeMismatch);

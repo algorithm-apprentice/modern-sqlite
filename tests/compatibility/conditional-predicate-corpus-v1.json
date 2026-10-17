@@ -1,0 +1,1050 @@
+{
+  "cases": [
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-true-or-constant-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643e30204f5220616273282d3932323333373230333638353437373538303829204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-true-or-constant-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643e30204f5220616273282d3932323333373230333638353437373538303829204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-false-and-constant-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643c3020414e4420616273282d3932323333373230333638353437373538303829204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-false-and-constant-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643c3020414e4420616273282d3932323333373230333638353437373538303829204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-true-or-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-true-or-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-false-and-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d3129204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-false-and-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d3129204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-false-or-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643c30204f52206162732869642d69642d393232333337323033363835343737353830372d3129204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-false-or-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643c30204f52206162732869642d69642d393232333337323033363835343737353830372d3129204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-true-and-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643e3020414e44206162732869642d69642d393232333337323033363835343737353830372d3129204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-true-and-row-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e472069643e3020414e44206162732869642d69642d393232333337323033363835343737353830372d3129204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-nested-or-then-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d73205748455245202869643e30204f52206162732869642d69642d393232333337323033363835343737353830372d31292920414e442069643c34204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-nested-or-then-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e47202869643e30204f52206162732869642d69642d393232333337323033363835343737353830372d31292920414e442069643c34204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-not-false-and-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d73205748455245204e4f542869643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d312929204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-not-false-and-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e47204e4f542869643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d312929204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "where-null-and-error-or-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d7320574845524520284e554c4c20414e44206162732869642d69642d393232333337323033363835343737353830372d312929204f522069643e30204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-predicate",
+      "id": "having-null-and-error-or-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046524f4d206974656d732047524f55502042592063617465676f727920484156494e4720284e554c4c20414e44206162732869642d69642d393232333337323033363835343737353830372d312929204f522069643e30204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-is-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202831204f5220616273282d3932323333373230333638353437373538303829292049532054525545"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-is-not-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120574845524520283020414e4420616273282d393232333337323033363835343737353830382929204953204e4f542054525545"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-is-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120574845524520283020414e4420616273282d3932323333373230333638353437373538303829292049532046414c5345"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-is-not-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202831204f5220616273282d393232333337323033363835343737353830382929204953204e4f542046414c5345"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-null-is-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245204e554c4c2049532054525545"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-null-is-not-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245204e554c4c204953204e4f542054525545"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-null-is-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245204e554c4c2049532046414c5345"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-truth-test",
+      "id": "truth-null-is-not-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245204e554c4c204953204e4f542046414c5345"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-iif",
+      "id": "iif-true-or-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206969662831204f5220616273282d39323233333732303336383534373735383038292c372c3829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-iif",
+      "id": "iif-false-and-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420696966283020414e4420616273282d39323233333732303336383534373735383038292c372c3829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-iif",
+      "id": "iif-null-or-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420696966284e554c4c204f5220312c372c3829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-iif",
+      "id": "iif-null-and-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420696966284e554c4c20414e4420312c372c3829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-aggregate-filter",
+      "id": "filter-direct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046494c544552202857484552452069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-aggregate-filter",
+      "id": "filter-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e742844495354494e4354206964292046494c544552202857484552452069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-aggregate-filter",
+      "id": "filter-ordered",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542067726f75705f636f6e636174286964204f52444552204259206964292046494c544552202857484552452069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-aggregate-filter",
+      "id": "filter-grouped",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542063617465676f72792c636f756e74282a292046494c544552202857484552452069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d3129292046524f4d206974656d732047524f55502042592063617465676f7279204f524445522042592063617465676f7279"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-aggregate-filter",
+      "id": "filter-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046494c544552202857484552452069643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d3129292046524f4d206974656d73"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "on-false-and-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046524f4d206974656d732061204a4f494e206974656d732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "on-true-or-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a292046524f4d206974656d732061204a4f494e206974656d732062204f4e20612e69643e30204f522061627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-logical-right-first",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202853454c45435420616273282d393232333337323033363835343737353830382929204f522031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-right-first",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202853454c45435420616273282d3932323333373230333638353437373538303829293d4e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-right-skip",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245204e554c4c3d2853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-both",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202853454c454354204e554c4c293d2853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-left-first",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202853454c45435420616273282d3932323333373230333638353437373538303829293d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-is-left-first",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031205748455245202853454c45435420616273282d393232333337323033363835343737353830382929204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-not-null-column",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732057484552452069643d3120414e44202853454c45435420616273282d3932323333373230333638353437373538303829293d6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-nullable-column",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732057484552452069643d3320414e44202853454c45435420616273282d3932323333373230333638353437373538303829293d73636f7265"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-query-order",
+      "id": "query-comparison-null-extended-column",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e69642c69696628622e6e616d653d2853454c4543542061627328612e69642d612e69642d393232333337323033363835343737353830372d3129292c312c30292046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643c30204f5244455220425920612e6964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-value-control",
+      "id": "value-or-remains-eager",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069643e30204f52206162732869642d69642d393232333337323033363835343737353830372d31292046524f4d206974656d73204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-value-control",
+      "id": "value-and-remains-eager",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069643c3020414e44206162732869642d69642d393232333337323033363835343737353830372d31292046524f4d206974656d73204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "conditional-lifecycle",
+      "id": "conditional-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542069642046524f4d206974656d73205748455245203f31204f52206162732869642d69642d393232333337323033363835343737353830372d3129204f52444552204259206964"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "prepare-errors",
+      "id": "conditional-prepare-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542029"
+    },
+    {
+      "database": "core",
+      "expectation": "unsupported",
+      "feature": "case-expression",
+      "id": "conditional-unsupported-case",
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542043415345205748454e2031205448454e203220454c5345203320454e44"
+    }
+  ],
+  "databases": [
+    {
+      "id": "core",
+      "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
+      "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    }
+  ],
+  "limits": {
+    "binding_operations": 256,
+    "cases": 512,
+    "child_seconds": 10,
+    "corpus_bytes": 4194304,
+    "operations": 1024,
+    "oracle_bytes": 67108864,
+    "output_bytes": 16777216,
+    "result_columns": 256,
+    "result_rows": 4096,
+    "sql_bytes": 65536,
+    "stderr_bytes": 1048576,
+    "value_bytes": 1048576
+  },
+  "oracle_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "schema_version": 1,
+  "supported_matrix": [
+    "conditional-predicate",
+    "conditional-truth-test",
+    "conditional-iif",
+    "conditional-aggregate-filter",
+    "conditional-join-on",
+    "conditional-query-order",
+    "conditional-value-control",
+    "conditional-lifecycle",
+    "prepare-errors"
+  ]
+}

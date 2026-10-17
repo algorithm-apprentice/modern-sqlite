@@ -310,6 +310,8 @@ merged main and only the confirmed merged branch were verified before cleanup.
 ### A3. Predicate contexts use eager value-expression evaluation
 
 Priority: **medium, observable error-phase differences**.
+Status: **conditional branch mechanism corrected by ADR-0104; one independent
+rowid-range/access case remains**.
 
 For example, all IDs in the diagnostic input are positive:
 
@@ -332,6 +334,20 @@ emission from conditional `sqlite3ExprIfTrue`/`sqlite3ExprIfFalse` in
 A repair must preserve SQL three-valued logic and the native error schedule
 without turning ordinary SELECT value expressions into universally
 short-circuiting expressions.
+
+ADR-0104 adds one shared conditional branch emitter across current predicate
+surfaces while retaining scalar value emission and existing optimizer
+placement. The frozen matrix improves from 8/20 to 19/20 exact matches.
+Its dedicated shard matches 50 pinned comparisons and retains one unsupported
+CASE boundary. The remaining WHERE case uses pinned INTEGER PRIMARY KEY range
+access while Modern scans; it remains a separately attributed access-planning
+difference rather than being hidden by residual reordering.
+
+The first two-jump implementation exceeded the existing 64-source program
+bound and was rejected. Two composite conditions on the existing typed jump
+instruction preserve that ceiling. Implementation review separately caught
+grouped-key recomputation; the final branch entry reuses the retained
+representative register and preserves nondeterministic callback counts.
 
 ### A4. Joined ON readiness and access-key phases remain incomplete
 
@@ -577,8 +593,14 @@ ADR-0102 verification-efficiency slice merged in PR #212 as
 `e120b0543f6f9f184ffb36e69b72e3522f023b76`. All nine first-head hosted checks
 passed; the unchanged original sanitizer model passed in 6.45 seconds under
 its ten-second deadline. Main, parent, trailer, and named branch cleanup were
-verified. ADR-0103 corrects B2's writable payload boundary in this slice;
-exact-tree review and hosted delivery gates remain required.
+verified. ADR-0103 corrected B2 in PR #213 as
+`c7ae1e86cee99ed3f911a5087eb3f32c52ba52ad`, accepted tree
+`014603ef28a12441327f2b35841d5e0bfe587043`. All nine first-head hosted checks
+passed; the unchanged original sanitizer model passed in 3.28 seconds under
+its ten-second deadline. Main, parent, trailer, and named branch cleanup were
+verified. ADR-0104 corrects conditional predicate branching in the current
+slice without claiming the independent rowid-range/access schedule. Exact-tree
+review and hosted delivery gates remain required.
 Prioritize the remaining durable/lifecycle
 and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view

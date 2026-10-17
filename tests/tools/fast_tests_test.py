@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/run_fast_tests.py"
 FAKE_GTEST = """
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +27,8 @@ import xml.etree.ElementTree as ET
 
 root = Path(__file__).parent
 mode = json.loads((root / "mode.json").read_text())["mode"]
+if mode in ("timeout", "descendant"):
+    (root / "owned-group").write_text(str(os.getpgrp()))
 launches = root / "launches"
 launches.write_text(str(int(launches.read_text()) + 1 if launches.exists() else 1))
 filters = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--gtest_filter="))
@@ -49,7 +53,10 @@ for name in names:
     if mode == "timeout":
         time.sleep(1)
         (root / "timeout-escaped").write_text("not killed")
-    if mode == "hold":
+    if mode == "capture-timeout":
+        time.sleep(0.25)
+        (root / "timeout-escaped").write_text("not killed")
+    if mode == "hold" and name == names[0]:
         time.sleep(0.3)
     if mode == "unknown-event":
         print("[ RUN      ] Unknown.Case", flush=True)
@@ -88,7 +95,7 @@ def cmake_quote(value: str) -> str:
     return "[=[" + value + "]=]"
 
 
-class FastLocalTest(unittest.TestCase):
+class FastLocalTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -155,6 +162,19 @@ class FastLocalTest(unittest.TestCase):
             timeout=15,
         )
 
+    def assert_owned_group_has_no_live_members(self) -> None:
+        from tools import run_fast_tests
+
+        group = int((self.root / "owned-group").read_text())
+        live = {
+            pid: state
+            for pid, state in run_fast_tests.owned_group_states(group).items()
+            if not state.startswith("Z")
+        }
+        self.assertEqual({}, live)
+
+
+class FastLocalExecutionTest(FastLocalTestCase):
     def test_accounts_complete_unit_union_and_preserves_standalone_exit_policy(self) -> None:
         result = self.run_tool()
         self.assertEqual(0, result.returncode, result.stderr)
@@ -176,9 +196,11 @@ class FastLocalTest(unittest.TestCase):
         result = self.run_tool()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("timed out", result.stderr.lower())
-        time.sleep(1.05)
+        self.assert_owned_group_has_no_live_members()
         self.assertFalse((self.root / "timeout-escaped").exists())
 
+
+class FastLocalProtocolTest(FastLocalTestCase):
     def test_rejects_duplicate_start(self) -> None:
         self.set_mode("duplicate-event")
         result = self.run_tool()
@@ -246,12 +268,14 @@ class FastLocalTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("capture limit", result.stderr.lower())
 
+
+class FastLocalProcessTest(FastLocalTestCase):
     def test_cleans_descendants_after_successful_leader_exit(self) -> None:
         self.set_mode("descendant")
         self.configure_cases(standalone=False)
         result = self.run_tool()
         self.assertEqual(0, result.returncode, result.stderr)
-        time.sleep(1.05)
+        self.assert_owned_group_has_no_live_members()
         self.assertFalse((self.root / "descendant-escaped").exists())
 
     def test_preserves_unrecognized_case_properties_through_ctest(self) -> None:
@@ -265,7 +289,7 @@ class FastLocalTest(unittest.TestCase):
     def test_cleans_owned_child_when_capture_setup_fails(self) -> None:
         from tools import run_fast_tests
 
-        self.set_mode("timeout")
+        self.set_mode("capture-timeout")
         case = {
             "name": "Fake.One", "filter": "Fake.One", "binary": str(self.binary),
             "common_arguments": [], "directory": str(self.root), "timeout": 10,
@@ -276,7 +300,7 @@ class FastLocalTest(unittest.TestCase):
         ):
             with self.assertRaises(OSError):
                 run_fast_tests.run_batch([case], self.root, 0, policy)
-        time.sleep(1.05)
+        time.sleep(0.3)
         self.assertFalse((self.root / "timeout-escaped").exists())
 
     def test_partitions_large_selections_without_dropping_cases(self) -> None:
@@ -324,6 +348,8 @@ class FastLocalTest(unittest.TestCase):
         inspect.assert_called_once_with(12345)
         process.wait.assert_called_once_with()
 
+
+class FastLocalEvidenceTest(FastLocalTestCase):
     def test_binary_drift_invalidates_an_otherwise_successful_run(self) -> None:
         self.set_mode("binary-drift")
         result = self.run_tool()
@@ -378,7 +404,6 @@ class FastLocalTest(unittest.TestCase):
             "print('{\"tests\": [null]}')\n"
         )
         ctest.chmod(0o755)
-        import os
         environment = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""))
         result = subprocess.run(
             [sys.executable, str(TOOL), "--build-directory", str(self.root),

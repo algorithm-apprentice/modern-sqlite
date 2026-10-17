@@ -6,7 +6,10 @@
     "tools.changed_clang_tidy_scope",
     "tools.ci_workflow_policy",
     "tools.verification",
-    "tools.fast_local",
+    "tools.fast_local_execution",
+    "tools.fast_local_protocol",
+    "tools.fast_local_process",
+    "tools.fast_local_evidence",
     "differential.read_compatibility_tool",
     "differential.sqlite_oracle",
     "differential.sqlite_oracle_regeneration",
@@ -14,6 +17,7 @@
     "differential.index_range_oracle_regeneration",
     "differential.namespace_oracle_regeneration",
     "differential.numeric_type_oracle_regeneration",
+    "differential.conditional_predicate_oracle_regeneration",
     "performance.read_performance_tool",
     "performance.write_performance_tool",
     "performance.index_performance_tool",
@@ -98,7 +102,7 @@
         "src/binder/**", "src/bytecode/**", "src/catalog/**", "src/lowering/**",
         "src/optimizer/**", "src/planner/**", "src/session/**", "src/runtime/**",
         "src/syntax/**", "src/text/**", "src/temporary_storage/**",
-        "src/instrumentation/**"
+        "src/instrumentation/**", "src/vm/**"
       ]
     },
     {
