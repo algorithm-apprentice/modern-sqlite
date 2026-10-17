@@ -10005,6 +10005,49 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Append(SealRelationInstruction{.relation = *source.automatic_relation});
   }
 
+  [[nodiscard]] static bool AccessConsumesPredicate(
+      const JoinedSourcePlan& source, const PhysicalNestedLoopJoinNode& owner,
+      const PhysicalJoinPredicatePlacement& predicate) noexcept {
+    if (source.access == nullptr || source.join != &owner) {
+      return false;
+    }
+    if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
+        lookup != nullptr) {
+      return lookup->constraint.has_value() &&
+             lookup->constraint->origin == PhysicalPredicateOrigin::kOn &&
+             lookup->constraint->predicate == predicate.predicate &&
+             lookup->constraint->conjunct_position == predicate.conjunct_position;
+    }
+    if (const auto* index = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
+        index != nullptr) {
+      if (std::ranges::any_of(index->equalities, [&](const auto& equality) {
+            return equality.origin == PhysicalPredicateOrigin::kOn &&
+                   equality.predicate == predicate.predicate &&
+                   equality.conjunct_position == predicate.conjunct_position;
+          })) {
+        return true;
+      }
+      return index->range.has_value() &&
+             ((index->range->lower.has_value() &&
+               index->range->lower->origin == PhysicalPredicateOrigin::kOn &&
+               index->range->lower->predicate == predicate.predicate &&
+               index->range->lower->conjunct_position == predicate.conjunct_position) ||
+              (index->range->upper.has_value() &&
+               index->range->upper->origin == PhysicalPredicateOrigin::kOn &&
+               index->range->upper->predicate == predicate.predicate &&
+               index->range->upper->conjunct_position == predicate.conjunct_position));
+    }
+    if (const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&source.access->payload);
+        automatic != nullptr) {
+      return std::ranges::any_of(automatic->equalities, [&](const auto& equality) {
+        return equality.origin == PhysicalPredicateOrigin::kOn &&
+               equality.predicate == predicate.predicate &&
+               equality.conjunct_position == predicate.conjunct_position;
+      });
+    }
+    return false;
+  }
+
   template <typename RowConsumer>
   [[nodiscard]] LoweringResult<void> EmitJoinedLoop(
       const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
@@ -10026,8 +10069,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const bool has_on =
         std::ranges::any_of(core.joined_sources, [&](const JoinedSourcePlan& candidate) {
-          return candidate.join != nullptr && candidate.join->on.has_value() &&
-                 candidate.join->condition_source == source.source;
+          return candidate.join != nullptr &&
+                 std::ranges::any_of(candidate.join->predicates, [&](const auto& predicate) {
+                   return predicate.source == source.source &&
+                          !AccessConsumesPredicate(source, *candidate.join, predicate);
+                 });
         });
     const bool has_predicate = core.filter != nullptr &&
                                std::ranges::contains(core.filter->predicate_sources, source.source);
@@ -10217,9 +10263,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (left || right) {
-      if (source.join->on.has_value()) {
-        if (auto on = EmitPredicate(*source.join->on, advance.value_or(*done)); !on.has_value()) {
-          return on;
+      for (const PhysicalJoinPredicatePlacement& predicate : source.join->predicates) {
+        if (predicate.source != source.source) {
+          return std::unexpected(
+              InternalFailure("outer ON predicate is not owned by its right source"));
+        }
+        if (!AccessConsumesPredicate(source, *source.join, predicate)) {
+          if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
+              !on.has_value()) {
+            return on;
+          }
         }
       }
       if (left) {
@@ -10255,10 +10308,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (const JoinedSourcePlan& candidate : core.joined_sources) {
       if (candidate.join != nullptr && !SourceJoinPreservesLeft(candidate.join->join) &&
           !SourceJoinPreservesRight(candidate.join->join)) {
-        const auto& condition = candidate.join->on;
-        if (condition.has_value() && candidate.join->condition_source == source.source) {
-          if (auto on = EmitPredicate(*condition, advance.value_or(*done)); !on.has_value()) {
-            return on;
+        for (const PhysicalJoinPredicatePlacement& predicate : candidate.join->predicates) {
+          if (predicate.source == source.source &&
+              !AccessConsumesPredicate(source, *candidate.join, predicate)) {
+            if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
+                !on.has_value()) {
+              return on;
+            }
           }
         }
       }
@@ -10527,6 +10583,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto guards = EmitStreamingGuards(core, *after); !guards.has_value()) {
       return guards;
+    }
+    for (const JoinedSourcePlan& source : core.joined_sources) {
+      if (source.join == nullptr || SourceJoinPreservesLeft(source.join->join) ||
+          SourceJoinPreservesRight(source.join->join)) {
+        continue;
+      }
+      for (const PhysicalJoinPredicatePlacement& predicate : source.join->predicates) {
+        if (!predicate.source.has_value()) {
+          if (auto emitted = EmitPredicate(predicate.predicate, *after); !emitted.has_value()) {
+            return emitted;
+          }
+        }
+      }
     }
     if (membership.has_value()) {
       if (auto opened = Append(OpenRelationInstruction{.relation = *membership});

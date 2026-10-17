@@ -1011,6 +1011,1026 @@
         }
       ],
       "sql_hex": "53454c4543542043415345205748454e2031205448454e203220454c5345203320454e44"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01035",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01036",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01037",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01038",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01067",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d20656d7074795f6b65795f726f77732061204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01068",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d20656d7074795f6b65795f726f77732061204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01099",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d20656d7074795f6b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01100",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d20656d7074795f6b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01131",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01132",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01133",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01134",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01135",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01136",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204c454654204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01167",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061204c454654204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01168",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061204c454654204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01259",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01260",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01261",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01262",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01263",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01264",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061205249474854204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01295",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f77732061205249474854204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01296",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f77732061205249474854204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01387",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01388",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01389",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01390",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01391",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01392",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612046554c4c204a4f494e206b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01423",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612046554c4c204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01424",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612046554c4c204a4f494e20656d7074795f6b65795f726f77732062204f4e20612e69643c3020414e4420622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d3129204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01547",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01548",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01549",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d206b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01550",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d206b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01579",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d20656d7074795f6b65795f726f777320612043524f5353204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01580",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d20656d7074795f6b65795f726f777320612043524f5353204a4f494e206b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01611",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e74282a29204153206e2046524f4d20656d7074795f6b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-audit-01612",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420612e6964204153206c2c622e696420415320722046524f4d20656d7074795f6b65795f726f777320612043524f5353204a4f494e20656d7074795f6b65795f726f77732062204f4e20616273282d393232333337323033363835343737353830382920414e4420622e69643d612e69642b31303030204f5244455220425920612e6964204953204e554c4c2c612e69642c622e6964204953204e554c4c2c622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-key-order",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e206b65795f726f77732062204f4e20622e69643d61627328612e69642d612e69642d393232333337323033363835343737353830372d312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-excluded-conditional-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e206b65795f726f77732062204f4e20622e69643d69696628612e69643e302c616273282d39323233333732303336383534373735383038292c312920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-excluded-subquery-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e206b65795f726f77732062204f4e20622e69643d2853454c45435420616273282d39323233333732303336383534373735383038292920414e4420622e69643d612e69642b31303030"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-later-right-left-rows-inner-empty",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732078204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d3129205249474854204a4f494e206b65795f726f77732062204f4e20782e69643d622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-later-right-left-empty-inner-rows",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d20656d7074795f6b65795f726f77732061204a4f494e206b65795f726f77732078204f4e20616273282d3932323333373230333638353437373538303829205249474854204a4f494e206b65795f726f77732062204f4e20782e69643d622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-later-full-left-rows-inner-empty",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e20656d7074795f6b65795f726f77732078204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d31292046554c4c204a4f494e206b65795f726f77732062204f4e20782e69643d622e6964"
+    },
+    {
+      "database": "joined-index",
+      "expectation": "compare",
+      "feature": "conditional-join-on",
+      "id": "joined-phase-later-right-populated-prefix-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f756e7428292046524f4d206b65795f726f77732061204a4f494e206b65795f726f77732078204f4e2061627328612e69642d612e69642d393232333337323033363835343737353830372d3129205249474854204a4f494e206b65795f726f77732062204f4e20782e69643d622e6964"
     }
   ],
   "databases": [
@@ -1018,6 +2038,11 @@
       "id": "core",
       "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
       "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    },
+    {
+      "id": "joined-index",
+      "path": "tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db",
+      "sha256": "ff55a8f7ba44f729060fa1e65256d99d2d00c1ca08a93d4d48bd2cd5def7501d"
     }
   ],
   "limits": {

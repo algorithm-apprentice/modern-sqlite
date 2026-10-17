@@ -65,6 +65,12 @@ Later commits in the batch may depend only on earlier commits in the same
 linear batch. A commit must leave the branch buildable and its own focused
 tests green. Reviewers can inspect each commit range separately.
 
+After the first accepted commit, publish the batch branch and open one draft
+pull request. Push each later accepted commit to that same draft so commit
+ranges, review discussion, and the evolving ledger remain visible. Opening or
+updating the draft does not promote it to ready status and does not replace
+commit-level local evidence.
+
 Before the next slice begins, append one JSON-lines record to the batch ledger
 at the session evidence path
 `node43-prerequisite-closure-ledger.jsonl`. Each slice record contains:
@@ -164,6 +170,10 @@ Normal two-to-four-slice batches continue to use ADR-0102's change-aware
 selected union. Any follow-up commit creates a new final head and invalidates
 prior exact-head review and hosted success until the complete required
 final-head gates pass again.
+
+Draft-PR workflows may start automatically on intermediate pushes. Their
+results are informative only: they do not satisfy, replace, or reduce the
+required final exact-head hosted checks.
 
 A failed final gate is corrected with a normal follow-up commit. Do not amend,
 force-push, bypass, or blindly rerun. If the failure reveals that a commit is

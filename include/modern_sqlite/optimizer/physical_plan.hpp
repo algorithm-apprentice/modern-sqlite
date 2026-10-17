@@ -77,6 +77,19 @@ enum class PhysicalScanDirection : std::uint8_t {
   kReverse,
 };
 
+enum class PhysicalPredicateOrigin : std::uint8_t {
+  kOn,
+  kWhere,
+};
+
+struct PhysicalAccessPredicate {
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
+
+  constexpr auto operator<=>(const PhysicalAccessPredicate&) const noexcept = default;
+};
+
 struct PhysicalSingleRowNode {
   std::size_t core_index = 0;
 
@@ -107,6 +120,7 @@ struct PhysicalRowIdLookupNode {
   std::optional<TableId> table{};
   RootPageId root_page{};
   BoundExpressionId key;
+  std::optional<PhysicalAccessPredicate> constraint{};
 
   constexpr bool operator==(const PhysicalRowIdLookupNode&) const noexcept = default;
 };
@@ -115,6 +129,7 @@ struct PhysicalRangeBound {
   BoundExpressionId key{0};
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
   bool inclusive = false;
 
   constexpr auto operator<=>(const PhysicalRangeBound&) const noexcept = default;
@@ -138,6 +153,7 @@ struct PhysicalIndexEquality {
   BoundExpressionId key{0};
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
   TypeAffinity affinity = TypeAffinity::kNone;
   std::string_view collation_name = "BINARY";
   SortOrder order = SortOrder::kAscending;
@@ -318,13 +334,21 @@ struct PhysicalHavingNode {
   BoundExpressionId predicate;
 };
 
+struct PhysicalJoinPredicatePlacement {
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  std::optional<BoundSourceId> source{};
+
+  constexpr auto operator<=>(const PhysicalJoinPredicatePlacement&) const noexcept = default;
+};
+
 struct PhysicalNestedLoopJoinNode {
   PhysicalNodeId left;
   PhysicalNodeId right;
   std::size_t core_index = 0;
   SourceJoinKind join = SourceJoinKind::kCross;
   std::optional<BoundExpressionId> on{};
-  std::optional<BoundSourceId> condition_source{};
+  std::vector<PhysicalJoinPredicatePlacement> predicates{};
 };
 
 using PhysicalNodePayload =

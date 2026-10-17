@@ -2903,6 +2903,22 @@ TEST(ReadSession, BoundsJoinedEqualityWorkByPointPositionedPrefixes) {
   EXPECT_LT(instructions, 1024U);
 }
 
+TEST(ReadSession, BoundsDeterministicFunctionJoinedRowidWorkByPointPrefixes) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT count() FROM model_rows a JOIN model_rows b ON b.id=abs(a.id)+1000");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 1024U);
+}
+
 TEST(ReadSession, BoundsComputedFullJoinWorkByPointPositionedPrefixes) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement = PrepareStatement(

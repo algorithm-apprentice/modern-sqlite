@@ -770,8 +770,14 @@ std::vector<std::string> callback_trace;
   return arguments.front().Clone();
 }
 
+[[nodiscard]] Result<SqlValue> DeterministicTrace(const ScalarFunctionContext&,
+                                                  std::span<const SqlValue> arguments) {
+  ++callback_count;
+  return arguments.front().Clone();
+}
+
 struct CustomEnvironment {
-  std::array<ScalarFunction, 12> functions{{
+  std::array<ScalarFunction, 14> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -794,6 +800,11 @@ struct CustomEnvironment {
       ScalarFunction{"deterministic_failing", FunctionArity::Exact(0),
                      FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
                      DeterministicFailCall},
+      ScalarFunction{"deterministic_counter", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone, CountCall},
+      ScalarFunction{"deterministic_trace", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     DeterministicTrace},
       ScalarFunction{"fail_after_one", FunctionArity::Exact(1),
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      FailAfterOne},
@@ -1159,6 +1170,69 @@ class ReadLoweringAutomaticJoin : public ReadLoweringAggregateIntegration {
                                                 .sorter_memory_threshold = ByteCount{1024}});
   }
 };
+
+class ReadLoweringJoinedPhase : public ReadLoweringAggregateIntegration {
+ protected:
+  void SetUp() override { OpenFixture(JoinedIndexFixturePath()); }
+};
+
+TEST_F(ReadLoweringJoinedPhase, MatchesJoinedOnReadinessAndCandidateMissPhases) {
+  constexpr std::string_view kOverflow = "abs(-9223372036854775808)";
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN empty_key_rows b ON " +
+                                std::string{kOverflow} + " AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM empty_key_rows a JOIN key_rows b ON " +
+                                std::string{kOverflow} + " AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN empty_key_rows b "
+                                "ON abs(a.id-a.id-9223372036854775807-1) AND b.id=a.id+1000")),
+      std::runtime_error);
+
+  const auto left = Execute(
+      "SELECT count() FROM key_rows a LEFT JOIN key_rows b "
+      "ON abs(-9223372036854775808) AND b.id=a.id+1000");
+  ASSERT_EQ(1U, left.size());
+  EXPECT_EQ(12, left[0][0].integer_value());
+
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a LEFT JOIN empty_key_rows b "
+                                "ON a.id<0 AND b.id=abs(a.id-a.id-9223372036854775807-1)")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                                "ON b.id=abs(a.id-a.id-9223372036854775807-1) AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(static_cast<void>(
+                   Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                           "ON b.id=iif(a.id>0,abs(-9223372036854775808),1) AND b.id=a.id+1000")),
+               std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                                "ON b.id=(SELECT abs(-9223372036854775808)) AND b.id=a.id+1000")),
+      std::runtime_error);
+
+  for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const auto rows = Execute(
+        "SELECT count() FROM key_rows a JOIN empty_key_rows x "
+        "ON abs(a.id-a.id-9223372036854775807-1) " +
+        std::string{join} + " key_rows b ON x.id=b.id");
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(12, rows[0][0].integer_value());
+  }
+  const auto source_free = Execute(
+      "SELECT count() FROM key_rows a JOIN empty_key_rows x "
+      "ON abs(-9223372036854775808) RIGHT JOIN key_rows b ON x.id=b.id");
+  ASSERT_EQ(1U, source_free.size());
+  EXPECT_EQ(12, source_free[0][0].integer_value());
+  EXPECT_THROW(static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows x "
+                                         "ON abs(a.id-a.id-9223372036854775807-1) "
+                                         "RIGHT JOIN key_rows b ON x.id=b.id")),
+               std::runtime_error);
+}
 
 TEST_F(ReadLoweringAutomaticJoin,
        PreservesAutomaticSourcesAcrossOrderingDistinctAndAggregateConsumers) {
@@ -2304,6 +2378,35 @@ TEST_F(ReadLoweringJoin, KeepsNondeterministicJoinKeysInTheirPhysicalCandidatePh
                 custom.Binder(), custom.Vm());
     EXPECT_EQ(3U, rows.size());
     EXPECT_EQ(9U, std::ranges::count(callback_trace, "argument"));
+  }
+}
+
+TEST_F(ReadLoweringJoin, EvaluatesDeterministicScalarAccessKeysOncePerPrefix) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT a.id,b.id FROM items a JOIN items b "
+      "ON b.id=deterministic_counter(a.id) ORDER BY a.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(3U, callback_count);
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][1].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringJoin, ConsumesOnlyTheSelectedRepeatedOnOccurrence) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT (b.id=deterministic_trace(a.id) AND 1) AS x "
+      "FROM items a LEFT JOIN items b ON x AND x ORDER BY a.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(9U, callback_count);
+  for (const auto& row : rows) {
+    EXPECT_EQ(1, row[0].integer_value());
   }
 }
 

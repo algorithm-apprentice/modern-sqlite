@@ -109,3 +109,4 @@ their corresponding implementation begins.
 104. [ADR-0104: Conditional Predicate Branch Emission](0104-conditional-predicate-branch-emission.md)
 105. [ADR-0105: SQLite-Aligned Rowid Range Access](0105-sqlite-aligned-rowid-range-access.md)
 106. [ADR-0106: Batched Related Slice Delivery](0106-batched-related-slice-delivery.md)
+107. [ADR-0107: Joined Predicate Access Phases](0107-joined-predicate-access-phases.md)

@@ -358,7 +358,9 @@ reference evaluation phase. The existing index-range shard now preserves all
 35 prior records and adds 20 rowid access records, for 54 native comparisons
 and one unchanged unsupported write boundary.
 
-### A4. Joined ON readiness and access-key phases remain incomplete
+### A4. Joined ON readiness and access-key phases
+
+Status: **corrected by ADR-0107**.
 
 Priority: **medium correctness; prerequisite for computed-key admission**.
 
@@ -378,6 +380,25 @@ but retaining a candidate scan is not itself proof of full native error
 compatibility. Reproduce and correct the schedule through canonical
 predicate/access contracts before admitting broader function keys. Do not
 add a second guard collection.
+
+At prerequisite-batch commit 1, the frozen 640-case matrix matches 600 and
+differs on 40: 16 INNER/CROSS readiness cases, 12 preserved candidate-miss
+cases, and 12 preserved computed-key cases. ADR-0107 replaces the
+complete-ON candidate callback with one term-level placement schedule,
+selected access-term consumption, and a bounded deterministic scalar rowid
+key domain. The unchanged 128-row function-key miss executes 131,340 Modern
+instructions versus 652 for the admitted arithmetic control.
+
+The implementation now exact-matches all 640 cases. One canonical physical
+placement list assigns pre-open and source-ready ON terms, selected ON access
+terms are consumed once, and selected WHERE constraints retain their existing
+filter recheck. The deterministic scalar rowid miss executes 780 instructions
+with the same 768 comparisons and 13 pages as the arithmetic-positioned
+shape, instead of the 131,340-instruction scan baseline. The pinned
+conditional shard adds all 40 former differences while preserving every
+inherited record, plus an explicit earlier-scalar/later-arithmetic key-order
+case, conditional/subquery access-order barriers, and later-RIGHT/FULL
+left-prefix fences.
 
 ### A5. Arithmetic joined keys retained quadratic candidate scans
 
