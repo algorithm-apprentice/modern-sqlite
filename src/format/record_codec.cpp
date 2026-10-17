@@ -721,8 +721,7 @@ RecordCursor RecordView::cursor() const noexcept {
 
 Result<RecordFieldView> RecordView::field(std::size_t index) const {
   if (index >= field_count_) {
-    return std::unexpected(
-        Error::Create(ErrorCode::kOutOfRange, "record field index is out of range"));
+    return std::unexpected(MakeError(ErrorCode::kOutOfRange, "record field index is out of range"));
   }
 
   RecordCursor record_cursor = cursor();
@@ -827,13 +826,19 @@ Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions 
     return std::unexpected(std::move(view.error()));
   }
 
-  std::vector<SqlValue> values;
-  values.reserve(view->field_count());
-  RecordCursor record_cursor = view->cursor();
-  while (const auto field = record_cursor.Next()) {
-    values.push_back(field->ToOwned());
+  try {
+    std::vector<SqlValue> values;
+    values.reserve(view->field_count());
+    RecordCursor record_cursor = view->cursor();
+    while (const auto field = record_cursor.Next()) {
+      values.push_back(field->ToOwned());
+    }
+    return values;
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  return values;
 }
 
 Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const RecordView& right,

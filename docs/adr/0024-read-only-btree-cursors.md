@@ -355,6 +355,9 @@ benefit and belong to a later performance change.
   overflow termination, and invalid followed page references are
   `kCorruption`.
 - Pager I/O, cache, lock, and allocation failures propagate unchanged.
+- ADR-0101 contains expected Open/copy ownership and diagnostic allocations
+  as typed `kOutOfMemory`, releases all failed-Open pins, and preserves copy
+  position/borrows. Both cursor types share one payload-copy implementation.
 
 No broad exception handling, silent fallback, or success-shaped corruption
 result is introduced.

@@ -296,6 +296,11 @@ should exist.
 - Malformed external bytes and invalid on-disk page references are
   `kCorruption`.
 - Successful parsing and access allocate zero times.
+- ADR-0101 contains diagnostic-message ownership in narrow allocation
+  boundaries. Error helpers borrow their input text; failed message ownership
+  returns typed `kOutOfMemory` without changing normal validation/errors.
+  Page-local Results propagate owning errors by move, with no message copy
+  after the protected factory.
 - No decoder owns bytes, performs I/O, retains pager pins, or catches broad
   exceptions.
 

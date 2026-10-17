@@ -5,8 +5,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,16 +26,26 @@ constexpr std::uint32_t kMaximumPageNumber = 0xfffffffeU;
 constexpr std::uint64_t kPendingByte = 0x40000000ULL;
 constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
 
-[[nodiscard]] Error Misuse(std::string message) {
-  return Error::Create(ErrorCode::kMisuse, std::move(message));
+[[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
+  try {
+    return Error::Create(code, std::string{message});
+  } catch (const std::bad_alloc&) {
+    return Error::OutOfMemory();
+  } catch (const std::length_error&) {
+    return Error::OutOfMemory();
+  }
 }
 
-[[nodiscard]] Error Corruption(std::string message) {
-  return Error::Create(ErrorCode::kCorruption, std::move(message));
+[[nodiscard]] Error Misuse(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kMisuse, message);
 }
 
-[[nodiscard]] Error OutOfRange(std::string message) {
-  return Error::Create(ErrorCode::kOutOfRange, std::move(message));
+[[nodiscard]] Error Corruption(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kCorruption, message);
+}
+
+[[nodiscard]] Error OutOfRange(std::string_view message) noexcept {
+  return MakeError(ErrorCode::kOutOfRange, message);
 }
 
 [[nodiscard]] std::uint16_t Load16(ByteView bytes, std::size_t offset) noexcept {
@@ -59,7 +71,7 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
   }
   const PageNumber page_number{raw_page_number};
   if (!IsValidPageReference(page_number, geometry)) {
-    return std::unexpected(Corruption(std::string{message}));
+    return std::unexpected(Corruption(message));
   }
   return std::optional<PageNumber>{page_number};
 }
@@ -69,7 +81,7 @@ constexpr std::uint64_t kMaximumPayloadSize = 0x7fffffffULL;
                                                              std::string_view message) {
   const PageNumber page_number{raw_page_number};
   if (!IsValidPageReference(page_number, geometry)) {
-    return std::unexpected(Corruption(std::string{message}));
+    return std::unexpected(Corruption(message));
   }
   return page_number;
 }
@@ -179,9 +191,9 @@ Result<BtreePageView> BtreePageView::Parse(ByteView page, PageNumber page_number
   }
 
   const std::size_t header_offset = page_number == PageNumber{1} ? 100U : 0U;
-  const auto decoded_type = DecodePageType(page[header_offset]);
+  auto decoded_type = DecodePageType(page[header_offset]);
   if (!decoded_type.has_value()) {
-    return std::unexpected(decoded_type.error());
+    return std::unexpected(std::move(decoded_type.error()));
   }
   const BtreePageType type = *decoded_type;
   const bool is_leaf = type == BtreePageType::kLeafIndex || type == BtreePageType::kLeafTable;
@@ -220,11 +232,11 @@ Result<BtreePageView> BtreePageView::Parse(ByteView page, PageNumber page_number
 
   std::optional<PageNumber> rightmost_child;
   if (!is_leaf) {
-    const auto decoded_child =
+    auto decoded_child =
         DecodeRequiredPageReference(Load32(page, header_offset + 8U), geometry,
                                     "B-tree interior page has an invalid rightmost child");
     if (!decoded_child.has_value()) {
-      return std::unexpected(decoded_child.error());
+      return std::unexpected(std::move(decoded_child.error()));
     }
     rightmost_child = *decoded_child;
   }
@@ -258,9 +270,9 @@ Result<ByteCount> BtreePageView::cell_offset(std::size_t index) const {
 }
 
 Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
-  const auto decoded_offset = cell_offset(index);
+  auto decoded_offset = cell_offset(index);
   if (!decoded_offset.has_value()) {
-    return std::unexpected(decoded_offset.error());
+    return std::unexpected(std::move(decoded_offset.error()));
   }
 
   const std::size_t offset = decoded_offset->value();
@@ -270,19 +282,19 @@ Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
   std::optional<std::int64_t> rowid;
 
   if (!is_leaf()) {
-    const auto child = DecodeRequiredPageReference(
-        Load32(cell_bytes, 0), geometry_, "B-tree interior cell has an invalid left child");
+    auto child = DecodeRequiredPageReference(Load32(cell_bytes, 0), geometry_,
+                                             "B-tree interior cell has an invalid left child");
     if (!child.has_value()) {
-      return std::unexpected(child.error());
+      return std::unexpected(std::move(child.error()));
     }
     left_child = *child;
     cursor = 4;
   }
 
   if (type_ == BtreePageType::kInteriorTable) {
-    const auto decoded_rowid = DecodeCellVarint(cell_bytes, cursor);
+    auto decoded_rowid = DecodeCellVarint(cell_bytes, cursor);
     if (!decoded_rowid.has_value()) {
-      return std::unexpected(decoded_rowid.error());
+      return std::unexpected(std::move(decoded_rowid.error()));
     }
     cursor += decoded_rowid->bytes_consumed.value();
     return BtreeCellView{
@@ -292,9 +304,9 @@ Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
     };
   }
 
-  const auto decoded_payload_size = DecodeCellVarint(cell_bytes, cursor);
+  auto decoded_payload_size = DecodeCellVarint(cell_bytes, cursor);
   if (!decoded_payload_size.has_value()) {
-    return std::unexpected(decoded_payload_size.error());
+    return std::unexpected(std::move(decoded_payload_size.error()));
   }
   if (decoded_payload_size->value > kMaximumPayloadSize) {
     return std::unexpected(Corruption("B-tree cell payload size exceeds SQLite's limit"));
@@ -303,9 +315,9 @@ Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
   const auto payload_size = static_cast<std::size_t>(decoded_payload_size->value);
 
   if (type_ == BtreePageType::kLeafTable) {
-    const auto decoded_rowid = DecodeCellVarint(cell_bytes, cursor);
+    auto decoded_rowid = DecodeCellVarint(cell_bytes, cursor);
     if (!decoded_rowid.has_value()) {
-      return std::unexpected(decoded_rowid.error());
+      return std::unexpected(std::move(decoded_rowid.error()));
     }
     rowid = std::bit_cast<std::int64_t>(decoded_rowid->value);
     cursor += decoded_rowid->bytes_consumed.value();
@@ -323,10 +335,10 @@ Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
   cursor += local_payload_size;
   std::optional<PageNumber> first_overflow_page;
   if (has_overflow) {
-    const auto decoded_overflow = DecodeRequiredPageReference(
+    auto decoded_overflow = DecodeRequiredPageReference(
         Load32(cell_bytes, cursor), geometry_, "B-tree cell has an invalid first overflow page");
     if (!decoded_overflow.has_value()) {
-      return std::unexpected(decoded_overflow.error());
+      return std::unexpected(std::move(decoded_overflow.error()));
     }
     first_overflow_page = *decoded_overflow;
     cursor += 4U;
@@ -390,10 +402,10 @@ Result<OverflowPageView> OverflowPageView::Parse(ByteView page, BtreePageGeometr
   if (page.size() != geometry.page_size().value()) {
     return std::unexpected(Misuse("overflow page buffer must match the configured page size"));
   }
-  const auto next_page = DecodeOptionalPageReference(
-      Load32(page, 0), geometry, "overflow page has an invalid next-page reference");
+  auto next_page = DecodeOptionalPageReference(Load32(page, 0), geometry,
+                                               "overflow page has an invalid next-page reference");
   if (!next_page.has_value()) {
-    return std::unexpected(next_page.error());
+    return std::unexpected(std::move(next_page.error()));
   }
   return OverflowPageView{
       *next_page,
@@ -405,10 +417,10 @@ Result<FreelistTrunkView> FreelistTrunkView::Parse(ByteView page, BtreePageGeome
   if (page.size() != geometry.page_size().value()) {
     return std::unexpected(Misuse("freelist trunk buffer must match the configured page size"));
   }
-  const auto next_trunk = DecodeOptionalPageReference(
+  auto next_trunk = DecodeOptionalPageReference(
       Load32(page, 0), geometry, "freelist trunk has an invalid next-trunk reference");
   if (!next_trunk.has_value()) {
-    return std::unexpected(next_trunk.error());
+    return std::unexpected(std::move(next_trunk.error()));
   }
 
   const std::uint32_t raw_leaf_count = Load32(page, 4);
@@ -418,11 +430,10 @@ Result<FreelistTrunkView> FreelistTrunkView::Parse(ByteView page, BtreePageGeome
   }
   const std::size_t leaf_count = raw_leaf_count;
   for (std::size_t index = 0; index < leaf_count; ++index) {
-    const auto leaf =
-        DecodeRequiredPageReference(Load32(page, 8U + index * 4U), geometry,
-                                    "freelist trunk has an invalid leaf-page reference");
+    auto leaf = DecodeRequiredPageReference(Load32(page, 8U + index * 4U), geometry,
+                                            "freelist trunk has an invalid leaf-page reference");
     if (!leaf.has_value()) {
-      return std::unexpected(leaf.error());
+      return std::unexpected(std::move(leaf.error()));
     }
   }
 
@@ -469,9 +480,9 @@ Result<bool> IsPointerMapPage(PageNumber page_number, BtreePageGeometry geometry
   if (page_number.value() > kMaximumPageNumber) {
     return std::unexpected(OutOfRange("pointer-map page number is out of range"));
   }
-  const auto map_page = PointerMapPageFor(page_number, geometry);
+  auto map_page = PointerMapPageFor(page_number, geometry);
   if (!map_page.has_value()) {
-    return std::unexpected(map_page.error());
+    return std::unexpected(std::move(map_page.error()));
   }
   return *map_page == page_number;
 }
@@ -481,9 +492,9 @@ Result<PointerMapView> PointerMapView::Parse(ByteView page, PageNumber page_numb
   if (page.size() != geometry.page_size().value()) {
     return std::unexpected(Misuse("pointer-map buffer must match the configured page size"));
   }
-  const auto is_pointer_map = IsPointerMapPage(page_number, geometry);
+  auto is_pointer_map = IsPointerMapPage(page_number, geometry);
   if (!is_pointer_map.has_value()) {
-    return std::unexpected(is_pointer_map.error());
+    return std::unexpected(std::move(is_pointer_map.error()));
   }
   if (!*is_pointer_map) {
     return std::unexpected(Misuse("page number does not identify a pointer-map page"));
@@ -492,9 +503,9 @@ Result<PointerMapView> PointerMapView::Parse(ByteView page, PageNumber page_numb
 }
 
 Result<PointerMapEntry> PointerMapView::entry(PageNumber target) const {
-  const auto map_page = PointerMapPageFor(target, geometry_);
+  auto map_page = PointerMapPageFor(target, geometry_);
   if (!map_page.has_value()) {
-    return std::unexpected(map_page.error());
+    return std::unexpected(std::move(map_page.error()));
   }
   if (*map_page != page_number_ || target == page_number_) {
     return std::unexpected(OutOfRange("pointer-map target does not belong to this map page"));
@@ -522,10 +533,10 @@ Result<PointerMapEntry> PointerMapView::entry(PageNumber target) const {
     return PointerMapEntry{.type = type, .parent = std::nullopt};
   }
 
-  const auto parent = DecodeRequiredPageReference(
-      raw_parent, geometry_, "pointer-map entry has an invalid parent reference");
+  auto parent = DecodeRequiredPageReference(raw_parent, geometry_,
+                                            "pointer-map entry has an invalid parent reference");
   if (!parent.has_value()) {
-    return std::unexpected(parent.error());
+    return std::unexpected(std::move(parent.error()));
   }
   return PointerMapEntry{.type = type, .parent = *parent};
 }

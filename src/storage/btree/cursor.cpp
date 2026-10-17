@@ -33,27 +33,33 @@
 namespace modern_sqlite {
 namespace {
 
-[[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) {
-  return Error::Create(code, std::string{message});
+[[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
+  try {
+    return Error::Create(code, std::string{message});
+  } catch (const std::bad_alloc&) {
+    return Error::OutOfMemory();
+  } catch (const std::length_error&) {
+    return Error::OutOfMemory();
+  }
 }
 
-[[nodiscard]] Error Misuse(std::string_view message) {
+[[nodiscard]] Error Misuse(std::string_view message) noexcept {
   return MakeError(ErrorCode::kMisuse, message);
 }
 
-[[nodiscard]] Error Corruption(std::string_view message) {
+[[nodiscard]] Error Corruption(std::string_view message) noexcept {
   return MakeError(ErrorCode::kCorruption, message);
 }
 
-[[nodiscard]] Error OutOfRange(std::string_view message) {
+[[nodiscard]] Error OutOfRange(std::string_view message) noexcept {
   return MakeError(ErrorCode::kOutOfRange, message);
 }
 
-[[nodiscard]] Error SchemaChanged(std::string_view message) {
+[[nodiscard]] Error SchemaChanged(std::string_view message) noexcept {
   return MakeError(ErrorCode::kSchemaChanged, message);
 }
 
-[[nodiscard]] Error Protocol(std::string_view message) {
+[[nodiscard]] Error Protocol(std::string_view message) noexcept {
   return MakeError(ErrorCode::kProtocol, message);
 }
 
@@ -499,6 +505,27 @@ class CursorCore final {
     return {};
   }
 
+  [[nodiscard]] Result<ByteBuffer> CopyPayload() try {
+    auto cell = CurrentCell();
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    auto possible = EnsureCompletePayloadPossible(*cell);
+    if (!possible.has_value()) {
+      return std::unexpected(std::move(possible.error()));
+    }
+    ByteBuffer copied{cell->payload_size()};
+    auto read = ReadCellPayload(*cell, ByteOffset{0}, copied.mutable_view());
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    return copied;
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+
  private:
   CursorCore(Pager& pager, PageNumber root_page, bool table, std::uint64_t data_version,
              std::optional<BtreePageGeometry> geometry, bool empty_database) noexcept
@@ -875,7 +902,9 @@ class CursorCore final {
   bool terminal_ = false;
 };
 
-[[nodiscard]] Error MovedFromCursor() { return Misuse("operation on a moved-from B-tree cursor"); }
+[[nodiscard]] Error MovedFromCursor() noexcept {
+  return Misuse("operation on a moved-from B-tree cursor");
+}
 
 }  // namespace
 
@@ -1001,12 +1030,16 @@ TableBtreeCursor& TableBtreeCursor::operator=(TableBtreeCursor&&) noexcept = def
 
 TableBtreeCursor::~TableBtreeCursor() = default;
 
-Result<TableBtreeCursor> TableBtreeCursor::Open(Pager& pager, PageNumber root_page) {
+Result<TableBtreeCursor> TableBtreeCursor::Open(Pager& pager, PageNumber root_page) try {
   auto core = CursorCore::Open(pager, root_page, true);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
   return TableBtreeCursor{std::make_unique<Impl>(std::move(*core))};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
 }
 
 bool TableBtreeCursor::valid() const noexcept { return impl_ != nullptr && impl_->core.valid(); }
@@ -1094,20 +1127,7 @@ Result<ByteBuffer> TableBtreeCursor::CopyPayload() {
   if (impl_ == nullptr) {
     return std::unexpected(MovedFromCursor());
   }
-  auto cell = impl_->core.CurrentCell();
-  if (!cell.has_value()) {
-    return std::unexpected(std::move(cell.error()));
-  }
-  auto possible = impl_->core.EnsureCompletePayloadPossible(*cell);
-  if (!possible.has_value()) {
-    return std::unexpected(std::move(possible.error()));
-  }
-  ByteBuffer copied{cell->payload_size()};
-  auto read = impl_->core.ReadCellPayload(*cell, ByteOffset{0}, copied.mutable_view());
-  if (!read.has_value()) {
-    return std::unexpected(std::move(read.error()));
-  }
-  return copied;
+  return impl_->core.CopyPayload();
 }
 
 IndexBtreeCursor::IndexBtreeCursor(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -1119,7 +1139,7 @@ IndexBtreeCursor& IndexBtreeCursor::operator=(IndexBtreeCursor&&) noexcept = def
 IndexBtreeCursor::~IndexBtreeCursor() = default;
 
 Result<IndexBtreeCursor> IndexBtreeCursor::Open(Pager& pager, PageNumber root_page,
-                                                std::span<const IndexColumnOrder> columns) {
+                                                std::span<const IndexColumnOrder> columns) try {
   if (!pager.in_read_transaction()) {
     return std::unexpected(Misuse("opening an index cursor requires a read transaction"));
   }
@@ -1155,6 +1175,10 @@ Result<IndexBtreeCursor> IndexBtreeCursor::Open(Pager& pager, PageNumber root_pa
   copied_columns.insert(copied_columns.end(), columns.begin(), columns.end());
   return IndexBtreeCursor{
       std::make_unique<Impl>(std::move(*core), std::move(copied_columns), *options)};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
 }
 
 bool IndexBtreeCursor::valid() const noexcept { return impl_ != nullptr && impl_->core.valid(); }
@@ -1259,20 +1283,7 @@ Result<ByteBuffer> IndexBtreeCursor::CopyPayload() {
   if (impl_ == nullptr) {
     return std::unexpected(MovedFromCursor());
   }
-  auto cell = impl_->core.CurrentCell();
-  if (!cell.has_value()) {
-    return std::unexpected(std::move(cell.error()));
-  }
-  auto possible = impl_->core.EnsureCompletePayloadPossible(*cell);
-  if (!possible.has_value()) {
-    return std::unexpected(std::move(possible.error()));
-  }
-  ByteBuffer copied{cell->payload_size()};
-  auto read = impl_->core.ReadCellPayload(*cell, ByteOffset{0}, copied.mutable_view());
-  if (!read.has_value()) {
-    return std::unexpected(std::move(read.error()));
-  }
-  return copied;
+  return impl_->core.CopyPayload();
 }
 
 }  // namespace modern_sqlite
