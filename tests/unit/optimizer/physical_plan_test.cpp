@@ -1874,10 +1874,10 @@ TEST(PhysicalPlan, PublishesExactJoinedPredicatePhasesAndConsumedOnIdentity) {
     return lookup != nullptr && lookup->source == BoundSourceId{1};
   });
   ASSERT_NE(inner.nodes().end(), inner_lookup);
-  const auto& lookup = std::get<PhysicalRowIdLookupNode>(inner_lookup->payload);
-  ASSERT_TRUE(lookup.constraint.has_value());
-  EXPECT_EQ(PhysicalPredicateOrigin::kOn, lookup.constraint->origin);
-  EXPECT_EQ(inner_predicates[2].predicate, lookup.constraint->predicate);
+  const auto& inner_lookup_access = std::get<PhysicalRowIdLookupNode>(inner_lookup->payload);
+  ASSERT_TRUE(inner_lookup_access.constraint.has_value());
+  EXPECT_EQ(PhysicalPredicateOrigin::kOn, inner_lookup_access.constraint->origin);
+  EXPECT_EQ(inner_predicates[2].predicate, inner_lookup_access.constraint->predicate);
 
   const PhysicalPlan outer = OptimizeOrThrow(
       "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
