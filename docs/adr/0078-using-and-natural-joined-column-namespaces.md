@@ -85,6 +85,11 @@ wildcards retain all matching source columns and use the same generated-name
 resolver. A generated reference may resolve to another physical occurrence
 only when both columns belong to the same merged group.
 
+ADR-0099 clarifies later RIGHT/FULL publication: a generated qualified
+wildcard name may instead use ordinary unqualified joined resolution when
+native's later-boundary/USING condition requires it. Explicit qualified
+columns remain physical, and wildcard names keep their owning spelling.
+
 This package represents the admitted INNER/LEFT merged value as its ordinary
 left source leaf. RIGHT/FULL coalesced values require their own executable
 package and value contract; do not add unused expression variants now.

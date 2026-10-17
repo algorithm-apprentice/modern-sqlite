@@ -101,3 +101,4 @@ their corresponding implementation begins.
 96. [ADR-0096: Computed Joined Rowid Probes](0096-computed-joined-rowid-probes.md)
 97. [ADR-0097: POSIX Nonempty Regular-File Existence](0097-posix-nonempty-regular-file-existence.md)
 98. [ADR-0098: Retired Statement Completion After Rollback](0098-retired-statement-completion-after-rollback.md)
+99. [ADR-0099: Preserved USING Wildcard Publication](0099-preserved-using-wildcard-publication.md)

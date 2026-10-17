@@ -93,6 +93,11 @@ expression-derived name when it becomes a scoped coalesce; wildcard output
 keeps the declared column name. Ordinary and RIGHT-only metadata remains
 unchanged.
 
+ADR-0099 corrects generated qualified wildcards under later RIGHT/FULL
+USING/NATURAL boundaries through the same resolver and coalesce. Preserve
+the wildcard owner's exact declared spelling even when a RIGHT value comes
+from another source; explicit qualified columns remain physical.
+
 ### 4. Keep outer barriers and failures canonical
 
 FULL participates in the same right-preservation predicate floor as RIGHT.

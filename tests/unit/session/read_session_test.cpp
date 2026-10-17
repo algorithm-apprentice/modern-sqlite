@@ -1630,6 +1630,9 @@ TEST(ReadSession, RecoversJoinedCursorReadFailureAndCleansOwnedState) {
            .second = 1},
       Case{.sql = "SELECT count() FROM Items a FULL JOIN storage_values b ON 0", .first = 15},
       Case{.sql = "SELECT count() FROM Items a FULL JOIN storage_values b USING(id)", .first = 11},
+      Case{.sql = "SELECT a.*,a.id,b.id FROM Items a FULL JOIN storage_values b USING(id) "
+                  "WHERE b.id=11 LIMIT 1",
+           .first = 11},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -1663,7 +1666,11 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
     std::size_t rows;
     bool descending;
     std::size_t copies = 1;
+    bool exercise_write_failure = false;
   };
+  const std::string wildcard_sql =
+      "SELECT a.*,b.id,'" + std::string(2048, 'x') +
+      "' FROM items a RIGHT JOIN model_rows b USING(id) ORDER BY 1 DESC,b.id";
   const std::array cases{
       JoinCase{.sql = "SELECT b.id FROM model_rows a CROSS JOIN model_rows b "
                       "ORDER BY b.id DESC,a.id",
@@ -1690,6 +1697,7 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
       JoinCase{.sql = "SELECT id FROM model_rows a NATURAL LEFT JOIN model_rows b ORDER BY id DESC",
                .rows = 32,
                .descending = true},
+      JoinCase{.sql = wildcard_sql, .rows = 32, .descending = true, .exercise_write_failure = true},
   };
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<int>(mode));
@@ -1709,6 +1717,17 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
       SCOPED_TRACE(test_case.sql);
       const std::size_t opens_before = state->open_count;
       ReadStatement statement = PrepareStatement(session, test_case.sql);
+      if (mode == TemporaryStoreMode::kFile && test_case.exercise_write_failure) {
+        state->writes_until_failure = 0U;
+        const auto failed = statement.Step();
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+        EXPECT_GT(state->open_count, opens_before);
+        EXPECT_EQ(0U, state->live_count);
+        const auto reset = statement.Reset();
+        ASSERT_FALSE(reset.has_value());
+        EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+      }
       std::size_t rows = 0;
       while (true) {
         const auto stepped = statement.Step();
@@ -2227,6 +2246,58 @@ TEST(ReadSession, RebindsTypedJoinedIndexKeysAfterSuspensionAndCompletion) {
           EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
         }
         RequireStatus(statement.Reset());
+      }
+    }
+  }
+}
+
+TEST(ReadSession, PublishesPreservedUsingKeysForQualifiedWildcards) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(session,
+                                             "SELECT a.*,a.id,b.id FROM probe_rows a "
+                                             "FULL JOIN key_rows b USING(id) WHERE b.id=12");
+  ASSERT_EQ(7U, statement.result_columns().size());
+  EXPECT_EQ(std::nullopt, statement.result_columns()[0].declared_type);
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(7U, statement.row().size());
+  EXPECT_EQ(12, statement.row()[0].integer_value());
+  for (std::size_t index = 1; index <= 5; ++index) {
+    EXPECT_EQ(SqlValueType::kNull, statement.row()[index].type());
+  }
+  EXPECT_EQ(12, statement.row()[6].integer_value());
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, KeepsWildcardOwnerNamesSeparateFromPreservedValueMetadata) {
+  const auto fixture = JoinedIndexFixturePath().parent_path().parent_path() / "wildcard_namespace" /
+                       "sqlite-3.54.0-wildcard-namespace.db";
+  ReadSession session = TakeValue(ReadSession::Open(fixture.string()));
+  for (const std::string_view join : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    for (const bool key_column : {false, true}) {
+      for (const bool qualified : {false, true}) {
+        SCOPED_TRACE(join);
+        SCOPED_TRACE(key_column);
+        SCOPED_TRACE(qualified);
+        ReadStatement statement = PrepareStatement(
+            session, "SELECT " + std::string{qualified ? "a.*" : "*"} +
+                         ",a.ID,b.id FROM wild_l a " + std::string{join} + " wild_r b USING(" +
+                         std::string{key_column ? "\"Key\"" : "ID"} + ")");
+        const std::size_t wildcard_columns = qualified ? 3U : 5U;
+        ASSERT_EQ(wildcard_columns + 2U, statement.result_columns().size());
+        const std::size_t key = key_column ? 1U : 0U;
+        EXPECT_EQ(key_column ? "Key" : "ID", statement.result_columns()[key].name);
+        const std::optional<std::string> expected =
+            join == "FULL JOIN"    ? std::nullopt
+            : join == "RIGHT JOIN" ? std::optional<std::string>{key_column ? "NUMERIC" : "INTEGER"}
+                                   : std::optional<std::string>{key_column ? "TEXT" : "INT"};
+        EXPECT_EQ(expected, statement.result_columns()[key].declared_type);
+        EXPECT_EQ(std::optional<std::string>{"INT"},
+                  statement.result_columns()[wildcard_columns].declared_type);
+        EXPECT_EQ(std::optional<std::string>{"INTEGER"},
+                  statement.result_columns()[wildcard_columns + 1U].declared_type);
+        EXPECT_EQ("ID", statement.result_columns()[wildcard_columns].name);
+        EXPECT_EQ("id", statement.result_columns()[wildcard_columns + 1U].name);
+        RequireStatus(statement.Finalize());
       }
     }
   }

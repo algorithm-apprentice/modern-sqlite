@@ -171,6 +171,9 @@ Unqualified lookup and unqualified `*` use this joined-output namespace, so a
 USING column appears once. Qualified `left.column`, `right.column`,
 `left.*`, and `right.*` continue to address the separate base sources. A
 merged column is therefore not forced into one base source identity.
+ADR-0099 narrows this generated-wildcard rule for later RIGHT/FULL
+USING/NATURAL boundaries: native may resolve a generated name unqualified
+through the joined namespace while explicit qualified columns remain physical.
 
 SQLite clause-specific alias and ordinal rules are explicit:
 
