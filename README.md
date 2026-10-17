@@ -69,6 +69,16 @@ cmake --build --preset dev-debug
 ctest --preset dev-debug
 ```
 
+For the bounded local inner loop and change-aware closing plan:
+
+```sh
+python3 tools/run_fast_tests.py --build-directory build/dev-debug
+python3 tools/verify.py plan --base-ref origin/main
+```
+
+The fast-local layer retains the complete unit selection but is not isolated
+qualification. See [verification domains and commands](docs/verification.md).
+
 Validate the project graph or query the single active/next-ready node with:
 
 ```sh

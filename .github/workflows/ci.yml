@@ -283,28 +283,10 @@ jobs:
             -DMODERN_SQLITE_PINNED_SQLITE_H="$GITHUB_WORKSPACE/sqlite-build/sqlite3.h"
       - name: Build benchmark contracts
         if: github.event_name == 'push' || matrix.run_on_pr
-        run: |
-          cmake --build --preset benchmark \
-            --parallel 3 \
-            --target \
-              modern_sqlite_read_benchmark \
-              modern_sqlite_read_diagnostics \
-              modern_sqlite_index_benchmark \
-              modern_sqlite_index_diagnostics \
-              modern_sqlite_order_by_benchmark \
-              modern_sqlite_order_by_diagnostics \
-              modern_sqlite_distinct_compound_benchmark \
-              modern_sqlite_distinct_compound_diagnostics \
-              modern_sqlite_aggregate_benchmark \
-              modern_sqlite_aggregate_diagnostics \
-              modern_sqlite_write_benchmark \
-              modern_sqlite_write_diagnostics \
-              modern_sqlite_benchmark_sqlite_shared \
-              modern_sqlite_btree_writer_sqlite_compatibility \
-              modern_sqlite_transaction_sqlite_compatibility \
-              modern_sqlite_write_session_sqlite_compatibility \
-              modern_sqlite_write_pager_sqlite_compatibility \
-              modern_sqlite_rollback_journal_fixture
+        run: >
+          python3 tools/verify.py build-native
+          --build-directory build/benchmark
+          --parallel 3
       - name: Run benchmark smoke and fixture contracts
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |

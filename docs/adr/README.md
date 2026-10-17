@@ -104,3 +104,4 @@ their corresponding implementation begins.
 99. [ADR-0099: Preserved USING Wildcard Publication](0099-preserved-using-wildcard-publication.md)
 100. [ADR-0100: Canonical Function Numeric-Type Conversion](0100-canonical-function-numeric-type.md)
 101. [ADR-0101: Typed Read Allocation Boundaries](0101-typed-read-allocation-boundaries.md)
+102. [ADR-0102: Change-Aware Verification](0102-change-aware-verification.md)

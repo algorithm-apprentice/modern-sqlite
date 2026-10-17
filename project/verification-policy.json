@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "shared_test_label": "configuration-independent",
+  "configuration_independent_tests": [
+    "project.graph",
+    "tools.changed_clang_tidy_scope",
+    "tools.ci_workflow_policy",
+    "tools.verification",
+    "tools.fast_local",
+    "differential.read_compatibility_tool",
+    "differential.sqlite_oracle",
+    "differential.sqlite_oracle_regeneration",
+    "differential.subquery_oracle_regeneration",
+    "differential.index_range_oracle_regeneration",
+    "differential.namespace_oracle_regeneration",
+    "differential.numeric_type_oracle_regeneration",
+    "performance.read_performance_tool",
+    "performance.write_performance_tool",
+    "performance.index_performance_tool",
+    "performance.order_by_performance_tool",
+    "performance.distinct_compound_performance_tool",
+    "performance.aggregate_performance_tool",
+    "performance.read_baseline_validation",
+    "performance.write_baseline_validation",
+    "performance.index_baseline_validation",
+    "performance.order_by_baseline_validation",
+    "performance.distinct_compound_baseline_validation",
+    "performance.aggregate_baseline_validation"
+  ],
+  "native_targets": [
+    "modern_sqlite_read_benchmark",
+    "modern_sqlite_read_diagnostics",
+    "modern_sqlite_index_benchmark",
+    "modern_sqlite_index_diagnostics",
+    "modern_sqlite_order_by_benchmark",
+    "modern_sqlite_order_by_diagnostics",
+    "modern_sqlite_distinct_compound_benchmark",
+    "modern_sqlite_distinct_compound_diagnostics",
+    "modern_sqlite_aggregate_benchmark",
+    "modern_sqlite_aggregate_diagnostics",
+    "modern_sqlite_write_benchmark",
+    "modern_sqlite_write_diagnostics",
+    "modern_sqlite_benchmark_sqlite_shared",
+    "modern_sqlite_btree_writer_sqlite_compatibility",
+    "modern_sqlite_transaction_sqlite_compatibility",
+    "modern_sqlite_write_session_sqlite_compatibility",
+    "modern_sqlite_write_pager_sqlite_compatibility",
+    "modern_sqlite_rollback_journal_fixture"
+  ],
+  "fast_local": {
+    "ordinary_unit_executable": "modern_sqlite_unit_tests",
+    "maximum_batch_cases": 128,
+    "boundary_seconds": 10,
+    "capture_bytes": 16777216
+  },
+  "domains": [
+    {
+      "name": "documentation",
+      "paths": ["docs/**", "*.md", "**/*.md"]
+    },
+    {
+      "name": "tooling",
+      "paths": [
+        "tools/**", "tests/tools/**", "tests/project/**",
+        "tests/CMakeLists.txt", "cmake/Verification.cmake",
+        ".github/workflows/**", "project/verification-policy.json", "project/manifest.json"
+      ]
+    },
+    {
+      "name": "foundation",
+      "paths": [
+        "include/**", "src/base/**", "CMakeLists.txt", "CMakePresets.json",
+        "cmake/CompilerWarnings.cmake", "cmake/Sanitizers.cmake",
+        "cmake/ClangTidy.cmake", "cmake/Format.cmake",
+        "src/storage/cache/**", "src/storage/page_bitvec.cpp"
+      ]
+    },
+    {
+      "name": "durability",
+      "paths": [
+        "src/storage/btree/writer*",
+        "src/storage/journal/**", "src/pager/**", "src/transaction/**",
+        "src/platform/**"
+      ]
+    },
+    {
+      "name": "storage",
+      "paths": [
+        "src/storage/**", "src/format/**", "src/pager/**",
+        "src/transaction/**", "src/platform/**",
+        "tests/unit/storage/**", "tests/unit/format/**", "tests/unit/pager/**",
+        "tests/unit/transaction/**", "tests/unit/platform/**"
+      ]
+    },
+    {
+      "name": "sql",
+      "paths": [
+        "src/binder/**", "src/bytecode/**", "src/catalog/**", "src/lowering/**",
+        "src/optimizer/**", "src/planner/**", "src/session/**", "src/runtime/**",
+        "src/syntax/**", "src/text/**", "src/temporary_storage/**",
+        "src/instrumentation/**"
+      ]
+    },
+    {
+      "name": "performance",
+      "paths": ["benchmarks/**", "tests/performance/**", "tools/*_performance.py"]
+    },
+    {
+      "name": "reference",
+      "paths": ["tests/fixtures/**", "tests/compatibility/**", "tests/golden/**"]
+    },
+    {
+      "name": "metadata",
+      "paths": ["project/manifest.json", "project/module-graph.json", "project/progress.json"]
+    },
+    {
+      "name": "tests",
+      "paths": ["tests/**"]
+    }
+  ]
+}

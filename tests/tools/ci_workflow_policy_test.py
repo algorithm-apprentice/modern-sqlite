@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import pathlib
 import re
 import unittest
@@ -103,11 +104,15 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             "tools/aggregate_performance.py validate-workloads",
             "tools/aggregate_performance.py validate-baseline",
             "benchmarks/aggregate-baseline-v1",
-            "modern_sqlite_aggregate_benchmark",
-            "modern_sqlite_aggregate_diagnostics",
         ):
             with self.subTest(required=required):
                 self.assertTrue(required in workflow, f"CI must include {required}")
+        targets = json.loads(
+            (REPOSITORY_ROOT / "project/verification-policy.json").read_text()
+        )["native_targets"]
+        self.assertIn("tools/verify.py build-native", workflow)
+        self.assertIn("modern_sqlite_aggregate_benchmark", targets)
+        self.assertIn("modern_sqlite_aggregate_diagnostics", targets)
 
         smoke_patterns = re.findall(r"-R '([^']+)'", workflow)
         self.assertTrue(
@@ -117,6 +122,28 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             ),
             "CI must execute the aggregate timing and diagnostic CLI matrix",
         )
+
+    def test_native_target_set_preserves_the_previous_ci_contract(self) -> None:
+        expected = {
+            "modern_sqlite_read_benchmark", "modern_sqlite_read_diagnostics",
+            "modern_sqlite_index_benchmark", "modern_sqlite_index_diagnostics",
+            "modern_sqlite_order_by_benchmark", "modern_sqlite_order_by_diagnostics",
+            "modern_sqlite_distinct_compound_benchmark",
+            "modern_sqlite_distinct_compound_diagnostics",
+            "modern_sqlite_aggregate_benchmark", "modern_sqlite_aggregate_diagnostics",
+            "modern_sqlite_write_benchmark", "modern_sqlite_write_diagnostics",
+            "modern_sqlite_benchmark_sqlite_shared",
+            "modern_sqlite_btree_writer_sqlite_compatibility",
+            "modern_sqlite_transaction_sqlite_compatibility",
+            "modern_sqlite_write_session_sqlite_compatibility",
+            "modern_sqlite_write_pager_sqlite_compatibility",
+            "modern_sqlite_rollback_journal_fixture",
+        }
+        actual = json.loads(
+            (REPOSITORY_ROOT / "project/verification-policy.json").read_text()
+        )["native_targets"]
+        self.assertEqual(expected, set(actual))
+        self.assertEqual(len(expected), len(actual))
 
 
 if __name__ == "__main__":
