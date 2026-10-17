@@ -40,6 +40,7 @@ enum class PhysicalAccessKind : std::uint8_t {
   kEmpty,
   kTableScan,
   kRowIdLookup,
+  kRowIdRange,
   kIndexScan,
   kAutomaticIndex,
 };
@@ -76,12 +77,29 @@ enum class PhysicalScanDirection : std::uint8_t {
   kReverse,
 };
 
+enum class PhysicalPredicateOrigin : std::uint8_t {
+  kOn,
+  kWhere,
+};
+
+struct PhysicalAccessPredicate {
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
+
+  constexpr auto operator<=>(const PhysicalAccessPredicate&) const noexcept = default;
+};
+
 struct PhysicalSingleRowNode {
   std::size_t core_index = 0;
+
+  constexpr bool operator==(const PhysicalSingleRowNode&) const noexcept = default;
 };
 
 struct PhysicalEmptyNode {
   std::size_t core_index = 0;
+
+  constexpr bool operator==(const PhysicalEmptyNode&) const noexcept = default;
 };
 
 struct PhysicalTableScanNode {
@@ -102,8 +120,32 @@ struct PhysicalRowIdLookupNode {
   std::optional<TableId> table{};
   RootPageId root_page{};
   BoundExpressionId key;
+  std::optional<PhysicalAccessPredicate> constraint{};
 
   constexpr bool operator==(const PhysicalRowIdLookupNode&) const noexcept = default;
+};
+
+struct PhysicalRangeBound {
+  BoundExpressionId key{0};
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
+  bool inclusive = false;
+
+  constexpr auto operator<=>(const PhysicalRangeBound&) const noexcept = default;
+};
+
+struct PhysicalRowIdRangeNode {
+  std::size_t core_index = 0;
+  BoundSourceId source{0};
+  BoundSourceKind source_kind = BoundSourceKind::kCatalogTable;
+  std::optional<TableId> table{};
+  RootPageId root_page{};
+  std::optional<PhysicalRangeBound> lower{};
+  std::optional<PhysicalRangeBound> upper{};
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+
+  constexpr bool operator==(const PhysicalRowIdRangeNode&) const noexcept = default;
 };
 
 struct PhysicalIndexEquality {
@@ -111,6 +153,7 @@ struct PhysicalIndexEquality {
   BoundExpressionId key{0};
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
+  PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
   TypeAffinity affinity = TypeAffinity::kNone;
   std::string_view collation_name = "BINARY";
   SortOrder order = SortOrder::kAscending;
@@ -119,22 +162,13 @@ struct PhysicalIndexEquality {
   constexpr auto operator<=>(const PhysicalIndexEquality&) const noexcept = default;
 };
 
-struct PhysicalIndexBound {
-  BoundExpressionId key{0};
-  BoundExpressionId predicate{0};
-  std::size_t conjunct_position = 0;
-  bool inclusive = false;
-
-  constexpr auto operator<=>(const PhysicalIndexBound&) const noexcept = default;
-};
-
 struct PhysicalIndexRange {
   ColumnId column{};
   TypeAffinity affinity = TypeAffinity::kNone;
   std::string_view collation_name = "BINARY";
   SortOrder order = SortOrder::kAscending;
-  std::optional<PhysicalIndexBound> lower{};
-  std::optional<PhysicalIndexBound> upper{};
+  std::optional<PhysicalRangeBound> lower{};
+  std::optional<PhysicalRangeBound> upper{};
 
   constexpr auto operator<=>(const PhysicalIndexRange&) const noexcept = default;
 };
@@ -300,22 +334,30 @@ struct PhysicalHavingNode {
   BoundExpressionId predicate;
 };
 
+struct PhysicalJoinPredicatePlacement {
+  BoundExpressionId predicate{0};
+  std::size_t conjunct_position = 0;
+  std::optional<BoundSourceId> source{};
+
+  constexpr auto operator<=>(const PhysicalJoinPredicatePlacement&) const noexcept = default;
+};
+
 struct PhysicalNestedLoopJoinNode {
   PhysicalNodeId left;
   PhysicalNodeId right;
   std::size_t core_index = 0;
   SourceJoinKind join = SourceJoinKind::kCross;
   std::optional<BoundExpressionId> on{};
-  std::optional<BoundSourceId> condition_source{};
+  std::vector<PhysicalJoinPredicatePlacement> predicates{};
 };
 
 using PhysicalNodePayload =
     std::variant<PhysicalSingleRowNode, PhysicalEmptyNode, PhysicalTableScanNode,
-                 PhysicalRowIdLookupNode, PhysicalIndexScanNode, PhysicalGuardNode,
-                 PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode, PhysicalSortNode,
-                 PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode, PhysicalCompoundNode,
-                 PhysicalAdvancedOrderNode, PhysicalAggregateNode, PhysicalHavingNode,
-                 PhysicalNestedLoopJoinNode, PhysicalAutomaticIndexNode>;
+                 PhysicalRowIdLookupNode, PhysicalRowIdRangeNode, PhysicalIndexScanNode,
+                 PhysicalGuardNode, PhysicalFilterNode, PhysicalLimitNode, PhysicalProjectionNode,
+                 PhysicalSortNode, PhysicalOutputNode, PhysicalValuesNode, PhysicalDistinctNode,
+                 PhysicalCompoundNode, PhysicalAdvancedOrderNode, PhysicalAggregateNode,
+                 PhysicalHavingNode, PhysicalNestedLoopJoinNode, PhysicalAutomaticIndexNode>;
 
 struct PhysicalNode {
   PhysicalNodePayload payload;
@@ -326,6 +368,7 @@ enum class PhysicalNodeKind : std::uint8_t {
   kEmpty,
   kTableScan,
   kRowIdLookup,
+  kRowIdRange,
   kIndexScan,
   kGuard,
   kFilter,
@@ -361,11 +404,19 @@ struct OptimizerError {
 
 [[nodiscard]] std::string_view OptimizerErrorCodeName(OptimizerErrorCode code) noexcept;
 
+struct PhysicalCoreAccessPlan {
+  std::size_t core_index = 0;
+  std::vector<AccessPathCandidate> candidates;
+  std::size_t selected_candidate = 0;
+
+  constexpr bool operator==(const PhysicalCoreAccessPlan&) const noexcept = default;
+};
+
 struct PhysicalQueryPlan {
   BoundQueryId query{0};
   std::vector<PhysicalNode> nodes;
-  std::vector<AccessPathCandidate> candidates;
-  std::size_t selected_candidate = 0;
+  std::optional<PhysicalCoreAccessPlan> root_core_access{};
+  std::vector<PhysicalCoreAccessPlan> core_accesses;
   PhysicalNodeId root{0};
 };
 
@@ -386,6 +437,7 @@ class PhysicalPlan final {
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept;
   [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept;
   [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept;
+  [[nodiscard]] std::span<const PhysicalCoreAccessPlan> core_access_plans() const noexcept;
   [[nodiscard]] const PhysicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
 
  private:
@@ -419,16 +471,33 @@ class PhysicalQueryView final {
   }
   [[nodiscard]] PhysicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept {
-    return owner_->query_plan(query_).candidates;
+    const PhysicalQueryPlan& plan = owner_->query_plan(query_);
+    const PhysicalCoreAccessPlan* root_access =
+        !plan.core_accesses.empty()
+            ? &plan.core_accesses.front()
+            : (plan.root_core_access.has_value() ? &*plan.root_core_access : nullptr);
+    return root_access != nullptr && root_access->core_index == 0U
+               ? std::span<const AccessPathCandidate>{root_access->candidates}
+               : std::span<const AccessPathCandidate>{};
   }
   [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept {
-    return candidates().empty()
-               ? std::nullopt
-               : std::optional<std::size_t>{owner_->query_plan(query_).selected_candidate};
+    const auto plans = core_access_plans();
+    return !plans.empty() && plans.front().core_index == 0U && !plans.front().candidates.empty()
+               ? std::optional<std::size_t>{plans.front().selected_candidate}
+               : std::nullopt;
   }
   [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept {
     const auto selected = selected_candidate_index();
     return selected.has_value() ? &candidates()[*selected] : nullptr;
+  }
+  [[nodiscard]] std::span<const PhysicalCoreAccessPlan> core_access_plans() const noexcept {
+    const PhysicalQueryPlan& plan = owner_->query_plan(query_);
+    if (!plan.core_accesses.empty()) {
+      return plan.core_accesses;
+    }
+    return plan.root_core_access.has_value()
+               ? std::span<const PhysicalCoreAccessPlan>{&*plan.root_core_access, 1U}
+               : std::span<const PhysicalCoreAccessPlan>{};
   }
 
  private:

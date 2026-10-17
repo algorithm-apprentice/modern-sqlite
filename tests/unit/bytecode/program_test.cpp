@@ -1268,7 +1268,14 @@ TEST(BytecodeProgramTest, VerifiesTypedTableDeleteAndRowidSeekModes) {
       CloseCursorInstruction{.cursor = Cursor(0)},
       HaltInstruction{},
   };
-  EXPECT_TRUE(VerifyProgram(seek).has_value());
+  constexpr std::array modes{
+      RowIdSeekMode::kEqual,       RowIdSeekMode::kGreaterOrEqual, RowIdSeekMode::kGreater,
+      RowIdSeekMode::kLessOrEqual, RowIdSeekMode::kLess,
+  };
+  for (const RowIdSeekMode mode : modes) {
+    std::get<SeekRowIdInstruction>(seek.instructions[2]).mode = mode;
+    EXPECT_TRUE(VerifyProgram(seek).has_value());
+  }
 
   std::get<SeekRowIdInstruction>(seek.instructions[2]).mode =
       static_cast<RowIdSeekMode>(255);  // NOLINT

@@ -26,6 +26,7 @@ class GlobalAggregateAccessEmitter final {
         leaf_(input.leaf),
         table_scan_(input.table_scan),
         rowid_lookup_(input.rowid_lookup),
+        rowid_range_(input.rowid_range),
         index_scan_(input.index_scan),
         filter_(input.filter),
         limit_(input.limit),
@@ -35,6 +36,8 @@ class GlobalAggregateAccessEmitter final {
         index_key_first_(input.index_key_first),
         index_key_capacity_(input.index_key_capacity),
         index_rowid_register_(input.index_rowid_register),
+        rowid_range_rowid_register_(input.rowid_range_rowid_register),
+        rowid_range_comparison_register_(input.rowid_range_comparison_register),
         indexed_min_max_null_constant_(input.indexed_min_max_null_constant) {}
 
   [[nodiscard]] LoweringResult<void> Run() { return EmitGlobalAggregatePlan(); }
@@ -86,6 +89,10 @@ class GlobalAggregateAccessEmitter final {
 
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id, RegisterId destination) {
     return services_.EmitExpression(id, destination);
+  }
+
+  [[nodiscard]] LoweringResult<SymbolId> EnsureBinarySymbol() {
+    return services_.EnsureBinarySymbol();
   }
 
   [[nodiscard]] LoweringResult<void> EmitLimitInitialization(std::optional<Label> completion) {
@@ -308,6 +315,207 @@ class GlobalAggregateAccessEmitter final {
     }
     if (auto completed = EmitGlobalAggregateCompletion(); !completed.has_value()) {
       return completed;
+    }
+    if (guard_empty.has_value()) {
+      if (auto bound = BindLabel(*guard_empty); !bound.has_value()) {
+        return bound;
+      }
+      if (auto completed = EmitGlobalAggregateCompletion(); !completed.has_value()) {
+        return completed;
+      }
+    }
+    if (preopen_completion.has_value()) {
+      if (auto bound = BindLabel(*preopen_completion); !bound.has_value()) {
+        return bound;
+      }
+      return EmitGlobalAggregateEarlyStopCompletion();
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitGlobalAggregateRowIdRange(
+      const PhysicalRowIdRangeNode& range) {
+    if (!cursor_.has_value() || aggregate_ == nullptr) {
+      return std::unexpected(
+          InternalFailure("global aggregate rowid range resources are incomplete"));
+    }
+    auto resolved = ResolveRowIdTraversal(range);
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    const RowIdTraversal& traversal = *resolved;
+    if (traversal.end != nullptr && (!rowid_range_rowid_register_.has_value() ||
+                                     !rowid_range_comparison_register_.has_value())) {
+      return std::unexpected(
+          InternalFailure("global aggregate rowid range end resources are incomplete"));
+    }
+    const bool indexed_min_max = aggregate_->strategy == PhysicalAggregateStrategy::kIndexedMinMax;
+
+    std::optional<Label> preopen_completion;
+    if (limit_ != nullptr) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      preopen_completion = *label;
+    }
+    if (auto limit = EmitLimitInitialization(preopen_completion); !limit.has_value()) {
+      return limit;
+    }
+    if (auto opened = OpenGlobalAggregates(); !opened.has_value()) {
+      return opened;
+    }
+    std::optional<Label> guard_empty;
+    if (filter_ != nullptr && !filter_->guards.empty()) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      guard_empty = *label;
+      if (auto guards = EmitGlobalAggregateGuards(*guard_empty); !guards.has_value()) {
+        return guards;
+      }
+    }
+    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !opened.has_value()) {
+      return opened;
+    }
+
+    auto unpositioned = CreateLabel();
+    auto row = CreateLabel();
+    if (!unpositioned.has_value()) {
+      return std::unexpected(std::move(unpositioned.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    std::optional<Label> advance;
+    if (!indexed_min_max || (filter_ != nullptr && !filter_->predicates.empty())) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      advance = *label;
+    }
+    if (traversal.start != nullptr) {
+      const RegisterId key = Home(traversal.start->key);
+      if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
+        return emitted;
+      }
+      auto sought = ConvertProgramResult(
+          builder_->EmitSeekRowId(AssumeValue(cursor_), key, *unpositioned, traversal.start_mode),
+          "unable to emit global aggregate rowid range seek");
+      if (!sought.has_value()) {
+        return std::unexpected(std::move(sought.error()));
+      }
+    } else {
+      ProgramResult<InstructionAddress> positioned =
+          traversal.reverse ? builder_->EmitLast(AssumeValue(cursor_), *unpositioned)
+                            : builder_->EmitRewind(AssumeValue(cursor_), *unpositioned);
+      auto rewound = ConvertProgramResult(
+          std::move(positioned), "unable to emit global aggregate rowid range positioning");
+      if (!rewound.has_value()) {
+        return std::unexpected(std::move(rewound.error()));
+      }
+    }
+
+    std::optional<Label> positioned_end;
+    std::optional<RegisterId> end_key;
+    if (traversal.end != nullptr) {
+      const RegisterId key = Home(traversal.end->key);
+      if (auto emitted = EmitExpression(traversal.end->key, key); !emitted.has_value()) {
+        return emitted;
+      }
+      end_key = key;
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      positioned_end = *label;
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (positioned_end.has_value()) {
+      auto binary = EnsureBinarySymbol();
+      if (!binary.has_value()) {
+        return std::unexpected(std::move(binary.error()));
+      }
+      if (auto read = Append(ReadRowIdInstruction{
+              .cursor = AssumeValue(cursor_),
+              .output = AssumeValue(rowid_range_rowid_register_),
+          });
+          !read.has_value()) {
+        return read;
+      }
+      if (auto compared = Append(CompareInstruction{
+              .comparison = traversal.end_comparison,
+              .affinity = TypeAffinity::kNumeric,
+              .collation = *binary,
+              .left = AssumeValue(rowid_range_rowid_register_),
+              .right = AssumeValue(end_key),
+              .output = AssumeValue(rowid_range_comparison_register_),
+          });
+          !compared.has_value()) {
+        return compared;
+      }
+      if (auto jumped = EmitJumpIf(AssumeValue(rowid_range_comparison_register_),
+                                   JumpCondition::kIfTrueOrNull, *positioned_end);
+          !jumped.has_value()) {
+        return jumped;
+      }
+    }
+    if (advance.has_value()) {
+      if (auto filters = EmitFilters(*advance); !filters.has_value()) {
+        return filters;
+      }
+    }
+    if (auto stepped = StepGlobalAggregates(); !stepped.has_value()) {
+      return stepped;
+    }
+    if (indexed_min_max) {
+      if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+          !closed.has_value()) {
+        return closed;
+      }
+      if (auto completed = EmitGlobalAggregateCompletion(); !completed.has_value()) {
+        return completed;
+      }
+    }
+    if (advance.has_value()) {
+      if (auto bound = BindLabel(*advance); !bound.has_value()) {
+        return bound;
+      }
+      ProgramResult<InstructionAddress> advanced =
+          traversal.reverse ? builder_->EmitPrevious(AssumeValue(cursor_), *row)
+                            : builder_->EmitNext(AssumeValue(cursor_), *row);
+      auto next = ConvertProgramResult(std::move(advanced),
+                                       "unable to emit global aggregate rowid range advance");
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+    }
+    if (auto bound = BindLabel(*unpositioned); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+        !closed.has_value()) {
+      return closed;
+    }
+    if (auto completed = EmitGlobalAggregateCompletion(); !completed.has_value()) {
+      return completed;
+    }
+    if (positioned_end.has_value()) {
+      if (auto bound = BindLabel(*positioned_end); !bound.has_value()) {
+        return bound;
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+          !closed.has_value()) {
+        return closed;
+      }
+      if (auto completed = EmitGlobalAggregateCompletion(); !completed.has_value()) {
+        return completed;
+      }
     }
     if (guard_empty.has_value()) {
       if (auto bound = BindLabel(*guard_empty); !bound.has_value()) {
@@ -1715,6 +1923,9 @@ class GlobalAggregateAccessEmitter final {
       if (rowid_lookup_ != nullptr) {
         return EmitGlobalAggregateRowIdLookup(*rowid_lookup_);
       }
+      if (rowid_range_ != nullptr) {
+        return EmitGlobalAggregateRowIdRange(*rowid_range_);
+      }
       if (index_scan_ != nullptr) {
         return EmitIndexedMinMaxIndexScan(*index_scan_);
       }
@@ -1739,6 +1950,9 @@ class GlobalAggregateAccessEmitter final {
     if (rowid_lookup_ != nullptr) {
       return EmitGlobalAggregateRowIdLookup(*rowid_lookup_);
     }
+    if (rowid_range_ != nullptr) {
+      return EmitGlobalAggregateRowIdRange(*rowid_range_);
+    }
     if (index_scan_ != nullptr && !index_scan_->covering) {
       return EmitGlobalAggregateNoncoveringIndexScan(*index_scan_);
     }
@@ -1756,6 +1970,7 @@ class GlobalAggregateAccessEmitter final {
   const PhysicalNode* leaf_;
   const PhysicalTableScanNode* table_scan_;
   const PhysicalRowIdLookupNode* rowid_lookup_;
+  const PhysicalRowIdRangeNode* rowid_range_;
   const PhysicalIndexScanNode* index_scan_;
   const PhysicalFilterNode* filter_;
   const PhysicalLimitNode* limit_;
@@ -1765,6 +1980,8 @@ class GlobalAggregateAccessEmitter final {
   std::optional<RegisterId> index_key_first_;
   std::uint32_t index_key_capacity_;
   std::optional<RegisterId> index_rowid_register_;
+  std::optional<RegisterId> rowid_range_rowid_register_;
+  std::optional<RegisterId> rowid_range_comparison_register_;
   std::optional<ConstantId> indexed_min_max_null_constant_;
 };
 

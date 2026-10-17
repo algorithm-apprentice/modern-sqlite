@@ -1618,7 +1618,8 @@ TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers
            .lookups = {BoundSourceId{2}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON +b.id=a.id", .lookups = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=b.Value", .lookups = {}},
-      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=abs(a.id)", .lookups = {}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=abs(a.id)",
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.key FROM Items a JOIN wr b ON b.key=a.id", .lookups = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
                   "WHERE a.id=2 AND b.id=a.id",
@@ -1658,7 +1659,38 @@ TEST(PhysicalPlan, SelectsComputedJoinedRowidProbesInValueOnlyOnContexts) {
   EXPECT_EQ(BoundBinaryOperation::kAdd, arithmetic->operation);
 }
 
-TEST(PhysicalPlan, KeepsComputedJoinedKeysBehindCallbackAndPreservationBoundaries) {
+TEST(PhysicalPlan, SelectsOnOriginDeterministicScalarRowidProbes) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=abs(a.id)",
+           "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
+           "ON b.id=a.id+1 AND abs(a.Value)>0",
+       }) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    EXPECT_TRUE(std::ranges::any_of(plan.nodes(), [](const PhysicalNode& node) {
+      const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+      return lookup != nullptr && lookup->source == BoundSourceId{1};
+    }));
+  }
+
+  const PhysicalPlan where_function = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Items b ON 1 WHERE b.id=abs(a.id)", catalog);
+  EXPECT_FALSE(std::ranges::any_of(where_function.nodes(), [](const PhysicalNode& node) {
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return lookup != nullptr && lookup->source == BoundSourceId{1};
+  }));
+
+  const PhysicalPlan volatile_function =
+      OptimizeOrThrow("SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=volatile_key()", catalog,
+                      TestEnvironment());
+  EXPECT_FALSE(std::ranges::any_of(volatile_function.nodes(), [](const PhysicalNode& node) {
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return lookup != nullptr && lookup->source == BoundSourceId{1};
+  }));
+}
+
+TEST(PhysicalPlan, UsesTermPhasesForComputedKeysAndSiblingCallbacks) {
   struct Case {
     std::string_view sql;
     std::vector<BoundSourceId> lookups;
@@ -1666,16 +1698,16 @@ TEST(PhysicalPlan, KeepsComputedJoinedKeysBehindCallbackAndPreservationBoundarie
   const std::array cases{
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
                   "ON b.id=a.id+1 AND abs(a.Value)>0",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
                   "ON b.id=a.id+1 AND (SELECT a.id)>0",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
                   "ON b.id=a.id+1 AND a.Name||a.Name!=''",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
                   "ON b.id=a.id+1 AND iif(a.id>0,1,0)",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b "
                   "ON b.id=a.id AND abs(a.Value)>0",
            .lookups = {BoundSourceId{1}}},
@@ -1688,10 +1720,10 @@ TEST(PhysicalPlan, KeepsComputedJoinedKeysBehindCallbackAndPreservationBoundarie
            .lookups = {}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b "
                   "ON c.id>0 AND abs(a.Value)>0 JOIN Items c ON c.id=a.id+1000",
-           .lookups = {}},
+           .lookups = {BoundSourceId{2}}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=a.id+1000 "
                   "JOIN Items c ON b.id>0 AND abs(a.Value)>0",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
   };
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -1707,7 +1739,7 @@ TEST(PhysicalPlan, KeepsComputedJoinedKeysBehindCallbackAndPreservationBoundarie
   }
 }
 
-TEST(PhysicalPlan, AdmitsNumericJoinedRowidShapesWithoutChangingValueKeyPreference) {
+TEST(PhysicalPlan, AdmitsNumericJoinedRowidShapesAndPreservesOriginOrdering) {
   for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
     for (const std::string_view key :
          {"a.id+?1", "?1+a.id", "a.Value-1", "a.id*2", "a.id/2", "a.id%2", "a.id<<1", "a.id>>1",
@@ -1723,6 +1755,21 @@ TEST(PhysicalPlan, AdmitsNumericJoinedRowidShapesWithoutChangingValueKeyPreferen
       }));
     }
   }
+  const PhysicalPlan fenced = OptimizeOrThrow(
+      "SELECT count() FROM Items a JOIN Items x "
+      "ON abs(a.id-a.id-9223372036854775807-1) "
+      "RIGHT JOIN Items b ON x.id=b.id",
+      TestCatalog());
+  const auto fenced_join = std::ranges::find_if(fenced.nodes(), [](const PhysicalNode& node) {
+    const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+    return join != nullptr && join->join == SourceJoinKind::kInner;
+  });
+  ASSERT_NE(fenced.nodes().end(), fenced_join);
+  const auto& fenced_predicates =
+      std::get<PhysicalNestedLoopJoinNode>(fenced_join->payload).predicates;
+  ASSERT_EQ(1U, fenced_predicates.size());
+  EXPECT_EQ(std::optional{BoundSourceId{1}}, fenced_predicates[0].source);
+
   const auto plan = OptimizeOrThrow(
       "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=a.id+1 AND b.id=?1", TestCatalog());
   const auto lookup = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
@@ -1730,10 +1777,25 @@ TEST(PhysicalPlan, AdmitsNumericJoinedRowidShapesWithoutChangingValueKeyPreferen
     return point != nullptr && point->source == BoundSourceId{1};
   });
   ASSERT_NE(plan.nodes().end(), lookup);
-  EXPECT_TRUE(std::holds_alternative<BoundParameterExpression>(
+  EXPECT_TRUE(std::holds_alternative<BoundBinaryExpression>(
       plan.logical_plan()
           .bound_select()
           .expression(std::get<PhysicalRowIdLookupNode>(lookup->payload).key)
+          .payload));
+
+  const auto where = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Items b ON 1 "
+      "WHERE b.id=a.id+1 AND b.id=?1",
+      TestCatalog());
+  const auto where_lookup = std::ranges::find_if(where.nodes(), [](const PhysicalNode& node) {
+    const auto* point = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return point != nullptr && point->source == BoundSourceId{1};
+  });
+  ASSERT_NE(where.nodes().end(), where_lookup);
+  EXPECT_TRUE(std::holds_alternative<BoundParameterExpression>(
+      where.logical_plan()
+          .bound_select()
+          .expression(std::get<PhysicalRowIdLookupNode>(where_lookup->payload).key)
           .payload));
 }
 
@@ -1761,7 +1823,11 @@ TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
       "LEFT JOIN Items c ON a.id>0 INNER JOIN Items d ON 1",
       TestCatalog());
   const std::array kinds{SourceJoinKind::kInner, SourceJoinKind::kLeft, SourceJoinKind::kInner};
-  const std::array ready{BoundSourceId{2}, BoundSourceId{2}, BoundSourceId{0}};
+  const std::array<std::optional<BoundSourceId>, 3> ready{
+      BoundSourceId{2},
+      BoundSourceId{2},
+      std::nullopt,
+  };
   const auto cores = plan.logical_plan().bound_select().query_cores();
   const auto& sources = std::get<BoundSelectCore>(cores.front()).table_sources;
   std::size_t index = 0;
@@ -1771,7 +1837,8 @@ TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
         join != nullptr) {
       ASSERT_LT(index, kinds.size());
       EXPECT_EQ(kinds[index], join->join);
-      EXPECT_EQ(ready[index], join->condition_source);
+      ASSERT_EQ(1U, join->predicates.size());
+      EXPECT_EQ(ready[index], join->predicates[0].source);
       ASSERT_TRUE(join->on.has_value());
       EXPECT_EQ(sources[index + 1U].on, join->on);
       const auto* logical =
@@ -1786,6 +1853,106 @@ TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP INNER JOIN"));
 }
 
+TEST(PhysicalPlan, PublishesExactJoinedPredicatePhasesAndConsumedOnIdentity) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan inner = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Items b "
+      "ON abs(-9223372036854775808) AND a.id<0 AND b.id=abs(a.id)",
+      catalog);
+  const auto inner_join = std::ranges::find_if(inner.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+  });
+  ASSERT_NE(inner.nodes().end(), inner_join);
+  const auto& inner_predicates =
+      std::get<PhysicalNestedLoopJoinNode>(inner_join->payload).predicates;
+  ASSERT_EQ(3U, inner_predicates.size());
+  EXPECT_EQ(std::nullopt, inner_predicates[0].source);
+  EXPECT_EQ(std::optional{BoundSourceId{0}}, inner_predicates[1].source);
+  EXPECT_EQ(std::optional{BoundSourceId{1}}, inner_predicates[2].source);
+  const auto inner_lookup = std::ranges::find_if(inner.nodes(), [](const PhysicalNode& node) {
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return lookup != nullptr && lookup->source == BoundSourceId{1};
+  });
+  ASSERT_NE(inner.nodes().end(), inner_lookup);
+  const auto& inner_lookup_access = std::get<PhysicalRowIdLookupNode>(inner_lookup->payload);
+  ASSERT_TRUE(inner_lookup_access.constraint.has_value());
+  EXPECT_EQ(PhysicalPredicateOrigin::kOn, inner_lookup_access.constraint->origin);
+  EXPECT_EQ(inner_predicates[2].predicate, inner_lookup_access.constraint->predicate);
+
+  const PhysicalPlan outer = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
+      "ON abs(-9223372036854775808) AND a.id<0 AND b.id=a.id+1000",
+      catalog);
+  const auto outer_join = std::ranges::find_if(outer.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+  });
+  ASSERT_NE(outer.nodes().end(), outer_join);
+  for (const auto& predicate :
+       std::get<PhysicalNestedLoopJoinNode>(outer_join->payload).predicates) {
+    EXPECT_EQ(std::optional{BoundSourceId{1}}, predicate.source);
+  }
+
+  const PhysicalPlan repeated = OptimizeOrThrow(
+      "SELECT (b.id=stable_guard(a.id) AND 1) AS x "
+      "FROM Items a LEFT JOIN Items b ON x AND x",
+      catalog, TestEnvironment());
+  const auto repeated_join = std::ranges::find_if(repeated.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+  });
+  ASSERT_NE(repeated.nodes().end(), repeated_join);
+  const auto& repeated_predicates =
+      std::get<PhysicalNestedLoopJoinNode>(repeated_join->payload).predicates;
+  ASSERT_EQ(4U, repeated_predicates.size());
+  EXPECT_EQ(repeated_predicates[0].predicate, repeated_predicates[2].predicate);
+  EXPECT_NE(repeated_predicates[0].conjunct_position, repeated_predicates[2].conjunct_position);
+  const auto repeated_lookup = std::ranges::find_if(repeated.nodes(), [](const PhysicalNode& node) {
+    const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+    return lookup != nullptr && lookup->source == BoundSourceId{1};
+  });
+  ASSERT_NE(repeated.nodes().end(), repeated_lookup);
+  const auto& repeated_constraint =
+      std::get<PhysicalRowIdLookupNode>(repeated_lookup->payload).constraint;
+  ASSERT_TRUE(repeated_constraint.has_value());
+  EXPECT_EQ(repeated_predicates[0].conjunct_position, repeated_constraint->conjunct_position);
+
+  const PhysicalPlan ordered_key = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Items b "
+      "ON b.id=abs(a.id) AND b.id=a.id+1000",
+      catalog);
+  const auto ordered_join = std::ranges::find_if(ordered_key.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+  });
+  const auto ordered_lookup =
+      std::ranges::find_if(ordered_key.nodes(), [](const PhysicalNode& node) {
+        const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+        return lookup != nullptr && lookup->source == BoundSourceId{1};
+      });
+  ASSERT_NE(ordered_key.nodes().end(), ordered_join);
+  ASSERT_NE(ordered_key.nodes().end(), ordered_lookup);
+  const auto& ordered_predicates =
+      std::get<PhysicalNestedLoopJoinNode>(ordered_join->payload).predicates;
+  const auto& ordered_constraint =
+      std::get<PhysicalRowIdLookupNode>(ordered_lookup->payload).constraint;
+  ASSERT_EQ(2U, ordered_predicates.size());
+  ASSERT_TRUE(ordered_constraint.has_value());
+  EXPECT_EQ(ordered_predicates[0].predicate, ordered_constraint->predicate);
+  EXPECT_EQ(ordered_predicates[0].conjunct_position, ordered_constraint->conjunct_position);
+
+  for (const std::string_view sql : {
+           "SELECT a.id,b.id FROM Items a JOIN Items b "
+           "ON b.id=iif(a.id>0,abs(-9223372036854775808),1) AND b.id=a.id+1000",
+           "SELECT a.id,b.id FROM Items a JOIN Items b "
+           "ON b.id=(SELECT abs(-9223372036854775808)) AND b.id=a.id+1000",
+       }) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan barrier = OptimizeOrThrow(sql, catalog);
+    EXPECT_FALSE(std::ranges::any_of(barrier.nodes(), [](const PhysicalNode& node) {
+      const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&node.payload);
+      return lookup != nullptr && lookup->source == BoundSourceId{1};
+    }));
+  }
+}
+
 TEST(PhysicalPlan, KeepsWhereAndSuffixOnAfterTheirRightNullExtensionBarriers) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON a.id=b.id "
@@ -1795,7 +1962,8 @@ TEST(PhysicalPlan, KeepsWhereAndSuffixOnAfterTheirRightNullExtensionBarriers) {
   for (const PhysicalNode& node : plan.nodes()) {
     if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
         join != nullptr) {
-      EXPECT_EQ(BoundSourceId{1}, join->condition_source);
+      ASSERT_EQ(1U, join->predicates.size());
+      EXPECT_EQ(std::optional{BoundSourceId{1}}, join->predicates[0].source);
       ++joins;
     } else if (const auto* filter = std::get_if<PhysicalFilterNode>(&node.payload);
                filter != nullptr) {
@@ -2050,7 +2218,7 @@ TEST(PhysicalPlan, OptimizesDistinctValuesAndCompoundQueries) {
   }
 }
 
-TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
+TEST(PhysicalPlan, PublishesCanonicalAdvancedAccessAndMembership) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const PhysicalPlan values = OptimizeOrThrow("VALUES(1),(2)", catalog);
@@ -2064,16 +2232,17 @@ TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
   const PhysicalPlan distinct =
       OptimizeOrThrow("SELECT DISTINCT Name FROM Items WHERE id=1", catalog);
   ASSERT_EQ(4U, distinct.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(distinct.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(distinct.nodes()[0].payload));
   EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(distinct.nodes()[1].payload));
   EXPECT_TRUE(std::holds_alternative<PhysicalProjectionNode>(distinct.nodes()[2].payload));
   const auto& node = std::get<PhysicalDistinctNode>(distinct.nodes()[3].payload);
   EXPECT_EQ(PhysicalDistinctStrategy::kEphemeralMembership, node.strategy);
-  EXPECT_TRUE(distinct.candidates().empty());
-  EXPECT_FALSE(distinct.selected_candidate_index().has_value());
-  EXPECT_EQ(nullptr, distinct.selected_candidate());
+  ASSERT_EQ(1U, distinct.core_access_plans().size());
+  EXPECT_EQ(0U, distinct.core_access_plans()[0].core_index);
+  ASSERT_NE(nullptr, distinct.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, distinct.selected_candidate()->kind);
   EXPECT_EQ(
-      "CORE 0 SCAN \"Items\"\n"
+      "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid=?)\n"
       "DISTINCT CORE 0 USING EPHEMERAL RELATION",
       ExplainPhysicalPlan(distinct));
 
@@ -2084,8 +2253,9 @@ TEST(PhysicalPlan, ChoosesConservativeAdvancedAccessAndMembership) {
   });
   ASSERT_NE(guarded.nodes().end(), filter);
   const auto& guarded_filter = std::get<PhysicalFilterNode>(filter->payload);
-  ASSERT_EQ(1U, guarded_filter.predicates.size());
+  EXPECT_TRUE(guarded_filter.predicates.empty());
   ASSERT_EQ(1U, guarded_filter.guards.size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(guarded.nodes()[0].payload));
 }
 
 TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
@@ -2507,6 +2677,159 @@ TEST(PhysicalPlan, RecognizesCompatibleRowIdSpellingsAndTieBreaksLookup) {
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, tiny.selected_candidate()->kind);
 }
 
+TEST(PhysicalPlan, SelectsRowIdRangeBeforeResidualPredicates) {
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE Name=?1 AND id<?2", TestCatalog());
+  EXPECT_EQ("SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)", ExplainPhysicalPlan(plan));
+}
+
+TEST(PhysicalPlan, NormalizesAndPublishesRowIdRangeBounds) {
+  struct Case {
+    std::string_view sql;
+    bool lower;
+    bool inclusive;
+    std::string_view explain;
+  };
+  constexpr std::array cases{
+      Case{.sql = "SELECT Name FROM Items WHERE id>?1",
+           .lower = true,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1<id",
+           .lower = true,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id>=?1",
+           .lower = true,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1<=id",
+           .lower = true,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id<?1",
+           .lower = false,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1>id",
+           .lower = false,
+           .inclusive = false,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE id<=?1",
+           .lower = false,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<=?)"},
+      Case{.sql = "SELECT Name FROM Items WHERE ?1>=id",
+           .lower = false,
+           .inclusive = true,
+           .explain = "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<=?)"},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, TestCatalog());
+    const auto& range = std::get<PhysicalRowIdRangeNode>(plan.nodes()[0].payload);
+    const std::optional<PhysicalRangeBound>& bound = test.lower ? range.lower : range.upper;
+    ASSERT_TRUE(bound.has_value());
+    EXPECT_EQ(test.inclusive, bound->inclusive);
+    EXPECT_EQ(test.lower, range.lower.has_value());
+    EXPECT_EQ(!test.lower, range.upper.has_value());
+    ASSERT_NE(nullptr, plan.selected_candidate());
+    EXPECT_EQ(PhysicalAccessKind::kRowIdRange, plan.selected_candidate()->kind);
+    EXPECT_EQ(1U, plan.selected_candidate()->range_bound_count);
+    EXPECT_EQ(test.explain, ExplainPhysicalPlan(plan));
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(plan.selected_candidate_index(),
+              std::optional{plan.core_access_plans()[0].selected_candidate});
+  }
+
+  const PhysicalPlan bounded =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id>?1 AND id<=?2", TestCatalog());
+  const auto& range = std::get<PhysicalRowIdRangeNode>(bounded.nodes()[0].payload);
+  ASSERT_TRUE(range.lower.has_value());
+  ASSERT_TRUE(range.upper.has_value());
+  EXPECT_FALSE(range.lower->inclusive);
+  EXPECT_TRUE(range.upper->inclusive);
+  EXPECT_EQ(2U, bounded.selected_candidate()->range_bound_count);
+  EXPECT_LT(bounded.selected_candidate()->cost.estimated_output_rows,
+            bounded.candidates()[0].cost.estimated_output_rows);
+  EXPECT_LT(bounded.selected_candidate()->cost.work_units, bounded.candidates()[0].cost.work_units);
+  EXPECT_EQ("SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>? AND rowid<=?)",
+            ExplainPhysicalPlan(bounded));
+
+  const PhysicalPlan zero_estimate =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id<1", TestCatalog("Items", 0));
+  ASSERT_EQ(2U, zero_estimate.candidates().size());
+  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[0].cost);
+  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[1].cost);
+  ASSERT_NE(nullptr, zero_estimate.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdRange, zero_estimate.selected_candidate()->kind);
+}
+
+TEST(PhysicalPlan, KeepsLaterRowIdBoundsResidualAndRejectsAccessBarriers) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan repeated =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE id>?1 AND id>=?2", catalog);
+  const auto& range = std::get<PhysicalRowIdRangeNode>(repeated.nodes()[0].payload);
+  ASSERT_TRUE(range.lower.has_value());
+  const auto& first = std::get<BoundParameterExpression>(
+      repeated.logical_plan().bound_select().expression(range.lower->key).payload);
+  EXPECT_EQ(0U, first.parameter.value());
+  const auto& filter = std::get<PhysicalFilterNode>(repeated.nodes()[1].payload);
+  ASSERT_EQ(1U, filter.predicates.size());
+  const auto& residual = std::get<BoundComparisonExpression>(
+      repeated.logical_plan().bound_select().expression(filter.predicates[0]).payload);
+  const auto& second = std::get<BoundParameterExpression>(
+      repeated.logical_plan().bound_select().expression(residual.right).payload);
+  EXPECT_EQ(1U, second.parameter.value());
+
+  constexpr std::array<std::string_view, 3> barriers{
+      "SELECT Name FROM Items WHERE +id>?1",
+      "SELECT Name FROM Items WHERE id>Name",
+      "SELECT key FROM wr WHERE key>'a'",
+  };
+  for (const std::string_view sql : barriers) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    EXPECT_FALSE(std::holds_alternative<PhysicalRowIdRangeNode>(plan.nodes()[0].payload));
+  }
+}
+
+TEST(PhysicalPlan, PublishesRowIdRangesForEveryNonjoinedCoreAndAggregateDirection) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const PhysicalPlan compound = OptimizeOrThrow(
+      "SELECT id FROM Items WHERE id<2 UNION ALL SELECT id FROM Items WHERE id>=2", catalog);
+  ASSERT_EQ(2U, compound.core_access_plans().size());
+  for (std::size_t core = 0; core < compound.core_access_plans().size(); ++core) {
+    EXPECT_EQ(core, compound.core_access_plans()[core].core_index);
+    const auto& selected = compound.core_access_plans()[core];
+    ASSERT_LT(selected.selected_candidate, selected.candidates.size());
+    EXPECT_EQ(PhysicalAccessKind::kRowIdRange,
+              selected.candidates[selected.selected_candidate].kind);
+  }
+  EXPECT_TRUE(
+      std::ranges::equal(compound.core_access_plans()[0].candidates, compound.candidates()));
+
+  const PhysicalPlan maximum = OptimizeOrThrow("SELECT max(id) FROM Items WHERE id<3", catalog);
+  const auto& reverse = std::get<PhysicalRowIdRangeNode>(maximum.nodes()[0].payload);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, reverse.direction);
+  EXPECT_EQ(
+      "SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid<?) REVERSE\n"
+      "AGGREGATE CORE 0 INDEXED MIN/MAX",
+      ExplainPhysicalPlan(maximum));
+
+  const PhysicalPlan grouped = OptimizeOrThrow(
+      "SELECT id,count() FROM Items "
+      "WHERE (NULL OR abs(id-id-9223372036854775807-1)) AND id<0 "
+      "GROUP BY id ORDER BY id",
+      catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(grouped.nodes()[0].payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(grouped).strategy);
+
+  const PhysicalPlan schema =
+      OptimizeOrThrow("SELECT name FROM main.sqlite_schema WHERE rowid<3", catalog);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(schema.nodes()[0].payload));
+}
+
 TEST(PhysicalPlan, PreservesFirstOriginalRowIdKeyAndResidualOccurrences) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan collated =
@@ -2596,12 +2919,11 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
       "ORDER BY Name DESC NULLS FIRST LIMIT ? OFFSET ?",
       catalog);
 
-  ASSERT_EQ(5U, plan.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
-  EXPECT_TRUE(std::holds_alternative<PhysicalFilterNode>(plan.nodes()[1].payload));
+  ASSERT_EQ(4U, plan.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdRangeNode>(plan.nodes()[0].payload));
 
-  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[2].payload);
-  EXPECT_EQ(PhysicalNodeId{1}, sort.input);
+  const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
+  EXPECT_EQ(PhysicalNodeId{0}, sort.input);
   EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, sort.schedule);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
   EXPECT_FALSE(sort.input_order_satisfied);
@@ -2620,10 +2942,10 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
   EXPECT_EQ(logical_order.payload_expressions, sort.payload_expressions);
   EXPECT_EQ(logical_order.output_fields, sort.output_fields);
 
-  const auto& limit = std::get<PhysicalLimitNode>(plan.nodes()[3].payload);
-  EXPECT_EQ(PhysicalNodeId{2}, limit.input);
-  const auto& output = std::get<PhysicalOutputNode>(plan.nodes()[4].payload);
-  EXPECT_EQ(PhysicalNodeId{3}, output.input);
+  const auto& limit = std::get<PhysicalLimitNode>(plan.nodes()[2].payload);
+  EXPECT_EQ(PhysicalNodeId{1}, limit.input);
+  const auto& output = std::get<PhysicalOutputNode>(plan.nodes()[3].payload);
+  EXPECT_EQ(PhysicalNodeId{2}, output.input);
   EXPECT_EQ(plan.logical_plan().root(), output.logical_output);
 }
 
@@ -2672,7 +2994,7 @@ TEST(PhysicalPlan, IncludesOrderingExpressionsInCoveringIndexRequirements) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT id,Score FROM Items ORDER BY Category,id", catalog);
 
-  ASSERT_EQ(2U, plan.candidates().size());
+  ASSERT_EQ(4U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, plan.selected_candidate()->index);
   EXPECT_TRUE(plan.selected_candidate()->covering);
@@ -2690,7 +3012,7 @@ TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
       "WHERE Category=?1 AND Score>=?2 AND Score<?3",
       catalog);
 
-  ASSERT_EQ(3U, plan.candidates().size());
+  ASSERT_EQ(4U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ((AccessPathCost{
                 .estimated_input_rows = 4096,
@@ -2755,7 +3077,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
 
   const PhysicalPlan full = OptimizeOrThrow("SELECT Category, Score FROM Items", catalog);
-  ASSERT_EQ(2U, full.candidates().size());
+  ASSERT_EQ(4U, full.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, full.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, full.selected_candidate()->index);
   EXPECT_EQ((AccessPathCost{
@@ -2789,7 +3111,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
 
   const PhysicalPlan selective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Category=?1", catalog);
-  ASSERT_EQ(2U, selective_noncovering.candidates().size());
+  ASSERT_EQ(4U, selective_noncovering.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, selective_noncovering.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, selective_noncovering.selected_candidate()->index);
   EXPECT_FALSE(selective_noncovering.selected_candidate()->covering);
@@ -2807,10 +3129,12 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
 
   const PhysicalPlan unselective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Flag=?1", catalog);
-  ASSERT_EQ(2U, unselective_noncovering.candidates().size());
+  ASSERT_EQ(4U, unselective_noncovering.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, unselective_noncovering.selected_candidate()->kind);
-  EXPECT_EQ(IndexId{2}, unselective_noncovering.candidates()[1].index);
-  EXPECT_FALSE(unselective_noncovering.candidates()[1].covering);
+  const auto flag_index = std::ranges::find(unselective_noncovering.candidates(),
+                                            std::optional{IndexId{2}}, &AccessPathCandidate::index);
+  ASSERT_NE(unselective_noncovering.candidates().end(), flag_index);
+  EXPECT_FALSE(flag_index->covering);
 }
 
 TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
@@ -2818,7 +3142,7 @@ TEST(PhysicalPlan, PreservesCandidateOrderAndRowidPreference) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT id, Score FROM Items WHERE id=?1 AND Category=?2", catalog);
 
-  ASSERT_EQ(3U, plan.candidates().size());
+  ASSERT_EQ(5U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, plan.candidates()[1].kind);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.candidates()[2].kind);

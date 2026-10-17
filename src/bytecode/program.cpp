@@ -238,7 +238,10 @@ template <typename T>
 [[nodiscard]] bool IsValid(RowIdSeekMode mode) noexcept {
   switch (mode) {
     case RowIdSeekMode::kEqual:
+    case RowIdSeekMode::kGreaterOrEqual:
     case RowIdSeekMode::kGreater:
+    case RowIdSeekMode::kLessOrEqual:
+    case RowIdSeekMode::kLess:
       return true;
   }
   return false;

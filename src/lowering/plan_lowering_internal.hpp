@@ -77,7 +77,7 @@ template <typename T>
 }
 
 struct IndexTraversalBound {
-  const PhysicalIndexBound* expression = nullptr;
+  const PhysicalRangeBound* expression = nullptr;
   bool implicit_null = false;
 
   [[nodiscard]] bool has_range_term() const noexcept {
@@ -95,6 +95,47 @@ struct IndexTraversal {
   bool has_start_key = false;
   bool has_end_key = false;
 };
+
+struct RowIdTraversal {
+  const PhysicalRangeBound* start = nullptr;
+  const PhysicalRangeBound* end = nullptr;
+  RowIdSeekMode start_mode = RowIdSeekMode::kEqual;
+  SqlComparison end_comparison = SqlComparison::kEqual;
+  bool reverse = false;
+};
+
+[[nodiscard]] inline LoweringResult<RowIdTraversal> ResolveRowIdTraversal(
+    const PhysicalRowIdRangeNode& range) {
+  if (!range.lower.has_value() && !range.upper.has_value()) {
+    return std::unexpected(InternalFailure("rowid range has no bound"));
+  }
+  RowIdTraversal traversal;
+  traversal.reverse = range.direction == PhysicalScanDirection::kReverse;
+  if (!traversal.reverse) {
+    traversal.start = range.lower.has_value() ? &*range.lower : nullptr;
+    traversal.end = range.upper.has_value() ? &*range.upper : nullptr;
+    if (traversal.start != nullptr) {
+      traversal.start_mode =
+          traversal.start->inclusive ? RowIdSeekMode::kGreaterOrEqual : RowIdSeekMode::kGreater;
+    }
+    if (traversal.end != nullptr) {
+      traversal.end_comparison =
+          traversal.end->inclusive ? SqlComparison::kGreater : SqlComparison::kGreaterEqual;
+    }
+  } else {
+    traversal.start = range.upper.has_value() ? &*range.upper : nullptr;
+    traversal.end = range.lower.has_value() ? &*range.lower : nullptr;
+    if (traversal.start != nullptr) {
+      traversal.start_mode =
+          traversal.start->inclusive ? RowIdSeekMode::kLessOrEqual : RowIdSeekMode::kLess;
+    }
+    if (traversal.end != nullptr) {
+      traversal.end_comparison =
+          traversal.end->inclusive ? SqlComparison::kLess : SqlComparison::kLessEqual;
+    }
+  }
+  return traversal;
+}
 
 [[nodiscard]] inline LoweringResult<IndexTraversal> ResolveIndexTraversal(
     const PhysicalIndexScanNode& index, const CatalogSnapshot& catalog) {

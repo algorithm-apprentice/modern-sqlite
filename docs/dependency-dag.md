@@ -9,10 +9,15 @@ to develop multiple nodes in parallel.
 Only one node is developed at a time. Independent ready nodes remain pending
 until the current node is complete and reviewed.
 
-An oversized node may be delivered as ordered stacked pull requests. Each PR
-contains one coherent slice, depends only on earlier slices of the same node,
-and passes its own design, test, review, and validation gates. The next DAG
-node remains blocked until every slice of the active node is complete.
+An oversized node normally uses one coherent slice per ordered pull request.
+An accepted delivery ADR may batch two through four related coherent slice
+commits with per-commit evidence and review. Named larger exceptions require
+an accepted ADR; ADR-0106 authorizes the seven-commit node-43 prerequisite
+closure. A related batch may open as a draft after its first accepted commit;
+later accepted commits update that same draft. Integrated gates run against
+the final exact batch head, and changing an earlier commit invalidates its
+dependent suffix. The next DAG node remains blocked until every slice of the
+active node is complete.
 
 The machine-readable source is `project/module-graph.json`. This document
 explains the canonical linearization and completion gates.
@@ -175,6 +180,15 @@ boundary while retaining strict whole-file diagnostics.
 ADR-0104 defines one conditional branch emitter for all current
 predicate contexts while preserving scalar value-expression semantics and
 existing optimizer placement.
+ADR-0105 adds explicit single-source rowid range access through the
+existing table cursor and typed range contracts.
+ADR-0106 keeps one coherent commit per slice, places all seven
+remaining node-43 prerequisite corrections in one reviewed pull request, and
+uses smaller related batches for later feature work.
+ADR-0107 assigns each joined ON conjunct one pre-open or source-ready
+phase, consumes selected access terms once, and bounds deterministic scalar
+rowid probes without changing join order or stored/automatic-index key
+domains.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

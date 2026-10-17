@@ -454,7 +454,7 @@ int main() try {
       DistinctFixture(catalog,
                       "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 ORDER BY 1 LIMIT ?7 OFFSET ?8"),
   };
-  const std::array<PhysicalPlan, 29> joined_plans{
+  const std::array<PhysicalPlan, 32> joined_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.id FROM Items a JOIN Items b ON a.id>?1 AND b.id=a.id"),
       DistinctFixture(catalog,
@@ -540,6 +540,16 @@ int main() try {
                       "(SELECT b.Name) FROM Items a FULL JOIN Items b "
                       "ON b.id=a.id+?3 AND a.id<=?1 AND b.id<=?2 "
                       "ORDER BY a.id IS NULL,a.id,b.id"),
+      AggregateFixture(catalog,
+                       "SELECT count() FROM Items a LEFT JOIN Items b "
+                       "ON abs(-9223372036854775808) AND b.id=a.id+1000"),
+      AggregateFixture(catalog,
+                       "SELECT count() FROM Items a JOIN Items b "
+                       "ON a.id<0 AND b.id=abs(a.id-a.id-9223372036854775807-1)"),
+      AggregateFixture(catalog,
+                       "SELECT count() FROM Items a JOIN Items x "
+                       "ON abs(a.id-a.id-9223372036854775807-1) "
+                       "RIGHT JOIN Items b ON x.id=b.id"),
   };
   const PhysicalMutationPlan mutation = MutationFixture(catalog);
   const PhysicalMutationPlan indexed_insert = MutationFixture(indexed_catalog);
@@ -616,6 +626,19 @@ int main() try {
                       "SELECT a.id,b.Payload FROM Items a LEFT JOIN Items b ON b.Name<a.Name"),
       AggregateFixture(indexed_catalog,
                        "SELECT count(b.Payload) FROM Items a FULL JOIN Items b ON b.Name<a.Name"),
+  };
+  const std::array<PhysicalPlan, 7> rowid_range_plans{
+      DistinctFixture(indexed_catalog, "SELECT Payload FROM Items WHERE id<?1"),
+      AggregateFixture(indexed_catalog, "SELECT count(*) FROM Items WHERE id>=?1"),
+      AggregateFixture(indexed_catalog, "SELECT id,count(*) FROM Items WHERE id>?1 GROUP BY id"),
+      DistinctFixture(indexed_catalog, "SELECT DISTINCT Name FROM Items WHERE id<=?1"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT id FROM Items WHERE id<?1 "
+                      "UNION ALL SELECT id FROM Items WHERE id>?2"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT (SELECT Payload FROM Items WHERE id<?1),"
+                      "EXISTS(SELECT 1 FROM Items WHERE id>?2)"),
+      DistinctFixture(indexed_catalog, "SELECT id FROM Items WHERE id=?1 UNION SELECT 99 LIMIT 1"),
   };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
@@ -695,6 +718,11 @@ int main() try {
     }
   }
   for (const PhysicalPlan& range_plan : null_range_plans) {
+    if (!verify_oom(range_plan, 256U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& range_plan : rowid_range_plans) {
     if (!verify_oom(range_plan, 256U)) {
       return 1;
     }

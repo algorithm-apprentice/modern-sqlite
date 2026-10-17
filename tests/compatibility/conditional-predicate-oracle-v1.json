@@ -3451,15 +3451,4546 @@
       },
       "expectation": "unsupported",
       "id": "conditional-unsupported-case"
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01035",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 106,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01036",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 157,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01037",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 117,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01038",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 168,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01067",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 106,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01068",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 157,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01099",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 112,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01100",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 163,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01131",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 105,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01132",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "4"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "6"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "9"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "10"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "11"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 12,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 13,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 156,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01133",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 116,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01134",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "4"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "6"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "9"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "10"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "11"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 12,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 13,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 167,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01135",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 113,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01136",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 164,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01167",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 119,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01168",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 170,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01259",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 106,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01260",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "2"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "4"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "5"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "6"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "9"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "10"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "11"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 12,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 13,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 157,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01261",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 117,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01262",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "2"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "4"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "5"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "6"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "9"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "10"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "11"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 12,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 13,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 168,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01263",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 114,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01264",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 165,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01295",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 120,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01296",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 171,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01387",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "24"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 105,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01388",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "4"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "6"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "9"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "10"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "11"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 12,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 13,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "2"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 14,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 15,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "4"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 16,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "5"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 17,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "6"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 18,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 19,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 20,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "9"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 21,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "10"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 22,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "11"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 23,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 24,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 25,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 156,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01389",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6e"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "24"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 116,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01390",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 2,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 3,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "4"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 4,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 5,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "6"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 6,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 7,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 8,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "9"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 9,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "10"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 10,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "11"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 11,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 12,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 13,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "2"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 14,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 15,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "4"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 16,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "5"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 17,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "6"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 18,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 19,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 20,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "9"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 21,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "10"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 22,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "11"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "6c"
+              },
+              {
+                "declared_type_hex": "494e5445474552",
+                "name_hex": "72"
+              }
+            ],
+            "op": "step",
+            "operation_index": 23,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 24,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 25,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 167,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01391",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 113,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01392",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 164,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01423",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 119,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01424",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 170,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01547",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 112,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01548",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 163,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01549",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 123,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01550",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 174,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01579",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 112,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01580",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 163,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01611",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6e"
+            }
+          ],
+          "next_offset": 118,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-audit-01612",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "6c"
+            },
+            {
+              "declared_type_hex": "494e5445474552",
+              "name_hex": "72"
+            }
+          ],
+          "next_offset": 169,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-key-order",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 110,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-excluded-conditional-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 113,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-excluded-subquery-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 108,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-later-right-left-rows-inner-empty",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 127,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-later-right-left-empty-inner-rows",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 116,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-later-full-left-rows-inner-empty",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f756e742829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "12"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 126,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "joined-phase-later-right-populated-prefix-error",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f756e742829"
+            }
+          ],
+          "next_offset": 121,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     }
   ],
   "corpus_path": "tests/compatibility/conditional-predicate-corpus-v1.json",
-  "corpus_sha256": "2e0d122bfec277ae46371193a23c2a04770a21c5eebbe96a1223cf5d9544cfad",
+  "corpus_sha256": "7d19f3dc22277899995d6d75f685c681cec6ee938a0ef63aadd534dad71387b4",
   "databases": [
     {
       "id": "core",
       "path": "tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db",
       "sha256": "9e02af35427a93406676902ba81333ab82b66d3583e82d0195b6ff0ae8474905"
+    },
+    {
+      "id": "joined-index",
+      "path": "tests/fixtures/joined_index/sqlite-3.54.0-joined-index.db",
+      "sha256": "ff55a8f7ba44f729060fa1e65256d99d2d00c1ca08a93d4d48bd2cd5def7501d"
     }
   ],
   "fixture_sources": [

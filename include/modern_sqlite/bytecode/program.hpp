@@ -391,7 +391,10 @@ struct NextRowIdListInstruction {
 
 enum class RowIdSeekMode : std::uint8_t {
   kEqual,
+  kGreaterOrEqual,
   kGreater,
+  kLessOrEqual,
+  kLess,
 };
 
 struct SeekRowIdInstruction {

@@ -1298,15 +1298,12 @@ class ReadPerformanceValidationTest(unittest.TestCase):
         self.assertNotEqual(0, timed_out.exception.returncode)
 
         descendant_pid_path = self.root / "descendant.pid"
-        child_code = (
-            "import os,pathlib,time;"
-            f"pathlib.Path({str(descendant_pid_path)!r}).write_text("
-            "str(os.getpid()),encoding='ascii');"
-            "time.sleep(5)"
-        )
+        child_code = "import time;time.sleep(5)"
         parent_code = (
-            "import subprocess,sys;"
-            f"subprocess.Popen([sys.executable,'-c',{child_code!r}])"
+            "import pathlib,subprocess,sys;"
+            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
+            f"pathlib.Path({str(descendant_pid_path)!r}).write_text("
+            "str(child.pid),encoding='ascii')"
         )
         with self.assertRaisesRegex(
             read_performance.ChildExecutionError,

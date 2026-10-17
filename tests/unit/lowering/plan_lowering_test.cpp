@@ -770,8 +770,14 @@ std::vector<std::string> callback_trace;
   return arguments.front().Clone();
 }
 
+[[nodiscard]] Result<SqlValue> DeterministicTrace(const ScalarFunctionContext&,
+                                                  std::span<const SqlValue> arguments) {
+  ++callback_count;
+  return arguments.front().Clone();
+}
+
 struct CustomEnvironment {
-  std::array<ScalarFunction, 12> functions{{
+  std::array<ScalarFunction, 14> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -794,6 +800,11 @@ struct CustomEnvironment {
       ScalarFunction{"deterministic_failing", FunctionArity::Exact(0),
                      FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
                      DeterministicFailCall},
+      ScalarFunction{"deterministic_counter", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone, CountCall},
+      ScalarFunction{"deterministic_trace", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     DeterministicTrace},
       ScalarFunction{"fail_after_one", FunctionArity::Exact(1),
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      FailAfterOne},
@@ -1006,6 +1017,140 @@ TEST_F(ReadLoweringAggregateIntegration, KeepsScalarValuesAndConstantGuardsEager
   EXPECT_EQ(1U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, StopsEmptyRowIdRangeBeforeResidualErrors) {
+  EXPECT_TRUE(Execute("SELECT id FROM items "
+                      "WHERE (NULL OR abs(id-id-9223372036854775807-1)) AND id<0 "
+                      "ORDER BY id")
+                  .empty());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ExecutesRowIdRangesAcrossAggregateConsumers) {
+  const auto global = Execute("SELECT count(),sum(id) FROM items WHERE id>1 AND id<=3");
+  ASSERT_EQ(1U, global.size());
+  EXPECT_EQ(2, global[0][0].integer_value());
+  EXPECT_EQ(5, global[0][1].integer_value());
+
+  const auto extremum = Execute("SELECT max(id) FROM items WHERE id<3");
+  ASSERT_EQ(1U, extremum.size());
+  EXPECT_EQ(2, extremum[0][0].integer_value());
+
+  const auto grouped = Execute("SELECT id,count() FROM items WHERE id>=2 GROUP BY id ORDER BY id");
+  ASSERT_EQ(2U, grouped.size());
+  EXPECT_EQ(2, grouped[0][0].integer_value());
+  EXPECT_EQ(1, grouped[0][1].integer_value());
+  EXPECT_EQ(3, grouped[1][0].integer_value());
+  EXPECT_EQ(1, grouped[1][1].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ExecutesRowIdRangesAcrossCompoundArms) {
+  const auto rows = Execute(
+      "SELECT id FROM items WHERE id<3 "
+      "UNION ALL SELECT id FROM items WHERE id>2 ORDER BY id");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+  EXPECT_EQ(3, rows[2][0].integer_value());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, UsesRowIdAccessInDemandOneCompoundArms) {
+  const auto client = Execute("SELECT id FROM items WHERE id<3 UNION SELECT 99 LIMIT 1");
+  ASSERT_EQ(1U, client.size());
+  EXPECT_EQ(1, client[0][0].integer_value());
+
+  const auto point = Execute("SELECT id FROM items WHERE id=1 UNION SELECT 99 LIMIT 1");
+  ASSERT_EQ(1U, point.size());
+  EXPECT_EQ(1, point[0][0].integer_value());
+
+  const auto filtered = Execute(
+      "SELECT id FROM items WHERE id<4 AND name='missing' "
+      "UNION SELECT 99 LIMIT 1");
+  ASSERT_EQ(1U, filtered.size());
+  EXPECT_EQ(99, filtered[0][0].integer_value());
+
+  const auto exists = Execute(
+      "SELECT EXISTS(SELECT id FROM items WHERE id<0 "
+      "UNION SELECT id FROM items WHERE id<0 LIMIT 1)");
+  ASSERT_EQ(1U, exists.size());
+  EXPECT_EQ(0, exists[0][0].integer_value());
+  const auto point_exists = Execute(
+      "SELECT EXISTS(SELECT id FROM items WHERE id=99 "
+      "UNION SELECT id FROM items WHERE id=98 LIMIT 1)");
+  ASSERT_EQ(1U, point_exists.size());
+  EXPECT_EQ(0, point_exists[0][0].integer_value());
+
+  const auto scalar = Execute(
+      "SELECT (SELECT id FROM items WHERE id<0 "
+      "UNION SELECT id FROM items WHERE id<0 LIMIT 1)");
+  ASSERT_EQ(1U, scalar.size());
+  EXPECT_EQ(SqlValueType::kNull, scalar[0][0].type());
+  const auto point_scalar = Execute(
+      "SELECT (SELECT id FROM items WHERE id=99 "
+      "UNION SELECT id FROM items WHERE id=98 LIMIT 1)");
+  ASSERT_EQ(1U, point_scalar.size());
+  EXPECT_EQ(SqlValueType::kNull, point_scalar[0][0].type());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, AppliesSqliteRowIdRangeKeyConversions) {
+  const auto ids = [&](std::string_view sql, SqlValue key) {
+    std::array<SqlValue, 1> parameters{std::move(key)};
+    const auto rows = Execute(sql, BindEnvironment::Core(), VmEnvironment::Core(), parameters);
+    std::vector<std::int64_t> result;
+    result.reserve(rows.size());
+    for (const auto& row : rows) {
+      result.push_back(*row[0].integer_value());
+    }
+    return result;
+  };
+
+  EXPECT_EQ((std::vector<std::int64_t>{2, 3}),
+            ids("SELECT id FROM items WHERE id>?1 ORDER BY id", SqlValue::Real(1.5)));
+  EXPECT_EQ((std::vector<std::int64_t>{2, 3}),
+            ids("SELECT id FROM items WHERE id>=?1 ORDER BY id", SqlValue::Real(1.5)));
+  EXPECT_EQ((std::vector<std::int64_t>{1}),
+            ids("SELECT id FROM items WHERE id<?1 ORDER BY id", SqlValue::Real(1.5)));
+  EXPECT_EQ((std::vector<std::int64_t>{1}),
+            ids("SELECT id FROM items WHERE id<=?1 ORDER BY id", SqlValue::Real(1.5)));
+  EXPECT_EQ((std::vector<std::int64_t>{1, 2, 3}),
+            ids("SELECT id FROM items WHERE id>?1 ORDER BY id", SqlValue::Real(-0.5)));
+  EXPECT_TRUE(ids("SELECT id FROM items WHERE id<?1 ORDER BY id", SqlValue::Real(-0.5)).empty());
+  EXPECT_EQ((std::vector<std::int64_t>{2, 3}),
+            ids("SELECT id FROM items WHERE id>?1 ORDER BY id", SqlValue::Text("1.5")));
+  EXPECT_TRUE(
+      ids("SELECT id FROM items WHERE id>?1 ORDER BY id", SqlValue::Text("not-numeric")).empty());
+  EXPECT_EQ((std::vector<std::int64_t>{1, 2, 3}),
+            ids("SELECT id FROM items WHERE id<=?1 ORDER BY id", SqlValue::Text("not-numeric")));
+  EXPECT_TRUE(
+      ids("SELECT id FROM items WHERE id>?1 ORDER BY id", SqlValue::Blob(ByteBuffer{ByteCount{1}}))
+          .empty());
+  EXPECT_EQ((std::vector<std::int64_t>{1, 2, 3}),
+            ids("SELECT id FROM items WHERE id<?1 ORDER BY id",
+                SqlValue::Blob(ByteBuffer{ByteCount{1}})));
+  EXPECT_TRUE(ids("SELECT id FROM items WHERE id<=?1 ORDER BY id", SqlValue{}).empty());
+
+  const double infinity = std::numeric_limits<double>::infinity();
+  EXPECT_EQ((std::vector<std::int64_t>{1, 2, 3}),
+            ids("SELECT id FROM items WHERE id<=?1 ORDER BY id", SqlValue::Real(infinity)));
+  EXPECT_TRUE(
+      ids("SELECT id FROM items WHERE id>=?1 ORDER BY id", SqlValue::Real(infinity)).empty());
+  EXPECT_EQ((std::vector<std::int64_t>{1, 2, 3}),
+            ids("SELECT id FROM items WHERE id>=?1 ORDER BY id", SqlValue::Real(-infinity)));
+  EXPECT_TRUE(
+      ids("SELECT id FROM items WHERE id<=?1 ORDER BY id", SqlValue::Real(-infinity)).empty());
+}
+
+TEST_F(ReadLoweringAggregateIntegration, EvaluatesRowIdRangeEndOnlyAfterPositioning) {
+  EXPECT_TRUE(Execute("SELECT id FROM items "
+                      "WHERE id>99 AND id<abs(-9223372036854775808)")
+                  .empty());
+  EXPECT_TRUE(Execute("SELECT id FROM items "
+                      "WHERE id>NULL AND id<abs(-9223372036854775808)")
+                  .empty());
+  EXPECT_TRUE(Execute("SELECT id,count() FROM items "
+                      "WHERE (NULL OR abs(id-id-9223372036854775807-1)) AND id<0 "
+                      "GROUP BY id ORDER BY id")
+                  .empty());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ReusesGroupedKeysInConditionalBranches) {
   const CustomEnvironment custom;
   callback_count = 0;
@@ -1025,6 +1170,86 @@ class ReadLoweringAutomaticJoin : public ReadLoweringAggregateIntegration {
                                                 .sorter_memory_threshold = ByteCount{1024}});
   }
 };
+
+class ReadLoweringJoinedPhase : public ReadLoweringAggregateIntegration {
+ protected:
+  void SetUp() override { OpenFixture(JoinedIndexFixturePath()); }
+};
+
+TEST_F(ReadLoweringJoinedPhase, MatchesJoinedOnReadinessAndCandidateMissPhases) {
+  constexpr std::string_view kOverflow = "abs(-9223372036854775808)";
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN empty_key_rows b ON " +
+                                std::string{kOverflow} + " AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM empty_key_rows a JOIN key_rows b ON " +
+                                std::string{kOverflow} + " AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN empty_key_rows b "
+                                "ON abs(a.id-a.id-9223372036854775807-1) AND b.id=a.id+1000")),
+      std::runtime_error);
+
+  const auto left = Execute(
+      "SELECT count() FROM key_rows a LEFT JOIN key_rows b "
+      "ON abs(-9223372036854775808) AND b.id=a.id+1000");
+  ASSERT_EQ(1U, left.size());
+  EXPECT_EQ(12, left[0][0].integer_value());
+
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a LEFT JOIN empty_key_rows b "
+                                "ON a.id<0 AND b.id=abs(a.id-a.id-9223372036854775807-1)")),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                                "ON b.id=abs(a.id-a.id-9223372036854775807-1) AND b.id=a.id+1000")),
+      std::runtime_error);
+  EXPECT_THROW(static_cast<void>(
+                   Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                           "ON b.id=iif(a.id>0,abs(-9223372036854775808),1) AND b.id=a.id+1000")),
+               std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows b "
+                                "ON b.id=(SELECT abs(-9223372036854775808)) AND b.id=a.id+1000")),
+      std::runtime_error);
+
+  for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const auto rows = Execute(
+        "SELECT count() FROM key_rows a JOIN empty_key_rows x "
+        "ON abs(a.id-a.id-9223372036854775807-1) " +
+        std::string{join} + " key_rows b ON x.id=b.id");
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(12, rows[0][0].integer_value());
+  }
+  const auto source_free = Execute(
+      "SELECT count() FROM key_rows a JOIN empty_key_rows x "
+      "ON abs(-9223372036854775808) RIGHT JOIN key_rows b ON x.id=b.id");
+  ASSERT_EQ(1U, source_free.size());
+  EXPECT_EQ(12, source_free[0][0].integer_value());
+  EXPECT_THROW(static_cast<void>(Execute("SELECT count() FROM key_rows a JOIN key_rows x "
+                                         "ON abs(a.id-a.id-9223372036854775807-1) "
+                                         "RIGHT JOIN key_rows b ON x.id=b.id")),
+               std::runtime_error);
+}
+
+TEST_F(ReadLoweringJoinedPhase, RetainsStoredIndexAffinityResiduals) {
+  const auto rows = Execute(
+      "SELECT p.id,b.id FROM probe_rows p JOIN key_rows b "
+      "ON b.text_key=p.raw_key ORDER BY p.id,b.id");
+  constexpr std::array<std::array<std::int64_t, 2>, 4> kExpected{{
+      {2, 4},
+      {2, 5},
+      {4, 8},
+      {4, 9},
+  }};
+  ASSERT_EQ(kExpected.size(), rows.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(kExpected[index][0], rows[index][0].integer_value());
+    EXPECT_EQ(kExpected[index][1], rows[index][1].integer_value());
+  }
+}
 
 TEST_F(ReadLoweringAutomaticJoin,
        PreservesAutomaticSourcesAcrossOrderingDistinctAndAggregateConsumers) {
@@ -2173,6 +2398,35 @@ TEST_F(ReadLoweringJoin, KeepsNondeterministicJoinKeysInTheirPhysicalCandidatePh
   }
 }
 
+TEST_F(ReadLoweringJoin, EvaluatesDeterministicScalarAccessKeysOncePerPrefix) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT a.id,b.id FROM items a JOIN items b "
+      "ON b.id=deterministic_counter(a.id) ORDER BY a.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(3U, callback_count);
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][1].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringJoin, ConsumesOnlyTheSelectedRepeatedOnOccurrence) {
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto rows = Execute(
+      "SELECT (b.id=deterministic_trace(a.id) AND 1) AS x "
+      "FROM items a LEFT JOIN items b ON x AND x ORDER BY a.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(9U, callback_count);
+  for (const auto& row : rows) {
+    EXPECT_EQ(1, row[0].integer_value());
+  }
+}
+
 TEST_F(ReadLoweringJoin, PreservesMergedScopesAcrossGroupingSetsAndValuesCores) {
   const auto grouped = Execute(
       "SELECT id,count(),count(b.id) FROM items a LEFT JOIN items b USING(id) "
@@ -2553,7 +2807,7 @@ TEST(PlanLowering, ClassifiesIndexRangeNullabilityFromCanonicalCatalogMetadata) 
                   PhysicalIndexRange{
                       .column = test_case.column,
                       .order = order,
-                      .upper = PhysicalIndexBound{.inclusive = false},
+                      .upper = PhysicalRangeBound{.inclusive = false},
                   },
               .direction = direction,
           };
@@ -2565,7 +2819,7 @@ TEST(PlanLowering, ClassifiesIndexRangeNullabilityFromCanonicalCatalogMetadata) 
           const auto& traversal = *resolved;
           const bool lower_starts =
               (order == SortOrder::kAscending) == (direction == PhysicalScanDirection::kForward);
-          const PhysicalIndexBound* upper = &*index.range->upper;
+          const PhysicalRangeBound* upper = &*index.range->upper;
           EXPECT_EQ(lower_starts ? nullptr : upper, traversal.start.expression);
           EXPECT_EQ(lower_starts ? upper : nullptr, traversal.end.expression);
           EXPECT_EQ(test_case.nullable && lower_starts, traversal.start.implicit_null);
@@ -2618,7 +2872,7 @@ TEST(PlanLowering, RejectsInvalidCatalogIdentitiesDuringIndexTraversal) {
       .range =
           PhysicalIndexRange{
               .column = ColumnId{1},
-              .upper = PhysicalIndexBound{},
+              .upper = PhysicalRangeBound{},
           },
   };
   auto invalid_table = lowering_internal::ResolveIndexTraversal(index, *catalog);

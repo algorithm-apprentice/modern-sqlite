@@ -1202,6 +1202,29 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+[[nodiscard]] std::optional<std::int64_t> ExecuteTableSeek(test::WritePagerFixedVfs& vfs,
+                                                           SqlValue key, RowIdSeekMode mode) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error("failed to open rowid seek test pager");
+  }
+  RequireStatus(pager->BeginRead());
+  const BytecodeProgram program = TableSeekProgram(std::move(key), mode);
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+  const VmStep first = TakeValue(vm.Step());
+  std::optional<std::int64_t> rowid;
+  if (first == VmStep::kRow) {
+    rowid = vm.row()[0].integer_value();
+    if (!rowid.has_value() || TakeValue(vm.Step()) != VmStep::kDone) {
+      throw std::runtime_error("rowid seek test returned an invalid row");
+    }
+  }
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(pager->EndRead());
+  return rowid;
+}
+
 void InsertDirectWriteRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid, std::string value) {
   TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
   TransactionStatement statement = TakeValue(
@@ -2372,6 +2395,66 @@ TEST(VmWriteTest, DeletesRowsAndSeeksStrictlyGreaterRowids) {
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(3, rows[0].first);
   ExpectText(rows[0].second[1], "third");
+}
+
+TEST(VmWriteTest, SeeksRowIdRangesUsingSqliteNumericBoundaryRules) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, -3, "negative");
+  InsertDirectWriteRow(vfs, 1, "first");
+  InsertDirectWriteRow(vfs, 3, "third");
+
+  const auto expect = [&](SqlValue key, RowIdSeekMode mode, std::optional<std::int64_t> expected) {
+    EXPECT_EQ(expected, ExecuteTableSeek(vfs, std::move(key), mode));
+  };
+  expect(SqlValue::Integer(1), RowIdSeekMode::kGreaterOrEqual, 1);
+  expect(SqlValue::Integer(1), RowIdSeekMode::kGreater, 3);
+  expect(SqlValue::Integer(1), RowIdSeekMode::kLessOrEqual, 1);
+  expect(SqlValue::Integer(1), RowIdSeekMode::kLess, -3);
+  expect(SqlValue::Real(1.5), RowIdSeekMode::kGreater, 3);
+  expect(SqlValue::Real(1.5), RowIdSeekMode::kLessOrEqual, 1);
+  expect(SqlValue::Real(-1.5), RowIdSeekMode::kGreaterOrEqual, 1);
+  expect(SqlValue::Real(-1.5), RowIdSeekMode::kLess, -3);
+  expect(SqlValue::Text("1.5"), RowIdSeekMode::kGreaterOrEqual, 3);
+  expect(SqlValue::Text("not-numeric"), RowIdSeekMode::kGreaterOrEqual, std::nullopt);
+  expect(SqlValue::Text("not-numeric"), RowIdSeekMode::kLessOrEqual, 3);
+  expect(SqlValue::Blob(ByteBuffer{ByteCount{1}}), RowIdSeekMode::kGreater, std::nullopt);
+  expect(SqlValue::Blob(ByteBuffer{ByteCount{1}}), RowIdSeekMode::kLess, 3);
+  expect(SqlValue{}, RowIdSeekMode::kLessOrEqual, std::nullopt);
+}
+
+TEST(VmWriteTest, SeeksRowIdRangeSignedEndpointsAndInfinities) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(InitializedWriteDatabase(vfs));
+  InsertDirectWriteRow(vfs, std::numeric_limits<std::int64_t>::min(), "minimum");
+  InsertDirectWriteRow(vfs, std::numeric_limits<std::int64_t>::max(), "maximum");
+
+  const double infinity = std::numeric_limits<double>::infinity();
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(),
+            ExecuteTableSeek(vfs, SqlValue::Real(-infinity), RowIdSeekMode::kGreaterOrEqual));
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+            ExecuteTableSeek(vfs, SqlValue::Real(infinity), RowIdSeekMode::kLessOrEqual));
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+            ExecuteTableSeek(vfs, SqlValue::Text("not-numeric"), RowIdSeekMode::kLess));
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(),
+            ExecuteTableSeek(
+                vfs, SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::min())),
+                RowIdSeekMode::kGreaterOrEqual));
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+            ExecuteTableSeek(
+                vfs, SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::max())),
+                RowIdSeekMode::kLessOrEqual));
+
+  const auto expect_two_to_63 = [&](SqlValue key) {
+    EXPECT_EQ(std::nullopt, ExecuteTableSeek(vfs, key.Clone(), RowIdSeekMode::kGreaterOrEqual));
+    EXPECT_EQ(std::nullopt, ExecuteTableSeek(vfs, key.Clone(), RowIdSeekMode::kGreater));
+    EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+              ExecuteTableSeek(vfs, key.Clone(), RowIdSeekMode::kLessOrEqual));
+    EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+              ExecuteTableSeek(vfs, std::move(key), RowIdSeekMode::kLess));
+  };
+  expect_two_to_63(SqlValue::Real(9223372036854775808.0));
+  expect_two_to_63(SqlValue::Text("9223372036854775808.0"));
 }
 
 TEST(VmWriteTest, DeletesAllRowsThroughOnePassMutationCursor) {
