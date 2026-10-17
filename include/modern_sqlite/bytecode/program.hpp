@@ -444,6 +444,7 @@ struct ReadFieldInstruction {
   CursorId cursor;
   CursorFieldId field;
   RegisterId output;
+  std::optional<TypeAffinity> missing_value_affinity{};
 };
 
 struct ReadRowIdInstruction {
@@ -473,11 +474,17 @@ struct CheckUpdateRowIdInstruction {
   RegisterId new_rowid;
 };
 
+enum class TableRecordAffinityMode : std::uint8_t {
+  kApplyColumnAffinity,
+  kAffinityPreapplied,
+};
+
 struct BuildTableRecordInstruction {
   WriteCursorId cursor;
   RegisterId first_value;
   std::uint32_t value_count;
   RegisterId output;
+  TableRecordAffinityMode affinity_mode = TableRecordAffinityMode::kApplyColumnAffinity;
 };
 
 struct CheckUniqueIndexInstruction {

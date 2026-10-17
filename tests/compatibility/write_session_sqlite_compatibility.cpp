@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -163,6 +164,15 @@ void ExecuteSqlite(sqlite3* database, std::string_view sql) {
   }
   const unsigned char* text = sqlite3_column_text(statement.get(), 0);
   return text == nullptr ? std::string{} : reinterpret_cast<const char*>(text);
+}
+
+[[nodiscard]] std::uint64_t QueryRealBits(sqlite3* database, std::string_view sql) {
+  const Statement statement{database, sql};
+  if (sqlite3_step(statement.get()) != SQLITE_ROW ||
+      sqlite3_column_type(statement.get(), 0) != SQLITE_FLOAT) {
+    throw std::runtime_error{"SQLite query did not return one REAL value"};
+  }
+  return std::bit_cast<std::uint64_t>(sqlite3_column_double(statement.get(), 0));
 }
 
 [[nodiscard]] modern_sqlite::WriteStatement Prepare(modern_sqlite::WriteSession& session,
@@ -1042,30 +1052,89 @@ void VerifyRealAffinityRounding(const std::filesystem::path& path) {
   {
     modern_sqlite::WriteSession session =
         TakeValue(modern_sqlite::WriteSession::Open(path.string()));
-    ExecuteModern(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,Score REAL)");
+    ExecuteModern(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,Score REAL,Note TEXT)");
+    ExecuteModern(session, "INSERT INTO Items VALUES(1,42,'compact')");
+    ExecuteModern(session, "INSERT INTO Items VALUES(2,9007199254740993,'wide')");
+    ExecuteModern(session, "INSERT INTO Items VALUES(3,-0.0,'zero-before')");
+    ExecuteModern(session, "INSERT INTO Items VALUES(4,-9223372036854775808.0,'endpoint')");
     ExecuteModern(session, "CREATE INDEX items_score ON Items(Score)");
-    ExecuteModern(session, "INSERT INTO Items VALUES(1,9007199254740993)");
+    ExecuteModern(session, "INSERT INTO Items VALUES(5,43,'compact-after')");
+    ExecuteModern(session, "INSERT INTO Items VALUES(6,-0.0,'zero-after')");
+    ExecuteModern(session, "UPDATE Items SET Note='renamed' WHERE id=1");
+    ExecuteModern(session, "UPDATE Items SET Score=44 WHERE id=2");
+    ExecuteModern(session, "DELETE FROM Items WHERE id=1");
+  }
+
+  {
+    const Database sqlite{path, kCreateFlags};
+    VerifyIntegrity(sqlite.get());
+    if (QueryText(sqlite.get(),
+                  "SELECT group_concat(id||':'||typeof(Score)||':'||quote(Score),',') "
+                  "FROM (SELECT id,Score FROM Items ORDER BY id)") !=
+            "2:real:44.0,3:real:0.0,4:real:-9.2233720368547758e+18,"
+            "5:real:43.0,6:real:0.0" ||
+        QueryInteger(sqlite.get(),
+                     "SELECT count(*) FROM Items INDEXED BY items_score WHERE Score IN(0,43,44)") !=
+            4 ||
+        QueryInteger(sqlite.get(),
+                     "SELECT count(*) FROM Items NOT INDEXED WHERE Score IN(0,43,44)") != 4 ||
+        QueryRealBits(sqlite.get(), "SELECT Score FROM Items WHERE id=3") != 0U ||
+        QueryRealBits(sqlite.get(), "SELECT Score FROM Items INDEXED BY items_score WHERE id=6") !=
+            0U) {
+      throw std::runtime_error{"Modern REAL serial forms disagree with pinned SQLite"};
+    }
+    ExecuteSqlite(sqlite.get(),
+                  "CREATE TABLE Native(id INTEGER PRIMARY KEY,Score REAL,Note TEXT);"
+                  "INSERT INTO Native VALUES(1,42,'compact');"
+                  "INSERT INTO Native VALUES(2,9007199254740993,'wide');"
+                  "CREATE INDEX native_score ON Native(Score);"
+                  "INSERT INTO Native VALUES(3,43,'post-index');"
+                  "INSERT INTO Native VALUES(4,-0.0,'negative-zero');"
+                  "CREATE TABLE DefaultCompact(id INTEGER PRIMARY KEY);"
+                  "INSERT INTO DefaultCompact VALUES(1);"
+                  "ALTER TABLE DefaultCompact ADD COLUMN Score REAL DEFAULT 42;"
+                  "CREATE TABLE DefaultZero(id INTEGER PRIMARY KEY);"
+                  "INSERT INTO DefaultZero VALUES(1);"
+                  "ALTER TABLE DefaultZero ADD COLUMN Score REAL DEFAULT -0.0;"
+                  "CREATE TABLE DefaultWide(id INTEGER PRIMARY KEY);"
+                  "INSERT INTO DefaultWide VALUES(1);"
+                  "ALTER TABLE DefaultWide ADD COLUMN Score REAL DEFAULT 9007199254740993;");
+    VerifyIntegrity(sqlite.get());
+  }
+
+  {
+    modern_sqlite::WriteSession session =
+        TakeValue(modern_sqlite::WriteSession::Open(path.string()));
+    ExecuteModern(session, "CREATE INDEX default_compact_score ON DefaultCompact(Score)");
+    ExecuteModern(session, "CREATE INDEX default_zero_score ON DefaultZero(Score)");
+    ExecuteModern(session, "CREATE INDEX default_wide_score ON DefaultWide(Score)");
+    ExecuteModern(session, "UPDATE Native SET Note='renamed' WHERE id=1");
+    ExecuteModern(session, "UPDATE Native SET Score=44 WHERE id=2");
+    ExecuteModern(session, "DELETE FROM Native WHERE id=1");
   }
 
   const Database sqlite{path, kReadOnlyFlags};
   VerifyIntegrity(sqlite.get());
-  if (QueryText(sqlite.get(), "SELECT typeof(Score)||'|'||quote(Score) FROM Items") !=
-          "real|9007199254740992.0" ||
-      QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE Score=9007199254740993") != 0 ||
+  if (QueryText(sqlite.get(),
+                "SELECT group_concat(id||':'||typeof(Score)||':'||quote(Score),',') "
+                "FROM (SELECT id,Score FROM Native INDEXED BY native_score ORDER BY id)") !=
+          "2:real:44.0,3:real:43.0,4:real:0.0" ||
       QueryInteger(sqlite.get(),
-                   "SELECT count(*) FROM Items INDEXED BY items_score "
-                   "WHERE Score=9007199254740993") != 0 ||
+                   "SELECT count(*) FROM Native INDEXED BY native_score "
+                   "WHERE Score IN(0,43,44)") != 3 ||
       QueryInteger(sqlite.get(),
-                   "SELECT count(*) FROM Items NOT INDEXED "
-                   "WHERE Score=9007199254740993") != 0 ||
-      QueryInteger(sqlite.get(), "SELECT count(*) FROM Items WHERE Score=9007199254740992") != 1 ||
-      QueryInteger(sqlite.get(),
-                   "SELECT count(*) FROM Items INDEXED BY items_score "
-                   "WHERE Score=9007199254740992") != 1 ||
-      QueryInteger(sqlite.get(),
-                   "SELECT count(*) FROM Items NOT INDEXED "
-                   "WHERE Score=9007199254740992") != 1) {
-    throw std::runtime_error{"Modern REAL-affinity rounding disagrees with pinned SQLite"};
+                   "SELECT count(*) FROM Native NOT INDEXED WHERE Score IN(0,43,44)") != 3 ||
+      QueryRealBits(sqlite.get(), "SELECT Score FROM Native INDEXED BY native_score WHERE id=4") !=
+          0U ||
+      QueryText(sqlite.get(),
+                "SELECT typeof(Score)||':'||quote(Score) "
+                "FROM DefaultCompact INDEXED BY default_compact_score") != "real:42.0" ||
+      QueryRealBits(sqlite.get(), "SELECT Score FROM DefaultZero INDEXED BY default_zero_score") !=
+          0U ||
+      QueryText(sqlite.get(),
+                "SELECT typeof(Score)||':'||quote(Score) "
+                "FROM DefaultWide INDEXED BY default_wide_score") != "real:9007199254740992.0") {
+    throw std::runtime_error{"Modern mutation disagrees with SQLite REAL serial history"};
   }
 }
 

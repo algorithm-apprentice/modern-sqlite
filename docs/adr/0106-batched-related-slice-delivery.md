@@ -27,7 +27,10 @@ time on repeated delivery mechanics than on the bounded implementation.
 The user requested a larger delivery unit: each slice should remain a distinct
 commit, while several slices share one pull request. The user then explicitly
 approved one pull request for all remaining node-43 prerequisite corrections,
-while keeping later feature delivery separate.
+while keeping later feature delivery separate. After PR #215 accumulated the
+first two corrections plus hosted remediations, the user directed that
+reviewable prefix to merge and the remaining corrections to continue in
+later pull requests.
 
 ## Decision
 
@@ -51,8 +54,11 @@ is accepted under this ADR.
 ### 1. Add a related-slice delivery batch
 
 A normal delivery batch contains two through four ordered commits in one pull
-request. The node-43 prerequisite-closure batch is an explicit exception: it
-contains the seven remaining prerequisite corrections in one pull request.
+request. The node-43 prerequisite closure originally planned seven remaining
+corrections in one pull request. After the first two reviewed slices and their
+remediations made PR #215 independently substantial, the user directed that
+prefix to merge. The remaining corrections therefore continue in ordered
+reviewable pull requests under the normal size rule.
 Each commit is one coherent slice and must independently have:
 
 - an accepted design or an existing accepted contract;
@@ -103,15 +109,15 @@ Slices may share a pull request when they:
 - produce a coherent integrated behavior that is still reviewable as one pull
   request.
 
-Do not normally batch unrelated SQL semantics, persistent-format changes,
+Do not batch unrelated SQL semantics, persistent-format changes,
 durability state transitions, public API work, extension work, or later DAG
-nodes merely to reduce CI runs. The prerequisite-closure exception is bounded
-to already confirmed node-43 findings and already ordered ADR-0092 follow-ups.
-It adds no later feature slice.
+nodes merely to reduce CI runs. Prerequisite closure is bounded to already
+confirmed node-43 findings and already ordered ADR-0092 follow-ups. It adds no
+later feature slice.
 
-Outside that explicit exception, if a planned batch grows beyond four slices,
-crosses another layer, or cannot be reviewed commit by commit, split it into
-ordered stacked pull requests.
+If a planned batch grows beyond four slices, crosses another layer, becomes
+independently substantial, or cannot be reviewed commit by commit, split it
+into ordered pull requests.
 
 Stop before beginning the next slice when:
 
@@ -120,7 +126,7 @@ Stop before beginning the next slice when:
 - the commit is not buildable; or
 - its ledger record is incomplete.
 
-Stop and split the seven-slice exception when a finding:
+Stop and split a prerequisite batch when a finding:
 
 - expands beyond its named correction;
 - adds an eighth production slice;
@@ -131,7 +137,7 @@ Stop and split the seven-slice exception when a finding:
 - creates a non-linear dependency; or
 - cannot be reviewed as an isolated commit range.
 
-The REAL/IntReal slice remains in this batch only as the already identified
+The REAL/IntReal slice remains in prerequisite closure only as the already identified
 serial-form compatibility correction. A broader format redesign or new
 persistent transition requires its own child ADR and pull request.
 
@@ -155,7 +161,7 @@ slice behind a later commit.
 After every commit-level review is accepted:
 
 - run ADR-0102's full verification profile against the complete base-to-head
-  diff for the seven-slice prerequisite exception;
+  diff included in that prerequisite pull request;
 - reconcile configuration-independent checks before exclusion;
 - run every applicable isolated compiler/sanitizer/model configuration,
   pinned native compatibility, SQL/database fuzz domain selected by the
@@ -194,12 +200,12 @@ also reverts or invalidates its dependent suffix.
 The pull request may squash on merge, but commit identities, focused evidence,
 reviews, and the pull-request history preserve the slice boundaries.
 
-### 5. Close all remaining prerequisites in one pull request
+### 5. Close remaining prerequisites in reviewable pull requests
 
-The prerequisite-closure branch contains these ordered commits:
+The prerequisite-closure order is:
 
-1. rowid range access;
-2. joined ON/access evaluation phase correction;
+1. rowid range access — merged in PR #215;
+2. joined ON/access evaluation phase correction — merged in PR #215;
 3. REAL/IntReal persistent serial-form correction;
 4. virtual NULL-row/range verifier-state correction;
 5. ADR-0092 semantic query-expression copies;
@@ -207,9 +213,11 @@ The prerequisite-closure branch contains these ordered commits:
 7. outer aggregate ownership.
 
 Commit-level design, red/green evidence, fast units, and implementation review
-remain mandatory before beginning the next commit. Do not publish the pull
-request as ready for merge until all seven commits are complete and the
-integrated exact tree is reviewed.
+remain mandatory before beginning the next commit. Open each continuation as
+a draft after its first accepted commit. Publish that draft as ready only when
+its included slices and exact head are complete, reviewed, and fully
+qualified. Node 43 remains active until every prerequisite and later feature
+slice is complete.
 
 IN, FROM/coroutine, CTE, view, constraint, trigger, window, and other feature
 slices remain outside this prerequisite pull request and use later related

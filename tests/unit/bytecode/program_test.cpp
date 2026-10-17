@@ -1176,6 +1176,11 @@ TEST(BytecodeProgramTest, VerifiesTypedTableInsertInstructions) {
   EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));
   input.instructions[4] = instructions[2];
 
+  std::get<BuildTableRecordInstruction>(input.instructions[4]).affinity_mode =
+      static_cast<TableRecordAffinityMode>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+  input.instructions[4] = instructions[2];
+
   std::get<ResolveInsertRowIdInstruction>(input.instructions[3]).input = Reg(3);
   EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, VerifyError(input));
   input.instructions[3] = instructions[1];
@@ -1482,6 +1487,11 @@ TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
   EXPECT_TRUE(VerifyProgram(input).has_value());
   EXPECT_EQ("seek_index", InstructionKindName(InstructionKindOf(input.instructions[2])));
   EXPECT_EQ("check_index_range", InstructionKindName(InstructionKindOf(input.instructions[3])));
+
+  std::get<ReadFieldInstruction>(input.instructions[4]).missing_value_affinity =
+      static_cast<TypeAffinity>(255);  // NOLINT
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+  std::get<ReadFieldInstruction>(input.instructions[4]).missing_value_affinity = std::nullopt;
 
   std::get<SeekIndexInstruction>(input.instructions[2]).key_count = 0;
   EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, VerifyError(input));

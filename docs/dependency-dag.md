@@ -12,12 +12,13 @@ until the current node is complete and reviewed.
 An oversized node normally uses one coherent slice per ordered pull request.
 An accepted delivery ADR may batch two through four related coherent slice
 commits with per-commit evidence and review. Named larger exceptions require
-an accepted ADR; ADR-0106 authorizes the seven-commit node-43 prerequisite
-closure. A related batch may open as a draft after its first accepted commit;
-later accepted commits update that same draft. Integrated gates run against
-the final exact batch head, and changing an earlier commit invalidates its
-dependent suffix. The next DAG node remains blocked until every slice of the
-active node is complete.
+an accepted ADR. ADR-0106 records node-43 prerequisite closure in ordered,
+reviewable pull requests; PR #215 merged the first two corrections. A related
+batch may open as a draft after its first accepted commit, and later accepted
+commits update that same draft. Integrated gates run against the final exact
+batch head, and changing an earlier commit invalidates its dependent suffix.
+The next DAG node remains blocked until every slice of the active node is
+complete.
 
 The machine-readable source is `project/module-graph.json`. This document
 explains the canonical linearization and completion gates.
@@ -182,13 +183,16 @@ predicate contexts while preserving scalar value-expression semantics and
 existing optimizer placement.
 ADR-0105 adds explicit single-source rowid range access through the
 existing table cursor and typed range contracts.
-ADR-0106 keeps one coherent commit per slice, places all seven
-remaining node-43 prerequisite corrections in one reviewed pull request, and
-uses smaller related batches for later feature work.
+ADR-0106 keeps one coherent commit per slice and splits node-43 prerequisite
+closure into reviewable ordered pull requests when an earlier prefix is
+already independently substantial.
 ADR-0107 assigns each joined ON conjunct one pre-open or source-ready
 phase, consumes selected access terms once, and bounds deterministic scalar
 rowid probes without changing join order or stored/automatic-index key
 domains.
+ADR-0108 preserves SQLite's path-dependent REAL/IntReal serial forms through
+explicit table-record affinity ownership, complete new-row affinity when an
+index is affected, and raw stored-value index-key reconstruction.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

@@ -101,6 +101,15 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(TableRecordAffinityMode mode) noexcept {
+  switch (mode) {
+    case TableRecordAffinityMode::kApplyColumnAffinity:
+    case TableRecordAffinityMode::kAffinityPreapplied:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(CastTarget target) noexcept {
   switch (target) {
     case CastTarget::kInteger:
@@ -1279,6 +1288,10 @@ struct InstructionOwnership {
               return std::unexpected(
                   ErrorAt(ProgramErrorCode::kInvalidField, index, operation.field.value()));
             }
+            if (operation.missing_value_affinity.has_value() &&
+                !IsValid(*operation.missing_value_affinity)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+            }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, ReadRowIdInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
@@ -1344,6 +1357,9 @@ struct InstructionOwnership {
                 input.statement_kind != ProgramStatementKind::kCreateIndex &&
                 input.statement_kind != ProgramStatementKind::kAnalyze) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (!IsValid(operation.affinity_mode)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
             }
             if (auto result = check_write_cursor(operation.cursor, index); !result) {
               return result;

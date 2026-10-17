@@ -34,8 +34,8 @@ benchmark reports, pull-request text, and commit messages.
   two through four related, buildable slice commits; every commit requires
   accepted design, focused red/green or a green refactor baseline, complete
   fast units, implementation review, ledger evidence, and node/ADR
-  traceability before the next slice begins. ADR-0106 alone authorizes the
-  seven-commit node-43 prerequisite-closure exception.
+  traceability before the next slice begins. ADR-0106 records the ordered
+  node-43 prerequisite closure and its reviewable pull-request splits.
 - Run integrated closing gates against the final exact batch head. Changing an
   earlier slice invalidates every dependent suffix's evidence and review until
   that suffix is requalified. No later DAG node begins before the active node

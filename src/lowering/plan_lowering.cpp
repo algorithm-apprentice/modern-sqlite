@@ -756,7 +756,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !write_cursor.has_value()) {
         return std::unexpected(std::move(write_cursor.error()));
       }
-      if (auto indexes = AddMutationIndexWriteCursorDescriptors(bound_update_->target());
+      if (auto indexes =
+              AddMutationIndexWriteCursorDescriptors(bound_update_->target(), bound_update_);
           !indexes.has_value()) {
         return std::unexpected(std::move(indexes.error()));
       }
@@ -4715,9 +4716,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> AddMutationIndexWriteCursorDescriptors(
-      const BoundMutationTarget& target) {
+      const BoundMutationTarget& target, const BoundUpdate* update = nullptr) {
+    index_write_cursors_.clear();
     index_write_cursors_.reserve(target.indexes.size());
-    for (const BoundIndexMaintenance& index : target.indexes) {
+    const auto add_index = [&](std::size_t index_position) -> LoweringResult<void> {
+      if (index_position >= target.indexes.size()) {
+        return std::unexpected(InternalFailure("selected mutation index is invalid"));
+      }
+      const BoundIndexMaintenance& index = target.indexes[index_position];
+      if (update != nullptr) {
+        auto affected = UpdateAffectsIndex(*update, index);
+        if (!affected.has_value()) {
+          return std::unexpected(std::move(affected.error()));
+        }
+        if (!*affected) {
+          return {};
+        }
+      }
       if (index.terms.empty() || index.terms.size() > std::numeric_limits<std::uint32_t>::max() ||
           index.key_term_count == 0U || index.key_term_count >= index.terms.size()) {
         return std::unexpected(InternalFailure("bound index maintenance shape is invalid"));
@@ -4750,7 +4765,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
-      index_write_cursors_.push_back(*cursor);
+      index_write_cursors_.push_back(MutationIndexCursor{
+          .target_index = index_position,
+          .cursor = *cursor,
+      });
+      return {};
+    };
+    for (std::size_t index_position = 0; index_position < target.indexes.size(); ++index_position) {
+      if (auto added = add_index(index_position); !added.has_value()) {
+        return added;
+      }
     }
     return {};
   }
@@ -5002,6 +5026,44 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::nullopt;
     }
     return static_cast<std::uint32_t>(std::distance(columns.begin(), found));
+  }
+
+  [[nodiscard]] static LoweringResult<bool> UpdateAffectsIndex(const BoundUpdate& update,
+                                                               const BoundIndexMaintenance& index) {
+    const BoundMutationTarget& target = update.target();
+    for (const BoundIndexTerm& term : index.terms) {
+      if (term.rowid) {
+        if (std::ranges::any_of(update.assignments(), [](const BoundUpdateAssignment& assignment) {
+              return assignment.effective && assignment.target.rowid;
+            })) {
+          return true;
+        }
+        continue;
+      }
+      if (!term.column.has_value()) {
+        return std::unexpected(
+            InternalFailure("bound index maintenance term has no physical source"));
+      }
+      const ColumnId indexed_column = term.column.value();
+      if (!TargetColumnIndex(target, indexed_column).has_value()) {
+        return std::unexpected(
+            InternalFailure("bound index maintenance term targets an unknown column"));
+      }
+      for (const BoundUpdateAssignment& assignment : update.assignments()) {
+        if (!assignment.effective || !assignment.target.column.has_value()) {
+          continue;
+        }
+        const ColumnId assigned_column = assignment.target.column.value();
+        if (!TargetColumnIndex(target, assigned_column).has_value()) {
+          return std::unexpected(
+              InternalFailure("effective UPDATE assignment targets an unknown column"));
+        }
+        if (assigned_column == indexed_column) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   [[nodiscard]] LoweringResult<ConstantId> AddConstant(SqlValue value) {
@@ -8248,8 +8310,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (index_write_cursors_.size() != target.indexes.size()) {
       return std::unexpected(InternalFailure("DELETE index cursor metadata is incomplete"));
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      auto key = EmitMutationIndexKey(target, target.indexes[index],
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (index_cursor.target_index >= target.indexes.size()) {
+        return std::unexpected(InternalFailure("DELETE index cursor metadata is incomplete"));
+      }
+      auto key = EmitMutationIndexKey(target, target.indexes[index_cursor.target_index],
                                       MutationIndexValueRegisters{
                                           .first_values = std::nullopt,
                                           .rowid = AssumeValue(source_rowid_register_),
@@ -8258,7 +8323,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(key.error()));
       }
       if (auto deleted = Append(DeleteIndexInstruction{
-              .cursor = index_write_cursors_[index],
+              .cursor = index_cursor.cursor,
               .first_value = AssumeValue(mutation_index_key_first_),
               .value_count = *key,
           });
@@ -8338,11 +8403,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !integer.has_value()) {
       return integer;
     }
+    const TableRecordAffinityMode affinity_mode =
+        index_write_cursors_.empty() ? TableRecordAffinityMode::kApplyColumnAffinity
+                                     : TableRecordAffinityMode::kAffinityPreapplied;
+    if (!index_write_cursors_.empty()) {
+      if (auto applied = EmitMutationValueAffinity(target, AssumeValue(update_values_first_));
+          !applied.has_value()) {
+        return applied;
+      }
+    }
     return Append(BuildTableRecordInstruction{
         .cursor = AssumeValue(write_cursor_),
         .first_value = AssumeValue(update_values_first_),
         .value_count = static_cast<std::uint32_t>(target.columns.size()),
         .output = AssumeValue(update_record_register_),
+        .affinity_mode = affinity_mode,
     });
   }
 
@@ -8355,9 +8430,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return prepared;
     }
     const BoundMutationTarget& target = bound_update_->target();
-    if (index_write_cursors_.size() != target.indexes.size()) {
-      return std::unexpected(InternalFailure("UPDATE index cursor metadata is incomplete"));
-    }
     if (!target.indexes.empty()) {
       if (auto checked = Append(CheckUpdateRowIdInstruction{
               .cursor = AssumeValue(write_cursor_),
@@ -8368,8 +8440,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return checked;
       }
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      const BoundIndexMaintenance& maintenance = target.indexes[index];
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (index_cursor.target_index >= target.indexes.size()) {
+        return std::unexpected(InternalFailure("UPDATE index cursor metadata is incomplete"));
+      }
+      const BoundIndexMaintenance& maintenance = target.indexes[index_cursor.target_index];
       auto key = EmitMutationIndexKey(target, maintenance,
                                       MutationIndexValueRegisters{
                                           .first_values = AssumeValue(update_values_first_),
@@ -8380,7 +8455,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (maintenance.unique) {
         if (auto checked = Append(CheckUniqueIndexInstruction{
-                .cursor = index_write_cursors_[index],
+                .cursor = index_cursor.cursor,
                 .first_key = AssumeValue(mutation_index_key_first_),
                 .key_count = maintenance.key_term_count,
                 .ignored_rowid = AssumeValue(source_rowid_register_),
@@ -8390,8 +8465,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      auto key = EmitMutationIndexKey(target, target.indexes[index],
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      const BoundIndexMaintenance& maintenance = target.indexes[index_cursor.target_index];
+      auto key = EmitMutationIndexKey(target, maintenance,
                                       MutationIndexValueRegisters{
                                           .first_values = std::nullopt,
                                           .rowid = AssumeValue(source_rowid_register_),
@@ -8400,7 +8476,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(key.error()));
       }
       if (auto deleted = Append(DeleteIndexInstruction{
-              .cursor = index_write_cursors_[index],
+              .cursor = index_cursor.cursor,
               .first_value = AssumeValue(mutation_index_key_first_),
               .value_count = *key,
           });
@@ -8408,8 +8484,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return deleted;
       }
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      auto key = EmitMutationIndexKey(target, target.indexes[index],
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      const BoundIndexMaintenance& maintenance = target.indexes[index_cursor.target_index];
+      auto key = EmitMutationIndexKey(target, maintenance,
                                       MutationIndexValueRegisters{
                                           .first_values = AssumeValue(update_values_first_),
                                           .rowid = AssumeValue(update_new_rowid_register_),
@@ -8418,7 +8495,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(key.error()));
       }
       if (auto inserted = Append(InsertIndexInstruction{
-              .cursor = index_write_cursors_[index],
+              .cursor = index_cursor.cursor,
               .first_value = AssumeValue(mutation_index_key_first_),
               .value_count = *key,
           });
@@ -8457,8 +8534,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !opened.has_value()) {
       return opened;
     }
-    for (const WriteCursorId cursor : index_write_cursors_) {
-      if (auto opened = Append(OpenWriteCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (auto opened = Append(OpenWriteCursorInstruction{.cursor = index_cursor.cursor});
+          !opened.has_value()) {
         return opened;
       }
     }
@@ -8466,8 +8544,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> CloseMutationWriteCursors() {
-    for (const WriteCursorId cursor : index_write_cursors_) {
-      if (auto closed = Append(CloseWriteCursorInstruction{.cursor = cursor});
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (auto closed = Append(CloseWriteCursorInstruction{.cursor = index_cursor.cursor});
           !closed.has_value()) {
         return closed;
       }
@@ -9113,20 +9191,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               .cursor = table_cursor,
               .field = CursorFieldId{static_cast<std::uint32_t>(index)},
               .output = output,
+              .missing_value_affinity = terms[index].affinity,
           });
           !field.has_value()) {
         return field;
-      }
-      const TypeAffinity affinity = terms[index].affinity == TypeAffinity::kReal
-                                        ? TypeAffinity::kNumeric
-                                        : terms[index].affinity;
-      if (auto applied = Append(ApplyAffinityInstruction{
-              .input = output,
-              .affinity = affinity,
-              .output = output,
-          });
-          !applied.has_value()) {
-        return applied;
       }
     }
     const RegisterId rowid{kFirstKey.value() + key_count};
@@ -9349,6 +9417,38 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     RegisterId rowid;
   };
 
+  struct MutationIndexCursor {
+    std::size_t target_index;
+    WriteCursorId cursor;
+  };
+
+  [[nodiscard]] LoweringResult<void> EmitMutationValueAffinity(const BoundMutationTarget& target,
+                                                               RegisterId first_value) {
+    for (std::size_t index = 0; index < target.columns.size(); ++index) {
+      const BoundMutationColumn& column = target.columns[index];
+      if (column.rowid_alias) {
+        continue;
+      }
+      const RegisterId value{
+          first_value.value() + static_cast<std::uint32_t>(index),
+      };
+      if (column.affinity == TypeAffinity::kReal) {
+        if (auto applied = Append(RealStorageAffinityInstruction{.input = value, .output = value});
+            !applied.has_value()) {
+          return applied;
+        }
+      } else if (auto applied = Append(ApplyAffinityInstruction{
+                     .input = value,
+                     .affinity = column.affinity,
+                     .output = value,
+                 });
+                 !applied.has_value()) {
+        return applied;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<std::uint32_t> EmitMutationIndexKey(
       const BoundMutationTarget& target, const BoundIndexMaintenance& index,
       MutationIndexValueRegisters registers) {
@@ -9361,8 +9461,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const RegisterId destination{AssumeValue(mutation_index_key_first_).value() +
                                    static_cast<std::uint32_t>(term_index)};
       RegisterId source = registers.rowid;
-      std::optional<TypeAffinity> affinity;
-      bool normalize_real = false;
       if (term.column.has_value()) {
         const std::optional<std::uint32_t> column_index = TargetColumnIndex(target, *term.column);
         if (!column_index.has_value()) {
@@ -9380,11 +9478,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
           source = *source_register;
         }
-        const TypeAffinity column_affinity = target.columns[*column_index].affinity;
-        normalize_real =
-            column_affinity == TypeAffinity::kReal && registers.first_values.has_value();
-        affinity =
-            column_affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : column_affinity;
       } else if (!term.rowid) {
         return std::unexpected(InternalFailure("index maintenance term has no physical source"));
       }
@@ -9394,25 +9487,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           });
           !copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
-      }
-      if (normalize_real) {
-        if (auto applied = Append(RealStorageAffinityInstruction{
-                .input = destination,
-                .output = destination,
-            });
-            !applied.has_value()) {
-          return std::unexpected(std::move(applied.error()));
-        }
-      }
-      if (affinity.has_value()) {
-        if (auto applied = Append(ApplyAffinityInstruction{
-                .input = destination,
-                .affinity = *affinity,
-                .output = destination,
-            });
-            !applied.has_value()) {
-          return std::unexpected(std::move(applied.error()));
-        }
       }
     }
     return static_cast<std::uint32_t>(index.terms.size());
@@ -9494,11 +9568,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !checked.has_value()) {
       return checked;
     }
+    const TableRecordAffinityMode affinity_mode =
+        index_write_cursors_.empty() ? TableRecordAffinityMode::kApplyColumnAffinity
+                                     : TableRecordAffinityMode::kAffinityPreapplied;
+    if (!index_write_cursors_.empty()) {
+      if (auto applied = EmitMutationValueAffinity(target, AssumeValue(insert_values_first_));
+          !applied.has_value()) {
+        return applied;
+      }
+    }
     if (auto built = Append(BuildTableRecordInstruction{
             .cursor = AssumeValue(write_cursor_),
             .first_value = AssumeValue(insert_values_first_),
             .value_count = static_cast<std::uint32_t>(target.columns.size()),
             .output = AssumeValue(insert_record_register_),
+            .affinity_mode = affinity_mode,
         });
         !built.has_value()) {
       return built;
@@ -9506,13 +9590,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (index_write_cursors_.size() != target.indexes.size()) {
       return std::unexpected(InternalFailure("INSERT index cursor metadata is incomplete"));
     }
-    for (const WriteCursorId cursor : index_write_cursors_) {
-      if (auto opened = Append(OpenWriteCursorInstruction{.cursor = cursor}); !opened.has_value()) {
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (index_cursor.target_index >= target.indexes.size()) {
+        return std::unexpected(InternalFailure("INSERT index cursor metadata is incomplete"));
+      }
+      if (auto opened = Append(OpenWriteCursorInstruction{.cursor = index_cursor.cursor});
+          !opened.has_value()) {
         return opened;
       }
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      const BoundIndexMaintenance& maintenance = target.indexes[index];
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      const BoundIndexMaintenance& maintenance = target.indexes[index_cursor.target_index];
       auto key = EmitMutationIndexKey(target, maintenance,
                                       MutationIndexValueRegisters{
                                           .first_values = AssumeValue(insert_values_first_),
@@ -9523,7 +9611,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (maintenance.unique) {
         if (auto checked = Append(CheckUniqueIndexInstruction{
-                .cursor = index_write_cursors_[index],
+                .cursor = index_cursor.cursor,
                 .first_key = AssumeValue(mutation_index_key_first_),
                 .key_count = maintenance.key_term_count,
                 .ignored_rowid = std::nullopt,
@@ -9533,8 +9621,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
     }
-    for (std::size_t index = 0; index < target.indexes.size(); ++index) {
-      const BoundIndexMaintenance& maintenance = target.indexes[index];
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      const BoundIndexMaintenance& maintenance = target.indexes[index_cursor.target_index];
       auto key = EmitMutationIndexKey(target, maintenance,
                                       MutationIndexValueRegisters{
                                           .first_values = AssumeValue(insert_values_first_),
@@ -9544,7 +9632,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(key.error()));
       }
       if (auto inserted = Append(InsertIndexInstruction{
-              .cursor = index_write_cursors_[index],
+              .cursor = index_cursor.cursor,
               .first_value = AssumeValue(mutation_index_key_first_),
               .value_count = *key,
           });
@@ -9560,8 +9648,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !inserted.has_value()) {
       return inserted;
     }
-    for (const WriteCursorId cursor : index_write_cursors_) {
-      if (auto closed = Append(CloseWriteCursorInstruction{.cursor = cursor});
+    for (const MutationIndexCursor& index_cursor : index_write_cursors_) {
+      if (auto closed = Append(CloseWriteCursorInstruction{.cursor = index_cursor.cursor});
           !closed.has_value()) {
         return closed;
       }
@@ -15632,7 +15720,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<RegisterId> update_new_rowid_register_;
   std::optional<RegisterId> update_record_register_;
   std::optional<WriteCursorId> write_cursor_;
-  std::vector<WriteCursorId> index_write_cursors_;
+  std::vector<MutationIndexCursor> index_write_cursors_;
   std::optional<CursorId> create_index_table_cursor_;
   std::optional<WriteCursorId> schema_write_cursor_;
   std::optional<WriteCursorId> create_index_write_cursor_;
