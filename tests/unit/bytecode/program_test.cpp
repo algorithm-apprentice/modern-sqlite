@@ -1514,6 +1514,65 @@ TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
   EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, VerifyError(input));
 }
 
+TEST(BytecodeProgramTest, TreatsIndexRangeEndAsUnpositioned) {
+  ProgramInput invalid;
+  invalid.register_count = 2;
+  invalid.constants.push_back(SqlValue::Text("bin-05"));
+  invalid.symbols.emplace_back("BINARY");
+  invalid.cursors.push_back(IndexCursorDescriptor());
+  invalid.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      NullRowInstruction{.cursor = Cursor(0)},
+      CheckIndexRangeInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .end_target = Address(6),
+          .mode = IndexRangeEndMode::kInclusive,
+      },
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  const auto rejected = VerifyProgram(invalid);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, rejected.error().code);
+
+  ProgramInput merged;
+  merged.register_count = 2;
+  merged.constants.push_back(SqlValue::Text("bin-05"));
+  merged.symbols.emplace_back("BINARY");
+  merged.cursors.push_back(IndexCursorDescriptor());
+  merged.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      SeekIndexInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .missing_target = Address(7),
+          .mode = IndexSeekMode::kGreaterOrEqual,
+      },
+      CheckIndexRangeInstruction{
+          .cursor = Cursor(0),
+          .first_key = Reg(0),
+          .key_count = 1,
+          .end_target = Address(7),
+          .mode = IndexRangeEndMode::kInclusive,
+      },
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+      NullRowInstruction{.cursor = Cursor(0), .enabled = false},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_TRUE(VerifyProgram(merged).has_value());
+}
+
 TEST(BytecodeProgramTest, VerifiesIndexRowidTableLookupInstructions) {
   ProgramInput input;
   input.register_count = 2;

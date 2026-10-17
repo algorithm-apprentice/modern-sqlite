@@ -8094,6 +8094,32 @@ TEST(CreateIndexLowering, RetainsResourceLimitsAndMoveSafety) {
   EXPECT_TRUE(LowerPlan(moved).has_value());
 }
 
+TEST(ReadLowering, SeparatesRangeEndFromPositionedLimitCompletion) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  const auto expect_separate = [&](std::string_view sql) {
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    std::vector<InstructionAddress> range_targets;
+    std::vector<InstructionAddress> limit_targets;
+    for (const Instruction& instruction : program.instructions()) {
+      if (const auto* range = std::get_if<CheckIndexRangeInstruction>(&instruction);
+          range != nullptr) {
+        range_targets.push_back(range->end_target);
+      }
+      if (const auto* jump = std::get_if<JumpIfInstruction>(&instruction);
+          jump != nullptr && jump->condition == JumpCondition::kIfFalse) {
+        limit_targets.push_back(jump->target);
+      }
+    }
+    ASSERT_FALSE(range_targets.empty());
+    ASSERT_FALSE(limit_targets.empty());
+    EXPECT_EQ(0U,
+              static_cast<std::size_t>(std::ranges::count(limit_targets, range_targets.back())));
+  };
+
+  expect_separate("SELECT Score FROM Items WHERE Score>=1 AND Score<5 LIMIT 2");
+  expect_separate("SELECT Name FROM Items WHERE Score>=1 AND Score<5 LIMIT 2");
+}
+
 TEST(AnalyzeLowering, CreatesStat1AndComputesIndexPrefixes) {
   const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
   const BytecodeProgram program = LowerMutationOrThrow("ANALYZE items_name", catalog);

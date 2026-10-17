@@ -813,7 +813,7 @@ int main() try {
           .cursor = CursorId(0),
           .first_key = RegisterId(0),
           .key_count = 1,
-          .end_target = InstructionAddress(5),
+          .end_target = InstructionAddress(7),
           .mode = IndexRangeEndMode::kInclusive,
       },
       CloseCursorInstruction{.cursor = CursorId(0)},

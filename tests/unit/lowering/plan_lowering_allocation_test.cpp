@@ -312,7 +312,7 @@ int main() try {
                       "SELECT Payload, Name FROM Items WHERE Name=?1 "
                       "ORDER BY id DESC LIMIT ?2 OFFSET ?3"),
   };
-  constexpr std::array<std::size_t, 8> kExpectedAllocations{17U, 29U, 28U, 35U, 35U, 40U, 47U, 60U};
+  constexpr std::array<std::size_t, 8> kExpectedAllocations{17U, 29U, 28U, 35U, 34U, 40U, 47U, 59U};
   std::unique_ptr<BytecodeProgram> published;
   for (std::size_t plan_index = 0; plan_index < physical_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
