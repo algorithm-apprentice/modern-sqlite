@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +63,96 @@ void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) {
       std::span<std::byte, sizeof(std::uint32_t)>{
           bytes.data() + static_cast<std::ptrdiff_t>(offset), sizeof(std::uint32_t)},
       value);
+}
+
+struct OverflowFixture {
+  ByteBuffer image;
+  ByteBuffer record;
+  PageNumber root_page;
+  std::vector<PageNumber> overflow_pages;
+  BtreePageGeometry geometry;
+};
+
+[[nodiscard]] OverflowFixture MakeOverflowFixture(BtreePageType type, std::size_t text_size) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error("failed to open overflow fixture pager");
+  }
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  ByteBuffer record = TakeValue(
+      EncodeRecord(std::array{SqlValue::Text(std::string(text_size, 'm')), SqlValue::Integer(7)}));
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    if (type == BtreePageType::kLeafTable) {
+      TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+      root = table.root_page();
+      RequireStatus(table.Insert(7, record.view()));
+    } else if (type == BtreePageType::kLeafIndex) {
+      IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+      root = index.root_page();
+      RequireStatus(index.InsertEncoded(record.view()));
+    } else {
+      throw std::runtime_error("overflow fixture requires a table or index leaf");
+    }
+  }
+  RequireStatus(pager->Commit());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  std::vector<PageNumber> pages;
+  {
+    const auto pin = TakeValue(pager->ReadPage(root));
+    const auto page = TakeValue(BtreePageView::Parse(pin.frame().bytes(), root, geometry));
+    const auto cell = TakeValue(page.cell(0U));
+    std::optional<PageNumber> next = cell.first_overflow_page();
+    std::size_t remaining = cell.payload_size().value() - cell.local_payload().size();
+    while (remaining != 0U) {
+      if (!next.has_value()) {
+        throw std::runtime_error("overflow fixture has a truncated payload");
+      }
+      pages.push_back(*next);
+      const auto overflow_pin = TakeValue(pager->ReadPage(*next));
+      const auto overflow =
+          TakeValue(OverflowPageView::Parse(overflow_pin.frame().bytes(), geometry));
+      remaining -= std::min(geometry.overflow_payload_capacity().value(), remaining);
+      next = overflow.next_page();
+    }
+  }
+  RequireStatus(pager->EndRead());
+  return OverflowFixture{
+      .image = ByteBuffer::CopyOf(vfs.database_bytes()),
+      .record = std::move(record),
+      .root_page = root,
+      .overflow_pages = std::move(pages),
+      .geometry = geometry,
+  };
+}
+
+[[nodiscard]] ByteBuffer WithOverflowLink(const OverflowFixture& fixture, PageNumber page,
+                                          std::uint32_t next) {
+  ByteBuffer image = ByteBuffer::CopyOf(fixture.image.view());
+  const std::size_t offset =
+      static_cast<std::size_t>(page.value() - 1U) * fixture.geometry.page_size().value();
+  Store32(image.mutable_view(), offset, next);
+  return image;
+}
+
+[[nodiscard]] std::array<std::uint32_t, 5> UnusedOverflowLinks(const OverflowFixture& fixture) {
+  return {
+      0U,
+      0xffffffffU,
+      fixture.geometry.locking_page().value(),
+      static_cast<std::uint32_t>(
+          fixture.image.size().value() / fixture.geometry.page_size().value() + 1U),
+      fixture.overflow_pages.back().value(),
+  };
 }
 
 enum class CrashOperation : std::uint8_t {
@@ -467,6 +558,173 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
   EXPECT_EQ("ALPHA", text->bytes());
   EXPECT_EQ(2, fields[1].integer_value());
   EXPECT_FALSE(TakeValue(cursor.Next()));
+}
+
+TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
+  for (const std::size_t size : {200U, 1'400U}) {
+    const OverflowFixture fixture = MakeOverflowFixture(BtreePageType::kLeafIndex, size);
+    ASSERT_EQ(size == 200U, fixture.overflow_pages.size() == 1U);
+    for (const std::uint32_t next : UnusedOverflowLinks(fixture)) {
+      SCOPED_TRACE(size);
+      SCOPED_TRACE(next);
+      const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), next);
+      test::WritePagerFixedVfs vfs{false};
+      vfs.LoadDatabase(image.view());
+      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      ASSERT_NE(nullptr, pager);
+      RequireStatus(pager->BeginRead());
+      RequireStatus(pager->BeginWrite());
+      const std::array<IndexColumnOrder, 2> columns{
+          IndexColumnOrder{BinaryCollation()},
+          IndexColumnOrder{BinaryCollation()},
+      };
+      const std::array key{SqlValue::Text(std::string(size, 'm'))};
+      const ByteBuffer missing = TakeValue(
+          EncodeRecord(std::array{SqlValue::Text(std::string(size, 'n')), SqlValue::Integer(7)}));
+      {
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+        const std::size_t writes = vfs.total_database_writes();
+        EXPECT_TRUE(TakeValue(index.ContainsEncoded(fixture.record.view())));
+        EXPECT_FALSE(TakeValue(index.ContainsEncoded(missing.view())));
+        EXPECT_EQ(std::optional<std::int64_t>{7}, TakeValue(index.FindPrefixRowId(key)));
+        EXPECT_EQ(writes, vfs.total_database_writes());
+        EXPECT_FALSE(index.requires_rollback());
+        const auto duplicate = index.InsertEncoded(fixture.record.view());
+        ASSERT_FALSE(duplicate.has_value());
+        EXPECT_EQ(ErrorCode::kConstraint, duplicate.error().code());
+        EXPECT_FALSE(index.requires_rollback());
+        RequireStatus(index.ReplaceEncoded(fixture.record.view()));
+        EXPECT_EQ(std::optional<std::int64_t>{7}, TakeValue(index.FindPrefixRowId(key)));
+        EXPECT_TRUE(TakeValue(index.DeleteEncoded(fixture.record.view())));
+        EXPECT_FALSE(TakeValue(index.DeleteEncoded(fixture.record.view())));
+        RequireStatus(index.InsertEncoded(fixture.record.view()));
+        EXPECT_TRUE(TakeValue(index.ContainsEncoded(fixture.record.view())));
+      }
+      RequireStatus(pager->Rollback());
+      EXPECT_TRUE(std::ranges::equal(image.view(), vfs.database_bytes()));
+      RequireStatus(pager->EndRead());
+    }
+  }
+}
+
+TEST(BtreeWriter, ReadsAndMutatesRowsWithoutConsumingUnusedFinalOverflowLinks) {
+  for (const std::size_t size : {600U, 1'400U}) {
+    const OverflowFixture fixture = MakeOverflowFixture(BtreePageType::kLeafTable, size);
+    ASSERT_EQ(size == 600U, fixture.overflow_pages.size() == 1U);
+    for (const std::uint32_t next : UnusedOverflowLinks(fixture)) {
+      SCOPED_TRACE(next);
+      const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), next);
+      test::WritePagerFixedVfs vfs{false};
+      vfs.LoadDatabase(image.view());
+      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      ASSERT_NE(nullptr, pager);
+      RequireStatus(pager->BeginRead());
+      RequireStatus(pager->BeginWrite());
+      ByteBuffer replacement = ByteBuffer::CopyOf(fixture.record.view());
+      replacement.mutable_view().back() = std::byte{8};
+      {
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        TableBtreeWriter table = TakeValue(session.OpenTableBtree(fixture.root_page));
+        TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+        ASSERT_TRUE(TakeValue(cursor.First()));
+        const std::size_t writes = vfs.total_database_writes();
+        const TableBtreeMutationRow row = TakeValue(cursor.row());
+        EXPECT_EQ(7, row.rowid);
+        EXPECT_TRUE(std::ranges::equal(fixture.record.view(), row.payload));
+        EXPECT_TRUE(std::ranges::equal(fixture.record.view(), TakeValue(cursor.row()).payload));
+        EXPECT_EQ(writes, vfs.total_database_writes());
+        EXPECT_FALSE(table.requires_rollback());
+        RequireStatus(cursor.ReplaceCurrent(replacement.view()));
+        EXPECT_TRUE(std::ranges::equal(replacement.view(), TakeValue(cursor.row()).payload));
+        EXPECT_FALSE(TakeValue(cursor.DeleteAndNext()));
+        EXPECT_FALSE(cursor.valid());
+      }
+      RequireStatus(pager->Rollback());
+      EXPECT_TRUE(std::ranges::equal(image.view(), vfs.database_bytes()));
+      RequireStatus(pager->EndRead());
+    }
+  }
+}
+
+TEST(BtreeWriter, RejectsConsumedInvalidOverflowLinksWithoutPoisoningTheTransaction) {
+  for (const BtreePageType type : {BtreePageType::kLeafIndex, BtreePageType::kLeafTable}) {
+    const OverflowFixture fixture = MakeOverflowFixture(type, 1'400U);
+    ASSERT_GT(fixture.overflow_pages.size(), 1U);
+    const std::array<std::uint32_t, 4> invalid{
+        0U,
+        0xffffffffU,
+        fixture.geometry.locking_page().value(),
+        static_cast<std::uint32_t>(
+            fixture.image.size().value() / fixture.geometry.page_size().value() + 1U),
+    };
+    for (const std::uint32_t next : invalid) {
+      SCOPED_TRACE(static_cast<std::uint8_t>(type));
+      SCOPED_TRACE(next);
+      const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.front(), next);
+      test::WritePagerFixedVfs vfs{false};
+      vfs.LoadDatabase(image.view());
+      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      ASSERT_NE(nullptr, pager);
+      RequireStatus(pager->BeginRead());
+      RequireStatus(pager->BeginWrite());
+      {
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        if (type == BtreePageType::kLeafIndex) {
+          const std::array<IndexColumnOrder, 2> columns{
+              IndexColumnOrder{BinaryCollation()},
+              IndexColumnOrder{BinaryCollation()},
+          };
+          IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+          const auto found = index.ContainsEncoded(fixture.record.view());
+          ASSERT_FALSE(found.has_value());
+          EXPECT_EQ(ErrorCode::kCorruption, found.error().code());
+        } else {
+          TableBtreeWriter table = TakeValue(session.OpenTableBtree(fixture.root_page));
+          TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+          ASSERT_TRUE(TakeValue(cursor.First()));
+          const auto row = cursor.row();
+          ASSERT_FALSE(row.has_value());
+          EXPECT_EQ(ErrorCode::kCorruption, row.error().code());
+          EXPECT_FALSE(cursor.valid());
+        }
+        EXPECT_FALSE(session.requires_rollback());
+      }
+      RequireStatus(pager->Rollback());
+      EXPECT_TRUE(std::ranges::equal(image.view(), vfs.database_bytes()));
+      RequireStatus(pager->EndRead());
+    }
+  }
+}
+
+TEST(BtreeWriter, ReturnsLateOverflowIoFailureAndReleasesPinsForRetry) {
+  const OverflowFixture fixture = MakeOverflowFixture(BtreePageType::kLeafIndex, 1'400U);
+  ASSERT_GT(fixture.overflow_pages.size(), 1U);
+  const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), 0xffffffffU);
+  test::WritePagerFixedVfs vfs{false};
+  vfs.LoadDatabase(image.view());
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    const std::array<IndexColumnOrder, 2> columns{
+        IndexColumnOrder{BinaryCollation()},
+        IndexColumnOrder{BinaryCollation()},
+    };
+    IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+    static_cast<void>(TakeValue(pager->ReadPage(fixture.root_page)));
+    vfs.FailDatabaseReadAfter(fixture.overflow_pages.size() - 1U, ErrorCode::kIo);
+    const auto failed = index.ContainsEncoded(fixture.record.view());
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_FALSE(index.requires_rollback());
+    EXPECT_TRUE(TakeValue(index.ContainsEncoded(fixture.record.view())));
+  }
+  RequireStatus(pager->Rollback());
+  EXPECT_TRUE(std::ranges::equal(image.view(), vfs.database_bytes()));
+  RequireStatus(pager->EndRead());
 }
 
 TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {

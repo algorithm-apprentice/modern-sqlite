@@ -670,6 +670,31 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
   }
 }
 
+TEST(StorageInspector, ReportsInvalidUnusedFinalOverflowLinks) {
+  PosixVfs vfs;
+  const StorageInspectionReport baseline = TakeValue(InspectDatabase(vfs, FixturePath().string()));
+  std::optional<PageNumber> final_overflow;
+  for (const StoragePageReport& page : baseline.pages) {
+    for (const StorageCellReport& cell : page.cells) {
+      if (!cell.overflow_pages.empty()) {
+        final_overflow = cell.overflow_pages.back();
+        break;
+      }
+    }
+    if (final_overflow.has_value()) {
+      break;
+    }
+  }
+  ASSERT_TRUE(final_overflow.has_value());
+
+  std::vector<std::byte> bytes = ReadBytes(FixturePath());
+  Write32(bytes, PageOffset(*final_overflow), 0xffffffffU);
+  const TemporaryDatabase database(bytes);
+  const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, database.path().string()));
+  EXPECT_FALSE(report.ok());
+  EXPECT_TRUE(HasIssue(report, StorageIssueCode::kOverflowChain));
+}
+
 TEST(StorageInspector, ReturnsUnlockFailureInsteadOfCompletedInspection) {
   const auto state = std::make_shared<CountingState>();
   state->bytes = ReadBytes(FixturePath());

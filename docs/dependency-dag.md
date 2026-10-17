@@ -170,6 +170,8 @@ allocation failures at their existing typed boundaries without changing
 borrowed decoding or persistent behavior.
 ADR-0102 defines change-aware local verification and bounded fast-local unit
 execution while retaining isolated qualification and required hosted gates.
+ADR-0103 corrects the writable payload reader's consumed overflow-link
+boundary while retaining strict whole-file diagnostics.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
