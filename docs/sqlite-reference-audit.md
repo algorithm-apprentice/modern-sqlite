@@ -7,10 +7,10 @@
 - Date: 2026-10-16.
 - Status: Initial whole-implemented-engine review complete; focused
   reproductions and corrections remain in progress.
-- Follow-up: A5, D1, D3, D2, A1, and A2 are corrected and verified by merged PRs
-  #205, #204, #206, #207, #208, and #209. ADR-0100 corrects R1's canonical
-  function numeric-type correction; other findings remain open unless their
-  own evidence states otherwise.
+- Follow-up: A5, D1, D3, D2, A1, A2, and R1 are corrected and verified by merged
+  PRs #205, #204, #206, #207, #208, #209, and #210. ADR-0101 corrects B1's
+  bounded typed read-allocation correction; other findings remain open unless
+  their own evidence states otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
 ## Scope and interpretation
@@ -439,6 +439,11 @@ allocation helper retains its original numeric case and exact two-allocation
 contract, adding long NUL TEXT paths and successful same-state reset/reuse
 after each injected failure. GPT-5.6 Sol accepted design and implementation
 without blockers; integrated exact-tree and delivery gates remain mandatory.
+The exact accepted tree `61eff1a3246c60b086285f031ceba09e72759271`
+passed all unchanged-input local gates and nine first-head hosted checks,
+including the original model in 7.27 seconds under its ten-second deadline.
+PR #210 squash merged as `ceeb3e8006afad3322698a93ff7022e619b1f06e`;
+merged main, parent, trailer, and named merged-branch cleanup were verified.
 
 ### R2. REAL storage conversion loses native IntReal serial-form rules
 
@@ -461,8 +466,9 @@ read-result defect or proven database corruption.
 ### B1. Codec and read-cursor allocation boundaries leak exceptions
 
 Priority: **medium, typed-error contract violations**.
+Status: **corrected by ADR-0101**.
 
-Record materialization/error construction at
+At the audited revision, record materialization/error construction at
 `src/format/record_codec.cpp:722-726,824-836` and public read-cursor
 Open/CopyPayload paths at
 `src/storage/btree/cursor.cpp:1004-1009,1093-1108,1121-1157,1258-1273`
@@ -479,6 +485,43 @@ These probes do not replace exhaustive cleanup/pin-release and overflow-copy
 regressions in the eventual correction.
 Contain only expected allocation exceptions, reuse `Error::OutOfMemory`,
 and do not add broad catches or success-shaped defaults.
+
+The main-agent current-tree reproduction after PR #210 confirms all nine
+named allocation sites still throw. The existing scoped diagnostic was
+recompiled against that exact library rather than reused as a stale binary.
+The inventory also identifies coupled page/cursor diagnostic constructors
+that own strings before a protected boundary. ADR-0101 reuses the codec's
+nonthrowing error pattern, explicit ownership boundaries, and the existing
+module allocation helpers; it does not broaden allocator handling in the
+optimizer/lowering or change persistent validation.
+Design review additionally identified 15 page-local lvalue error forwards
+that can copy owning diagnostics after the factory. The correction requires
+move propagation from non-const Results and nested failure-index coverage,
+not only a fail-index-zero factory test.
+
+ADR-0101 now contains expected allocation failures through the existing
+nonthrowing error pattern and ownership boundaries. All 15 page errors move
+from non-const Results. The shared cursor payload-copy operation retains one
+exact buffer, feasibility-before-allocation, the same walker, and unchanged
+position/borrows on failure. Public API shape and persistent behavior remain
+unchanged.
+
+The existing allocation helpers observed the field and three mixed-record
+escapes plus 38 overlapping cursor/page observations before production
+changes. Their expanded green controls exhaust ownership and nested
+diagnostic allocations, include indices after zero, verify cleanup and
+same-input/Pager retry, and prove failed-Open pin release through `EndRead`.
+Local and overflow copies cover both cursor types. A real third-read I/O
+failure after copy allocation preserves the original error, cursor position,
+local bytes, and successful exact retry.
+
+The focused and complete 1,432-case fast tiers passed before and after the
+green-only copy consolidation. Current Debug passes 1,493 tests, retaining
+every inherited name plus one I/O regression. All 2,511 frozen post-R1 native
+and Modern outcomes remain unchanged. Old comparison repetitions, allocation
+ceilings, fixtures, oracles, profiles, workloads, and resource controls are
+unchanged. GPT-5.6 Sol accepted the amended design and implementation without
+remaining blockers; integrated exact-tree and delivery gates remain mandatory.
 
 ### B2. Writable payload reads consume an unused overflow link
 
@@ -512,9 +555,9 @@ not a demonstrated SQL defect.
 
 ## Repair ordering and remaining verification
 
-D1, A5, D3, D2, A1, and A2 have merged with exact-head hosted proof, and the
-preserved binder foundation is integrated. Continue R1 through ADR-0100's
-canonical function numeric typing. Prioritize the remaining durable/lifecycle
+D1, A5, D3, D2, A1, A2, and R1 have merged with exact-head hosted proof, and the
+preserved binder foundation is integrated. Continue B1 through ADR-0101's
+typed read-allocation boundaries. Prioritize the remaining durable/lifecycle
 and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
 optimization remains preserved and is not treated as a delivered correction.

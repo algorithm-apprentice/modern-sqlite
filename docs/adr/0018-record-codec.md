@@ -72,6 +72,10 @@ appear in a well-formed persistent database record.
 - Codec error construction is non-throwing. If owning an error message cannot
   allocate, including `EncodeRecordInto` destination validation, the API
   returns `ErrorCode::kOutOfMemory`.
+- ADR-0101 applies the same boundary to field-range diagnostics and owned
+  `DecodeRecord` materialization, including partial vector/TEXT/BLOB cleanup.
+  Borrowed views and comparisons remain allocation-free; value-returning
+  ownership primitives retain their existing exception policy.
 - Index comparison accepts:
   - a validated encoded record;
   - a borrowed unpacked search-key prefix;

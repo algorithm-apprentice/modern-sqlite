@@ -103,3 +103,4 @@ their corresponding implementation begins.
 98. [ADR-0098: Retired Statement Completion After Rollback](0098-retired-statement-completion-after-rollback.md)
 99. [ADR-0099: Preserved USING Wildcard Publication](0099-preserved-using-wildcard-publication.md)
 100. [ADR-0100: Canonical Function Numeric-Type Conversion](0100-canonical-function-numeric-type.md)
+101. [ADR-0101: Typed Read Allocation Boundaries](0101-typed-read-allocation-boundaries.md)

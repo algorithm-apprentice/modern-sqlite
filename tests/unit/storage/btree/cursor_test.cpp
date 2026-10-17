@@ -946,6 +946,31 @@ TEST_F(BtreePrefixComparisonTest, ReportsLateReadFailuresEvenWhenTheComparedKeyI
   }
 }
 
+TEST_F(BtreePrefixComparisonTest, PreservesPayloadCopyPositionAfterLateReadFailure) {
+  const std::array fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(8192, 'x')))),
+  };
+  const ByteBuffer expected = TakeValue(EncodeRecord(fields));
+  const PageNumber root = CreateIndex(fields);
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const BtreePayloadView before = TakeValue(cursor.payload());
+  const ByteBuffer local = ByteBuffer::CopyOf(before.local_bytes());
+  const std::size_t reads_before = vfs_.total_pathless_reads();
+  vfs_.FailPathlessReadAfter(2, ErrorCode::kIo);
+  const auto failed = cursor.CopyPayload();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(reads_before + 3U, vfs_.total_pathless_reads());
+  EXPECT_TRUE(cursor.valid());
+  const BtreePayloadView after = TakeValue(cursor.payload());
+  EXPECT_EQ(before.local_bytes().data(), after.local_bytes().data());
+  EXPECT_TRUE(std::ranges::equal(local.view(), after.local_bytes()));
+  const ByteBuffer retry = TakeValue(cursor.CopyPayload());
+  EXPECT_TRUE(std::ranges::equal(expected.view(), retry.view()));
+}
+
 TEST_F(BtreePrefixComparisonTest, PrioritizesLateReadFailuresOverStagedFormatErrors) {
   const std::array<SqlValue, 2> fields{
       SqlValue::Integer(7),

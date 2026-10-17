@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <compare>
@@ -5,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <new>
 #include <optional>
@@ -14,11 +16,14 @@
 #include <utility>
 #include <vector>
 
+#include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -103,6 +108,240 @@ struct Outcome {
   std::size_t allocations;
   bool invariant_holds;
 };
+
+template <typename Operation>
+[[nodiscard]] Outcome ObserveAllocation(const char* name, Operation&& operation,
+                                        std::optional<std::size_t> failure,
+                                        std::optional<modern_sqlite::ErrorCode> expected_error,
+                                        std::string_view expected_message = {}) {
+  const std::size_t live_before = live_allocations.load(std::memory_order_relaxed);
+  allocation_index.store(0, std::memory_order_relaxed);
+  failing_allocation = failure;
+  bool correct = false;
+  try {
+    const auto result = operation();
+    failing_allocation.reset();
+    correct = expected_error.has_value()
+                  ? !result.has_value() && result.error().code() == *expected_error &&
+                        (expected_message.empty() || result.error().message() == expected_message)
+                  : result.has_value();
+  } catch (const std::bad_alloc&) {
+    failing_allocation.reset();
+    std::fprintf(stderr, "%s allocation %zu escaped std::bad_alloc\n", name, failure.value_or(0));
+  }
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  return Outcome{.allocations = allocations,
+                 .invariant_holds =
+                     correct && live_before == live_allocations.load(std::memory_order_relaxed)};
+}
+
+template <typename Operation>
+[[nodiscard]] bool ExhaustOwnedAllocations(const char* name, Operation&& operation,
+                                           std::size_t expected_allocations,
+                                           std::optional<modern_sqlite::ErrorCode> expected_error,
+                                           std::string_view expected_message = {}) {
+  const Outcome baseline =
+      ObserveAllocation(name, operation, std::nullopt, expected_error, expected_message);
+  if (baseline.allocations > 16U) {
+    return false;
+  }
+  bool correct = baseline.invariant_holds && baseline.allocations == expected_allocations;
+  for (std::size_t failure = 0; failure < baseline.allocations; ++failure) {
+    const Outcome outcome =
+        ObserveAllocation(name, operation, failure, modern_sqlite::ErrorCode::kOutOfMemory);
+    correct = outcome.invariant_holds && correct;
+  }
+  const Outcome after_message =
+      ObserveAllocation(name, operation, baseline.allocations, expected_error, expected_message);
+  return after_message.invariant_holds && after_message.allocations == expected_allocations &&
+         correct;
+}
+
+template <typename Operation>
+[[nodiscard]] bool CheckDiagnostic(const char* name, Operation&& operation,
+                                   modern_sqlite::ErrorCode expected_error) {
+  const auto original = operation();
+  if (original.has_value() || original.error().code() != expected_error) {
+    return false;
+  }
+  return ExhaustOwnedAllocations(name, operation, 1, expected_error, original.error().message());
+}
+
+[[nodiscard]] std::unique_ptr<modern_sqlite::Pager> OpenNativeFixture(
+    modern_sqlite::PosixVfs& vfs) {
+  const auto path =
+      std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path().parent_path() /
+      "fixtures" / "btree_read" / "sqlite-3.54.0-btree-read.db";
+  auto pager = TakeValue(modern_sqlite::Pager::Open(
+      vfs, path.string(), modern_sqlite::PagerOptions{.cache_capacity_pages = 256}));
+  RequireStatus(pager->BeginRead());
+  return pager;
+}
+
+[[nodiscard]] bool CheckOpenFailures() {
+  using namespace modern_sqlite;
+  PosixVfs vfs;
+  auto pager = OpenNativeFixture(vfs);
+  for (const PageNumber root : {PageNumber{2}, PageNumber{76}}) {
+    const ReadPagePin warm = TakeValue(pager->ReadPage(root));
+  }
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  const bool table = ExhaustOwnedAllocations(
+      "table open", [&] { return TableBtreeCursor::Open(*pager, PageNumber{2}); }, 1, std::nullopt);
+  const bool index = ExhaustOwnedAllocations(
+      "index open", [&] { return IndexBtreeCursor::Open(*pager, PageNumber{76}, columns); }, 2,
+      std::nullopt);
+  const bool zero_root = CheckDiagnostic(
+      "cursor misuse", [&] { return TableBtreeCursor::Open(*pager, PageNumber{0}); },
+      ErrorCode::kMisuse);
+  const bool released = pager->EndRead().has_value();
+  return table && index && zero_root && released;
+}
+
+template <typename Cursor>
+[[nodiscard]] bool CheckCopies(Cursor& cursor, bool overflow) {
+  using namespace modern_sqlite;
+  const BtreePayloadView before = TakeValue(cursor.payload());
+  if (before.is_fully_local() == overflow) {
+    return false;
+  }
+  const ByteBuffer original = TakeValue(cursor.CopyPayload());
+  const ByteBuffer local = ByteBuffer::CopyOf(before.local_bytes());
+  const bool copied = ExhaustOwnedAllocations(
+      overflow ? "overflow copy" : "local copy", [&] { return cursor.CopyPayload(); }, 1,
+      std::nullopt);
+  const BtreePayloadView after = TakeValue(cursor.payload());
+  const ByteBuffer retry = TakeValue(cursor.CopyPayload());
+  return copied && cursor.valid() && before.local_bytes().data() == after.local_bytes().data() &&
+         std::ranges::equal(local.view(), after.local_bytes()) &&
+         std::ranges::equal(original.view(), retry.view());
+}
+
+[[nodiscard]] bool CheckPayloadCopyFailures() {
+  using namespace modern_sqlite;
+  PosixVfs vfs;
+  auto pager = OpenNativeFixture(vfs);
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  bool correct = true;
+  for (const bool overflow : {false, true}) {
+    {
+      auto cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      if (!TakeValue(cursor.Seek(overflow ? 44 : 1, BtreeSeekMode::kEqual))) {
+        return false;
+      }
+      correct = CheckCopies(cursor, overflow) && correct;
+    }
+    {
+      auto cursor =
+          TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{overflow ? 102U : 76U}, columns));
+      if (!TakeValue(cursor.First())) {
+        return false;
+      }
+      correct = CheckCopies(cursor, overflow) && correct;
+    }
+  }
+  return pager->EndRead().has_value() && correct;
+}
+
+void Write16(modern_sqlite::ByteBuffer& bytes, std::size_t offset, std::uint16_t value) {
+  modern_sqlite::StoreBigEndian<std::uint16_t>(
+      std::span<std::byte, 2>{bytes.mutable_view().data() + offset, 2}, value);
+}
+
+void Write32(modern_sqlite::ByteBuffer& bytes, std::size_t offset, std::uint32_t value) {
+  modern_sqlite::StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, 4>{bytes.mutable_view().data() + offset, 4}, value);
+}
+
+[[nodiscard]] modern_sqlite::ByteBuffer DiagnosticPage(modern_sqlite::BtreePageType type,
+                                                       std::size_t cell_offset = 512) {
+  using namespace modern_sqlite;
+  ByteBuffer page{ByteCount{512}};
+  std::ranges::fill(page.mutable_view(), std::byte{0});
+  page.mutable_view()[0] = static_cast<std::byte>(type);
+  Write16(page, 5, static_cast<std::uint16_t>(cell_offset));
+  if (cell_offset != 512) {
+    Write16(page, 3, 1);
+    const bool interior =
+        type == BtreePageType::kInteriorTable || type == BtreePageType::kInteriorIndex;
+    Write16(page, interior ? 12U : 8U, static_cast<std::uint16_t>(cell_offset));
+  }
+  return page;
+}
+
+[[nodiscard]] bool CheckPageDiagnostics() {
+  using namespace modern_sqlite;
+  const auto geometry = TakeValue(BtreePageGeometry::Create(ByteCount{512}, ByteCount{512}));
+  bool correct = true;
+  const auto check = [&]<typename Operation>(const char* name, Operation&& operation,
+                                             ErrorCode code = ErrorCode::kCorruption) {
+    correct = CheckDiagnostic(name, operation, code) && correct;
+  };
+  ByteBuffer bad_type = DiagnosticPage(BtreePageType::kLeafTable);
+  bad_type.mutable_view()[0] = std::byte{0};
+  check("page type propagation",
+        [&] { return BtreePageView::Parse(bad_type.view(), PageNumber{2}, geometry); });
+  const ByteBuffer right_child = DiagnosticPage(BtreePageType::kInteriorTable);
+  check("right child propagation",
+        [&] { return BtreePageView::Parse(right_child.view(), PageNumber{2}, geometry); });
+
+  const auto first_cell = [&](const ByteBuffer& bytes) -> Result<BtreeCellView> {
+    auto page = BtreePageView::Parse(bytes.view(), PageNumber{2}, geometry);
+    if (!page.has_value()) {
+      return std::unexpected(std::move(page.error()));
+    }
+    return page->cell(0);
+  };
+  const ByteBuffer empty = DiagnosticPage(BtreePageType::kLeafTable);
+  check("cell range propagation", [&] { return first_cell(empty); }, ErrorCode::kOutOfRange);
+  ByteBuffer invalid_offset = DiagnosticPage(BtreePageType::kLeafTable, 511);
+  Write16(invalid_offset, 8, 512);
+  check("cell offset propagation", [&] { return first_cell(invalid_offset); });
+  ByteBuffer child = DiagnosticPage(BtreePageType::kInteriorTable, 507);
+  Write32(child, 8, 1);
+  child.mutable_view()[511] = std::byte{0x80};
+  check("left child propagation", [&] { return first_cell(child); });
+  ByteBuffer interior_rowid = ByteBuffer::CopyOf(child.view());
+  Write32(interior_rowid, 507, 1);
+  check("interior rowid propagation", [&] { return first_cell(interior_rowid); });
+  ByteBuffer payload = DiagnosticPage(BtreePageType::kLeafTable, 511);
+  payload.mutable_view()[511] = std::byte{0x80};
+  check("payload varint propagation", [&] { return first_cell(payload); });
+  const ByteBuffer rowid = DiagnosticPage(BtreePageType::kLeafTable, 511);
+  check("table rowid propagation", [&] { return first_cell(rowid); });
+  ByteBuffer first_overflow = DiagnosticPage(BtreePageType::kLeafTable, 466);
+  first_overflow.mutable_view()[466] = std::byte{0x83};
+  first_overflow.mutable_view()[467] = std::byte{0x74};
+  first_overflow.mutable_view()[468] = std::byte{1};
+  check("first overflow propagation", [&] { return first_cell(first_overflow); });
+
+  ByteBuffer chain = DiagnosticPage(BtreePageType::kLeafTable);
+  Write32(chain, 0, 0xffffffffU);
+  check("overflow link propagation",
+        [&] { return OverflowPageView::Parse(chain.view(), geometry); });
+  check("freelist link propagation",
+        [&] { return FreelistTrunkView::Parse(chain.view(), geometry); });
+  ByteBuffer trunk = DiagnosticPage(BtreePageType::kLeafTable);
+  Write32(trunk, 0, 0);
+  Write32(trunk, 4, 1);
+  check("freelist leaf propagation",
+        [&] { return FreelistTrunkView::Parse(trunk.view(), geometry); });
+  ByteBuffer map = DiagnosticPage(BtreePageType::kLeafTable);
+  std::ranges::fill(map.mutable_view(), std::byte{0});
+  map.mutable_view()[0] = static_cast<std::byte>(PointerMapType::kBtreeChild);
+  check(
+      "pointer map parse propagation",
+      [&] { return PointerMapView::Parse(map.view(), PageNumber{0}, geometry); },
+      ErrorCode::kMisuse);
+  const auto pointer_map = TakeValue(PointerMapView::Parse(map.view(), PageNumber{2}, geometry));
+  check(
+      "pointer map target propagation", [&] { return pointer_map.entry(PageNumber{0}); },
+      ErrorCode::kMisuse);
+  check("pointer map parent propagation", [&] { return pointer_map.entry(PageNumber{3}); });
+  return correct;
+}
 
 [[nodiscard]] Outcome RunCase(bool wide_header, bool seek, std::size_t requested_fields,
                               std::optional<std::size_t> failure,
@@ -219,7 +458,10 @@ int main() try {
       return 1;
     }
   }
-  return 0;
+  const bool opened = CheckOpenFailures();
+  const bool copied = CheckPayloadCopyFailures();
+  const bool diagnostics = CheckPageDiagnostics();
+  return opened && copied && diagnostics ? 0 : 1;
 } catch (const std::exception& error) {
   std::fprintf(stderr, "cursor allocation fixture failure: %s\n", error.what());
   return 1;

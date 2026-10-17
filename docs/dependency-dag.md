@@ -165,6 +165,9 @@ boundaries through the canonical joined namespace without changing explicit
 physical qualification.
 ADR-0100 corrects function numeric typing through the canonical SQL-value
 parsers while preserving distinct affinity, CAST, and arithmetic behavior.
+ADR-0101 contains expected codec/page/read-cursor ownership and diagnostic
+allocation failures at their existing typed boundaries without changing
+borrowed decoding or persistent behavior.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
