@@ -34,6 +34,7 @@ namespace binder_detail {
 
 struct ResultDefinition {
   std::optional<ExpressionId> syntax{};
+  std::vector<ExpressionId> additional_syntax{};
   bool has_subqueries = false;
   bool value_checked = false;
 };
@@ -99,7 +100,7 @@ struct NameScopeView {
   std::span<const SourceState> sources;
   std::span<const BoundTableSource> table_sources;
   std::span<const AliasEntry> aliases;
-  std::span<const ResultDefinition> result_definitions;
+  std::span<ResultDefinition> result_definitions;
   const NameScopeView* outer = nullptr;
   BindScope scope{};
 };
@@ -1658,6 +1659,13 @@ class StatementBinder final {
     return std::ranges::find(source_states_, source, &SourceState::id) != source_states_.end();
   }
 
+  [[nodiscard]] bool OwnsAggregateSource(BoundSourceId source) const noexcept {
+    const std::span<const SourceState> sources = definition_name_scope_ != nullptr
+                                                     ? definition_name_scope_->sources
+                                                     : std::span<const SourceState>{source_states_};
+    return std::ranges::find(sources, source, &SourceState::id) != sources.end();
+  }
+
   [[nodiscard]] bool OwnsQuerySource(BoundSourceId source) const noexcept {
     return std::ranges::any_of(ActiveCores(), [source](const BoundQueryCore& core) {
       const auto* select = std::get_if<BoundSelectCore>(&core);
@@ -1876,6 +1884,9 @@ class StatementBinder final {
         return collations;
       }
     }
+    if (auto validated = ValidateRequiredResultDefinitions(); !validated.has_value()) {
+      return validated;
+    }
     PublishResultColumns();
     return FinalizeQueryCaptures();
   }
@@ -1984,6 +1995,12 @@ class StatementBinder final {
   }
 
   [[nodiscard]] NameScopeView CurrentNameScope(BindScope scope) const noexcept {
+    if (definition_name_scope_ != nullptr) {
+      NameScopeView view = *definition_name_scope_;
+      view.scope = scope;
+      view.scope.result_aliases = false;
+      return view;
+    }
     return NameScopeView{
         .query = active_query_,
         .sources = source_states_,
@@ -2048,8 +2065,14 @@ class StatementBinder final {
                                          "subqueries in mutation statements are not supported"));
     }
     const bool binding_only = binding_only_ || !scope.requires_value;
-    auto& existing = query_bindings_[syntax.query.value];
-    if (!existing.has_value()) {
+    if (syntax.query.value >= tree_.select_queries().size() ||
+        query_binding_base_ > query_bindings_.size() ||
+        syntax.query.value >= query_bindings_.size() - query_binding_base_) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "query binding cache index is invalid"));
+    }
+    const std::size_t binding_index = query_binding_base_ + syntax.query.value;
+    if (!query_bindings_[binding_index].has_value()) {
       if (impl_->nested_queries.size() >= std::numeric_limits<std::uint32_t>::max()) {
         return std::unexpected(
             BinderError(BindErrorCode::kInternalInvariant, span, "bound query identity overflow"));
@@ -2062,17 +2085,20 @@ class StatementBinder final {
                                                               : BoundQueryDestination::kExists,
       });
       QueryBindingScope saved = SaveQueryScope(scope);
+      const NameScopeView* definition_scope = std::exchange(definition_name_scope_, nullptr);
       outer_scope_ = &saved.names;
       active_query_ = id;
       binding_only_ = binding_only;
       auto bound = BindQuery(tree_.select_query(syntax.query));
+      definition_name_scope_ = definition_scope;
       RestoreQueryScope(std::move(saved));
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      existing = id;
+      query_bindings_[binding_index] = id;
     }
-    const BoundQuery& query = Query(*existing);
+    const BoundQueryId query_id = query_bindings_[binding_index].value_or(BoundQueryId{0});
+    const BoundQuery& query = Query(query_id);
     if (query.destination == BoundQueryDestination::kScalar && query.output_columns.size() != 1U &&
         !binding_only) {
       return std::unexpected(BinderError(BindErrorCode::kColumnCountMismatch, span,
@@ -2081,12 +2107,11 @@ class StatementBinder final {
                                              " columns - expected 1"));
     }
     auto expression = AppendExpression(
-        span, BoundSubqueryExpression{.query = *existing},
-        ExpressionProperties{
-            .affinity = query.destination == BoundQueryDestination::kScalar
-                            ? Properties(ScalarResultExpression(*existing)).affinity
-                            : TypeAffinity::kNone,
-            .collation = std::nullopt});
+        span, BoundSubqueryExpression{.query = query_id},
+        ExpressionProperties{.affinity = query.destination == BoundQueryDestination::kScalar
+                                             ? Properties(ScalarResultExpression(query_id)).affinity
+                                             : TypeAffinity::kNone,
+                             .collation = std::nullopt});
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
@@ -2700,14 +2725,24 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
                                          "too many columns in result set"));
     }
-    const BindScope empty_scope{.source_columns = true, .result_aliases = false};
+    const bool requires_value = ActiveQuery().destination != BoundQueryDestination::kExists;
+    const BindScope empty_scope{
+        .source_columns = true,
+        .result_aliases = false,
+        .requires_value = requires_value,
+    };
     std::vector<std::vector<BoundExpressionId>> rows;
     rows.reserve(core.rows.size());
     impl_->result_definitions.reserve(column_count);
     for (const std::vector<ExpressionId>& syntax_row : core.rows) {
+      if (syntax_row.size() != column_count) {
+        return std::unexpected(BinderError(BindErrorCode::kValuesColumnCount, core.span,
+                                           "all VALUES must have the same number of terms"));
+      }
       std::vector<BoundExpressionId> row;
       row.reserve(syntax_row.size());
-      for (const ExpressionId expression : syntax_row) {
+      for (std::size_t index = 0; index < syntax_row.size(); ++index) {
+        const ExpressionId expression = syntax_row[index];
         const std::size_t first_query = impl_->nested_queries.size();
         BindExpected<BoundExpressionId> bound = BindExpression(expression, empty_scope);
         if (!bound.has_value()) {
@@ -2718,15 +2753,16 @@ class StatementBinder final {
           impl_->result_definitions.push_back(ResultDefinition{
               .syntax = expression,
               .has_subqueries = impl_->nested_queries.size() != first_query,
-              .value_checked = !binding_only_,
+              .value_checked = requires_value && !binding_only_,
           });
+        } else {
+          ResultDefinition& definition = impl_->result_definitions[index];
+          definition.additional_syntax.push_back(expression);
+          definition.has_subqueries =
+              definition.has_subqueries || impl_->nested_queries.size() != first_query;
         }
       }
       rows.push_back(std::move(row));
-      if (syntax_row.size() != column_count) {
-        return std::unexpected(BinderError(BindErrorCode::kValuesColumnCount, core.span,
-                                           "all VALUES must have the same number of terms"));
-      }
     }
 
     std::vector<BoundResultColumn> results;
@@ -3158,7 +3194,26 @@ class StatementBinder final {
                               std::to_string(impl_->result_columns.size())));
         }
         result_column = static_cast<std::size_t>(**ordinal - 1);
-        expression = BindOrderByResultReference(syntax, *result_column);
+        const ResultDefinition& definition = impl_->result_definitions[*result_column];
+        const BindScope copy_scope{
+            .source_columns = true,
+            .result_aliases = false,
+            .aggregates = AggregatePermission::kGrouping,
+        };
+        const NameScopeView names = CurrentNameScope(copy_scope);
+        if (definition.has_subqueries) {
+          auto copied = BindResultDefinitionCopy(definition, names, copy_scope, span);
+          if (!copied.has_value()) {
+            return std::unexpected(std::move(copied.error()));
+          }
+          expression = BindOrderByResultReference(syntax, *copied);
+        } else {
+          if (auto validated = ValidateResultDefinition(*result_column, names, span);
+              !validated.has_value()) {
+            return std::unexpected(std::move(validated.error()));
+          }
+          expression = BindOrderByResultReference(syntax, *result_column);
+        }
       } else {
         expression = BindExpression(syntax, BindScope{
                                                 .source_columns = true,
@@ -4636,7 +4691,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
                                                                std::size_t root_height = 0) {
-    const std::size_t height = expression_owner_ == active_query_
+    const std::size_t height = binding_validated_template_ || expression_owner_ == active_query_
                                    ? 0U
                                    : (root_height == 0U ? ExpressionSyntaxHeight(id) : root_height);
     if (auto admitted = ValidateResolutionHeight(height, tree_.expression(id).span);
@@ -4930,15 +4985,16 @@ class StatementBinder final {
             parts->size() == 3U ? std::optional<std::string_view>{parts->front()} : std::nullopt,
         .name = (*parts)[parts->size() - 2U],
     };
-    auto resolved = ResolveNameInScope(parts->back(), identifier.name.span, qualification,
-                                       CurrentNameScope(scope));
+    const NameScopeView current = CurrentNameScope(scope);
+    auto resolved = ResolveNameInScope(parts->back(), identifier.name.span, qualification, current);
     if (!resolved.has_value()) {
       return std::unexpected(std::move(resolved.error()));
     }
     if (resolved->has_value()) {
       return **resolved;
     }
-    auto outer = ResolveOuterSourceName(parts->back(), identifier.name.span, qualification);
+    auto outer =
+        ResolveOuterSourceName(parts->back(), identifier.name.span, qualification, current.outer);
     if (!outer.has_value()) {
       return std::unexpected(std::move(outer.error()));
     }
@@ -4948,9 +5004,130 @@ class StatementBinder final {
     return NoSuchColumn(identifier.name.span);
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> BindResultDefinitionCopy(
+      const ResultDefinition& definition, const NameScopeView& definition_scope,
+      BindScope copy_scope, SourceSpan span) {
+    if (!definition.syntax.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "result definition copy has no syntax"));
+    }
+    const std::size_t binding_width = tree_.select_queries().size();
+    const std::size_t previous_size = query_bindings_.size();
+    if (binding_width > query_bindings_.max_size() - previous_size) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "query binding cache size overflow"));
+    }
+    const std::size_t previous_base = query_binding_base_;
+    query_bindings_.resize(previous_size + binding_width);
+    query_binding_base_ = previous_size;
+
+    NameScopeView names = definition_scope;
+    names.scope = copy_scope;
+    names.scope.result_aliases = false;
+    const NameScopeView* previous_names = std::exchange(definition_name_scope_, &names);
+    const bool previous_template = std::exchange(binding_validated_template_, true);
+    const std::optional<BoundQueryId> previous_owner =
+        std::exchange(expression_owner_, active_query_);
+    auto bound = BindExpression(*definition.syntax, copy_scope);
+    expression_owner_ = previous_owner;
+    binding_validated_template_ = previous_template;
+    definition_name_scope_ = previous_names;
+    query_binding_base_ = previous_base;
+    query_bindings_.resize(previous_size);
+    return bound;
+  }
+
+  [[nodiscard]] BindExpected<void> ValidateResultSyntax(ExpressionId syntax,
+                                                        const NameScopeView& definition_scope,
+                                                        SourceSpan span) {
+    const BindScope validation_scope{
+        .source_columns = definition_scope.scope.source_columns,
+        .result_aliases = false,
+        .aggregates = AggregatePermission::kAllowed,
+        .requires_value = true,
+    };
+    const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+    const ResultDefinition candidate{
+        .syntax = syntax,
+        .has_subqueries = true,
+    };
+    auto bound = BindResultDefinitionCopy(candidate, definition_scope, validation_scope, span);
+    RestoreBindingArena(checkpoint);
+    if (!bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> ValidateResultDefinition(std::size_t definition_index,
+                                                            const NameScopeView& definition_scope,
+                                                            SourceSpan span) {
+    if (definition_index >= definition_scope.result_definitions.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "result definition validation index is invalid"));
+    }
+    const ResultDefinition& definition = definition_scope.result_definitions[definition_index];
+    if (definition.value_checked || !definition.syntax.has_value()) {
+      return {};
+    }
+    const ExpressionId primary_syntax = definition.syntax.value();
+    const std::size_t additional_count = definition.additional_syntax.size();
+    if (auto validated = ValidateResultSyntax(primary_syntax, definition_scope, span);
+        !validated.has_value()) {
+      return validated;
+    }
+    for (std::size_t index = 0; index < additional_count; ++index) {
+      const ExpressionId syntax =
+          definition_scope.result_definitions[definition_index].additional_syntax[index];
+      if (auto validated = ValidateResultSyntax(syntax, definition_scope, span);
+          !validated.has_value()) {
+        return validated;
+      }
+    }
+    definition_scope.result_definitions[definition_index].value_checked = true;
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> ValidateResultDefinitionsInSyntaxOrder(
+      const NameScopeView& definition_scope) {
+    std::size_t additional_count = 0;
+    for (const ResultDefinition& definition : definition_scope.result_definitions) {
+      additional_count = std::max(additional_count, definition.additional_syntax.size());
+      if (definition.value_checked || !definition.syntax.has_value()) {
+        continue;
+      }
+      const ExpressionId syntax = *definition.syntax;
+      if (auto validated =
+              ValidateResultSyntax(syntax, definition_scope, tree_.expression(syntax).span);
+          !validated.has_value()) {
+        return validated;
+      }
+    }
+    for (std::size_t row = 0; row < additional_count; ++row) {
+      for (const ResultDefinition& definition : definition_scope.result_definitions) {
+        if (definition.value_checked || row >= definition.additional_syntax.size()) {
+          continue;
+        }
+        const ExpressionId syntax = definition.additional_syntax[row];
+        if (auto validated =
+                ValidateResultSyntax(syntax, definition_scope, tree_.expression(syntax).span);
+            !validated.has_value()) {
+          return validated;
+        }
+      }
+    }
+    for (ResultDefinition& definition : definition_scope.result_definitions) {
+      if (definition.syntax.has_value()) {
+        definition.value_checked = true;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindAliasReference(
-      const AliasEntry& alias, const ResultDefinition& definition, SourceSpan span,
-      AggregatePermission aggregates, std::optional<BoundQueryId> context = std::nullopt) {
+      const AliasEntry& alias, const ResultDefinition& definition,
+      const NameScopeView& definition_scope, SourceSpan span, AggregatePermission aggregates,
+      std::optional<BoundQueryId> context = std::nullopt) {
     const ExpressionProperties properties = Properties(alias.target);
     if (properties.contains_aggregate) {
       if (aggregates == AggregatePermission::kProhibited ||
@@ -4974,10 +5151,24 @@ class StatementBinder final {
               BinderError(BindErrorCode::kColumnCountMismatch, span, "row value misused"));
         }
       }
-      if (definition.has_subqueries) {
-        return std::unexpected(
-            BinderError(BindErrorCode::kUnsupportedFeature, span,
-                        "outer result-alias definitions containing queries are not supported"));
+    }
+    if (definition.has_subqueries) {
+      if (!definition.syntax.has_value()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "query-containing result definition has no syntax"));
+      }
+      const BindScope copy_scope{
+          .source_columns = definition_scope.scope.source_columns,
+          .result_aliases = false,
+          .aggregates = aggregates,
+          .requires_value = active_value_required_,
+      };
+      return BindResultDefinitionCopy(definition, definition_scope, copy_scope, span);
+    }
+    if (active_value_required_ && !definition.value_checked) {
+      if (auto validated = ValidateResultDefinition(alias.result_index, definition_scope, span);
+          !validated.has_value()) {
+        return std::unexpected(std::move(validated.error()));
       }
     }
     auto expression = AppendExpression(
@@ -4996,12 +5187,13 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSingleName(
       std::string_view name, SourceSpan span, BindScope scope) {
-    auto resolved = ResolveNameInScope(name, span, std::nullopt, CurrentNameScope(scope));
+    const NameScopeView current = CurrentNameScope(scope);
+    auto resolved = ResolveNameInScope(name, span, std::nullopt, current);
     if (!resolved.has_value() || resolved->has_value()) {
       return resolved;
     }
     if (scope.source_columns) {
-      return ResolveOuterSourceName(name, span, std::nullopt);
+      return ResolveOuterSourceName(name, span, std::nullopt, current.outer);
     }
     return std::optional<BoundExpressionId>{};
   }
@@ -5034,7 +5226,7 @@ class StatementBinder final {
                                                "result alias definition is unavailable"));
           }
           auto expression = BindAliasReference(alias, scope.result_definitions[alias.result_index],
-                                               span, scope.scope.aggregates, context);
+                                               scope, span, scope.scope.aggregates, context);
           if (!expression.has_value()) {
             return std::unexpected(std::move(expression.error()));
           }
@@ -5046,8 +5238,9 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveOuterSourceName(
-      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification) {
-    for (const NameScopeView* scope = outer_scope_; scope != nullptr; scope = scope->outer) {
+      std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification,
+      const NameScopeView* outer) {
+    for (const NameScopeView* scope = outer; scope != nullptr; scope = scope->outer) {
       if (!scope->scope.source_columns) {
         break;
       }
@@ -5057,6 +5250,47 @@ class StatementBinder final {
       }
     }
     return std::optional<BoundExpressionId>{};
+  }
+
+  [[nodiscard]] BindExpected<void> ValidateRequiredResultDefinitions() {
+    if (binding_only_ || !BoundQueryRequiresResultValues(ActiveQuery(), impl_->expressions)) {
+      return {};
+    }
+    const std::size_t core_begin = ActiveQuery().core_begin;
+    const std::size_t core_count = ActiveQuery().core_count;
+    for (std::size_t index = 0; index < core_count; ++index) {
+      const std::size_t global_index = core_begin + index;
+      CoreBindingMetadata& metadata = core_metadata_[global_index];
+      BoundQueryCore& core = impl_->query_cores[global_index];
+      const std::span<const BoundTableSource> table_sources = std::visit(
+          [](const auto& candidate) -> std::span<const BoundTableSource> {
+            using Core = std::decay_t<decltype(candidate)>;
+            if constexpr (std::is_same_v<Core, BoundSelectCore>) {
+              return candidate.table_sources;
+            }
+            return {};
+          },
+          core);
+      const NameScopeView names{
+          .query = active_query_,
+          .sources = metadata.source_states,
+          .table_sources = table_sources,
+          .aliases = {},
+          .result_definitions = metadata.result_definitions,
+          .outer = outer_scope_,
+          .scope =
+              BindScope{
+                  .source_columns = true,
+                  .result_aliases = false,
+                  .aggregates = AggregatePermission::kAllowed,
+                  .requires_value = true,
+              },
+      };
+      if (auto validated = ValidateResultDefinitionsInSyntaxOrder(names); !validated.has_value()) {
+        return validated;
+      }
+    }
+    return {};
   }
 
   [[nodiscard]] bool QualifiedSourceMatches(
@@ -5520,8 +5754,8 @@ class StatementBinder final {
     bool local_source = false;
     bool outer_source = false;
     auto owner = [&](BoundSourceId source) {
-      local_source = local_source || OwnsActiveSource(source);
-      outer_source = outer_source || !OwnsActiveSource(source);
+      local_source = local_source || OwnsAggregateSource(source);
+      outer_source = outer_source || !OwnsAggregateSource(source);
     };
     const auto inspect = [&](BoundExpressionId id) {
       return VisitSourceOwners(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
@@ -6103,8 +6337,11 @@ class StatementBinder final {
   std::size_t resolution_height_ = 0;
   bool active_value_required_ = true;
   bool binding_only_ = false;
+  bool binding_validated_template_ = false;
   std::size_t active_core_ = 0;
   const NameScopeView* outer_scope_ = nullptr;
+  const NameScopeView* definition_name_scope_ = nullptr;
+  std::size_t query_binding_base_ = 0;
   std::vector<std::optional<BoundQueryId>> query_bindings_;
   std::vector<SourceState> source_states_;
   std::vector<AliasEntry> aliases_;

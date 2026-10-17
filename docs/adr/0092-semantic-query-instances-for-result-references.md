@@ -293,6 +293,28 @@ combined-tree review/local validation and all new-head hosted checks.
 This refresh admits no expression-copy or aggregate-ordering behavior and
 does not complete this ADR.
 
+### Semantic expression-copy delivery
+
+The second delivery instantiates query-containing local and outer result
+references through the canonical binder. It uses scoped suffixes of the one
+query-binding cache, the definition's borrowed name scope, the consuming query
+as actual parent, and validation-only replay for deferred result demand.
+
+Each query-containing GROUP BY ordinal owns a fresh semantic instance while
+retaining `result_column` for first-key output reuse. Named aliases remain
+ordinary expression copies. VALUES definitions retain every row's syntax in
+the same canonical result-definition metadata so ignored EXISTS payloads stay
+inactive and live set comparisons validate every row.
+
+The pinned subquery shard promotes the three prior query-definition
+boundaries and appends 16 query-copy cases. It now contains 213 comparisons
+and five explicit unsupported boundaries without changing any inherited SQL,
+operations, or oracle outcome outside those promotions.
+
+Direct and compound aggregate ORDER registration, phase partitioning, and
+replacement retained-leaf analysis remain the third delivery. Outer aggregate
+ownership remains the following prerequisite. Node 43 is still active.
+
 ## Verification
 
 Obtain GPT-5.6 Sol design approval before production changes. Start with

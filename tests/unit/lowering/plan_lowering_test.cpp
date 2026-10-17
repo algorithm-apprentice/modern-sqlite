@@ -1556,6 +1556,85 @@ TEST_F(ReadLoweringAggregateIntegration, LazilyCachesVolatileUncorrelatedQueries
   EXPECT_EQ(0U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, InstantiatesIndependentQueryAliasCopies) {
+  const CustomEnvironment custom;
+  const std::size_t count = Execute("SELECT id FROM Items").size();
+
+  callback_count = 0;
+  const auto local = Execute("SELECT (SELECT volatile_counter()) AS x FROM Items WHERE x+x>0",
+                             custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, local.size());
+  EXPECT_EQ(3U, callback_count);
+  for (const auto& row : local) {
+    EXPECT_EQ(3, row[0].integer_value());
+  }
+
+  callback_count = 0;
+  const auto outer =
+      Execute("SELECT (SELECT volatile_counter()) AS x FROM Items WHERE (SELECT x)>0",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, outer.size());
+  EXPECT_EQ(2U, callback_count);
+  for (const auto& row : outer) {
+    EXPECT_EQ(2, row[0].integer_value());
+  }
+
+  callback_count = 0;
+  const auto named_group =
+      Execute("SELECT (SELECT volatile_counter()) AS x,count() FROM Items GROUP BY x",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, named_group.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(2, named_group[0][0].integer_value());
+  EXPECT_EQ(static_cast<std::int64_t>(count), named_group[0][1].integer_value());
+
+  callback_count = 0;
+  const auto ordinal_group =
+      Execute("SELECT (SELECT volatile_counter()),count() FROM Items GROUP BY 1,1", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, ordinal_group.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(1, ordinal_group[0][0].integer_value());
+  EXPECT_EQ(static_cast<std::int64_t>(count), ordinal_group[0][1].integer_value());
+
+  callback_count = 0;
+  const auto compound = Execute(
+      "SELECT (SELECT volatile_counter() UNION ALL SELECT 0) AS x "
+      "FROM Items WHERE (SELECT x)>0",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, compound.size());
+  EXPECT_EQ(2U, callback_count);
+  for (const auto& row : compound) {
+    EXPECT_EQ(2, row[0].integer_value());
+  }
+
+  callback_count = 0;
+  const auto values =
+      Execute("SELECT (VALUES(volatile_counter()),(0)) AS x FROM Items WHERE (SELECT x)>0",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, values.size());
+  EXPECT_EQ(2U, callback_count);
+  for (const auto& row : values) {
+    EXPECT_EQ(2, row[0].integer_value());
+  }
+
+  callback_count = 0;
+  const auto aggregate =
+      Execute("SELECT sum((SELECT volatile_counter())) AS x FROM Items HAVING x>0", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, aggregate.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), aggregate[0][0].integer_value());
+
+  callback_count = 0;
+  const auto direct_aggregate_order =
+      Execute("SELECT sum((SELECT volatile_counter())) AS x FROM Items ORDER BY x", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, direct_aggregate_order.size());
+  EXPECT_EQ(1U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), direct_aggregate_order[0][0].integer_value());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ReevaluatesConstantAliasContextWithoutSourceFields) {
   const CustomEnvironment custom;
   const auto rows = Execute("SELECT 1 AS x FROM Items WHERE (SELECT volatile_counter()+x)>0",

@@ -4843,13 +4843,9 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
-      "feature": "correlated-subquery",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
       "id": "outer-alias-query-definition",
-      "modern_rejection": {
-        "phase": "prepare",
-        "primary_code": "generic"
-      },
       "operations": [
         {
           "op": "finalize"
@@ -4859,13 +4855,9 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
-      "feature": "correlated-subquery",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
       "id": "outer-alias-source-free-query-definition",
-      "modern_rejection": {
-        "phase": "prepare",
-        "primary_code": "generic"
-      },
       "operations": [
         {
           "op": "finalize"
@@ -4875,13 +4867,9 @@
     },
     {
       "database": "core",
-      "expectation": "unsupported",
-      "feature": "correlated-subquery",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
       "id": "outer-alias-inactive-deep-width-definition",
-      "modern_rejection": {
-        "phase": "prepare",
-        "primary_code": "generic"
-      },
       "operations": [
         {
           "op": "finalize"
@@ -4992,6 +4980,333 @@
         }
       ],
       "sql_hex": "53454c454354206f2e69642c2853454c45435420636f756e7428292046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20622e69643d612e69642b6f2e696429204153206e2046524f4d206974656d73206f205748455245206f2e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-local",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542069642920415320782046524f4d206974656d7320574845524520783e3020414e442069643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-outer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542069642920415320782046524f4d206974656d73205748455245202853454c4543542078293e3020414e442069643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-shadowed-source",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354206f2e6e616d652920415320782046524f4d206974656d73206f205748455245202853454c45435420782046524f4d206974656d73206f205748455245206f2e69643d3129204953204e4f54204e554c4c20414e44206f2e69643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-original-dqs",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420636f616c65736365282853454c454354204e554c4c292c226c61746572222920415320782c6e616d65204153206c617465722046524f4d206974656d73205748455245202853454c4543542078293d276c617465722720414e442069643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-order-expression",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542069642920415320782046524f4d206974656d732057484552452069643c3d32204f5244455220425920782b302044455343"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-group-alias",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420312920415320782c636f756e7428292046524f4d206974656d732047524f55502042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-group-repeated-ordinal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542031292c636f756e7428292046524f4d206974656d732047524f555020425920312c31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-values-definition",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202856414c554553286964292c2830292920415320782046524f4d206974656d73205748455245202853454c4543542078293e3020414e442069643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-compound-definition",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420696420554e494f4e20414c4c2053454c45435420302920415320782046524f4d206974656d73205748455245202853454c4543542078293e3020414e442069643d31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-ignored-width",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420636f616c6573636528312c2853454c45435420312c3229292041532078205748455245204558495354532853454c45435420782929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-live-width-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420636f616c6573636528312c2853454c45435420312c3229292041532078205748455245207829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-live-pure-collation-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542028283120434f4c4c415445206d697373696e67293d32292041532078205748455245207829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-ignored-values-width",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532856414c554553282853454c45435420312c32292929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-live-set-width-error",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354202853454c45435420312c322920494e544552534543542053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-group-ordinal-live-collation",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542056616c75653d312046524f4d20437573746f6d436f6c6c6174696f6e2047524f5550204259203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-copies",
+      "id": "query-copy-values-row-order",
+      "operations": [
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532856414c55455328312c56616c75653d31292c282853454c45435420312c32292c312920494e544552534543542056414c55455328312c3129292046524f4d20437573746f6d436f6c6c6174696f6e"
     }
   ],
   "databases": [
@@ -5025,6 +5340,7 @@
   "supported_matrix": [
     "correlated-subquery",
     "execution-errors",
-    "prepare-errors"
+    "prepare-errors",
+    "query-alias-copies"
   ]
 }
