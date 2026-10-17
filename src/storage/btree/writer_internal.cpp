@@ -5205,17 +5205,20 @@ Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
       owner_->Release(*slot);
       return std::unexpected(std::move(frame.error()));
     }
-    auto overflow = OverflowPageView::Parse(frame->get().bytes(), geometry_);
-    if (!overflow.has_value()) {
-      owner_->Release(*slot);
-      return std::unexpected(std::move(overflow.error()));
-    }
-
-    const std::size_t count = std::min(overflow->payload().size(), payload_size - offset);
-    std::ranges::copy(overflow->payload().first(count),
+    const ByteView bytes = frame->get().bytes();
+    const std::size_t count =
+        std::min(geometry_.overflow_payload_capacity().value(), payload_size - offset);
+    std::ranges::copy(bytes.subspan(sizeof(std::uint32_t), count),
                       scratch.begin() + static_cast<std::ptrdiff_t>(offset));
     offset += count;
-    overflow_page = overflow->next_page();
+    if (offset < payload_size) {
+      auto overflow = OverflowPageView::Parse(bytes, geometry_);
+      if (!overflow.has_value()) {
+        owner_->Release(*slot);
+        return std::unexpected(std::move(overflow.error()));
+      }
+      overflow_page = overflow->next_page();
+    }
     owner_->Release(*slot);
   }
   return ByteView{scratch};

@@ -10,7 +10,8 @@
 - Follow-up: A5, D1, D3, D2, A1, A2, R1, and B1 are corrected and verified by
   merged PRs #205, #204, #206, #207, #208, #209, #210, and #211. ADR-0102 separately
   improves verification efficiency without changing these corrections or
-  required gates; other findings remain open unless their own evidence states
+  required gates. ADR-0103 corrects B2's writable point-read boundary in the
+  current slice; other findings remain open unless their own evidence states
   otherwise.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
 
@@ -547,6 +548,14 @@ writable lookup rejects it. All paths reject the consumed intermediate-link
 control. No valid-image or Modern-write corruption claim follows from this
 malformed-image point-operation difference.
 
+ADR-0103 corrects the canonical writable payload reader by decoding the next
+link only when more logical payload bytes remain. Public encoded-index and
+table-mutation operations cover one and multiple overflow pages, exact and
+missing keys, repeated access, typed allocation and I/O failures, rollback
+state, and consumed-link controls. The pinned runtime accepts all five tested
+unused final values and rejects the consumed invalid control. Strict decoding
+and whole-file diagnostics remain unchanged.
+
 ## Direct-bytecode verifier/runtime finding
 
 The verifier's virtual NULL-row/range-check state at
@@ -563,7 +572,13 @@ not a demonstrated SQL defect.
 
 D1, A5, D3, D2, A1, A2, R1, and B1 have merged with exact-head hosted proof,
 and the preserved binder foundation is integrated. The user-requested
-ADR-0102 verification-efficiency slice precedes further corrections.
+ADR-0102 verification-efficiency slice merged in PR #212 as
+`356bbca5a51d6e3d539bb25fc7f6154e0d49d129`, accepted tree
+`e120b0543f6f9f184ffb36e69b72e3522f023b76`. All nine first-head hosted checks
+passed; the unchanged original sanitizer model passed in 6.45 seconds under
+its ten-second deadline. Main, parent, trailer, and named branch cleanup were
+verified. ADR-0103 corrects B2's writable payload boundary in this slice;
+exact-tree review and hosted delivery gates remain required.
 Prioritize the remaining durable/lifecycle
 and silent-result defects according to their reproduced scope. The earlier
 NULL-range design is now resumed under ADR-0094; the independent page-view
