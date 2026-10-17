@@ -135,6 +135,39 @@ TEST(RecordCodecGolden, MatchesSQLite354RealBitPatterns) {
   EXPECT_EQ(std::numeric_limits<double>::infinity(), (*decoded)[2].real_value());
 }
 
+TEST(RecordCodecGolden, MatchesSQLite354RealIntRealSerialBoundaries) {
+  // Extracted from one pinned SQLite table record whose REAL columns own affinity.
+  const ByteBuffer expected = FromHex(
+      "0b07070101050705070607"
+      "4340000000000000"
+      "c3e0000000000000"
+      "2a"
+      "2a"
+      "7fffffffffff"
+      "42e0000000000000"
+      "800000000000"
+      "c2e0000000000020"
+      "0020000000000001"
+      "3ff8000000000000");
+
+  std::vector<SqlValue> values;
+  values.push_back(SqlValue::Real(9007199254740992.0));
+  values.push_back(SqlValue::Real(-9223372036854775808.0));
+  values.push_back(SqlValue::Integer(42));
+  values.push_back(SqlValue::Integer(42));
+  values.push_back(SqlValue::Integer(140737488355327LL));
+  values.push_back(SqlValue::Real(140737488355328.0));
+  values.push_back(SqlValue::Integer(-140737488355328LL));
+  values.push_back(SqlValue::Real(-140737488355329.0));
+  values.push_back(SqlValue::Integer(9007199254740993LL));
+  values.push_back(SqlValue::Real(1.5));
+
+  const auto encoded = EncodeRecord(values);
+
+  ASSERT_TRUE(encoded.has_value());
+  EXPECT_TRUE(std::ranges::equal(expected.view(), encoded->view()));
+}
+
 TEST(RecordCodecGolden, MatchesSQLite354SerialTypeVarintBoundaries) {
   // SQLite produced header codes 127, 129, 126, and 128 for lengths 57/58.
   std::vector<SqlValue> values;

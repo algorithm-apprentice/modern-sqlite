@@ -495,21 +495,38 @@ merged main, parent, trailer, and named merged-branch cleanup were verified.
 
 ### R2. REAL storage conversion loses native IntReal serial-form rules
 
-Priority: **medium, persistent-representation mechanism difference**.
+Priority: **corrected by ADR-0108**.
 
-`src/vm/vm.cpp:190-223,1392-1415` reuses REAL affinity plus lossless rowid
-conversion. Native `src/vdbe.c:3623-3638,3700-3753` distinguishes compact
-IntReal storage from eight-byte IntReal, which serializes as REAL.
-Native `src/vdbemem.c:802-827` also excludes int64 endpoints when
-integerizing an existing REAL.
+The original mechanism reused REAL affinity plus lossless rowid conversion.
+INTEGER `9007199254740993`, REAL `-9223372036854775808.0`, and compact
+INTEGER `42` under REAL table affinity therefore produced Modern serial codes
+`[6,6,1]`, versus pinned SQLite `[7,7,1]`.
 
-Executed cases include INTEGER `9007199254740993` under REAL storage
-affinity and REAL `-9223372036854775808.0`. Modern serial codes are
-`[6,6,1]`, versus native `[7,7,1]` for those two values and the compact
-integer control. The alternative record passes native `integrity_check`;
-both engines return identical public types and exact REAL bits from either
-representation. This is a verified mechanism difference, not a demonstrated
-read-result defect or proven database corruption.
+The completed audit found three native paths rather than one uniform REAL
+rule:
+
+- table-owned `MakeRecord` affinity retains compact IntReal serial types and
+  converts only integer serial type 6 to REAL;
+- INSERT or UPDATE with an affected index pre-affinitizes the complete new row,
+  so the table and affected new index records share REAL-normalized values; and
+- DELETE, old UPDATE keys, and `CREATE INDEX` reconstruct raw stored values,
+  preserving valid mixed histories.
+
+ADR-0108 adds explicit table-record affinity ownership, reuses
+`SelectRecordSerialType` for the canonical six-byte boundary, normalizes
+storage REAL through NUMERIC then REAL to canonicalize `-0.0`, maintains only
+affected UPDATE indexes, and preserves raw old/index-build keys. Ordinary
+runtime `SqlValue`, comparison affinity, read-time REAL affinity, and the
+record codec contract remain unchanged.
+
+Focused table/index tests cover compact and wide boundaries, signed endpoints,
+numeric TEXT, negative zero, index-before/after insertion, mixed histories,
+affected and unaffected UPDATE, DELETE, raw physical `CREATE INDEX` fields,
+and synthesized compact/wide/negative-zero ALTER TABLE defaults. The
+independent pinned golden serial list is `[7,7,1,1,5,7,5,7,6,7]`.
+Modern-written and SQLite-written mixed histories pass pinned
+`integrity_check`, exact public REAL-bit checks, and indexed/nonindexed
+mutation checks.
 
 ### B1. Codec and read-cursor allocation boundaries leak exceptions
 

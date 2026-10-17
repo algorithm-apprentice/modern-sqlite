@@ -316,17 +316,36 @@ struct RowIdSeekTarget {
   };
 }
 
-[[nodiscard]] SqlValue ApplyStorageAffinity(SqlValue value, TypeAffinity affinity) {
+[[nodiscard]] Result<SqlValue> ApplyTableRecordAffinity(SqlValue value, TypeAffinity affinity,
+                                                        RecordCodecOptions options) {
   if (affinity == TypeAffinity::kReal) {
-    value = ApplyAffinity(std::move(value), TypeAffinity::kReal);
-    if (value.type() == SqlValueType::kReal) {
-      if (const std::optional<std::int64_t> integer = LosslessRowId(value); integer.has_value()) {
-        return SqlValue::Integer(*integer);
+    if (value.type() == SqlValueType::kReal && !std::isfinite(value.real_value().value_or(0.0))) {
+      return value;
+    }
+    value = ApplyAffinity(std::move(value), TypeAffinity::kNumeric);
+    if (value.type() == SqlValueType::kInteger) {
+      auto serial_type = SelectRecordSerialType(value, options);
+      if (!serial_type.has_value()) {
+        return std::unexpected(std::move(serial_type.error()));
+      }
+      if (serial_type->code() == 6U) {
+        return SqlValue::Real(static_cast<double>(value.integer_value().value_or(std::int64_t{0})));
       }
     }
     return value;
   }
   return ApplyAffinity(std::move(value), affinity);
+}
+
+[[nodiscard]] SqlValue ApplyRealStorageAffinity(SqlValue value) {
+  if (value.type() == SqlValueType::kReal && !std::isfinite(value.real_value().value_or(0.0))) {
+    return value;
+  }
+  value = ApplyAffinity(std::move(value), TypeAffinity::kNumeric);
+  if (value.type() == SqlValueType::kInteger) {
+    return SqlValue::Real(static_cast<double>(value.integer_value().value_or(std::int64_t{0})));
+  }
+  return value;
 }
 
 struct ResolvedCall {
@@ -1071,8 +1090,8 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
                                        const RealStorageAffinityInstruction& operation) {
-    return SetRegister(operation.output, ApplyStorageAffinity(Register(operation.input).Clone(),
-                                                              TypeAffinity::kReal));
+    return SetRegister(operation.output,
+                       ApplyRealStorageAffinity(Register(operation.input).Clone()));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CastInstruction& operation) {
@@ -1508,13 +1527,20 @@ struct Vm::Impl {
     values.reserve(descriptor.columns.size());
     for (std::size_t index = 0; index < descriptor.columns.size(); ++index) {
       const WriteColumnDescriptor& column = descriptor.columns[index];
-      SqlValue value =
-          column.rowid_alias
-              ? SqlValue{}
-              : ApplyStorageAffinity(Register(RegisterId(operation.first_value.value() +
-                                                         static_cast<std::uint32_t>(index)))
-                                         .Clone(),
-                                     column.affinity);
+      SqlValue value;
+      if (!column.rowid_alias) {
+        value =
+            Register(RegisterId(operation.first_value.value() + static_cast<std::uint32_t>(index)))
+                .Clone();
+        if (operation.affinity_mode == TableRecordAffinityMode::kApplyColumnAffinity) {
+          auto applied =
+              ApplyTableRecordAffinity(std::move(value), column.affinity, record_options_);
+          if (!applied.has_value()) {
+            return std::unexpected(std::move(applied.error()));
+          }
+          value = std::move(*applied);
+        }
+      }
       if (!column.rowid_alias && column.not_null && value.type() == SqlValueType::kNull) {
         return std::unexpected(VmError(ErrorCode::kConstraint, "NOT NULL constraint failed"));
       }
@@ -2420,6 +2446,7 @@ struct Vm::Impl {
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     const CursorFieldSource& source = descriptor.fields[operation.field.value()];
     SqlValue value;
+    bool physically_missing = false;
     if (source.kind == CursorFieldSourceKind::kRowId) {
       if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
           read_cursor != nullptr && read_cursor->valid()) {
@@ -2444,7 +2471,7 @@ struct Vm::Impl {
       if (!field.has_value()) {
         return std::unexpected(std::move(field.error()));
       }
-      const bool physically_missing =
+      physically_missing =
           runtime.record.has_value() && source.record_field >= runtime.record->field_count();
       if (!physically_missing) {
         value = std::move(*field);
@@ -2464,6 +2491,14 @@ struct Vm::Impl {
                 ErrorCode::kGeneric, "unsupported default for physically missing record field"));
         }
       }
+    }
+    if (physically_missing && operation.missing_value_affinity.has_value()) {
+      auto applied = ApplyTableRecordAffinity(std::move(value), *operation.missing_value_affinity,
+                                              record_options_);
+      if (!applied.has_value()) {
+        return std::unexpected(std::move(applied.error()));
+      }
+      value = std::move(*applied);
     }
     return SetRegister(operation.output, std::move(value));
   }
