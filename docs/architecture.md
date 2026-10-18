@@ -174,6 +174,14 @@ ADR-0045 assigns each module one explicit alignment level:
   container details may differ when they do not change persistent transitions
   or observable semantics.
 
+ADR-0111 adds a first-version mechanism baseline across these levels.
+Stateful or performance-sensitive SQL, planner, lowering, VM, session, and
+infrastructure paths preserve SQLite's proven algorithm, state transitions,
+ordering, boundedness, ownership intent, and failure cleanup unless an
+accepted ADR authorizes a measured alternative. This requirement does not
+restore SQLite's source-level cycles, mutable AST/VDBE structures, opcode
+identity, or internal ABI.
+
 The first compatible storage implementation does not invent alternative
 journal, pager, freelist, overflow, or B-tree balancing algorithms. This rule
 does not restore SQLite's source-level dependency cycles or internal VDBE

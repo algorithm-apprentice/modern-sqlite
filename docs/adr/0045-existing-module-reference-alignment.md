@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-06
+- Amended by: ADR-0111 extends the first-version mechanism baseline to
+  stateful and performance-sensitive Level B and Level C paths.
 
 ## Context
 
