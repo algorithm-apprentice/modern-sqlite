@@ -482,7 +482,9 @@ bool PageCache::NeedsSyncForPager(PageNumber page_number) const noexcept {
 
 void PageCache::MarkDirtyForPager(PageNumber page_number) noexcept {
   Entry* entry = Find(page_number);
-  assert(entry != nullptr);
+  if (entry == nullptr) {
+    return;
+  }
   entry->dont_write = false;
   if (entry->frame.dirty_) {
     return;
