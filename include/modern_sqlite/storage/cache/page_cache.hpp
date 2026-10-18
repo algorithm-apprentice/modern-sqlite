@@ -203,6 +203,7 @@ class PageCache final {
   [[nodiscard]] bool NeedsSyncForPager(PageNumber page_number) const noexcept;
   void MarkDirtyForPager(PageNumber page_number) noexcept;
   void MarkNeedsSyncForPager(PageNumber page_number) noexcept;
+  [[nodiscard]] bool MarkDontWriteForPager(PageNumber page_number) noexcept;
   [[nodiscard]] Status PermuteExclusiveForPager(std::span<const PageCacheRekey> pages);
   void Release(Entry& entry) noexcept;
   void MarkDirty(Entry& entry) noexcept;

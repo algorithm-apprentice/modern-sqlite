@@ -263,12 +263,16 @@ Add:
 
 ```cpp
 [[nodiscard]] Status Pager::MarkPageDontWrite(WritePagePin& pin);
+[[nodiscard]] Status Pager::MarkPageDontWrite(PageNumber page_number);
 [[nodiscard]] Status Pager::WritePage(WritePagePin& pin);
 ```
 
-The operation requires a regular rollback-mode write transaction and a dirty
-exclusive pin owned by that Pager. It is a no-op when any savepoint is active,
-matching SQLite's statement-rollback restriction.
+Both marking operations require a regular rollback-mode write transaction and
+are no-ops when any savepoint is active, matching SQLite's
+statement-rollback restriction. The pin overload requires a dirty exclusive
+pin owned by that Pager. The page-number overload performs a non-pinning cache
+lookup and marks the page only when it is currently cached and dirty; clean or
+uncached freed pages already require no write.
 
 Setting `dont_write` makes mutable access through that pin return typed misuse
 and makes page permutation reject the pin. This is Modern's equivalent of
@@ -283,13 +287,15 @@ than rewritten as a new trunk:
 
 1. update and journal the existing trunk;
 2. set the transaction-scoped `pHasContent` bit;
-3. mark an already-owned writable freed page `dont_write`; and
+3. mark the cached dirty freed page `dont_write` through a non-pinning Pager
+   lookup; and
 4. preserve existing cleanup and rollback-required behavior.
 
-Clean or unowned pages need no flag. A page rewritten as a freelist trunk must
-still be written and is never marked. `MutationPageOwner::Promote()` re-enters
-Pager when an existing write pin is `dont_write`, so later reuse cannot bypass
-the writable transition.
+Clean or uncached pages need no flag. A page rewritten as a freelist trunk
+must still be written and is never marked. If another live write pin owns the
+cached page, the entry flag immediately revokes its mutable access.
+`MutationPageOwner::Promote()` re-enters Pager when an existing write pin is
+`dont_write`, so later reuse cannot bypass the writable transition.
 
 Writeback of a `dont_write` page still performs a required journal sync before
 cleaning it. It does not authorize or issue a database write and does not
@@ -315,7 +321,7 @@ Add red tests for:
 - mutable access and permutation failing while the same pin is
   `dont_write`;
 - savepoints disabling `dont_write`;
-- freelist-leaf insertion marking an owned dirty page while new-trunk
+- freelist-leaf insertion marking a cached dirty page while new-trunk
   insertion does not;
 - commit, full rollback, savepoint rollback, OOM, I/O failure, and crash-cut
   behavior with one durable and one unsynchronized cohort; and
@@ -327,19 +333,11 @@ Add red tests for:
 Extend the version-2 diagnostic contract with bounded fixed work:
 
 - matched update scan performs at most 32 main-journal sync calls; and
-- matched delete scan performs at most 32 main-journal sync calls.
+- matched delete scan performs at most 128 database-page writes and at most
+  32 main-journal sync calls.
 
 These limits are intentionally above the source-derived cache/cohort work and
-far below the current 7,722/7,738 sync calls.
-
-The direct Pager and B-tree fixed-work tests require `DONT_WRITE` to suppress
-the freed leaf's database write exactly when no savepoint is active. The
-public SQL delete diagnostic is not allowed to claim that reduction in this
-slice: Modern currently opens an anonymous statement savepoint for every DML
-statement, while SQLite's `usesStmtJournal` admission omits it for the
-non-aborting delete scan. Both engines disable `DONT_WRITE` while a savepoint
-is active. Ledger 8 must remove that unnecessary Modern savepoint before the
-delete-scan database-write delta can close.
+far below the current 7,722/7,738 sync calls and 4,380 delete writes.
 
 Timing remains evidence, not the correctness oracle.
 
@@ -360,9 +358,13 @@ After focused green and the complete fast unit tier, run:
 - exact-tree review and hosted checks.
 
 Run a fresh complete version-2 write baseline against the committed immutable
-baseline. Preserve every logical result, database fingerprint, durability
-counter family, deadline, and matched 10x guard. Record fixed-work and timing
-deltas as implementation evidence without replacing the immutable baseline.
+baseline. Preserve every logical result, database metadata, integrity result,
+durability counter family, deadline, and matched 10x guard. `DONT_WRITE`
+intentionally permits unreachable freelist-leaf bytes to differ physically;
+record any resulting database fingerprint change and verify SQLite
+interoperability rather than requiring byte identity. Record fixed-work and
+timing deltas as implementation evidence without replacing the immutable
+baseline.
 
 ## Consequences
 
@@ -374,8 +376,8 @@ deltas as implementation evidence without replacing the immutable baseline.
 - sector and page-move safety become explicit cache invariants;
 - freed leaf bytes no longer generate pointless database writes when no
   savepoint is active;
-- direct Pager/B-tree callers gain the freed-page optimization immediately,
-  while SQL delete scans retain the explicit statement-admission dependency;
+- public SQL delete scans gain the same cached-page optimization without a
+  second B-tree ownership container;
 - savepoint playback retains the main-journal durability guard; and
 - the next transaction-admission repair starts from SQLite-faithful Pager
   storage work.

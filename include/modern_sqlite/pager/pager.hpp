@@ -216,6 +216,7 @@ class Pager final {
   [[nodiscard]] Result<WritePagePin> WritePage(ReadPagePin&& pin);
   [[nodiscard]] Status WritePage(WritePagePin& pin);
   [[nodiscard]] Status MarkPageDontWrite(WritePagePin& pin);
+  [[nodiscard]] Status MarkPageDontWrite(PageNumber page_number);
   [[nodiscard]] Status PermutePageNumbers(std::span<const PageNumberRekey> pages);
   [[nodiscard]] Result<WritePagePin> AllocatePage();
   [[nodiscard]] Status TruncateImage(std::uint32_t page_count);

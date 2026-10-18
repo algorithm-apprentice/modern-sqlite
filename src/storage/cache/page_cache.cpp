@@ -504,6 +504,15 @@ void PageCache::MarkNeedsSyncForPager(PageNumber page_number) noexcept {
   }
 }
 
+bool PageCache::MarkDontWriteForPager(PageNumber page_number) noexcept {
+  Entry* entry = Find(page_number);
+  if (entry == nullptr || !entry->frame.dirty_) {
+    return false;
+  }
+  entry->dont_write = true;
+  return true;
+}
+
 Status PageCache::PermuteExclusiveForPager(std::span<const PageCacheRekey> pages) {
   if (pages.size() > kMaximumPermutationPages) {
     return std::unexpected(Misuse("page permutation supports at most five pages"));

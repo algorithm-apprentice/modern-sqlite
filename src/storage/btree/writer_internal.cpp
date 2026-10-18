@@ -379,15 +379,7 @@ Status MutationPageOwner::MarkDontWrite(PageNumber page_number) {
   if (!active.has_value()) {
     return active;
   }
-  const std::optional<std::size_t> slot = Find(page_number);
-  if (!slot.has_value()) {
-    return {};
-  }
-  auto* write = std::get_if<WritePagePin>(&pages_[*slot].pin);
-  if (write == nullptr) {
-    return {};
-  }
-  return pager_->MarkPageDontWrite(*write);
+  return pager_->MarkPageDontWrite(page_number);
 }
 
 Status MutationPageOwner::RequireSolePin(std::size_t slot) const {

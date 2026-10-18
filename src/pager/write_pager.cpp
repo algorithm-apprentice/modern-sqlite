@@ -487,6 +487,34 @@ Status Pager::MarkPageDontWrite(WritePagePin& write_pin) {
   return write_pin.pin_.MarkDontWrite();
 }
 
+Status Pager::MarkPageDontWrite(PageNumber page_number) {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (!in_write_transaction() || state_ == PagerState::kWriterFinished || write_attempt_sealed_ ||
+      final_image_) {
+    return std::unexpected(Misuse("DONT_WRITE requires an active mutable write transaction"));
+  }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "DONT_WRITE requires transaction rollback"));
+  }
+  auto valid = ValidatePageNumber(page_number);
+  if (!valid.has_value()) {
+    return valid;
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return {};
+  }
+  if (journal_transaction_ == nullptr) {
+    return std::unexpected(Internal("DONT_WRITE requires an active rollback journal"));
+  }
+  if (journal_transaction_->savepoint_count() != 0U) {
+    return {};
+  }
+  static_cast<void>(cache_->MarkDontWriteForPager(page_number));
+  return {};
+}
+
 Result<std::uint32_t> Pager::IncrementSchemaCookie() {
   if (current_page_count_ == 0U) {
     return std::unexpected(Misuse("schema cookie increment requires an initialized database"));

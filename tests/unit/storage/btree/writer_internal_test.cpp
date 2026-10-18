@@ -463,11 +463,13 @@ TEST(BtreeFreelist, AppendsAndExtractsLeavesInSQLiteOrder) {
     RequireStatus(FreeBtreePage(owner, geometry, PageNumber{2}));
     const std::size_t page_three_slot = TakeValue(owner.AcquireWrite(PageNumber{3}));
     TakeValue(owner.MutableBytes(page_three_slot))[100] = std::byte{0x7f};
+  }
+  {
+    MutationPageOwner owner{*pager};
     RequireStatus(FreeBtreePage(owner, geometry, PageNumber{3}));
-    EXPECT_FALSE(owner.MutableBytes(page_three_slot).has_value());
     EXPECT_TRUE(pager->PageContentRequired(PageNumber{3}));
     const ByteView trunk =
-        TakeValue(owner.Frame(TakeValue(owner.Borrow(PageNumber{2})))).get().bytes();
+        TakeValue(owner.Frame(TakeValue(owner.AcquireRead(PageNumber{2})))).get().bytes();
     EXPECT_EQ(1U, LoadBigEndian<std::uint32_t>(trunk.subspan<4U, 4U>()));
     EXPECT_EQ(3U, LoadBigEndian<std::uint32_t>(trunk.subspan<8U, 4U>()));
   }
