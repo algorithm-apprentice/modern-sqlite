@@ -225,17 +225,25 @@ jobs:
           --baseline benchmarks/aggregate-baseline-v1
       - name: Validate committed write workloads
         if: github.event_name == 'push' || matrix.run_on_pr
-        run: >
-          python3 tools/write_performance.py validate-workloads
-          --workloads tests/performance/write-workloads-v1.json
+        run: |
+          python3 tools/write_performance.py validate-workloads \
+            --workloads tests/performance/write-workloads-v1.json
+          python3 tools/write_performance_v2.py validate-workloads \
+            --workloads tests/performance/write-workloads-v2.json
       - name: Validate committed write baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
           if test -d benchmarks/write-baseline-v1; then
-            python3 tools/write_performance.py validate-baseline \
+            python3 tools/write_performance_v2.py validate-historical-baseline \
               --repository-root . \
               --workloads tests/performance/write-workloads-v1.json \
               --baseline benchmarks/write-baseline-v1
+          fi
+          if test -d benchmarks/write-baseline-v2; then
+            python3 tools/write_performance_v2.py validate-baseline \
+              --repository-root . \
+              --workloads tests/performance/write-workloads-v2.json \
+              --baseline benchmarks/write-baseline-v2
           fi
       - name: Check out pinned SQLite
         if: github.event_name == 'push' || matrix.run_on_pr

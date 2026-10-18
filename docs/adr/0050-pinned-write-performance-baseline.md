@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-08
+- Amended by: ADR-0113 preserves version 1 as historical evidence and adds a
+  version-2 baseline with truthful Modern temp-store configuration.
 
 ## Context
 

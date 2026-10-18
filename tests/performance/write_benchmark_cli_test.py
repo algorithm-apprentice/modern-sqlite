@@ -18,7 +18,7 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from tools import write_performance
+from tools import write_performance_v2 as write_performance
 
 
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
@@ -267,7 +267,8 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                             self.assertEqual("smoke", report["run_kind"])
                             self.assertEqual(1, report["schema_version"])
                             self.assertEqual(
-                                1, report["workload_semantics_version"]
+                                self.workloads["workload_semantics_version"],
+                                report["workload_semantics_version"],
                             )
                             self.assertEqual(
                                 {
@@ -371,6 +372,15 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                                     {}, report["counters"]["sqlite"]
                                 )
                                 self.assertTrue(report["counters"]["vfs"])
+                                if profile == "matched-durable":
+                                    self.assertTrue(
+                                        all(
+                                            value == 0
+                                            for value in report["counters"][
+                                                "vfs"
+                                            ]["subjournal"].values()
+                                        )
+                                    )
                             else:
                                 self.assertEqual(
                                     {}, report["counters"]["modern"]

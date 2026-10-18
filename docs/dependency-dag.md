@@ -210,6 +210,10 @@ ADR-0112 begins that ordered repair ledger with SQLite's cache-local hash,
 clean-frame recycling, unpublished Pager fills, sync-safe dirty selection,
 and page-number-owned sync metadata. Journal and Pager transitions remain the
 next ordered repairs.
+ADR-0113 follows with SQLite's chunked in-memory statement journal, 64 KiB
+spill policy, atomic spill fallback, memory-only temp-store mode, and a
+version-2 truthful write-performance baseline. Main-journal durability and
+Pager sync authorization remain unchanged.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

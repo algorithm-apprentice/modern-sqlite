@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 
+ADR-0113 replaces the file-only statement subjournal with SQLite's
+memory-only or bounded-memory-then-spill mechanism.
+
 ## Context
 
 ADR-0040 defines the semantic journal coordinator used by the future writable

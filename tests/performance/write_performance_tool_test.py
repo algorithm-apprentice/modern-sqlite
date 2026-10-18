@@ -18,10 +18,12 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/write_performance.py"
+TOOL_V2 = ROOT / "tools/write_performance_v2.py"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools import write_performance
+from tools import write_performance_v2
 from tests.performance import write_benchmark_cli_test
 
 
@@ -707,7 +709,10 @@ def valid_diagnostic_report(
 
 class WritePerformanceToolTest(unittest.TestCase):
     def run_tool(
-        self, manifest_text: str | None, *extra: str
+        self,
+        manifest_text: str | None,
+        *extra: str,
+        tool: pathlib.Path = TOOL,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = pathlib.Path(temporary) / "workloads.json"
@@ -716,7 +721,7 @@ class WritePerformanceToolTest(unittest.TestCase):
             return subprocess.run(
                 [
                     sys.executable,
-                    TOOL,
+                    tool,
                     "validate-workloads",
                     "--workloads",
                     manifest,
@@ -739,6 +744,108 @@ class WritePerformanceToolTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertEqual("", completed.stderr)
+
+    def test_accepts_version_two_with_profile_specific_modern_temp_store(
+        self,
+    ) -> None:
+        manifest = valid_manifest()
+        manifest["workload_semantics_version"] = 2
+        completed = self.run_tool(
+            json.dumps(manifest, sort_keys=True),
+            tool=TOOL_V2,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        engine_default = valid_timing_report(
+            engine="modern",
+            profile="engine-default",
+        )
+        engine_default["workload_semantics_version"] = 2
+        engine_default["effective_configuration"]["temp_store"] = "file"
+        self.assertIs(
+            engine_default,
+            write_performance_v2.validate_raw_timing_report(
+                engine_default,
+                workload_manifest=manifest,
+                expected_engine="modern",
+                expected_profile="engine-default",
+                expected_case="insert-point-implicit",
+                expected_run_kind="smoke",
+            ),
+        )
+        wrong_default = deepcopy(engine_default)
+        wrong_default["effective_configuration"]["temp_store"] = "memory"
+        with self.assertRaisesRegex(
+            write_performance_v2.HarnessError,
+            "effective configuration does not match",
+        ):
+            write_performance_v2.validate_raw_timing_report(
+                wrong_default,
+                workload_manifest=manifest,
+                expected_engine="modern",
+                expected_profile="engine-default",
+                expected_case="insert-point-implicit",
+                expected_run_kind="smoke",
+            )
+
+        matched = valid_timing_report(
+            engine="modern",
+            profile="matched-durable",
+        )
+        matched["workload_semantics_version"] = 2
+        self.assertIs(
+            matched,
+            write_performance_v2.validate_raw_timing_report(
+                matched,
+                workload_manifest=manifest,
+                expected_engine="modern",
+                expected_profile="matched-durable",
+                expected_case="insert-point-implicit",
+                expected_run_kind="smoke",
+            ),
+        )
+
+    def test_historical_input_references_do_not_bind_to_current_files(
+        self,
+    ) -> None:
+        reference = {
+            "role": "benchmark-source",
+            "path": "historical/write_performance.cpp",
+            "sha256": "a" * 64,
+            "size_bytes": 123,
+        }
+        expected = ROOT / "historical/write_performance.cpp"
+        self.assertEqual(
+            expected,
+            write_performance_v2._validate_input_reference(
+                reference,
+                repository_root=ROOT,
+                label="historical input",
+                verify_current_file=False,
+            ),
+        )
+        with self.assertRaisesRegex(
+            write_performance_v2.HarnessError,
+            "input does not exist",
+        ):
+            write_performance_v2._validate_input_reference(
+                reference,
+                repository_root=ROOT,
+                label="historical input",
+            )
+
+        malformed = dict(reference)
+        malformed["sha256"] = "not-a-digest"
+        with self.assertRaisesRegex(
+            write_performance_v2.HarnessError,
+            "sha256 is invalid",
+        ):
+            write_performance_v2._validate_input_reference(
+                malformed,
+                repository_root=ROOT,
+                label="historical input",
+                verify_current_file=False,
+            )
 
     def test_accepts_timing_and_diagnostic_binary_identities(self) -> None:
         for instrumentation in (False, True):
@@ -1497,7 +1604,7 @@ class WriteCliSchedulingTest(unittest.TestCase):
         case.workloads = {}
         result = object()
         progress = io.StringIO()
-        with mock.patch.object(write_performance, "run_diagnostic_child", return_value=result), \
+        with mock.patch.object(write_performance_v2, "run_diagnostic_child", return_value=result), \
                 redirect_stderr(progress):
             actual = case.run_validated_diagnostic(
                 "modern", "matched-durable", "insert-point-implicit",
@@ -1516,10 +1623,12 @@ class WriteCliSchedulingTest(unittest.TestCase):
         case.arguments = argparse.Namespace(diagnostic_binary=pathlib.Path("diagnostic"))
         case.workloads = {}
         progress = io.StringIO()
-        with mock.patch.object(write_performance, "run_diagnostic_child",
-                               side_effect=write_performance.HarnessError("injected child failure")), \
+        with mock.patch.object(write_performance_v2, "run_diagnostic_child",
+                               side_effect=write_performance_v2.HarnessError(
+                                   "injected child failure")), \
                 redirect_stderr(progress):
-            with self.assertRaisesRegex(write_performance.HarnessError, "injected child failure"):
+            with self.assertRaisesRegex(write_performance_v2.HarnessError,
+                                        "injected child failure"):
                 case.run_validated_diagnostic(
                     "sqlite", "engine-default", "mixed-batch-commit",
                     pathlib.Path("fixture.db"), pathlib.Path("scratch"),
@@ -1537,9 +1646,10 @@ class WriteCliSchedulingTest(unittest.TestCase):
         with mock.patch.object(write_benchmark_cli_test, "_COMMAND_LINE_ARGUMENTS", arguments), \
                 mock.patch.object(cls, "arguments", None, create=True), \
                 mock.patch.object(cls, "workloads", None, create=True), \
-                mock.patch.object(write_performance, "load_and_validate_workloads",
+                mock.patch.object(write_performance_v2, "load_and_validate_workloads",
                                   return_value={"cases": [{"id": "insert-point-implicit"}]}):
-            with self.assertRaisesRegex(write_performance.HarnessError, "unknown diagnostic child"):
+            with self.assertRaisesRegex(write_performance_v2.HarnessError,
+                                        "unknown diagnostic child"):
                 cls.setUpClass()
 
 

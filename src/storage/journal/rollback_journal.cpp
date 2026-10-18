@@ -442,14 +442,302 @@ struct SavepointPlaybackRange {
   std::uint64_t subjournal_record_count;
 };
 
+struct StatementJournalChunk;
+constexpr std::size_t kStatementJournalChunkAllocation = 1024;
+constexpr std::size_t kStatementJournalChunkPayload =
+    kStatementJournalChunkAllocation - sizeof(std::unique_ptr<StatementJournalChunk>);
+
+struct StatementJournalChunk {
+  std::unique_ptr<StatementJournalChunk> next;
+  std::array<std::byte, kStatementJournalChunkPayload> bytes;
+};
+
+static_assert(sizeof(StatementJournalChunk) == kStatementJournalChunkAllocation);
+
+class StatementJournal final {
+ public:
+  StatementJournal(Vfs& vfs, std::optional<ByteCount> spill_threshold) noexcept
+      : vfs_(&vfs), spill_threshold_(spill_threshold) {}
+  ~StatementJournal() noexcept { ReleaseChunks(std::move(first_chunk_)); }
+
+  [[nodiscard]] Status Append(ByteView bytes) {
+    auto next_size = CheckedAdd(size_, bytes.size(), "statement journal size is too large");
+    if (!next_size.has_value()) {
+      return std::unexpected(std::move(next_size.error()));
+    }
+    if (file_ != nullptr) {
+      auto written = file_->WriteAt(bytes, FileOffset{size_});
+      if (!written.has_value()) {
+        return written;
+      }
+      size_ = *next_size;
+      return {};
+    }
+    if (spill_threshold_.has_value()) {
+      const std::size_t threshold = spill_threshold_->value();
+      if (threshold == 0U || *next_size > threshold) {
+        return SpillAndAppend(bytes, *next_size);
+      }
+      try {
+        if (!bounded_buffer_.has_value()) {
+          bounded_buffer_.emplace(ByteCount{threshold});
+        }
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      } catch (const std::length_error&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      std::ranges::copy(bytes, bounded_buffer_->mutable_view().subspan(size_).begin());
+      size_ = *next_size;
+      return {};
+    }
+    return AppendMemoryOnly(bytes, *next_size);
+  }
+
+  [[nodiscard]] Status ReadAt(MutableByteView output, FileOffset offset) {
+    auto end = CheckedAdd(offset.value(), output.size(), "statement journal read is too large");
+    if (!end.has_value()) {
+      return std::unexpected(std::move(end.error()));
+    }
+    if (*end > size_) {
+      return std::unexpected(Internal("live statement journal contains a short record"));
+    }
+    if (file_ != nullptr) {
+      auto read = file_->ReadAt(output, offset);
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      if (!read->complete()) {
+        return std::unexpected(Internal("live statement journal contains a short record"));
+      }
+      return {};
+    }
+    if (bounded_buffer_.has_value()) {
+      std::ranges::copy(bounded_buffer_->view().subspan(offset.value(), output.size()),
+                        output.begin());
+      return {};
+    }
+    return ReadMemoryOnly(output, offset.value());
+  }
+
+  [[nodiscard]] Status Rewind(FileSize size) {
+    if (size.value() > size_) {
+      return std::unexpected(Misuse("statement journal rewind exceeds its logical size"));
+    }
+    if (size.value() == size_) {
+      ResetReadPoint();
+      return {};
+    }
+    size_ = size.value();
+    ResetReadPoint();
+    if (file_ != nullptr || bounded_buffer_.has_value()) {
+      return {};
+    }
+    if (size_ == 0U) {
+      ReleaseChunks(std::move(first_chunk_));
+      last_chunk_ = nullptr;
+      chunk_count_ = 0;
+      return {};
+    }
+    const auto retained = static_cast<std::size_t>((size_ + kStatementJournalChunkPayload - 1U) /
+                                                   kStatementJournalChunkPayload);
+    StatementJournalChunk* tail = first_chunk_.get();
+    for (std::size_t index = 1; index < retained; ++index) {
+      assert(tail != nullptr);
+      tail = tail->next.get();
+    }
+    assert(tail != nullptr);
+    ReleaseChunks(std::move(tail->next));
+    last_chunk_ = tail;
+    chunk_count_ = retained;
+    return {};
+  }
+
+  [[nodiscard]] bool in_memory() const noexcept { return file_ == nullptr; }
+  [[nodiscard]] FileSize size() const noexcept { return FileSize{size_}; }
+
+  void Close() noexcept {
+    file_.reset();
+    bounded_buffer_.reset();
+    ReleaseChunks(std::move(first_chunk_));
+    last_chunk_ = nullptr;
+    chunk_count_ = 0;
+    size_ = 0;
+    ResetReadPoint();
+  }
+
+ private:
+  static void ReleaseChunks(std::unique_ptr<StatementJournalChunk> chunks) noexcept {
+    while (chunks != nullptr) {
+      std::unique_ptr<StatementJournalChunk> next = std::move(chunks->next);
+      chunks.reset();
+      chunks = std::move(next);
+    }
+  }
+
+  [[nodiscard]] Status AppendMemoryOnly(ByteView bytes, std::uint64_t next_size) {
+    const auto required = static_cast<std::size_t>(
+        (next_size + kStatementJournalChunkPayload - 1U) / kStatementJournalChunkPayload);
+    std::unique_ptr<StatementJournalChunk> added;
+    StatementJournalChunk* added_tail = nullptr;
+    try {
+      for (std::size_t count = chunk_count_; count < required; ++count) {
+        auto chunk = std::make_unique<StatementJournalChunk>();
+        StatementJournalChunk* const raw = chunk.get();
+        if (added_tail == nullptr) {
+          added = std::move(chunk);
+        } else {
+          added_tail->next = std::move(chunk);
+        }
+        added_tail = raw;
+      }
+    } catch (const std::bad_alloc&) {
+      ReleaseChunks(std::move(added));
+      return std::unexpected(Error::OutOfMemory());
+    }
+
+    StatementJournalChunk* const retained_tail = last_chunk_;
+    StatementJournalChunk* first_added = added.get();
+    if (added != nullptr) {
+      if (last_chunk_ == nullptr) {
+        first_chunk_ = std::move(added);
+      } else {
+        last_chunk_->next = std::move(added);
+      }
+      last_chunk_ = added_tail;
+      chunk_count_ = required;
+    }
+
+    auto chunk_offset = static_cast<std::size_t>(size_ % kStatementJournalChunkPayload);
+    StatementJournalChunk* chunk = nullptr;
+    if (size_ == 0U) {
+      chunk = first_chunk_.get();
+    } else if (chunk_offset == 0U) {
+      chunk = first_added;
+    } else {
+      chunk = retained_tail;
+    }
+    assert(chunk != nullptr);
+    ByteView remaining = bytes;
+    while (!remaining.empty()) {
+      const std::size_t amount =
+          std::min(remaining.size(), kStatementJournalChunkPayload - chunk_offset);
+      std::ranges::copy(remaining.first(amount), chunk->bytes.begin() + chunk_offset);
+      remaining = remaining.subspan(amount);
+      chunk_offset = 0;
+      if (!remaining.empty()) {
+        chunk = chunk->next.get();
+        assert(chunk != nullptr);
+      }
+    }
+    size_ = next_size;
+    return {};
+  }
+
+  [[nodiscard]] Status SpillAndAppend(ByteView bytes, std::uint64_t next_size) {
+    auto opened = vfs_->Open(std::nullopt, FileOpenOptions{
+                                               .kind = FileKind::kSubjournal,
+                                               .access = FileAccessMode::kReadWrite,
+                                               .create = true,
+                                               .exclusive_create = true,
+                                               .delete_on_close = true,
+                                               .allow_read_only_fallback = false,
+                                               .no_follow = false,
+                                           });
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    if (size_ != 0U) {
+      assert(bounded_buffer_.has_value());
+      auto copied = opened->file->WriteAt(bounded_buffer_->view().first(size_), FileOffset{0});
+      if (!copied.has_value()) {
+        return copied;
+      }
+    }
+    auto written = opened->file->WriteAt(bytes, FileOffset{size_});
+    if (!written.has_value()) {
+      return written;
+    }
+    file_ = std::move(opened->file);
+    bounded_buffer_.reset();
+    size_ = next_size;
+    return {};
+  }
+
+  [[nodiscard]] Status ReadMemoryOnly(MutableByteView output, std::uint64_t offset) {
+    const auto target_index = static_cast<std::size_t>(offset / kStatementJournalChunkPayload);
+    StatementJournalChunk* chunk = nullptr;
+    std::size_t chunk_index = 0;
+    if (read_offset_ == offset && read_chunk_ != nullptr) {
+      chunk = read_chunk_;
+      chunk_index = read_chunk_index_;
+    } else {
+      chunk = first_chunk_.get();
+      while (chunk_index < target_index) {
+        assert(chunk != nullptr);
+        chunk = chunk->next.get();
+        ++chunk_index;
+      }
+    }
+    assert(chunk != nullptr);
+    auto chunk_offset = static_cast<std::size_t>(offset % kStatementJournalChunkPayload);
+    MutableByteView remaining = output;
+    while (!remaining.empty()) {
+      const std::size_t amount =
+          std::min(remaining.size(), kStatementJournalChunkPayload - chunk_offset);
+      std::ranges::copy(ByteView{chunk->bytes}.subspan(chunk_offset, amount), remaining.begin());
+      remaining = remaining.subspan(amount);
+      chunk_offset = 0;
+      if (!remaining.empty()) {
+        chunk = chunk->next.get();
+        ++chunk_index;
+        assert(chunk != nullptr);
+      }
+    }
+    const std::uint64_t next_offset = offset + output.size();
+    if (next_offset == size_) {
+      read_chunk_ = nullptr;
+      read_chunk_index_ = 0;
+      read_offset_ = 0;
+    } else if (next_offset % kStatementJournalChunkPayload == 0U) {
+      read_chunk_ = chunk->next.get();
+      read_chunk_index_ = chunk_index + 1U;
+      read_offset_ = next_offset;
+    } else {
+      read_chunk_ = chunk;
+      read_chunk_index_ = chunk_index;
+      read_offset_ = next_offset;
+    }
+    return {};
+  }
+
+  void ResetReadPoint() noexcept {
+    read_chunk_ = nullptr;
+    read_chunk_index_ = 0;
+    read_offset_ = 0;
+  }
+
+  Vfs* vfs_;
+  std::optional<ByteCount> spill_threshold_;
+  std::optional<ByteBuffer> bounded_buffer_;
+  std::unique_ptr<StatementJournalChunk> first_chunk_;
+  StatementJournalChunk* last_chunk_ = nullptr;
+  std::size_t chunk_count_ = 0;
+  std::unique_ptr<File> file_;
+  std::uint64_t size_ = 0;
+  StatementJournalChunk* read_chunk_ = nullptr;
+  std::size_t read_chunk_index_ = 0;
+  std::uint64_t read_offset_ = 0;
+};
+
 class RollbackSavepointPlayback final : public JournalPlayback {
  public:
   [[nodiscard]] static Result<std::unique_ptr<JournalPlayback>> Open(
-      File& main_file, File* subjournal_file, const std::vector<JournalCohort>& cohorts,
+      File& main_file, StatementJournal* subjournal, const std::vector<JournalCohort>& cohorts,
       JournalPlaybackInfo info, SavepointPlaybackRange range) {
     try {
       return std::unique_ptr<JournalPlayback>(
-          new RollbackSavepointPlayback(main_file, subjournal_file, cohorts, info, range));
+          new RollbackSavepointPlayback(main_file, subjournal, cohorts, info, range));
     } catch (const std::bad_alloc&) {
       return std::unexpected(Error::OutOfMemory());
     }
@@ -481,14 +769,13 @@ class RollbackSavepointPlayback final : public JournalPlayback {
     if (subjournal_index_ >= subjournal_record_count_) {
       return std::optional<JournalPageImage>{};
     }
-    if (subjournal_file_ == nullptr) {
-      return std::unexpected(Internal("savepoint playback is missing its subjournal file"));
+    if (subjournal_ == nullptr) {
+      return std::unexpected(Internal("savepoint playback is missing its statement journal"));
     }
     const std::uint64_t subjournal_record_size =
         info_.page_size.value() + kSubjournalRecordOverhead;
     const std::uint64_t offset = subjournal_record_size * subjournal_index_++;
-    auto image =
-        ReadRecord(*subjournal_file_, FileOffset{offset}, ByteCount{kSubjournalRecordOverhead});
+    auto image = ReadStatementRecord(FileOffset{offset});
     if (!image.has_value()) {
       return std::unexpected(std::move(image.error()));
     }
@@ -496,11 +783,11 @@ class RollbackSavepointPlayback final : public JournalPlayback {
   }
 
  private:
-  RollbackSavepointPlayback(File& main_file, File* subjournal_file,
+  RollbackSavepointPlayback(File& main_file, StatementJournal* subjournal,
                             const std::vector<JournalCohort>& cohorts, JournalPlaybackInfo info,
                             SavepointPlaybackRange range)
       : main_file_(&main_file),
-        subjournal_file_(subjournal_file),
+        subjournal_(subjournal),
         cohorts_(&cohorts),
         info_(info),
         main_boundary_(range.main_boundary),
@@ -530,8 +817,25 @@ class RollbackSavepointPlayback final : public JournalPlayback {
     };
   }
 
+  [[nodiscard]] Result<JournalPageImage> ReadStatementRecord(FileOffset offset) {
+    const std::size_t record_size = info_.page_size.value() + kSubjournalRecordOverhead;
+    auto read = subjournal_->ReadAt(record_buffer_.mutable_view().first(record_size), offset);
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    const ByteView record = record_buffer_.view();
+    const auto page_number = LoadBigEndian<std::uint32_t>(record.first<sizeof(std::uint32_t)>());
+    if (page_number == 0U || page_number == LockingPage(info_.page_size)) {
+      return std::unexpected(Internal("live savepoint journal contains an invalid page number"));
+    }
+    return JournalPageImage{
+        .page_number = PageNumber{page_number},
+        .bytes = record.subspan(4, info_.page_size.value()),
+    };
+  }
+
   File* main_file_;
-  File* subjournal_file_;
+  StatementJournal* subjournal_;
   const std::vector<JournalCohort>* cohorts_;
   JournalPlaybackInfo info_;
   std::uint64_t main_boundary_;
@@ -554,6 +858,7 @@ class RollbackJournal::Impl final {
         journal_path_(std::move(journal_path)),
         effective_sector_(effective_sector),
         options_(options),
+        statement_journal_(vfs, options.statement_journal_spill_threshold),
         safe_append_(database_properties.device_characteristics.Has(DeviceCapability::kSafeAppend)),
         sequential_(database_properties.device_characteristics.Has(DeviceCapability::kSequential)) {
   }
@@ -609,6 +914,7 @@ class RollbackJournal::Impl final {
     info_ = info;
     journal_offset_ = 0;
     subjournal_record_count_ = 0;
+    statement_journal_.Close();
     auto started = StartCohort(0);
     if (!started.has_value()) {
       main_file_.reset();
@@ -728,39 +1034,21 @@ class RollbackJournal::Impl final {
       return std::unexpected(Internal("coordinator supplied an invalid subjournal page number"));
     }
 
-    if (subjournal_file_ == nullptr) {
+    if (subjournal_buffer_.empty()) {
       try {
         subjournal_buffer_ =
             ByteBuffer{ByteCount{info_.page_size.value() + kSubjournalRecordOverhead}};
       } catch (const std::bad_alloc&) {
         return std::unexpected(Error::OutOfMemory());
       }
-      auto opened = vfs_->Open(std::nullopt, FileOpenOptions{
-                                                 .kind = FileKind::kSubjournal,
-                                                 .access = FileAccessMode::kReadWrite,
-                                                 .create = true,
-                                                 .exclusive_create = true,
-                                                 .delete_on_close = true,
-                                                 .allow_read_only_fallback = false,
-                                                 .no_follow = false,
-                                             });
-      if (!opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      subjournal_file_ = std::move(opened->file);
     }
 
     const MutableByteView record = subjournal_buffer_.mutable_view();
     StoreU32(record, 0, image.page_number.value());
     std::ranges::copy(image.bytes, record.begin() + static_cast<std::ptrdiff_t>(4));
-    const std::uint64_t record_size = record.size();
-    if (subjournal_record_count_ > std::numeric_limits<std::uint64_t>::max() / record_size) {
-      return std::unexpected(TooLarge("subjournal offset overflows the file range"));
-    }
-    const std::uint64_t offset = subjournal_record_count_ * record_size;
-    auto written = subjournal_file_->WriteAt(subjournal_buffer_.view(), FileOffset{offset});
-    if (!written.has_value()) {
-      return written;
+    auto appended = statement_journal_.Append(subjournal_buffer_.view());
+    if (!appended.has_value()) {
+      return appended;
     }
     ++subjournal_record_count_;
     return {};
@@ -788,7 +1076,16 @@ class RollbackJournal::Impl final {
       return std::unexpected(Internal("rollback backend cannot find the released savepoint"));
     }
     if (rewind_subjournal) {
-      subjournal_record_count_ = savepoints_[*index].subjournal_record_count;
+      const std::uint64_t record_count = savepoints_[*index].subjournal_record_count;
+      const std::uint64_t record_size = info_.page_size.value() + kSubjournalRecordOverhead;
+      if (record_count > std::numeric_limits<std::uint64_t>::max() / record_size) {
+        return std::unexpected(TooLarge("subjournal rewind offset overflows the file range"));
+      }
+      auto rewound = statement_journal_.Rewind(FileSize{record_count * record_size});
+      if (!rewound.has_value()) {
+        return rewound;
+      }
+      subjournal_record_count_ = record_count;
     }
     savepoints_.erase(savepoints_.begin() + static_cast<std::ptrdiff_t>(*index), savepoints_.end());
     return {};
@@ -805,7 +1102,8 @@ class RollbackJournal::Impl final {
     }
     const SavepointBoundary& boundary = savepoints_[*index];
     return RollbackSavepointPlayback::Open(
-        *main_file_, subjournal_file_.get(), cohorts_,
+        *main_file_, statement_journal_.size().value() == 0U ? nullptr : &statement_journal_,
+        cohorts_,
         JournalPlaybackInfo{
             .kind = JournalPlaybackKind::kSavepointRollback,
             .page_size = info_.page_size,
@@ -886,7 +1184,7 @@ class RollbackJournal::Impl final {
       return std::unexpected(Misuse("rollback journal is not active"));
     }
     main_file_.reset();
-    subjournal_file_.reset();
+    statement_journal_.Close();
     active_ = false;
     recovering_ = false;
 
@@ -982,6 +1280,7 @@ class RollbackJournal::Impl final {
     header_buffer_ = ByteBuffer{};
     record_buffer_ = ByteBuffer{};
     subjournal_buffer_ = ByteBuffer{};
+    statement_journal_.Close();
     cohorts_.clear();
     savepoints_.clear();
     journal_offset_ = 0;
@@ -993,6 +1292,7 @@ class RollbackJournal::Impl final {
   std::string journal_path_;
   ByteCount effective_sector_;
   RollbackJournalOptions options_;
+  StatementJournal statement_journal_;
   bool safe_append_ = false;
   bool sequential_ = false;
   bool active_ = false;
@@ -1004,7 +1304,6 @@ class RollbackJournal::Impl final {
       .original_page_count = 0,
   };
   std::unique_ptr<File> main_file_;
-  std::unique_ptr<File> subjournal_file_;
   ByteBuffer header_buffer_;
   ByteBuffer record_buffer_;
   ByteBuffer subjournal_buffer_;

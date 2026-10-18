@@ -95,25 +95,31 @@ class VerificationLayeringTest(unittest.TestCase):
     def test_write_performance_tool_uses_only_standard_library_and_local_tools(
         self,
     ) -> None:
-        tool = self.root / "tools/write_performance.py"
-        tree = ast.parse(tool.read_text(encoding="utf-8"), filename=str(tool))
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(
-                    alias.name.split(".", 1)[0] for alias in node.names
+        for filename in ("write_performance.py", "write_performance_v2.py"):
+            with self.subTest(filename=filename):
+                tool = self.root / "tools" / filename
+                tree = ast.parse(
+                    tool.read_text(encoding="utf-8"),
+                    filename=str(tool),
                 )
-            elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                if node.module is not None:
-                    imported.add(node.module.split(".", 1)[0])
+                imported: set[str] = set()
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        imported.update(
+                            alias.name.split(".", 1)[0]
+                            for alias in node.names
+                        )
+                    elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                        if node.module is not None:
+                            imported.add(node.module.split(".", 1)[0])
 
-        self.assertTrue(imported)
-        for module in imported:
-            self.assertTrue(
-                module in {"read_performance", "tools"}
-                or module in sys.stdlib_module_names,
-                module,
-            )
+                self.assertTrue(imported)
+                for module in imported:
+                    self.assertTrue(
+                        module in {"read_performance", "tools"}
+                        or module in sys.stdlib_module_names,
+                        module,
+                    )
 
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
         read_allowed = {

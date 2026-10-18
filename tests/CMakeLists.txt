@@ -1641,7 +1641,7 @@ if(TARGET modern_sqlite_read_benchmark AND
       --populated-fixture
         "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
       --workloads
-        "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+        "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v2.json"
       --suite smoke
   )
   set_tests_properties(
@@ -1651,7 +1651,7 @@ if(TARGET modern_sqlite_read_benchmark AND
       TIMEOUT 180
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
-  file(READ "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json" write_workloads_json)
+  file(READ "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v2.json" write_workloads_json)
   string(JSON write_case_count LENGTH "${write_workloads_json}" cases)
   math(EXPR write_last_case "${write_case_count} - 1")
   foreach(write_engine IN ITEMS modern sqlite)
@@ -1672,7 +1672,7 @@ if(TARGET modern_sqlite_read_benchmark AND
             --diagnostic-binary "${PROJECT_BINARY_DIR}/modern_sqlite_write_diagnostics"
             --schema-fixture "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/schema.db"
             --populated-fixture "${PROJECT_SOURCE_DIR}/tests/fixtures/write_performance/populated.db"
-            --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
+            --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v2.json"
             --suite diagnostic
             --engine "${write_engine}"
             --profile "${write_profile}"
@@ -1766,17 +1766,36 @@ if(TARGET modern_sqlite_read_benchmark AND
 endif()
 if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v1/run-manifest.json")
   add_test(
-    NAME performance.write_baseline_validation
+    NAME performance.write_baseline_historical_validation
     COMMAND
       "${Python3_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tools/write_performance.py"
-      validate-baseline
+      "${PROJECT_SOURCE_DIR}/tools/write_performance_v2.py"
+      validate-historical-baseline
       --repository-root "${PROJECT_SOURCE_DIR}"
       --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v1.json"
       --baseline "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v1"
   )
   set_tests_properties(
-    performance.write_baseline_validation
+    performance.write_baseline_historical_validation
+    PROPERTIES
+      LABELS performance
+      TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v2/run-manifest.json")
+  add_test(
+    NAME performance.write_baseline_validation_v2
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tools/write_performance_v2.py"
+      validate-baseline
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --workloads "${PROJECT_SOURCE_DIR}/tests/performance/write-workloads-v2.json"
+      --baseline "${PROJECT_SOURCE_DIR}/benchmarks/write-baseline-v2"
+  )
+  set_tests_properties(
+    performance.write_baseline_validation_v2
     PROPERTIES
       LABELS performance
       TIMEOUT 60
