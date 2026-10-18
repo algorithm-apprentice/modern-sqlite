@@ -20,7 +20,9 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
+#include "src/storage/btree/writer_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
@@ -637,6 +639,56 @@ TEST(EphemeralRelation, SharesOneLazyStatementArenaAcrossFileModeRelations) {
   EXPECT_EQ(peak_overhead, environment.storage().overhead_bytes());
   environment.ResetStorage();
   EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(EphemeralRelation, BoundsOneSharedCacheAcrossManyPositionedRoots) {
+  constexpr std::size_t kRelationCount = 32;
+  constexpr std::size_t kCompletedOperationOverflowPages = 1;
+  constexpr std::size_t kSingleLevelRootPinnedPages = 1;
+  RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{16}};
+  std::vector<EphemeralRelation> relations;
+  relations.reserve(kRelationCount);
+  EXPECT_EQ(0U, environment.storage().relation_cache_capacity_pages());
+  EXPECT_EQ(0U, environment.storage().relation_cache_peak_allocated_pages());
+
+  for (std::size_t index = 0; index < kRelationCount; ++index) {
+    EphemeralRelation relation =
+        TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+    const auto key = static_cast<std::int64_t>(index + 1U);
+    EXPECT_EQ(
+        EphemeralInsertResult::kInserted,
+        TakeValue(relation.Insert(IntegerRow(key, key * 10), EphemeralInsertMode::kKeepExisting)));
+    RequireStatus(relation.Rewind());
+    ASSERT_TRUE(relation.current_record().has_value());
+    relations.push_back(std::move(relation));
+  }
+
+  EXPECT_EQ(1U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(1U, environment.storage().live_file_count());
+  EXPECT_EQ(1U, environment.storage().relation_cache_capacity_pages());
+  EXPECT_EQ(kRelationCount * kSingleLevelRootPinnedPages,
+            environment.storage().relation_cache_pin_count());
+  EXPECT_EQ(kRelationCount, environment.storage().relation_cache_page_count());
+  EXPECT_EQ(kRelationCount, environment.storage().relation_cache_allocated_pages());
+  EXPECT_EQ(kRelationCount + kCompletedOperationOverflowPages,
+            environment.storage().relation_cache_peak_allocated_pages());
+  EXPECT_LE(environment.storage().relation_cache_pin_count(), kRelationCount * kMaximumBtreeDepth);
+  EXPECT_LE(environment.storage().relation_cache_page_count(),
+            environment.storage().relation_cache_allocated_pages());
+  EXPECT_LE(environment.storage().relation_cache_allocated_pages(),
+            environment.storage().relation_cache_capacity_pages() +
+                kRelationCount * kMaximumBtreeDepth + kCompletedOperationOverflowPages);
+  EXPECT_LE(environment.storage().relation_cache_allocated_pages(),
+            environment.storage().relation_cache_peak_allocated_pages());
+  EXPECT_LE(environment.storage().relation_cache_peak_allocated_pages(),
+            environment.storage().relation_cache_capacity_pages() +
+                kRelationCount * kMaximumBtreeDepth + btree_internal::kMaximumMutationPages +
+                kCompletedOperationOverflowPages);
+
+  for (EphemeralRelation& relation : relations) {
+    relation.Close();
+  }
+  EXPECT_EQ(0U, environment.storage().relation_cache_pin_count());
 }
 
 TEST(EphemeralRelation, AccountsMemoryAndSpillsLargestOwnerUnderStatementPressure) {

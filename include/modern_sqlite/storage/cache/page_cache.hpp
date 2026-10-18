@@ -132,6 +132,10 @@ class PageCache final {
   [[nodiscard]] ByteCount page_size() const noexcept { return page_size_; }
   [[nodiscard]] std::size_t capacity_pages() const noexcept { return capacity_pages_; }
   [[nodiscard]] std::size_t page_count() const noexcept { return active_page_count_; }
+  [[nodiscard]] std::size_t allocated_slot_count() const noexcept { return entries_.size(); }
+  [[nodiscard]] std::size_t peak_allocated_slot_count() const noexcept {
+    return peak_allocated_slot_count_;
+  }
   [[nodiscard]] std::size_t dirty_page_count() const noexcept { return dirty_page_count_; }
   [[nodiscard]] std::size_t pin_count() const noexcept { return total_pin_count_; }
   [[nodiscard]] std::size_t exclusive_pin_count() const noexcept { return exclusive_pin_count_; }
@@ -250,6 +254,7 @@ class PageCache final {
   Entry* dirty_newest_ = nullptr;
   mutable Entry* synced_candidate_ = nullptr;
   std::size_t active_page_count_ = 0;
+  std::size_t peak_allocated_slot_count_ = 0;
   std::size_t dirty_page_count_ = 0;
   std::size_t total_pin_count_ = 0;
   std::size_t exclusive_pin_count_ = 0;

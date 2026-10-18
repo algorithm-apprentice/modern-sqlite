@@ -988,6 +988,36 @@ std::size_t StatementTemporaryStorage::peak_live_file_count() const noexcept {
   return state_ == nullptr ? 0U : state_->peak_live_files;
 }
 
+std::size_t StatementTemporaryStorage::relation_cache_capacity_pages() const noexcept {
+  return state_ == nullptr || state_->relation_arena == nullptr
+             ? 0U
+             : state_->relation_arena->pager->cache_capacity_pages();
+}
+
+std::size_t StatementTemporaryStorage::relation_cache_page_count() const noexcept {
+  return state_ == nullptr || state_->relation_arena == nullptr
+             ? 0U
+             : state_->relation_arena->pager->cache_page_count();
+}
+
+std::size_t StatementTemporaryStorage::relation_cache_allocated_pages() const noexcept {
+  return state_ == nullptr || state_->relation_arena == nullptr
+             ? 0U
+             : state_->relation_arena->pager->cache_allocated_page_count();
+}
+
+std::size_t StatementTemporaryStorage::relation_cache_peak_allocated_pages() const noexcept {
+  return state_ == nullptr || state_->relation_arena == nullptr
+             ? 0U
+             : state_->relation_arena->pager->cache_peak_allocated_page_count();
+}
+
+std::size_t StatementTemporaryStorage::relation_cache_pin_count() const noexcept {
+  return state_ == nullptr || state_->relation_arena == nullptr
+             ? 0U
+             : state_->relation_arena->pager->cache_pin_count();
+}
+
 Result<TemporaryMemoryAccount> StatementTemporaryStorage::RegisterMemoryOwner() {
   if (state_ == nullptr) {
     return std::unexpected(Misuse("statement temporary storage is invalid"));
