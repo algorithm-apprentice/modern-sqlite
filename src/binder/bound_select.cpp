@@ -54,6 +54,7 @@ struct ExpressionProperties {
   bool explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
   bool contains_aggregate = false;
+  bool references_aggregate = false;
 };
 
 struct AliasEntry {
@@ -71,6 +72,8 @@ enum class AggregatePermission : std::uint8_t {
   kProhibited,
   kAllowed,
   kGrouping,
+  kOuterOnly,
+  kDiscardedLocalOrder,
 };
 
 struct BindScope {
@@ -78,6 +81,12 @@ struct BindScope {
   bool result_aliases = false;
   AggregatePermission aggregates = AggregatePermission::kProhibited;
   bool requires_value = true;
+  bool requires_scalar_width = true;
+};
+
+struct AliasAggregatePermissions {
+  AggregatePermission definition = AggregatePermission::kProhibited;
+  AggregatePermission consumer = AggregatePermission::kProhibited;
 };
 
 struct SourceState {
@@ -95,6 +104,12 @@ struct SourceQualification {
   std::string_view name;
 };
 
+enum class AggregateOccurrencePhase : std::uint8_t {
+  kResult,
+  kOrderBy,
+  kHaving,
+};
+
 struct NameScopeView {
   BoundQueryId query{0};
   std::span<const SourceState> sources;
@@ -103,6 +118,10 @@ struct NameScopeView {
   std::span<ResultDefinition> result_definitions;
   const NameScopeView* outer = nullptr;
   BindScope scope{};
+  std::size_t aggregate_core = 0;
+  AggregateOccurrencePhase aggregate_phase = AggregateOccurrencePhase::kResult;
+  AggregatePermission aggregate_permission = AggregatePermission::kProhibited;
+  bool aggregate_was_established = false;
 };
 
 struct CoreBindingMetadata {
@@ -120,16 +139,33 @@ struct AggregateLeafAnalysisView {
   bool order_by_uses_result_columns = false;
 };
 
-enum class AggregateOccurrencePhase : std::uint8_t {
-  kResult,
-  kOrderBy,
-  kHaving,
-};
-
 struct PendingAggregateInvocation {
+  ExpressionId syntax;
   BoundExpressionId expression;
   BoundAggregateInvocation invocation;
+  BoundQueryId owner_query{0};
+  std::size_t owner_core = 0;
+  BoundQueryId site_query{0};
   AggregateOccurrencePhase phase = AggregateOccurrencePhase::kResult;
+  bool finalized = false;
+};
+
+struct DeferredAggregateReplay {
+  ExpressionId syntax;
+  NameScopeView definition_scope;
+  BindScope scope;
+  BoundQueryId owner_query{0};
+  std::size_t owner_core = 0;
+  AggregateOccurrencePhase owner_phase = AggregateOccurrencePhase::kResult;
+  AggregatePermission owner_permission = AggregatePermission::kProhibited;
+  bool owner_was_established = false;
+  BoundQueryId consumer_query{0};
+};
+
+struct DiscardedOrderBinding {
+  BoundQueryId query{0};
+  std::size_t replay_begin = 0;
+  bool rolls_back = false;
 };
 
 struct QueryBindingScope {
@@ -149,7 +185,6 @@ struct QueryBindingScope {
   bool is_aggregate = false;
   std::vector<BoundGroupingTerm> group_by;
   std::optional<BoundExpressionId> having;
-  std::vector<PendingAggregateInvocation> aggregates;
   const NameScopeView* outer = nullptr;
   bool binding_only = false;
 };
@@ -157,6 +192,7 @@ struct QueryBindingScope {
 struct BindingArenaCheckpoint {
   std::size_t expressions;
   std::size_t pending_aggregates;
+  std::size_t deferred_aggregates;
   std::size_t collations;
   std::size_t functions;
   std::size_t aggregate_functions;
@@ -1683,6 +1719,86 @@ class StatementBinder final {
     });
   }
 
+  [[nodiscard]] bool IsQueryAncestor(BoundQueryId ancestor,
+                                     BoundQueryId descendant) const noexcept {
+    while (descendant != ancestor) {
+      const std::optional<BoundQueryId> parent = Query(descendant).parent;
+      if (!parent.has_value()) {
+        return false;
+      }
+      descendant = *parent;
+    }
+    return true;
+  }
+
+  [[nodiscard]] static const BoundAggregateContextCapture* FindAggregateContextCapture(
+      std::span<const BoundQueryCapture> captures, BoundQueryId owner) noexcept {
+    for (const BoundQueryCapture& capture : captures) {
+      const auto* aggregate = std::get_if<BoundAggregateContextCapture>(&capture);
+      if (aggregate != nullptr && aggregate->query == owner) {
+        return aggregate;
+      }
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] BindExpected<void> MergeAggregateContextCapture(
+      std::vector<BoundQueryCapture>& captures, const BoundAggregateContextCapture& candidate) {
+    const auto found = std::ranges::find_if(captures, [&](const BoundQueryCapture& capture) {
+      const auto* aggregate = std::get_if<BoundAggregateContextCapture>(&capture);
+      return aggregate != nullptr && aggregate->query == candidate.query &&
+             aggregate->expression == candidate.expression;
+    });
+    if (found == captures.end()) {
+      captures.emplace_back(candidate);
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> NormalizeAggregateContextCaptures() {
+    auto& captures = ActiveQuery().captures;
+    for (std::size_t index = 0; index < captures.size(); ++index) {
+      auto* selected = std::get_if<BoundAggregateContextCapture>(&captures[index]);
+      if (selected == nullptr) {
+        continue;
+      }
+      const auto source_anchored = [&](BoundExpressionId expression) -> std::optional<bool> {
+        if (expression.value() >= impl_->expressions.size()) {
+          return std::nullopt;
+        }
+        const auto* call = std::get_if<BoundAggregateCallExpression>(
+            &impl_->expressions[expression.value()].payload);
+        const BoundAggregateInvocation* invocation =
+            call == nullptr ? nullptr : AggregateInvocationForExpression(expression, *call);
+        return invocation == nullptr ? std::nullopt : std::optional{invocation->source_anchored};
+      };
+      std::optional<bool> selected_anchored = source_anchored(selected->expression);
+      if (!selected_anchored.has_value()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "aggregate context has no invocation"));
+      }
+      for (std::size_t candidate_index = index + 1U; candidate_index < captures.size();) {
+        const auto* candidate =
+            std::get_if<BoundAggregateContextCapture>(&captures[candidate_index]);
+        if (candidate == nullptr || candidate->query != selected->query) {
+          ++candidate_index;
+          continue;
+        }
+        const std::optional<bool> candidate_anchored = source_anchored(candidate->expression);
+        if (!candidate_anchored.has_value()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                             "aggregate context has no invocation"));
+        }
+        if (!*selected_anchored && *candidate_anchored) {
+          selected->expression = candidate->expression;
+          selected_anchored = true;
+        }
+        captures.erase(captures.begin() + static_cast<std::ptrdiff_t>(candidate_index));
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> RecordQueryCaptures(BoundExpressionId id) {
     auto visitor = [&](const BoundQueryCapture& dependency) {
       auto& captures = ActiveQuery().captures;
@@ -1691,14 +1807,22 @@ class StatementBinder final {
             FindSourceCapture(std::span{captures}, source->identity) == nullptr) {
           captures.emplace_back(BoundSourceCapture{.identity = source->identity});
         }
-      } else {
-        const auto context = std::get<BoundQueryContextCapture>(dependency);
+      } else if (const auto* context = std::get_if<BoundQueryContextCapture>(&dependency);
+                 context != nullptr) {
         const bool recorded = std::ranges::any_of(captures, [context](const auto& capture) {
           const auto* existing = std::get_if<BoundQueryContextCapture>(&capture);
-          return existing != nullptr && existing->query == context.query;
+          return existing != nullptr && existing->query == context->query;
         });
-        if (context.query != active_query_ && !recorded) {
-          captures.emplace_back(context);
+        if (context->query != active_query_ && !recorded) {
+          captures.emplace_back(*context);
+        }
+      } else {
+        const auto aggregate = std::get<BoundAggregateContextCapture>(dependency);
+        if (aggregate.query != active_query_) {
+          if (const auto merged = MergeAggregateContextCapture(captures, aggregate);
+              !merged.has_value()) {
+            return false;
+          }
         }
       }
       return true;
@@ -1711,7 +1835,164 @@ class StatementBinder final {
     return {};
   }
 
+  [[nodiscard]] BindExpected<void> RecordOwnerAggregateCaptures(BoundExpressionId id) {
+    auto visitor = [&](const BoundQueryCapture& dependency) {
+      auto& captures = ActiveQuery().captures;
+      if (const auto* source = std::get_if<BoundSourceCapture>(&dependency); source != nullptr) {
+        if (!OwnsActiveSource(source->identity.source) &&
+            FindSourceCapture(std::span{captures}, source->identity) == nullptr) {
+          captures.emplace_back(BoundSourceCapture{.identity = source->identity});
+        }
+        return true;
+      }
+      if (const auto* context = std::get_if<BoundQueryContextCapture>(&dependency);
+          context != nullptr) {
+        if (context->query == active_query_ || IsQueryAncestor(active_query_, context->query)) {
+          return true;
+        }
+        if (!IsQueryAncestor(context->query, active_query_)) {
+          return false;
+        }
+        const bool recorded = std::ranges::any_of(captures, [context](const auto& capture) {
+          const auto* existing = std::get_if<BoundQueryContextCapture>(&capture);
+          return existing != nullptr && existing->query == context->query;
+        });
+        if (!recorded) {
+          captures.emplace_back(*context);
+        }
+        return true;
+      }
+      const auto aggregate = std::get<BoundAggregateContextCapture>(dependency);
+      if (aggregate.query == active_query_ || IsQueryAncestor(active_query_, aggregate.query)) {
+        return false;
+      }
+      if (!IsQueryAncestor(aggregate.query, active_query_)) {
+        return false;
+      }
+      if (const auto merged = MergeAggregateContextCapture(captures, aggregate);
+          !merged.has_value()) {
+        return false;
+      }
+      return true;
+    };
+    if (!VisitQueryDependencies(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                                BoundSourceDependency::kBinding, visitor)) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "outer aggregate has invalid query dependencies"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> ReparentExpressionQueries(BoundExpressionId id,
+                                                             BoundQueryId previous,
+                                                             BoundQueryId owner) {
+    BoundExpression& expression = impl_->expressions[id.value()];
+    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
+        subquery != nullptr) {
+      BoundQuery& query = Query(subquery->query);
+      if (query.parent != previous && query.parent != owner) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
+                                           "aggregate query has an invalid lexical parent"));
+      }
+      query.parent = owner;
+      return {};
+    }
+    const auto reparent = [&](BoundExpressionId child) {
+      return ReparentExpressionQueries(child, previous, owner);
+    };
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+        alias != nullptr) {
+      return reparent(alias->target);
+    }
+    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+        unary != nullptr) {
+      return reparent(unary->operand);
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+        binary != nullptr) {
+      if (auto result = reparent(binary->left); !result.has_value()) {
+        return result;
+      }
+      return reparent(binary->right);
+    }
+    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+        comparison != nullptr) {
+      if (auto result = reparent(comparison->left); !result.has_value()) {
+        return result;
+      }
+      return reparent(comparison->right);
+    }
+    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
+        truth != nullptr) {
+      return reparent(truth->operand);
+    }
+    const auto reparent_arguments = [&](std::span<const BoundExpressionId> arguments) {
+      for (const BoundExpressionId argument : arguments) {
+        if (auto result = reparent(argument); !result.has_value()) {
+          return result;
+        }
+      }
+      return BindExpected<void>{};
+    };
+    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
+        call != nullptr) {
+      return reparent_arguments(call->arguments);
+    }
+    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
+        coalesce != nullptr) {
+      return reparent_arguments(coalesce->arguments);
+    }
+    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&expression.payload);
+        conditional != nullptr) {
+      return reparent_arguments(conditional->arguments);
+    }
+    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
+        likelihood != nullptr) {
+      return reparent(likelihood->operand);
+    }
+    if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+        collate != nullptr) {
+      return reparent(collate->operand);
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> PrepareOuterAggregateInvocation(
+      PendingAggregateInvocation& pending) {
+    if (pending.site_query == pending.owner_query) {
+      return {};
+    }
+    if (active_query_ != pending.owner_query || active_core_ != pending.owner_core) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "outer aggregate finalized under the wrong owner"));
+    }
+    const auto prepare = [&](BoundExpressionId id) -> BindExpected<void> {
+      if (auto reparented = ReparentExpressionQueries(id, pending.site_query, pending.owner_query);
+          !reparented.has_value()) {
+        return reparented;
+      }
+      return RecordOwnerAggregateCaptures(id);
+    };
+    for (const BoundExpressionId argument : pending.invocation.arguments) {
+      if (auto prepared = prepare(argument); !prepared.has_value()) {
+        return prepared;
+      }
+    }
+    for (const BoundOrderingTerm& term : pending.invocation.order_by) {
+      if (auto prepared = prepare(term.expression); !prepared.has_value()) {
+        return prepared;
+      }
+    }
+    if (pending.invocation.filter.has_value()) {
+      return prepare(*pending.invocation.filter);
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> FinalizeQueryCaptures() {
+    if (auto normalized = NormalizeAggregateContextCaptures(); !normalized.has_value()) {
+      return normalized;
+    }
     if (ActiveQuery().captures.empty()) {
       return {};
     }
@@ -1944,6 +2225,7 @@ class StatementBinder final {
     return BindingArenaCheckpoint{
         .expressions = impl_->expressions.size(),
         .pending_aggregates = pending_aggregates_.size(),
+        .deferred_aggregates = deferred_aggregate_replays_.size(),
         .collations = impl_->collations.size(),
         .functions = impl_->functions.size(),
         .aggregate_functions = impl_->aggregate_functions.size(),
@@ -1958,10 +2240,14 @@ class StatementBinder final {
   }
 
   void RestoreBindingArena(const BindingArenaCheckpoint& checkpoint,
-                           bool preserve_capture_dependencies = false) {
+                           bool preserve_capture_dependencies = false,
+                           bool preserve_deferred_aggregates = false) {
     impl_->expressions.resize(checkpoint.expressions);
     while (pending_aggregates_.size() > checkpoint.pending_aggregates) {
       pending_aggregates_.pop_back();
+    }
+    if (!preserve_deferred_aggregates) {
+      deferred_aggregate_replays_.resize(checkpoint.deferred_aggregates);
     }
     impl_->collations.resize(checkpoint.collations);
     impl_->functions.resize(checkpoint.functions);
@@ -1981,6 +2267,12 @@ class StatementBinder final {
     next_source_id_ = checkpoint.next_source;
     if (!preserve_capture_dependencies) {
       ActiveQuery().captures.resize(checkpoint.captures);
+    } else {
+      std::erase_if(ActiveQuery().captures, [&](const BoundQueryCapture& capture) {
+        const auto* aggregate = std::get_if<BoundAggregateContextCapture>(&capture);
+        return aggregate != nullptr && (aggregate->query.value() > checkpoint.queries ||
+                                        aggregate->expression.value() >= checkpoint.expressions);
+      });
     }
     for (auto& binding : query_bindings_) {
       if (binding.has_value() && binding->value() > checkpoint.queries) {
@@ -1990,23 +2282,82 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindQueryOrdering(const SelectStatement& select, bool compound) {
+    const bool source_free_singleton =
+        !compound && impl_->table_sources.empty() && !active_core_is_aggregate_;
+    if (ActiveQuery().destination != BoundQueryDestination::kExists && source_free_singleton) {
+      discarded_order_bindings_.push_back(DiscardedOrderBinding{
+          .query = active_query_,
+          .replay_begin = deferred_aggregate_replays_.size(),
+          .rolls_back = false,
+      });
+      auto bound = BindOrderBy(select);
+      discarded_order_bindings_.pop_back();
+      return bound;
+    }
     if (ActiveQuery().destination != BoundQueryDestination::kExists) {
       return compound ? BindCompoundOrderBy(select) : BindOrderBy(select);
     }
+    const bool owns_deferred_replay =
+        std::ranges::none_of(discarded_order_bindings_, &DiscardedOrderBinding::rolls_back);
+    const std::size_t replay_begin = deferred_aggregate_replays_.size();
+    discarded_order_bindings_.push_back(DiscardedOrderBinding{
+        .query = active_query_,
+        .replay_begin = replay_begin,
+        .rolls_back = true,
+    });
     const BindingArenaCheckpoint checkpoint = SaveBindingArena();
     const AggregateOccurrencePhase phase = active_aggregate_phase_;
     auto bound = compound ? BindCompoundOrderBy(select) : BindOrderBy(select);
     ActiveQuery().order_by.clear();
-    RestoreBindingArena(checkpoint, true);
+    RestoreBindingArena(checkpoint, true, true);
     active_aggregate_phase_ = phase;
-    return bound;
+    discarded_order_bindings_.pop_back();
+    if (!bound.has_value()) {
+      deferred_aggregate_replays_.resize(replay_begin);
+      return bound;
+    }
+    if (!owns_deferred_replay) {
+      return {};
+    }
+    BindExpected<void> replayed = [&]() -> BindExpected<void> {
+      for (std::size_t index = replay_begin; index < deferred_aggregate_replays_.size(); ++index) {
+        const DeferredAggregateReplay replay = deferred_aggregate_replays_[index];
+        if (replay.consumer_query != active_query_) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                             "discarded aggregate consumer is invalid"));
+        }
+        const SourceSpan replay_span = tree_.expression(replay.syntax).span;
+        const std::size_t pending_begin = pending_aggregates_.size();
+        const bool previous_binding_only = std::exchange(binding_only_, false);
+        auto expression = BindExpressionTemplateCopy(replay.syntax, replay.definition_scope,
+                                                     replay.scope, replay_span, false);
+        binding_only_ = previous_binding_only;
+        if (!expression.has_value()) {
+          return std::unexpected(std::move(expression.error()));
+        }
+        const bool registered = std::ranges::any_of(
+            std::span{pending_aggregates_}.subspan(pending_begin),
+            [&](const PendingAggregateInvocation& pending) {
+              return !pending.finalized && pending.owner_query == replay.owner_query &&
+                     pending.owner_core == replay.owner_core && pending.phase == replay.owner_phase;
+            });
+        if (!registered) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, replay_span,
+                                             "discarded aggregate replay was not registered"));
+        }
+      }
+      return {};
+    }();
+    deferred_aggregate_replays_.resize(replay_begin);
+    return replayed;
   }
 
   [[nodiscard]] NameScopeView CurrentNameScope(BindScope scope) const noexcept {
     if (definition_name_scope_ != nullptr) {
       NameScopeView view = *definition_name_scope_;
+      const bool template_result_aliases = view.scope.result_aliases;
       view.scope = scope;
-      view.scope.result_aliases = false;
+      view.scope.result_aliases = scope.result_aliases && template_result_aliases;
       return view;
     }
     return NameScopeView{
@@ -2017,6 +2368,10 @@ class StatementBinder final {
         .result_definitions = impl_->result_definitions,
         .outer = outer_scope_,
         .scope = scope,
+        .aggregate_core = active_core_,
+        .aggregate_phase = active_aggregate_phase_,
+        .aggregate_permission = scope.aggregates,
+        .aggregate_was_established = active_core_is_aggregate_,
     };
   }
 
@@ -2039,7 +2394,6 @@ class StatementBinder final {
         .is_aggregate = active_core_is_aggregate_,
         .group_by = std::move(active_group_by_),
         .having = std::exchange(active_having_, std::nullopt),
-        .aggregates = std::move(pending_aggregates_),
         .outer = outer_scope_,
         .binding_only = binding_only_,
     };
@@ -2061,7 +2415,6 @@ class StatementBinder final {
     active_core_is_aggregate_ = scope.is_aggregate;
     active_group_by_ = std::move(scope.group_by);
     active_having_ = scope.having;
-    pending_aggregates_ = std::move(scope.aggregates);
     outer_scope_ = scope.outer;
     binding_only_ = scope.binding_only;
   }
@@ -2108,18 +2461,44 @@ class StatementBinder final {
     const BoundQueryId query_id = query_bindings_[binding_index].value_or(BoundQueryId{0});
     const BoundQuery& query = Query(query_id);
     if (query.destination == BoundQueryDestination::kScalar && query.output_columns.size() != 1U &&
-        !binding_only) {
+        scope.requires_scalar_width && !binding_only) {
       return std::unexpected(BinderError(BindErrorCode::kColumnCountMismatch, span,
                                          "sub-select returns " +
                                              std::to_string(query.output_columns.size()) +
                                              " columns - expected 1"));
     }
+    const BoundAggregateContextCapture* aggregate =
+        FindAggregateContextCapture(query.captures, active_query_);
+    if (aggregate != nullptr && (scope.aggregates == AggregatePermission::kProhibited ||
+                                 scope.aggregates == AggregatePermission::kOuterOnly)) {
+      const auto* call = std::get_if<BoundAggregateCallExpression>(
+          &impl_->expressions[aggregate->expression.value()].payload);
+      const BoundAggregateInvocation* invocation =
+          call == nullptr ? nullptr
+                          : AggregateInvocationForExpression(aggregate->expression, *call);
+      if (invocation == nullptr ||
+          invocation->function.value() >= impl_->aggregate_functions.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "aggregate context has no function"));
+      }
+      return std::unexpected(
+          BinderError(BindErrorCode::kAggregateMisuse, span,
+                      "misuse of aggregate function " +
+                          impl_->aggregate_functions[invocation->function.value()].name + "()"));
+    }
+    const bool contains_owner_aggregate = aggregate != nullptr;
+    const bool references_aggregate =
+        std::ranges::any_of(query.captures, [](const BoundQueryCapture& capture) {
+          return std::holds_alternative<BoundAggregateContextCapture>(capture);
+        });
     auto expression = AppendExpression(
         span, BoundSubqueryExpression{.query = query_id},
         ExpressionProperties{.affinity = query.destination == BoundQueryDestination::kScalar
                                              ? Properties(ScalarResultExpression(query_id)).affinity
                                              : TypeAffinity::kNone,
-                             .collation = std::nullopt});
+                             .collation = std::nullopt,
+                             .contains_aggregate = contains_owner_aggregate,
+                             .references_aggregate = references_aggregate});
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
@@ -2181,7 +2560,6 @@ class StatementBinder final {
     active_source_begin_ = impl_->source_columns.size();
     active_source_count_ = 0;
     active_condition_height_ = 0;
-    pending_aggregates_.clear();
     active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
     active_core_is_aggregate_ = false;
     active_group_by_.clear();
@@ -2210,7 +2588,8 @@ class StatementBinder final {
   [[nodiscard]] bool AggregateInvocationsEquivalent(const BoundAggregateInvocation& left,
                                                     const BoundAggregateInvocation& right) const {
     if (left.function != right.function || left.collation != right.collation ||
-        left.distinct != right.distinct || left.arguments.size() != right.arguments.size() ||
+        left.owner != right.owner || left.distinct != right.distinct ||
+        left.arguments.size() != right.arguments.size() ||
         left.order_by.size() != right.order_by.size() ||
         left.filter.has_value() != right.filter.has_value()) {
       return false;
@@ -2530,8 +2909,12 @@ class StatementBinder final {
                                          "aggregate invocation phase boundary is invalid"));
     }
     for (PendingAggregateInvocation& pending : pending_aggregates_) {
-      if (pending.phase != phase) {
+      if (pending.finalized || pending.owner_query != active_query_ ||
+          pending.owner_core != active_core_ || pending.phase != phase) {
         continue;
+      }
+      if (auto prepared = PrepareOuterAggregateInvocation(pending); !prepared.has_value()) {
+        return prepared;
       }
       std::optional<std::size_t> selected_index;
       for (std::size_t index = 0; index < program.invocations.size(); ++index) {
@@ -2586,17 +2969,23 @@ class StatementBinder final {
                                            "pending aggregate expression is invalid"));
       }
       call->invocation = selected;
+      pending.finalized = true;
     }
     return {};
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundAggregateProgram>> FinalizeAggregateProgram() {
     std::optional<BoundAggregateProgram> aggregate;
-    if (pending_aggregates_.empty() && active_group_by_.empty() && !active_having_.has_value()) {
+    const auto pending_count = static_cast<std::size_t>(std::ranges::count_if(
+        pending_aggregates_, [this](const PendingAggregateInvocation& pending) {
+          return !pending.finalized && pending.owner_query == active_query_ &&
+                 pending.owner_core == active_core_;
+        }));
+    if (pending_count == 0U && active_group_by_.empty() && !active_having_.has_value()) {
       return aggregate;
     }
     BoundAggregateProgram program;
-    program.invocations.reserve(pending_aggregates_.size());
+    program.invocations.reserve(pending_count);
     if (auto finalized = FinalizeAggregatePhase(program, AggregateOccurrencePhase::kResult);
         !finalized.has_value()) {
       return std::unexpected(std::move(finalized.error()));
@@ -2613,7 +3002,6 @@ class StatementBinder final {
     program.group_by = std::move(active_group_by_);
     program.having = active_having_;
     aggregate = std::move(program);
-    pending_aggregates_.clear();
     return aggregate;
   }
 
@@ -3124,7 +3512,7 @@ class StatementBinder final {
 
   [[nodiscard]] bool ResultDefinitionNeedsAggregateOrderingCopy(
       const ResultDefinition& definition, const BoundResultColumn& result) const noexcept {
-    return definition.has_subqueries && Properties(result.expression).contains_aggregate;
+    return definition.has_subqueries && Properties(result.expression).references_aggregate;
   }
 
   [[nodiscard]] BindExpected<void> BindDirectAggregateOrderingCopy(std::size_t result_column,
@@ -3169,7 +3557,6 @@ class StatementBinder final {
       for (std::size_t core_index = 0; core_index < core_count; ++core_index) {
         ActivateQueryCore(core_index);
         active_aggregate_phase_ = AggregateOccurrencePhase::kOrderBy;
-        pending_aggregates_.clear();
         bool copied_definition = false;
         for (std::size_t order_index = 0; order_index < order_count; ++order_index) {
           const std::optional<std::size_t> result_column =
@@ -3212,15 +3599,75 @@ class StatementBinder final {
               .result_definitions = metadata.result_definitions,
               .outer = outer_scope_,
               .scope = copy_scope,
+              .aggregate_core = global_index,
+              .aggregate_phase = active_aggregate_phase_,
+              .aggregate_permission = copy_scope.aggregates,
+              .aggregate_was_established = active_core_is_aggregate_,
           };
           const SourceSpan span = definition.syntax.has_value()
                                       ? tree_.expression(*definition.syntax).span
                                       : SourceSpan{};
+          const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+          const std::size_t pending_begin = pending_aggregates_.size();
           auto copied = BindResultDefinitionCopy(definition, names, copy_scope, span);
           if (!copied.has_value()) {
-            return std::unexpected(std::move(copied.error()));
+            BindError error = std::move(copied.error());
+            RestoreBindingArena(checkpoint);
+            return std::unexpected(std::move(error));
           }
-          copied_definition = true;
+          std::vector<ExpressionId> local_calls;
+          std::optional<SourceSpan> replay_error;
+          for (const PendingAggregateInvocation& pending :
+               std::span{pending_aggregates_}.subspan(pending_begin)) {
+            if (pending.finalized || pending.owner_query != active_query_ ||
+                pending.owner_core != global_index) {
+              continue;
+            }
+            bool unsupported = false;
+            auto dependency = [&](const BoundQueryCapture& capture) {
+              if (const auto* context = std::get_if<BoundQueryContextCapture>(&capture);
+                  context != nullptr) {
+                unsupported = unsupported || context->query.value() > checkpoint.queries;
+              } else if (const auto* aggregate =
+                             std::get_if<BoundAggregateContextCapture>(&capture);
+                         aggregate != nullptr) {
+                unsupported = unsupported || aggregate->query != active_query_;
+              }
+              return !unsupported;
+            };
+            const auto inspect = [&](BoundExpressionId id) {
+              return VisitQueryDependencies(impl_->expressions, impl_->source_columns, id,
+                                            CaptureLookup(), BoundSourceDependency::kBinding,
+                                            dependency);
+            };
+            bool valid = std::ranges::all_of(pending.invocation.arguments, inspect);
+            for (const BoundOrderingTerm& ordering : pending.invocation.order_by) {
+              valid = valid && inspect(ordering.expression);
+            }
+            if (pending.invocation.filter.has_value()) {
+              valid = valid && inspect(*pending.invocation.filter);
+            }
+            if (!valid || unsupported) {
+              replay_error = pending.invocation.span;
+              break;
+            }
+            local_calls.push_back(pending.syntax);
+          }
+          RestoreBindingArena(checkpoint);
+          if (replay_error.has_value()) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kUnsupportedFeature, *replay_error,
+                            "compound aggregate ordering replay is not supported"));
+          }
+          for (const ExpressionId local_call : local_calls) {
+            const SourceSpan call_span = tree_.expression(local_call).span;
+            auto replayed =
+                BindExpressionTemplateCopy(local_call, names, copy_scope, call_span, true);
+            if (!replayed.has_value()) {
+              return std::unexpected(std::move(replayed.error()));
+            }
+            copied_definition = true;
+          }
         }
         if (!copied_definition) {
           continue;
@@ -3238,8 +3685,6 @@ class StatementBinder final {
             !finalized.has_value()) {
           return finalized;
         }
-        pending_aggregates_.clear();
-
         select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
         if (select == nullptr || !select->aggregate.has_value()) {
           return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
@@ -3395,6 +3840,7 @@ class StatementBinder final {
       const ExpressionId syntax = core.group_by[term_index];
       const SourceSpan span = tree_.expression(syntax).span;
       std::optional<std::size_t> result_column;
+      bool ordinal_aggregate_reference = false;
       BindExpected<std::optional<std::int64_t>> ordinal = ClassifyOrderByInteger(syntax, true);
       if (!ordinal.has_value()) {
         return std::unexpected(std::move(ordinal.error()));
@@ -3412,6 +3858,8 @@ class StatementBinder final {
         }
         result_column = static_cast<std::size_t>(**ordinal - 1);
         const ResultDefinition& definition = impl_->result_definitions[*result_column];
+        ordinal_aggregate_reference =
+            Properties(impl_->result_columns[*result_column].expression).references_aggregate;
         const BindScope copy_scope{
             .source_columns = true,
             .result_aliases = false,
@@ -3441,7 +3889,7 @@ class StatementBinder final {
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
       }
-      if (Properties(*expression).contains_aggregate) {
+      if (Properties(*expression).contains_aggregate || ordinal_aggregate_reference) {
         return std::unexpected(
             BinderError(BindErrorCode::kAggregateMisuse, span,
                         "aggregate functions are not allowed in the GROUP BY clause"));
@@ -4374,7 +4822,7 @@ class StatementBinder final {
   [[nodiscard]] const BoundAggregateInvocation* AggregateInvocationForExpression(
       BoundExpressionId expression, const BoundAggregateCallExpression& call) const noexcept {
     for (const PendingAggregateInvocation& pending : pending_aggregates_) {
-      if (pending.expression == expression) {
+      if (!pending.finalized && pending.expression == expression) {
         return &pending.invocation;
       }
     }
@@ -4645,9 +5093,12 @@ class StatementBinder final {
                                    .result_aliases = true,
                                    .aggregates = active_core_is_aggregate_ ||
                                                          ActiveQuery().destination ==
-                                                             BoundQueryDestination::kExists
+                                                             BoundQueryDestination::kExists ||
+                                                         !discarded_order_bindings_.empty()
                                                      ? AggregatePermission::kAllowed
-                                                     : AggregatePermission::kProhibited,
+                                                 : impl_->table_sources.empty()
+                                                     ? AggregatePermission::kDiscardedLocalOrder
+                                                     : AggregatePermission::kOuterOnly,
                                    .requires_value =
                                        ActiveQuery().destination != BoundQueryDestination::kExists,
                                });
@@ -4956,7 +5407,7 @@ class StatementBinder final {
     }
     if (const auto* call = std::get_if<FunctionCallExpression>(&expression.payload);
         call != nullptr) {
-      return BindCall(*call, expression.span, scope);
+      return BindCall(id, *call, expression.span, scope);
     }
     if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
         collate != nullptr) {
@@ -5209,15 +5660,16 @@ class StatementBinder final {
         .name = (*parts)[parts->size() - 2U],
     };
     const NameScopeView current = CurrentNameScope(scope);
-    auto resolved = ResolveNameInScope(parts->back(), identifier.name.span, qualification, current);
+    auto resolved = ResolveNameInScope(parts->back(), identifier.name.span, qualification, current,
+                                       scope.aggregates);
     if (!resolved.has_value()) {
       return std::unexpected(std::move(resolved.error()));
     }
     if (resolved->has_value()) {
       return **resolved;
     }
-    auto outer =
-        ResolveOuterSourceName(parts->back(), identifier.name.span, qualification, current.outer);
+    auto outer = ResolveOuterSourceName(parts->back(), identifier.name.span, qualification,
+                                        current.outer, scope.aggregates);
     if (!outer.has_value()) {
       return std::unexpected(std::move(outer.error()));
     }
@@ -5227,13 +5679,9 @@ class StatementBinder final {
     return NoSuchColumn(identifier.name.span);
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindResultDefinitionCopy(
-      const ResultDefinition& definition, const NameScopeView& definition_scope,
-      BindScope copy_scope, SourceSpan span) {
-    if (!definition.syntax.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                         "result definition copy has no syntax"));
-    }
+  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionTemplateCopy(
+      ExpressionId syntax, const NameScopeView& definition_scope, BindScope copy_scope,
+      SourceSpan span, bool hide_result_aliases) {
     const std::size_t binding_width = tree_.select_queries().size();
     const std::size_t previous_size = query_bindings_.size();
     if (binding_width > query_bindings_.max_size() - previous_size) {
@@ -5246,18 +5694,28 @@ class StatementBinder final {
 
     NameScopeView names = definition_scope;
     names.scope = copy_scope;
-    names.scope.result_aliases = false;
+    names.scope.result_aliases = copy_scope.result_aliases && !hide_result_aliases;
     const NameScopeView* previous_names = std::exchange(definition_name_scope_, &names);
     const bool previous_template = std::exchange(binding_validated_template_, true);
     const std::optional<BoundQueryId> previous_owner =
         std::exchange(expression_owner_, active_query_);
-    auto bound = BindExpression(*definition.syntax, copy_scope);
+    auto bound = BindExpression(syntax, copy_scope);
     expression_owner_ = previous_owner;
     binding_validated_template_ = previous_template;
     definition_name_scope_ = previous_names;
     query_binding_base_ = previous_base;
     query_bindings_.resize(previous_size);
     return bound;
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindResultDefinitionCopy(
+      const ResultDefinition& definition, const NameScopeView& definition_scope,
+      BindScope copy_scope, SourceSpan span) {
+    if (!definition.syntax.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "result definition copy has no syntax"));
+    }
+    return BindExpressionTemplateCopy(*definition.syntax, definition_scope, copy_scope, span, true);
   }
 
   [[nodiscard]] BindExpected<void> ValidateResultSyntax(ExpressionId syntax,
@@ -5349,18 +5807,33 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindAliasReference(
       const AliasEntry& alias, const ResultDefinition& definition,
-      const NameScopeView& definition_scope, SourceSpan span, AggregatePermission aggregates,
+      const NameScopeView& definition_scope, SourceSpan span, AliasAggregatePermissions permissions,
       std::optional<BoundQueryId> context = std::nullopt) {
     const ExpressionProperties properties = Properties(alias.target);
-    if (properties.contains_aggregate) {
-      if (aggregates == AggregatePermission::kProhibited ||
-          (context.has_value() && aggregates == AggregatePermission::kGrouping)) {
+    if (properties.references_aggregate) {
+      bool definition_owns_aggregate = false;
+      auto dependency = [&](const BoundQueryCapture& capture) {
+        const auto* aggregate = std::get_if<BoundAggregateContextCapture>(&capture);
+        definition_owns_aggregate =
+            definition_owns_aggregate ||
+            (aggregate != nullptr && aggregate->query == definition_scope.query);
+        return true;
+      };
+      if (!VisitQueryDependencies(impl_->expressions, impl_->source_columns, alias.target,
+                                  CaptureLookup(), BoundSourceDependency::kBinding, dependency)) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "aggregate alias has invalid dependencies"));
+      }
+      if (definition_owns_aggregate &&
+          (permissions.definition == AggregatePermission::kProhibited ||
+           (context.has_value() && permissions.definition == AggregatePermission::kGrouping))) {
         return std::unexpected(BinderError(BindErrorCode::kAggregateMisuse, span,
                                            "misuse of aggregate function through result alias"));
       }
-      if (context.has_value()) {
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                           "outer-owned aggregates are not supported"));
+      if (context.has_value() && permissions.consumer == AggregatePermission::kGrouping) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kAggregateMisuse, span,
+                        "aggregate functions are not allowed in the GROUP BY clause"));
       }
     }
     if (context.has_value()) {
@@ -5383,10 +5856,26 @@ class StatementBinder final {
       const BindScope copy_scope{
           .source_columns = definition_scope.scope.source_columns,
           .result_aliases = false,
-          .aggregates = aggregates,
+          .aggregates = permissions.definition,
           .requires_value = active_value_required_,
       };
-      return BindResultDefinitionCopy(definition, definition_scope, copy_scope, span);
+      auto copied = BindResultDefinitionCopy(definition, definition_scope, copy_scope, span);
+      if (!copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+      auto expression = AppendExpression(span,
+                                         BoundAliasReferenceExpression{
+                                             .target = *copied,
+                                             .context = definition_scope.query,
+                                         },
+                                         Properties(*copied));
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      if (auto captured = RecordQueryCaptures(*expression); !captured.has_value()) {
+        return std::unexpected(std::move(captured.error()));
+      }
+      return *expression;
     }
     if (active_value_required_ && !definition.value_checked) {
       if (auto validated = ValidateResultDefinition(alias.result_index, definition_scope, span);
@@ -5394,16 +5883,21 @@ class StatementBinder final {
         return std::unexpected(std::move(validated.error()));
       }
     }
-    auto expression = AppendExpression(
-        span, BoundAliasReferenceExpression{.target = alias.target, .context = context},
-        properties);
+    ExpressionProperties alias_properties = properties;
+    if (context.has_value() && alias_properties.references_aggregate) {
+      alias_properties.contains_aggregate = false;
+    }
+    auto expression = AppendExpression(span,
+                                       BoundAliasReferenceExpression{
+                                           .target = alias.target,
+                                           .context = definition_scope.query,
+                                       },
+                                       alias_properties);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
-    if (context.has_value()) {
-      if (auto captured = RecordQueryCaptures(*expression); !captured.has_value()) {
-        return std::unexpected(std::move(captured.error()));
-      }
+    if (auto captured = RecordQueryCaptures(*expression); !captured.has_value()) {
+      return std::unexpected(std::move(captured.error()));
     }
     return *expression;
   }
@@ -5411,19 +5905,19 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveSingleName(
       std::string_view name, SourceSpan span, BindScope scope) {
     const NameScopeView current = CurrentNameScope(scope);
-    auto resolved = ResolveNameInScope(name, span, std::nullopt, current);
+    auto resolved = ResolveNameInScope(name, span, std::nullopt, current, scope.aggregates);
     if (!resolved.has_value() || resolved->has_value()) {
       return resolved;
     }
     if (scope.source_columns) {
-      return ResolveOuterSourceName(name, span, std::nullopt, current.outer);
+      return ResolveOuterSourceName(name, span, std::nullopt, current.outer, scope.aggregates);
     }
     return std::optional<BoundExpressionId>{};
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveNameInScope(
       std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification,
-      const NameScopeView& scope) {
+      const NameScopeView& scope, AggregatePermission consumer_aggregates) {
     const std::optional<BoundQueryId> context =
         scope.query == active_query_ ? std::nullopt : std::optional{scope.query};
     if (scope.scope.source_columns) {
@@ -5448,8 +5942,13 @@ class StatementBinder final {
             return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                                "result alias definition is unavailable"));
           }
-          auto expression = BindAliasReference(alias, scope.result_definitions[alias.result_index],
-                                               scope, span, scope.scope.aggregates, context);
+          auto expression =
+              BindAliasReference(alias, scope.result_definitions[alias.result_index], scope, span,
+                                 AliasAggregatePermissions{
+                                     .definition = scope.scope.aggregates,
+                                     .consumer = consumer_aggregates,
+                                 },
+                                 context);
           if (!expression.has_value()) {
             return std::unexpected(std::move(expression.error()));
           }
@@ -5462,12 +5961,12 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> ResolveOuterSourceName(
       std::string_view name, SourceSpan span, std::optional<SourceQualification> qualification,
-      const NameScopeView* outer) {
+      const NameScopeView* outer, AggregatePermission consumer_aggregates) {
     for (const NameScopeView* scope = outer; scope != nullptr; scope = scope->outer) {
       if (!scope->scope.source_columns) {
         break;
       }
-      auto resolved = ResolveNameInScope(name, span, qualification, *scope);
+      auto resolved = ResolveNameInScope(name, span, qualification, *scope, consumer_aggregates);
       if (!resolved.has_value() || resolved->has_value()) {
         return resolved;
       }
@@ -5508,6 +6007,11 @@ class StatementBinder final {
                   .aggregates = AggregatePermission::kAllowed,
                   .requires_value = true,
               },
+          .aggregate_core = global_index,
+          .aggregate_phase = AggregateOccurrencePhase::kResult,
+          .aggregate_permission = AggregatePermission::kAllowed,
+          .aggregate_was_established = std::holds_alternative<BoundSelectCore>(core) &&
+                                       std::get<BoundSelectCore>(core).aggregate.has_value(),
       };
       if (auto validated = ValidateResultDefinitionsInSyntaxOrder(names); !validated.has_value()) {
         return validated;
@@ -5726,6 +6230,7 @@ class StatementBinder final {
     ExpressionProperties properties;
     const ExpressionProperties child = Properties(*operand);
     properties.contains_aggregate = child.contains_aggregate;
+    properties.references_aggregate = child.references_aggregate;
     if (unary.op == UnaryOperator::kPositive) {
       properties = child;
       properties.affinity = TypeAffinity::kNone;
@@ -5903,9 +6408,11 @@ class StatementBinder final {
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
-    BindExpected<void> required = RequireCollation(*collation, term.span);
-    if (!required.has_value()) {
-      return std::unexpected(std::move(required.error()));
+    if (scope.requires_value) {
+      BindExpected<void> required = RequireCollation(*collation, term.span);
+      if (!required.has_value()) {
+        return std::unexpected(std::move(required.error()));
+      }
     }
     const SortOrder order =
         term.order == SortOrder::kDescending ? SortOrder::kDescending : SortOrder::kAscending;
@@ -5925,11 +6432,20 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindAggregateCall(
-      const AggregateFunction& function, const FunctionCallExpression& call, SourceSpan span,
-      BindScope scope, bool has_wildcard) {
+      ExpressionId syntax, const AggregateFunction& function, const FunctionCallExpression& call,
+      SourceSpan span, BindScope scope, bool has_wildcard) {
+    const BindingArenaCheckpoint aggregate_checkpoint = SaveBindingArena();
+    const std::size_t capture_prefix = ActiveQuery().captures.size();
+    const bool discarded_local_order =
+        !replaying_discarded_aggregate_ &&
+        std::ranges::any_of(discarded_order_bindings_, [](const DiscardedOrderBinding& binding) {
+          return !binding.rolls_back;
+        });
     BindScope argument_scope = scope;
     argument_scope.requires_value =
         scope.requires_value || active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy;
+    argument_scope.requires_scalar_width =
+        !discarded_local_order && scope.aggregates != AggregatePermission::kDiscardedLocalOrder;
     argument_scope.aggregates = AggregatePermission::kProhibited;
     std::vector<BoundExpressionId> arguments;
     if (!has_wildcard) {
@@ -5947,10 +6463,14 @@ class StatementBinder final {
     }
 
     std::vector<BoundOrderingTerm> order_by;
+    BindScope modifier_scope = argument_scope;
+    if (discarded_local_order || scope.aggregates == AggregatePermission::kDiscardedLocalOrder) {
+      modifier_scope.requires_value = false;
+    }
     if (!arguments.empty()) {
       order_by.reserve(call.order_by.size());
       for (const OrderingTerm& term : call.order_by) {
-        BindExpected<BoundOrderingTerm> bound = BindAggregateOrderingTerm(term, argument_scope);
+        BindExpected<BoundOrderingTerm> bound = BindAggregateOrderingTerm(term, modifier_scope);
         if (!bound.has_value()) {
           return std::unexpected(std::move(bound.error()));
         }
@@ -5962,7 +6482,8 @@ class StatementBinder final {
     if (call.filter.has_value()) {
       BindScope filter_scope = scope;
       filter_scope.aggregates = AggregatePermission::kProhibited;
-      filter_scope.requires_value = argument_scope.requires_value;
+      filter_scope.requires_value = modifier_scope.requires_value;
+      filter_scope.requires_scalar_width = modifier_scope.requires_scalar_width;
       BindExpected<BoundExpressionId> bound = BindExpression(*call.filter, filter_scope);
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
@@ -5974,15 +6495,32 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kWrongFunctionArity, span,
                                          "DISTINCT aggregates must have exactly one argument"));
     }
-    bool local_source = false;
-    bool outer_source = false;
-    auto owner = [&](BoundSourceId source) {
-      local_source = local_source || OwnsAggregateSource(source);
-      outer_source = outer_source || !OwnsAggregateSource(source);
+    std::vector<BoundSourceId> source_dependencies;
+    std::vector<BoundQueryContextCapture> alias_dependencies;
+    std::vector<BoundAggregateContextCapture> aggregate_dependencies;
+    auto dependency = [&](const BoundQueryCapture& capture) {
+      if (const auto* source = std::get_if<BoundSourceCapture>(&capture); source != nullptr) {
+        if (!std::ranges::contains(source_dependencies, source->identity.source)) {
+          source_dependencies.push_back(source->identity.source);
+        }
+      } else if (const auto* context = std::get_if<BoundQueryContextCapture>(&capture);
+                 context != nullptr) {
+        if (!std::ranges::contains(alias_dependencies, context->query,
+                                   &BoundQueryContextCapture::query)) {
+          alias_dependencies.push_back(*context);
+        }
+      } else {
+        const auto aggregate = std::get<BoundAggregateContextCapture>(capture);
+        if (!std::ranges::contains(aggregate_dependencies, aggregate.expression,
+                                   &BoundAggregateContextCapture::expression)) {
+          aggregate_dependencies.push_back(aggregate);
+        }
+      }
+      return true;
     };
     const auto inspect = [&](BoundExpressionId id) {
-      return VisitSourceOwners(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
-                               owner);
+      return VisitQueryDependencies(impl_->expressions, impl_->source_columns, id, CaptureLookup(),
+                                    BoundSourceDependency::kBinding, dependency);
     };
     bool valid_ownership = std::ranges::all_of(arguments, inspect);
     for (const BoundOrderingTerm& term : order_by) {
@@ -5995,9 +6533,152 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                          "aggregate has invalid source dependencies"));
     }
-    if (outer_source && !local_source) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                         "outer-owned aggregates are not supported"));
+
+    const NameScopeView definition_scope = CurrentNameScope(scope);
+    NameScopeView owner_scope = definition_scope;
+    bool source_anchored = !source_dependencies.empty();
+    for (const BoundAggregateContextCapture& aggregate : aggregate_dependencies) {
+      const auto* call_expression = std::get_if<BoundAggregateCallExpression>(
+          &impl_->expressions[aggregate.expression.value()].payload);
+      const BoundAggregateInvocation* invocation =
+          call_expression == nullptr
+              ? nullptr
+              : AggregateInvocationForExpression(aggregate.expression, *call_expression);
+      if (invocation == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "aggregate context has no invocation"));
+      }
+      source_anchored = source_anchored || invocation->source_anchored;
+    }
+    if (source_anchored) {
+      const NameScopeView* selected = nullptr;
+      for (const NameScopeView* candidate = &definition_scope; candidate != nullptr;
+           candidate = candidate->outer) {
+        const bool owns_source =
+            std::ranges::any_of(source_dependencies, [&](BoundSourceId source) {
+              return std::ranges::contains(candidate->sources, source, &SourceState::id);
+            });
+        const bool owns_aggregate = std::ranges::any_of(
+            aggregate_dependencies, [&](const BoundAggregateContextCapture& aggregate) {
+              const auto* call_expression = std::get_if<BoundAggregateCallExpression>(
+                  &impl_->expressions[aggregate.expression.value()].payload);
+              const BoundAggregateInvocation* invocation =
+                  call_expression == nullptr
+                      ? nullptr
+                      : AggregateInvocationForExpression(aggregate.expression, *call_expression);
+              return aggregate.query == candidate->query && invocation != nullptr &&
+                     invocation->source_anchored;
+            });
+        if (owns_source || owns_aggregate) {
+          selected = candidate;
+          break;
+        }
+      }
+      if (selected == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "aggregate owner scope is unavailable"));
+      }
+      owner_scope = *selected;
+    }
+    for (const BoundAggregateContextCapture& aggregate : aggregate_dependencies) {
+      if (aggregate.query == owner_scope.query ||
+          IsQueryAncestor(owner_scope.query, aggregate.query)) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kAggregateMisuse, span,
+                        "misuse of aggregate function " + std::string{function.name()} + "()"));
+      }
+      if (!IsQueryAncestor(aggregate.query, owner_scope.query)) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "aggregate context is not lexical"));
+      }
+    }
+    if (scope.aggregates == AggregatePermission::kOuterOnly && owner_scope.query == active_query_) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kAggregateMisuse, span,
+                      "misuse of aggregate function " + std::string{function.name()} + "()"));
+    }
+    const auto rollback_binding =
+        std::ranges::find(discarded_order_bindings_, true, &DiscardedOrderBinding::rolls_back);
+    if (!replaying_discarded_aggregate_ && !discarded_order_bindings_.empty() &&
+        rollback_binding == discarded_order_bindings_.end() &&
+        !discarded_order_bindings_.front().rolls_back) {
+      const BoundQueryId discarded_query = discarded_order_bindings_.front().query;
+      bool retain = false;
+      if (IsQueryAncestor(discarded_query, owner_scope.query)) {
+        retain = false;
+      } else if (IsQueryAncestor(owner_scope.query, discarded_query)) {
+        if (owner_scope.aggregate_permission == AggregatePermission::kGrouping) {
+          return std::unexpected(
+              BinderError(BindErrorCode::kAggregateMisuse, span,
+                          "aggregate functions are not allowed in the GROUP BY clause"));
+        }
+        retain = owner_scope.aggregate_permission == AggregatePermission::kAllowed &&
+                 (owner_scope.aggregate_phase != AggregateOccurrencePhase::kOrderBy ||
+                  owner_scope.aggregate_was_established);
+      } else {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                           "discarded aggregate owner is not lexical"));
+      }
+      RestoreBindingArena(aggregate_checkpoint);
+      if (!retain) {
+        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+      }
+      BindScope replay_scope = scope;
+      replay_scope.aggregates = AggregatePermission::kAllowed;
+      replay_scope.requires_value = true;
+      replay_scope.requires_scalar_width = true;
+      const bool previous_replay = std::exchange(replaying_discarded_aggregate_, true);
+      auto replayed =
+          BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
+      replaying_discarded_aggregate_ = previous_replay;
+      return replayed;
+    }
+    if (scope.aggregates == AggregatePermission::kDiscardedLocalOrder &&
+        owner_scope.query != active_query_) {
+      if (owner_scope.aggregate_permission == AggregatePermission::kGrouping) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kAggregateMisuse, span,
+                        "aggregate functions are not allowed in the GROUP BY clause"));
+      }
+      const bool retain = owner_scope.aggregate_permission == AggregatePermission::kAllowed &&
+                          (owner_scope.aggregate_phase != AggregateOccurrencePhase::kOrderBy ||
+                           owner_scope.aggregate_was_established);
+      RestoreBindingArena(aggregate_checkpoint);
+      if (!retain) {
+        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+      }
+      BindScope replay_scope = scope;
+      replay_scope.aggregates = AggregatePermission::kAllowed;
+      replay_scope.requires_value = true;
+      replay_scope.requires_scalar_width = true;
+      return BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
+    }
+    const bool deferred_outer = rollback_binding != discarded_order_bindings_.end() &&
+                                owner_scope.query != rollback_binding->query &&
+                                IsQueryAncestor(owner_scope.query, rollback_binding->query);
+    bool retain_deferred = false;
+    if (deferred_outer) {
+      const bool vanished_alias =
+          std::ranges::any_of(alias_dependencies, [&](const BoundQueryContextCapture& context) {
+            return context.query != rollback_binding->query &&
+                   IsQueryAncestor(rollback_binding->query, context.query);
+          });
+      if (vanished_alias) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                           "discarded outer aggregate aliases are not supported"));
+      }
+      if (!aggregate_dependencies.empty()) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                           "discarded nested outer aggregates are not supported"));
+      }
+      if (owner_scope.aggregate_permission == AggregatePermission::kGrouping) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kAggregateMisuse, span,
+                        "aggregate functions are not allowed in the GROUP BY clause"));
+      }
+      retain_deferred = owner_scope.aggregate_permission == AggregatePermission::kAllowed &&
+                        (owner_scope.aggregate_phase != AggregateOccurrencePhase::kOrderBy ||
+                         owner_scope.aggregate_was_established);
     }
     const bool argument_reuses_single_order_key =
         arguments.size() == 1U && order_by.size() == 1U &&
@@ -6021,35 +6702,82 @@ class StatementBinder final {
         return std::unexpected(std::move(required.error()));
       }
     }
+    if (scope.aggregates == AggregatePermission::kDiscardedLocalOrder &&
+        owner_scope.query == active_query_) {
+      RestoreBindingArena(aggregate_checkpoint);
+      return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+    }
     if (pending_aggregates_.size() >= std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                          "pending aggregate invocation ID overflow"));
     }
     ExpressionProperties properties = PropagatedExplicitProperties(arguments);
     properties.affinity = TypeAffinity::kNone;
-    properties.contains_aggregate = true;
+    properties.contains_aggregate = owner_scope.query == active_query_;
+    properties.references_aggregate = true;
     const BoundAggregateInvocationId pending_id{
         static_cast<std::uint32_t>(pending_aggregates_.size())};
-    BindExpected<BoundExpressionId> expression =
-        AppendExpression(span, BoundAggregateCallExpression{.invocation = pending_id}, properties);
+    BindExpected<BoundExpressionId> expression = AppendExpression(span,
+                                                                  BoundAggregateCallExpression{
+                                                                      .invocation = pending_id,
+                                                                      .owner = owner_scope.query,
+                                                                  },
+                                                                  properties);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
     pending_aggregates_.push_back(PendingAggregateInvocation{
+        .syntax = syntax,
         .expression = *expression,
         .invocation =
             BoundAggregateInvocation{
                 .span = span,
                 .function = *bound_function,
                 .collation = *collation,
+                .owner = owner_scope.query,
                 .arguments = std::move(arguments),
                 .distinct = call.distinct,
                 .order_by = std::move(order_by),
                 .filter = filter,
                 .argument_reuses_single_order_key = argument_reuses_single_order_key,
+                .source_anchored = source_anchored,
             },
-        .phase = active_aggregate_phase_,
+        .owner_query = owner_scope.query,
+        .owner_core = owner_scope.aggregate_core,
+        .site_query = active_query_,
+        .phase = owner_scope.aggregate_phase,
     });
+    if (owner_scope.query != active_query_) {
+      ActiveQuery().captures.resize(capture_prefix);
+      if (!deferred_outer) {
+        auto& captures = ActiveQuery().captures;
+        if (auto merged = MergeAggregateContextCapture(captures,
+                                                       BoundAggregateContextCapture{
+                                                           .query = owner_scope.query,
+                                                           .expression = *expression,
+                                                       });
+            !merged.has_value()) {
+          return std::unexpected(std::move(merged.error()));
+        }
+      }
+    }
+    if (retain_deferred) {
+      BindScope replay_scope = scope;
+      replay_scope.aggregates = AggregatePermission::kAllowed;
+      replay_scope.requires_value = true;
+      replay_scope.requires_scalar_width = true;
+      deferred_aggregate_replays_.push_back(DeferredAggregateReplay{
+          .syntax = syntax,
+          .definition_scope = definition_scope,
+          .scope = replay_scope,
+          .owner_query = owner_scope.query,
+          .owner_core = owner_scope.aggregate_core,
+          .owner_phase = owner_scope.aggregate_phase,
+          .owner_permission = owner_scope.aggregate_permission,
+          .owner_was_established = owner_scope.aggregate_was_established,
+          .consumer_query = rollback_binding->query,
+      });
+    }
     return *expression;
   }
 
@@ -6081,7 +6809,8 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindCall(const FunctionCallExpression& call,
+  [[nodiscard]] BindExpected<BoundExpressionId> BindCall(ExpressionId syntax,
+                                                         const FunctionCallExpression& call,
                                                          SourceSpan span, BindScope scope) {
     BindExpected<DecodedNameParts> parts = NameParts(call.name);
     if (!parts.has_value()) {
@@ -6245,7 +6974,7 @@ class StatementBinder final {
     const Result<const AggregateFunction*> aggregate =
         environment_.functions().ResolveAggregate(name, argument_count);
     if (aggregate.has_value()) {
-      return BindAggregateCall(**aggregate, call, span, scope, has_wildcard);
+      return BindAggregateCall(syntax, **aggregate, call, span, scope, has_wildcard);
     }
     if (FunctionNameExists(name) || AggregateFunctionNameExists(name) ||
         NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull") || NamesEqual(name, "iif") ||
@@ -6364,6 +7093,7 @@ class StatementBinder final {
                 .has_explicit_collation = properties.explicit_collation,
                 .truth_hint = properties.truth_hint,
                 .contains_aggregate = properties.contains_aggregate,
+                .references_aggregate = properties.references_aggregate,
             },
         .payload = std::move(payload),
     });
@@ -6378,6 +7108,7 @@ class StatementBinder final {
         .explicit_collation = properties.has_explicit_collation,
         .truth_hint = properties.truth_hint,
         .contains_aggregate = properties.contains_aggregate,
+        .references_aggregate = properties.references_aggregate,
     };
   }
 
@@ -6387,6 +7118,7 @@ class StatementBinder final {
     for (const BoundExpressionId expression : expressions) {
       const ExpressionProperties properties = Properties(expression);
       result.contains_aggregate = result.contains_aggregate || properties.contains_aggregate;
+      result.references_aggregate = result.references_aggregate || properties.references_aggregate;
       if (!result.explicit_collation && properties.explicit_collation) {
         result.collation = properties.collation;
         result.explicit_collation = true;
@@ -6577,6 +7309,9 @@ class StatementBinder final {
   std::vector<BoundGroupingTerm> active_group_by_;
   std::optional<BoundExpressionId> active_having_;
   std::vector<PendingAggregateInvocation> pending_aggregates_;
+  std::vector<DeferredAggregateReplay> deferred_aggregate_replays_;
+  std::vector<DiscardedOrderBinding> discarded_order_bindings_;
+  bool replaying_discarded_aggregate_ = false;
   std::vector<CoreBindingMetadata> core_metadata_;
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
 };

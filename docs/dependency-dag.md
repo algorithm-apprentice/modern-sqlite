@@ -153,8 +153,8 @@ the verified value-call interface. ADR-0091 defines the next bounded outer
 expression-alias admission through immutable targets and the same capture
 contract. ADR-0092 defines query-containing result-reference instances
 through canonical template binding, delivered as ordered binder-foundation,
-expression-copy, and aggregate-ordering slices; outer aggregate ownership
-remains an ordered follow-up. ADR-0096 corrects arithmetic joined-rowid scan
+expression-copy, and aggregate-ordering slices; ADR-0110 completes the ordered
+outer aggregate ownership follow-up. ADR-0096 corrects arithmetic joined-rowid scan
 amplification through the same positioned producer and canonical ON readiness,
 without relaxing the unchanged model deadline. The
 [implemented-engine reference audit](sqlite-reference-audit.md) retains
@@ -196,6 +196,9 @@ index is affected, and raw stored-value index-key reconstruction.
 ADR-0109 makes the index-range end edge logically unpositioned in the typed
 bytecode verifier while preserving readable fallthrough candidates and
 ordinary virtual NULL rows.
+ADR-0110 assigns aggregates to the nearest referenced query scope, registers
+outer-owned work in that query's canonical phase-ordered program, and lets
+inline child frames read finalized owner registers without copied state.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

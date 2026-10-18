@@ -5916,6 +5916,46 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return inline_parent_->SourceFrame(identity);
   }
 
+  [[nodiscard]] LoweringResult<PlanLowerer*> QueryFrame(BoundQueryId query) {
+    if (bound_select_ == nullptr) {
+      return std::unexpected(InternalFailure("aggregate owner has no bound query"));
+    }
+    if (bound_select_->query().id == query) {
+      return this;
+    }
+    if (inline_parent_ == nullptr) {
+      return std::unexpected(InternalFailure("aggregate owner has no live lexical compiler frame"));
+    }
+    return inline_parent_->QueryFrame(query);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitAggregateResult(const BoundAggregateCallExpression& call,
+                                                         RegisterId destination) {
+    if (call.invocation.value() >= aggregate_invocations_.size()) {
+      return std::unexpected(InternalFailure("aggregate call has invalid invocation"));
+    }
+    const BoundAggregateInvocation& invocation = aggregate_invocations_[call.invocation.value()];
+    if (bound_select_ == nullptr) {
+      return std::unexpected(InternalFailure("aggregate call has no bound query"));
+    }
+    if (invocation.owner != bound_select_->query().id) {
+      auto owner = QueryFrame(invocation.owner);
+      if (!owner.has_value()) {
+        return std::unexpected(std::move(owner.error()));
+      }
+      return (*owner)->EmitAggregateResult(call, destination);
+    }
+    if ((!global_aggregate_query_ && !grouped_aggregate_query_) ||
+        call.invocation.value() >= aggregate_result_registers_.size() ||
+        !aggregate_result_registers_[call.invocation.value()].has_value()) {
+      return std::unexpected(InternalFailure("aggregate call has no finalized register"));
+    }
+    return Append(CopyInstruction{
+        .input = AssumeValue(aggregate_result_registers_[call.invocation.value()]),
+        .output = destination,
+    });
+  }
+
   [[nodiscard]] LoweringResult<void> EmitUnaryValue(const BoundUnaryExpression& unary,
                                                     RegisterId destination) {
     if (auto emitted = EmitExpression(unary.operand, destination); !emitted.has_value()) {
@@ -6088,15 +6128,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (const auto* call = std::get_if<BoundAggregateCallExpression>(&expression.payload);
         call != nullptr) {
-      if ((!global_aggregate_query_ && !grouped_aggregate_query_) ||
-          call->invocation.value() >= aggregate_result_registers_.size() ||
-          !aggregate_result_registers_[call->invocation.value()].has_value()) {
-        return std::unexpected(InternalFailure("aggregate call has no finalized register"));
-      }
-      return Append(CopyInstruction{
-          .input = AssumeValue(aggregate_result_registers_[call->invocation.value()]),
-          .output = destination,
-      });
+      return EmitAggregateResult(*call, destination);
     }
     if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
         coalesce != nullptr) {

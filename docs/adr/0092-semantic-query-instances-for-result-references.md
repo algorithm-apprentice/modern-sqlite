@@ -343,8 +343,8 @@ extend the pinned subquery shard to 220 comparisons and five explicit
 unsupported boundaries. Callback tests separately pin the native independent
 invocation counts and result/ORDER/HAVING execution order.
 
-This completes ADR-0092's three ordered deliveries. Outer aggregate ownership
-remains the following prerequisite, and node 43 remains active.
+This completes ADR-0092's three ordered deliveries. ADR-0110 subsequently
+delivers outer aggregate ownership. Node 43 remains active.
 
 ## Verification
 

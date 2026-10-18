@@ -157,6 +157,7 @@ struct BoundExpressionProperties {
   bool has_explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
   bool contains_aggregate = false;
+  bool references_aggregate = false;
 };
 
 struct BoundLiteralExpression {
@@ -214,6 +215,7 @@ struct BoundScalarCallExpression {
 
 struct BoundAggregateCallExpression {
   BoundAggregateInvocationId invocation;
+  BoundQueryId owner{0};
 };
 
 struct BoundSubqueryExpression {
@@ -270,7 +272,13 @@ struct BoundQueryContextCapture {
   BoundQueryId query{0};
 };
 
-using BoundQueryCapture = std::variant<BoundSourceCapture, BoundQueryContextCapture>;
+struct BoundAggregateContextCapture {
+  BoundQueryId query{0};
+  BoundExpressionId expression;
+};
+
+using BoundQueryCapture =
+    std::variant<BoundSourceCapture, BoundQueryContextCapture, BoundAggregateContextCapture>;
 
 enum class BoundSourceDependency : std::uint8_t {
   kBinding,
@@ -315,9 +323,13 @@ template <typename CaptureLookup, typename Visitor>
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
-                      std::is_same_v<Payload, BoundParameterExpression> ||
-                      std::is_same_v<Payload, BoundAggregateCallExpression>) {
+                      std::is_same_v<Payload, BoundParameterExpression>) {
           return true;
+        } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
+          return visitor(BoundQueryCapture{BoundAggregateContextCapture{
+              .query = payload.owner,
+              .expression = id,
+          }});
         } else if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
           const auto inputs = captures(payload.query);
           if (!inputs.has_value()) {
@@ -442,11 +454,13 @@ struct BoundAggregateInvocation {
   SourceSpan span{};
   BoundAggregateFunctionId function;
   BoundCollationId collation;
+  BoundQueryId owner{0};
   std::vector<BoundExpressionId> arguments{};
   bool distinct = false;
   std::vector<BoundOrderingTerm> order_by{};
   std::optional<BoundExpressionId> filter{};
   bool argument_reuses_single_order_key = false;
+  bool source_anchored = false;
 };
 
 struct BoundGroupingTerm {
