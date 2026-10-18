@@ -88,6 +88,8 @@ Add:
 does not clear `needs_sync`. `MarkDirty()` always clears `dont_write`, even
 when the page was already dirty, matching `sqlite3PcacheMakeDirty()`.
 `MarkClean()`, discard, fill reuse, and cache destruction clear both flags.
+Mutable access while `dont_write` is set returns typed misuse; allocation
+failure while constructing that error is translated to typed out of memory.
 
 `dont_write` follows the cached bytes during a page-number permutation.
 `needs_sync` remains owned by the physical page number as specified by
@@ -118,6 +120,9 @@ It is independent from savepoint subjournal membership.
 make the active cohort dirty without erasing the fact that the initial header
 and every prior published cohort are durable.
 
+Every direct sync path, including savepoint and full rollback, publishes the
+same successful-sync bookkeeping.
+
 The existing `main_journal_dirty()` continues to describe only whether the
 current tail requires publication.
 
@@ -139,6 +144,11 @@ peers. The sector requires synchronization when any peer already has
 new page before the first successful journal sync. After capture, every
 currently cached peer is marked `needs_sync` when that combined condition is
 true.
+
+These inspections and flag updates use Pager-only, non-pinning cache
+operations. They do not change recency and cannot conflict with another live
+exclusive pin for a distinct page in the sector. A cache miss still uses the
+ordinary read pin long enough to capture the missing image.
 
 This rescan is mandatory even when every page already has main-journal
 membership. A clean older peer may lose its local flag through cache
@@ -220,6 +230,12 @@ Commit uses the same sync helper before flushing. Savepoint rollback calls it
 before opening playback so subjournal bytes can never reach the database
 while the transaction-original image remains unsynchronized. Full rollback
 retains its existing main-journal playback path and clears/replaces the cache.
+
+After dirty-page flush and before database sync, commit compares the physical
+file size with the logical image size. If a skipped `dont_write` page is the
+new final page, Pager authorizes an empty growth resize and extends the file
+before sync. This reproduces `pager.c:6720-6730`; commit never leaves a header
+that names pages beyond end-of-file.
 
 ### 6. Preserve physical sync state through Modern page permutation
 
@@ -303,18 +319,29 @@ Add red tests for:
   insertion does not;
 - commit, full rollback, savepoint rollback, OOM, I/O failure, and crash-cut
   behavior with one durable and one unsynchronized cohort; and
+- an EOF freelist leaf skipped by `DONT_WRITE` still producing an exact-size
+  database that reopens successfully; and
 - no new allocation in selection, flag publication, sync clearing, skipped
   writeback, or permutation.
 
 Extend the version-2 diagnostic contract with bounded fixed work:
 
 - matched update scan performs at most 32 main-journal sync calls; and
-- matched delete scan performs at most 128 database-page writes and at most
-  32 main-journal sync calls.
+- matched delete scan performs at most 32 main-journal sync calls.
 
 These limits are intentionally above the source-derived cache/cohort work and
-far below the current 7,722/7,738 sync calls and 4,380 delete writes. Timing
-remains evidence, not the correctness oracle.
+far below the current 7,722/7,738 sync calls.
+
+The direct Pager and B-tree fixed-work tests require `DONT_WRITE` to suppress
+the freed leaf's database write exactly when no savepoint is active. The
+public SQL delete diagnostic is not allowed to claim that reduction in this
+slice: Modern currently opens an anonymous statement savepoint for every DML
+statement, while SQLite's `usesStmtJournal` admission omits it for the
+non-aborting delete scan. Both engines disable `DONT_WRITE` while a savepoint
+is active. Ledger 8 must remove that unnecessary Modern savepoint before the
+delete-scan database-write delta can close.
+
+Timing remains evidence, not the correctness oracle.
 
 ### 9. Qualify the complete durability seam
 
@@ -345,7 +372,10 @@ deltas as implementation evidence without replacing the immutable baseline.
   transaction-global approximation;
 - `pSynced` can write durable older pages while a newer cohort remains dirty;
 - sector and page-move safety become explicit cache invariants;
-- freed leaf bytes no longer generate pointless database writes;
+- freed leaf bytes no longer generate pointless database writes when no
+  savepoint is active;
+- direct Pager/B-tree callers gain the freed-page optimization immediately,
+  while SQL delete scans retain the explicit statement-admission dependency;
 - savepoint playback retains the main-journal durability guard; and
 - the next transaction-admission repair starts from SQLite-faithful Pager
   storage work.

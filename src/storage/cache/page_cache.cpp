@@ -55,14 +55,21 @@ const PageFrame* PageCache::Pin::operator->() const noexcept { return &frame(); 
 const PageFrame& PageCache::Pin::operator*() const noexcept { return frame(); }
 
 Result<MutableByteView> PageCache::Pin::mutable_bytes() {
-  assert(entry_ != nullptr);
-  if (!exclusive_) {
-    return std::unexpected(Misuse("mutable page bytes require an exclusive pin"));
+  try {
+    assert(entry_ != nullptr);
+    if (!exclusive_) {
+      return std::unexpected(Misuse("mutable page bytes require an exclusive pin"));
+    }
+    if (!entry_->frame.dirty_) {
+      return std::unexpected(Misuse("mutable page bytes require dirty state"));
+    }
+    if (entry_->dont_write) {
+      return std::unexpected(Misuse("mutable page bytes require writable state"));
+    }
+    return entry_->frame.bytes_.mutable_view();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  if (!entry_->frame.dirty_) {
-    return std::unexpected(Misuse("mutable page bytes require dirty state"));
-  }
-  return entry_->frame.bytes_.mutable_view();
 }
 
 Status PageCache::Pin::MarkDirty() {
@@ -92,9 +99,24 @@ Status PageCache::Pin::MarkNeedsSync() {
   return {};
 }
 
+Status PageCache::Pin::MarkDontWrite() {
+  assert(cache_ != nullptr);
+  assert(entry_ != nullptr);
+  if (!exclusive_) {
+    return std::unexpected(Misuse("DONT_WRITE requires an exclusive pin"));
+  }
+  if (!entry_->frame.dirty_) {
+    return std::unexpected(Misuse("DONT_WRITE requires dirty state"));
+  }
+  cache_->MarkDontWrite(*entry_);
+  return {};
+}
+
 bool PageCache::Pin::sole() const noexcept { return entry_ != nullptr && entry_->pin_count == 1U; }
 
 bool PageCache::Pin::needs_sync() const noexcept { return entry_ != nullptr && entry_->needs_sync; }
+
+bool PageCache::Pin::dont_write() const noexcept { return entry_ != nullptr && entry_->dont_write; }
 
 void PageCache::Pin::Reset() noexcept {
   if (cache_ == nullptr) {
@@ -445,6 +467,41 @@ Status PageCache::PromoteExclusiveForPager(Pin& pin) {
   return {};
 }
 
+std::optional<ByteView> PageCache::CachedBytesForPager(PageNumber page_number) const noexcept {
+  const Entry* entry = Find(page_number);
+  if (entry == nullptr) {
+    return std::nullopt;
+  }
+  return entry->frame.bytes();
+}
+
+bool PageCache::NeedsSyncForPager(PageNumber page_number) const noexcept {
+  const Entry* entry = Find(page_number);
+  return entry != nullptr && entry->needs_sync;
+}
+
+void PageCache::MarkDirtyForPager(PageNumber page_number) noexcept {
+  Entry* entry = Find(page_number);
+  assert(entry != nullptr);
+  entry->dont_write = false;
+  if (entry->frame.dirty_) {
+    return;
+  }
+  if (entry->in_clean_list) {
+    RemoveClean(*entry);
+  }
+  entry->frame.dirty_ = true;
+  AppendDirtyNewest(*entry);
+  ++dirty_page_count_;
+}
+
+void PageCache::MarkNeedsSyncForPager(PageNumber page_number) noexcept {
+  Entry* entry = Find(page_number);
+  if (entry != nullptr) {
+    MarkNeedsSync(*entry);
+  }
+}
+
 Status PageCache::PermuteExclusiveForPager(std::span<const PageCacheRekey> pages) {
   if (pages.size() > kMaximumPermutationPages) {
     return std::unexpected(Misuse("page permutation supports at most five pages"));
@@ -523,6 +580,7 @@ void PageCache::Release(Entry& entry) noexcept {
 
 void PageCache::MarkDirty(Entry& entry) noexcept {
   assert(entry.pin_count > 0);
+  entry.dont_write = false;
   if (entry.frame.dirty_) {
     return;
   }
@@ -537,12 +595,14 @@ void PageCache::MarkClean(Entry& entry) noexcept {
   assert(entry.pin_count > 0);
   if (!entry.frame.dirty_) {
     entry.needs_sync = false;
+    entry.dont_write = false;
     return;
   }
 
   RemoveDirty(entry);
   entry.frame.dirty_ = false;
   entry.needs_sync = false;
+  entry.dont_write = false;
   assert(dirty_page_count_ > 0);
   --dirty_page_count_;
 }
@@ -559,6 +619,12 @@ void PageCache::MarkNeedsSync(Entry& entry) noexcept {
     }
     synced_candidate_ = candidate;
   }
+}
+
+void PageCache::MarkDontWrite(Entry& entry) noexcept {
+  assert(entry.pin_count > 0);
+  assert(entry.frame.dirty_);
+  entry.dont_write = true;
 }
 
 PageCache::Entry* PageCache::Find(PageNumber page_number) const noexcept {
@@ -738,6 +804,7 @@ void PageCache::ResetEntry(Entry& entry) noexcept {
   entry.in_dirty_list = false;
   entry.exclusively_pinned = false;
   entry.needs_sync = false;
+  entry.dont_write = false;
 }
 
 void PageCache::AppendCleanNewest(Entry& entry) noexcept {

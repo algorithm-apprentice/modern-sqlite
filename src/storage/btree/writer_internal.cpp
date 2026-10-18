@@ -348,8 +348,8 @@ Status MutationPageOwner::Promote(std::size_t slot) {
     return std::unexpected(Misuse("mutation page slot is out of range"));
   }
   OwnedPage& page = pages_[slot];
-  if (std::holds_alternative<WritePagePin>(page.pin)) {
-    return {};
+  if (auto* write = std::get_if<WritePagePin>(&page.pin); write != nullptr) {
+    return pager_->WritePage(*write);
   }
   auto* read = std::get_if<ReadPagePin>(&page.pin);
   if (read == nullptr) {
@@ -372,6 +372,22 @@ Status MutationPageOwner::Promote(std::size_t slot) {
   page.pin.emplace<WritePagePin>(std::move(*promoted));
   ++size_;
   return {};
+}
+
+Status MutationPageOwner::MarkDontWrite(PageNumber page_number) {
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  const std::optional<std::size_t> slot = Find(page_number);
+  if (!slot.has_value()) {
+    return {};
+  }
+  auto* write = std::get_if<WritePagePin>(&pages_[*slot].pin);
+  if (write == nullptr) {
+    return {};
+  }
+  return pager_->MarkPageDontWrite(*write);
 }
 
 Status MutationPageOwner::RequireSolePin(std::size_t slot) const {
@@ -707,6 +723,10 @@ Status FreeBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry, PageN
       auto marked = owner.pager().MarkPageContentRequired(page_number);
       if (!marked.has_value()) {
         return fail(std::move(marked.error()));
+      }
+      auto skipped = owner.MarkDontWrite(page_number);
+      if (!skipped.has_value()) {
+        return fail(std::move(skipped.error()));
       }
       return {};
     }

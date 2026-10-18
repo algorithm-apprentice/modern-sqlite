@@ -252,8 +252,7 @@ Status JournalTransaction::CapturePage(JournalPageImage image) {
   }
 
   const std::uint32_t page_number = image.page_number.value();
-  const bool needs_transaction = page_number <= info_.original_page_count &&
-                                 !ContainsPage(transaction_pages_, image.page_number);
+  const bool needs_transaction = NeedsMainJournalCapture(image.page_number);
   std::optional<std::size_t> first_savepoint_needing_image;
   for (std::size_t index = 0; index < savepoints_.size(); ++index) {
     const SavepointState& state = savepoints_[index];
@@ -338,6 +337,14 @@ bool JournalTransaction::NeedsCapture(PageNumber page_number) const noexcept {
   return std::ranges::any_of(savepoints_, [page, page_number](const SavepointState& state) {
     return page <= state.savepoint.original_page_count && !ContainsPage(state.pages, page_number);
   });
+}
+
+bool JournalTransaction::NeedsMainJournalCapture(PageNumber page_number) const noexcept {
+  if (state_ != JournalTransactionState::kActive || !IsValidPageNumber(page_number)) {
+    return false;
+  }
+  return page_number.value() <= info_.original_page_count &&
+         !ContainsPage(transaction_pages_, page_number);
 }
 
 Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t current_page_count) {
@@ -427,6 +434,7 @@ Status JournalTransaction::RollbackToSavepoint(JournalSavepointId savepoint,
       return std::unexpected(std::move(synced.error()));
     }
     main_journal_dirty_ = false;
+    journal_ever_synced_ = true;
   }
 
   const JournalSavepoint scope = savepoints_[*index].savepoint;
@@ -486,10 +494,12 @@ Status JournalTransaction::SyncJournal() {
     return std::unexpected(std::move(synced.error()));
   }
   main_journal_dirty_ = false;
+  journal_ever_synced_ = true;
   return {};
 }
 
-Status JournalTransaction::AuthorizeDatabaseWrite(PageNumber page_number) {
+Status JournalTransaction::AuthorizeDatabaseWrite(PageNumber page_number,
+                                                  RollbackImageDurability durability) {
   auto active = RequireActive();
   if (!active.has_value()) {
     return active;
@@ -497,8 +507,8 @@ Status JournalTransaction::AuthorizeDatabaseWrite(PageNumber page_number) {
   if (!IsValidPageNumber(page_number)) {
     return std::unexpected(Misuse("database write requires a valid page number"));
   }
-  if (main_journal_dirty_) {
-    return std::unexpected(Misuse("database write requires a synchronized main journal"));
+  if (durability != RollbackImageDurability::Durable) {
+    return std::unexpected(Misuse("database write requires a durable rollback image"));
   }
 
   const std::uint64_t page_size = info_.page_size.value();
@@ -621,6 +631,7 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
       return std::unexpected(std::move(synced.error()));
     }
     main_journal_dirty_ = false;
+    journal_ever_synced_ = true;
   }
 
   auto opened = backend_->DoOpenTransactionPlayback();

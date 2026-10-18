@@ -319,11 +319,13 @@ TEST(JournalTransaction, CapturesOnceAndEnforcesCommitOrdering) {
   ASSERT_TRUE(transaction->CapturePage(Image(3, page)).has_value());
   EXPECT_EQ(std::vector<PageNumber>({PageNumber{3}}), backend.transaction_pages);
 
-  const auto unsynced_write = transaction->AuthorizeDatabaseWrite(PageNumber{3});
+  const auto unsynced_write =
+      transaction->AuthorizeDatabaseWrite(PageNumber{3}, RollbackImageDurability::Unsynchronized);
   ASSERT_FALSE(unsynced_write.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, unsynced_write.error().code());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{3}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{3}, RollbackImageDurability::Durable)
+                  .has_value());
 
   const auto unsynced_commit = transaction->Commit();
   ASSERT_FALSE(unsynced_commit.has_value());
@@ -563,7 +565,8 @@ TEST(JournalTransaction, RequiresEveryOldPageInALargeSectorBeforeWriting) {
 
   ASSERT_TRUE(transaction->CapturePage(Image(3, page)).has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  const auto incomplete = transaction->AuthorizeDatabaseWrite(PageNumber{3});
+  const auto incomplete =
+      transaction->AuthorizeDatabaseWrite(PageNumber{3}, RollbackImageDurability::Durable);
   ASSERT_FALSE(incomplete.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, incomplete.error().code());
 
@@ -571,7 +574,8 @@ TEST(JournalTransaction, RequiresEveryOldPageInALargeSectorBeforeWriting) {
     ASSERT_TRUE(transaction->CapturePage(Image(page_number, page)).has_value());
   }
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  EXPECT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{3}).has_value());
+  EXPECT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{3}, RollbackImageDurability::Durable)
+                  .has_value());
 }
 
 TEST(JournalTransaction, ExcludesTheLockingPageFromSectorAuthorization) {
@@ -587,7 +591,10 @@ TEST(JournalTransaction, ExcludesTheLockingPageFromSectorAuthorization) {
     ASSERT_TRUE(transaction->CapturePage(Image(page_number, page)).has_value());
   }
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  EXPECT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{kLockingPage + 1U}).has_value());
+  EXPECT_TRUE(
+      transaction
+          ->AuthorizeDatabaseWrite(PageNumber{kLockingPage + 1U}, RollbackImageDurability::Durable)
+          .has_value());
 }
 
 TEST(JournalTransaction, SupportsRepeatedSyncEpochsWithoutSyncingSubjournalOnlyAppends) {
@@ -596,25 +603,54 @@ TEST(JournalTransaction, SupportsRepeatedSyncEpochsWithoutSyncingSubjournalOnlyA
   ASSERT_NE(nullptr, transaction);
   const PageBytes page{};
 
+  EXPECT_TRUE(transaction->NeedsMainJournalCapture(PageNumber{1}));
+  EXPECT_FALSE(transaction->journal_ever_synced());
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+  EXPECT_FALSE(transaction->NeedsMainJournalCapture(PageNumber{1}));
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  EXPECT_TRUE(transaction->journal_ever_synced());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
   const auto savepoint = transaction->CreateSavepoint(8);
   ASSERT_TRUE(savepoint.has_value());
 
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
   EXPECT_FALSE(transaction->main_journal_dirty());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
 
   ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
   EXPECT_TRUE(transaction->main_journal_dirty());
-  EXPECT_FALSE(transaction->AuthorizeDatabaseWrite(PageNumber{2}).has_value());
+  EXPECT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
+  EXPECT_FALSE(
+      transaction->AuthorizeDatabaseWrite(PageNumber{2}, RollbackImageDurability::Unsynchronized)
+          .has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{2}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{2}, RollbackImageDurability::Durable)
+                  .has_value());
 
   EXPECT_EQ(2U, EventCount(backend, "sync"));
   EXPECT_EQ(1U, EventCount(backend, "append-savepoint"));
+}
+
+TEST(JournalTransaction, SavepointRollbackRecordsTheFirstSuccessfulSync) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+  ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+  const auto savepoint = transaction->CreateSavepoint(8);
+  ASSERT_TRUE(savepoint.has_value());
+  EXPECT_FALSE(transaction->journal_ever_synced());
+  RecordingTarget target(backend.trace);
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+
+  EXPECT_TRUE(transaction->journal_ever_synced());
+  EXPECT_EQ(1U, EventCount(backend, "sync"));
 }
 
 TEST(JournalTransaction, ResizeRequiresEveryApplicableRollbackImage) {
@@ -649,7 +685,8 @@ TEST(JournalTransaction, DatabaseFailureLatchesRollbackOnlyState) {
   const PageBytes page{};
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
 
   transaction->ReportDatabaseFailure(ErrorCode::kIo);
   EXPECT_EQ(JournalTransactionState::kFailed, transaction->state());
@@ -670,7 +707,8 @@ TEST(JournalTransaction, SavepointRollbackClearsPriorDatabaseSyncAndRetainsTheTa
   const PageBytes page{};
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
   ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
 
   backend.savepoint_playback.records = {Record(1, std::byte{0x11})};
@@ -1001,7 +1039,8 @@ TEST(JournalTransaction, CommitFinalizationFailureBecomesPersistent) {
   const PageBytes page{};
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
   ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
 
   const auto committed = transaction->Commit();
@@ -1019,7 +1058,8 @@ TEST(JournalTransaction, CommitFinalizationAllocationFailureBecomesPersistent) {
   const PageBytes page{};
   ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
   ASSERT_TRUE(transaction->SyncJournal().has_value());
-  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+  ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                  .has_value());
   ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
 
   const auto committed = transaction->Commit();

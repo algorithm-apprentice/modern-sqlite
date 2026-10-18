@@ -1119,7 +1119,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     RequireStatus(test::InitializeEmptyBtreeImage(*pager));
     {
       auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-      Store32(page_one.mutable_bytes(), 52U, 2U);
+      Store32(page_one.mutable_bytes().value(), 52U, 2U);
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());
@@ -1138,7 +1138,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     RequireStatus(test::InitializeEmptyBtreeImage(*pager));
     {
       auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-      Store32(page_one.mutable_bytes(), 56U, 2U);
+      Store32(page_one.mutable_bytes().value(), 56U, 2U);
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());
@@ -1157,7 +1157,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     RequireStatus(test::InitializeEmptyBtreeImage(*pager));
     {
       auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-      page_one.mutable_bytes()[100] = static_cast<std::byte>(BtreePageType::kLeafIndex);
+      page_one.mutable_bytes().value()[100] = static_cast<std::byte>(BtreePageType::kLeafIndex);
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());

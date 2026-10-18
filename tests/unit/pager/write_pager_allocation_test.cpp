@@ -73,7 +73,7 @@ std::atomic<std::size_t> allocation_count = 0;
     if (!page.has_value()) {
       return std::nullopt;
     }
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   allocation_count.store(0, std::memory_order_relaxed);
@@ -97,7 +97,7 @@ std::atomic<std::size_t> allocation_count = 0;
     if (!page.has_value()) {
       return std::nullopt;
     }
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto page = pager->WritePage(modern_sqlite::PageNumber{1});
@@ -132,7 +132,7 @@ std::atomic<std::size_t> allocation_count = 0;
     if (!page.has_value()) {
       return std::nullopt;
     }
-    page->mutable_bytes()[100] = std::byte{0x11};
+    page->mutable_bytes().value()[100] = std::byte{0x11};
   }
   auto retained_result = pager->ReadPage(modern_sqlite::PageNumber{1});
   if (!retained_result.has_value()) {
@@ -145,7 +145,7 @@ std::atomic<std::size_t> allocation_count = 0;
     if (!page.has_value()) {
       return std::nullopt;
     }
-    page->mutable_bytes()[100] = std::byte{0x22};
+    page->mutable_bytes().value()[100] = std::byte{0x22};
   }
 
   allocation_count.store(0, std::memory_order_relaxed);

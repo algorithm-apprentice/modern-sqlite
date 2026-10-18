@@ -135,11 +135,7 @@ Result<DatabaseHeader> ParseDatabaseHeader(ByteView bytes) {
   return header;
 }
 
-MutableByteView WritePagePin::mutable_bytes() noexcept {
-  auto bytes = pin_.mutable_bytes();
-  assert(bytes.has_value());
-  return *bytes;
-}
+Result<MutableByteView> WritePagePin::mutable_bytes() noexcept { return pin_.mutable_bytes(); }
 
 Result<std::unique_ptr<Pager>> Pager::Open(Vfs& vfs, std::string_view path, PagerOptions options) {
   try {

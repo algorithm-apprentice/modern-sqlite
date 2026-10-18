@@ -87,12 +87,15 @@ class PageCache final {
     [[nodiscard]] Status MarkDirty();
     [[nodiscard]] Status MarkClean();
     [[nodiscard]] Status MarkNeedsSync();
+    [[nodiscard]] Status MarkDontWrite();
     [[nodiscard]] bool exclusive() const noexcept { return exclusive_; }
     [[nodiscard]] bool sole() const noexcept;
     [[nodiscard]] bool needs_sync() const noexcept;
+    [[nodiscard]] bool dont_write() const noexcept;
 
    private:
     friend class PageCache;
+    friend class Pager;
 
     Pin(PageCache& cache, Entry& entry, bool exclusive) noexcept
         : cache_(&cache), entry_(&entry), exclusive_(exclusive) {}
@@ -186,6 +189,7 @@ class PageCache final {
     bool in_dirty_list = false;
     bool exclusively_pinned = false;
     bool needs_sync = false;
+    bool dont_write = false;
   };
 
   [[nodiscard]] Result<Fill> PrepareFill(PageNumber page_number);
@@ -195,11 +199,16 @@ class PageCache final {
   [[nodiscard]] Pin Acquire(Entry& entry, bool exclusive) noexcept;
   [[nodiscard]] bool OwnsPinForPager(const Pin& pin) const noexcept;
   [[nodiscard]] Status PromoteExclusiveForPager(Pin& pin);
+  [[nodiscard]] std::optional<ByteView> CachedBytesForPager(PageNumber page_number) const noexcept;
+  [[nodiscard]] bool NeedsSyncForPager(PageNumber page_number) const noexcept;
+  void MarkDirtyForPager(PageNumber page_number) noexcept;
+  void MarkNeedsSyncForPager(PageNumber page_number) noexcept;
   [[nodiscard]] Status PermuteExclusiveForPager(std::span<const PageCacheRekey> pages);
   void Release(Entry& entry) noexcept;
   void MarkDirty(Entry& entry) noexcept;
   void MarkClean(Entry& entry) noexcept;
   void MarkNeedsSync(Entry& entry) noexcept;
+  void MarkDontWrite(Entry& entry) noexcept;
 
   [[nodiscard]] Entry* Find(PageNumber page_number) const noexcept;
   [[nodiscard]] std::size_t HashIndex(PageNumber page_number) const noexcept;

@@ -314,17 +314,17 @@ void BuildTableChain(Pager& pager, std::size_t depth) {
     auto pin = pager.WritePage(PageNumber{static_cast<std::uint32_t>(page)});
     ASSERT_TRUE(pin.has_value());
     const PageNumber child{static_cast<std::uint32_t>(page + 1U)};
-    WriteTableInterior(pin->mutable_bytes(), page == 1U, child, child, 100);
+    WriteTableInterior(pin->mutable_bytes().value(), page == 1U, child, child, 100);
   }
   {
     auto leaf = pager.WritePage(PageNumber{static_cast<std::uint32_t>(depth)});
     ASSERT_TRUE(leaf.has_value());
-    WriteTableLeaf(leaf->mutable_bytes(), depth == 1U, 1);
+    WriteTableLeaf(leaf->mutable_bytes().value(), depth == 1U, 1);
   }
   {
     auto page_one = pager.WritePage(PageNumber{1});
     ASSERT_TRUE(page_one.has_value());
-    Store32(page_one->mutable_bytes(), 28U, static_cast<std::uint32_t>(depth));
+    Store32(page_one->mutable_bytes().value(), 28U, static_cast<std::uint32_t>(depth));
   }
   ASSERT_TRUE(pager.Commit().has_value());
 }
@@ -456,11 +456,15 @@ TEST(BtreeFreelist, AppendsAndExtractsLeavesInSQLiteOrder) {
   }
   RequireStatus(pager->Commit());
 
+  const std::size_t writes_before_free = vfs.total_database_writes();
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
     RequireStatus(FreeBtreePage(owner, geometry, PageNumber{2}));
+    const std::size_t page_three_slot = TakeValue(owner.AcquireWrite(PageNumber{3}));
+    TakeValue(owner.MutableBytes(page_three_slot))[100] = std::byte{0x7f};
     RequireStatus(FreeBtreePage(owner, geometry, PageNumber{3}));
+    EXPECT_FALSE(owner.MutableBytes(page_three_slot).has_value());
     EXPECT_TRUE(pager->PageContentRequired(PageNumber{3}));
     const ByteView trunk =
         TakeValue(owner.Frame(TakeValue(owner.Borrow(PageNumber{2})))).get().bytes();
@@ -468,6 +472,7 @@ TEST(BtreeFreelist, AppendsAndExtractsLeavesInSQLiteOrder) {
     EXPECT_EQ(3U, LoadBigEndian<std::uint32_t>(trunk.subspan<8U, 4U>()));
   }
   RequireStatus(pager->Commit());
+  EXPECT_EQ(writes_before_free + 2U, vfs.total_database_writes());
 
   RequireStatus(pager->BeginWrite());
   {
@@ -486,6 +491,36 @@ TEST(BtreeFreelist, AppendsAndExtractsLeavesInSQLiteOrder) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeFreelist, DontWriteGrowthStillCommitsTheExactPhysicalImageSize) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  RequireStatus(pager->BeginWrite());
+  {
+    MutationPageOwner owner{*pager};
+    const AllocatedBtreePage trunk = TakeValue(AllocateBtreePage(owner, geometry));
+    const AllocatedBtreePage leaf = TakeValue(AllocateBtreePage(owner, geometry));
+    ASSERT_EQ(PageNumber{2}, trunk.page_number);
+    ASSERT_EQ(PageNumber{3}, leaf.page_number);
+    RequireStatus(FreeBtreePage(owner, geometry, trunk.page_number));
+    RequireStatus(FreeBtreePage(owner, geometry, leaf.page_number));
+    EXPECT_FALSE(owner.MutableBytes(leaf.owner_slot).has_value());
+  }
+
+  RequireStatus(pager->Commit());
+
+  EXPECT_EQ(3U * test::kWritePagerPageSize, vfs.database_bytes().size());
+  RequireStatus(pager->EndRead());
+  pager.reset();
+  pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  EXPECT_EQ(3U, pager->page_count());
+  EXPECT_TRUE(pager->ReadPage(PageNumber{3}).has_value());
+}
+
 TEST(BtreeFreelist, UsesTheHistoricalTrunkLeafLimit) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<Pager> pager = OpenInitialized(vfs);
@@ -500,14 +535,14 @@ TEST(BtreeFreelist, UsesTheHistoricalTrunkLeafLimit) {
       EXPECT_EQ(PageNumber{page}, allocated.frame().page_number());
     }
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 28U, kLeafCount + 3U);
-    Store32(page_one.mutable_bytes(), 32U, 2U);
-    Store32(page_one.mutable_bytes(), 36U, kLeafCount + 1U);
+    Store32(page_one.mutable_bytes().value(), 28U, kLeafCount + 3U);
+    Store32(page_one.mutable_bytes().value(), 32U, 2U);
+    Store32(page_one.mutable_bytes().value(), 36U, kLeafCount + 1U);
     auto trunk = TakeValue(pager->WritePage(PageNumber{2}));
-    Store32(trunk.mutable_bytes(), 0U, 0U);
-    Store32(trunk.mutable_bytes(), 4U, kLeafCount);
+    Store32(trunk.mutable_bytes().value(), 0U, 0U);
+    Store32(trunk.mutable_bytes().value(), 4U, kLeafCount);
     for (std::uint32_t index = 0U; index < kLeafCount; ++index) {
-      Store32(trunk.mutable_bytes(), 8U + index * 4U, 3U + index);
+      Store32(trunk.mutable_bytes().value(), 8U + index * 4U, 3U + index);
     }
   }
   RequireStatus(pager->Commit());
@@ -537,8 +572,8 @@ TEST(BtreeFreelist, RejectsImpossibleHeaderCountsBeforeMutation) {
   RequireStatus(pager->BeginWrite());
   {
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 32U, 1U);
-    Store32(page_one.mutable_bytes(), 36U, 1U);
+    Store32(page_one.mutable_bytes().value(), 32U, 1U);
+    Store32(page_one.mutable_bytes().value(), 36U, 1U);
   }
   ByteBuffer before;
   {
@@ -591,14 +626,14 @@ TEST(BtreeFreelist, LatchesRollbackAfterPostHeaderCorruption) {
   }
   {
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 28U, 2U);
-    Store32(page_one.mutable_bytes(), 32U, 2U);
-    Store32(page_one.mutable_bytes(), 36U, 1U);
+    Store32(page_one.mutable_bytes().value(), 28U, 2U);
+    Store32(page_one.mutable_bytes().value(), 32U, 2U);
+    Store32(page_one.mutable_bytes().value(), 36U, 1U);
   }
   {
     auto trunk = TakeValue(pager->WritePage(PageNumber{2}));
-    Store32(trunk.mutable_bytes(), 0U, 0U);
-    Store32(trunk.mutable_bytes(), 4U, 127U);
+    Store32(trunk.mutable_bytes().value(), 0U, 0U);
+    Store32(trunk.mutable_bytes().value(), 4U, 127U);
   }
   RequireStatus(pager->Commit());
 
@@ -3626,20 +3661,20 @@ TEST(BtreeInsert, ReplacesAnInteriorIndexRecordWithoutChangingItsLeftChild) {
   }
   {
     auto root = TakeValue(pager->WritePage(PageNumber{2}));
-    WriteIndexPage(root.mutable_bytes(), BtreePageType::kInteriorIndex, forty_two.view(),
+    WriteIndexPage(root.mutable_bytes().value(), BtreePageType::kInteriorIndex, forty_two.view(),
                    PageNumber{3}, PageNumber{4});
   }
   {
     auto left = TakeValue(pager->WritePage(PageNumber{3}));
-    WriteIndexPage(left.mutable_bytes(), BtreePageType::kLeafIndex, ten.view());
+    WriteIndexPage(left.mutable_bytes().value(), BtreePageType::kLeafIndex, ten.view());
   }
   {
     auto right = TakeValue(pager->WritePage(PageNumber{4}));
-    WriteIndexPage(right.mutable_bytes(), BtreePageType::kLeafIndex, seventy.view());
+    WriteIndexPage(right.mutable_bytes().value(), BtreePageType::kLeafIndex, seventy.view());
   }
   {
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 28U, 4U);
+    Store32(page_one.mutable_bytes().value(), 28U, 4U);
   }
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
@@ -4517,20 +4552,20 @@ TEST(WritableCursor, SeeksInteriorAndLeafIndexEntriesWithSharedRecordComparison)
   const ByteBuffer seventy = TakeValue(EncodeRecord(std::array{SqlValue::Integer(70)}, options));
   {
     auto root = TakeValue(pager->WritePage(PageNumber{2}));
-    WriteIndexPage(root.mutable_bytes(), BtreePageType::kInteriorIndex, fifty.view(), PageNumber{3},
-                   PageNumber{4});
+    WriteIndexPage(root.mutable_bytes().value(), BtreePageType::kInteriorIndex, fifty.view(),
+                   PageNumber{3}, PageNumber{4});
   }
   {
     auto left = TakeValue(pager->WritePage(PageNumber{3}));
-    WriteIndexPage(left.mutable_bytes(), BtreePageType::kLeafIndex, ten.view());
+    WriteIndexPage(left.mutable_bytes().value(), BtreePageType::kLeafIndex, ten.view());
   }
   {
     auto right = TakeValue(pager->WritePage(PageNumber{4}));
-    WriteIndexPage(right.mutable_bytes(), BtreePageType::kLeafIndex, seventy.view());
+    WriteIndexPage(right.mutable_bytes().value(), BtreePageType::kLeafIndex, seventy.view());
   }
   {
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 28U, 4U);
+    Store32(page_one.mutable_bytes().value(), 28U, 4U);
   }
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
@@ -4583,30 +4618,30 @@ TEST(WritableCursor, SeeksOverflowIndexEntriesAndRejectsPathAliasing) {
   }
   {
     auto root = TakeValue(pager->WritePage(PageNumber{2}));
-    WriteOverflowIndexLeaf(root.mutable_bytes(), record.view(), PageNumber{3}, geometry);
+    WriteOverflowIndexLeaf(root.mutable_bytes().value(), record.view(), PageNumber{3}, geometry);
   }
   {
     auto first = TakeValue(pager->WritePage(PageNumber{3}));
-    std::ranges::fill(first.mutable_bytes(), std::byte{0});
-    Store32(first.mutable_bytes(), 0U, 4U);
+    std::ranges::fill(first.mutable_bytes().value(), std::byte{0});
+    Store32(first.mutable_bytes().value(), 0U, 4U);
     const std::size_t count =
         std::min(geometry.overflow_payload_capacity().value(), record.size().value() - local);
     std::ranges::copy(
         record.view().subspan(local, count),
-        first.mutable_bytes().begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+        first.mutable_bytes().value().begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
   }
   {
     auto second = TakeValue(pager->WritePage(PageNumber{4}));
-    std::ranges::fill(second.mutable_bytes(), std::byte{0});
+    std::ranges::fill(second.mutable_bytes().value(), std::byte{0});
     const std::size_t first_count =
         std::min(geometry.overflow_payload_capacity().value(), record.size().value() - local);
-    std::ranges::copy(
-        record.view().subspan(local + first_count),
-        second.mutable_bytes().begin() + static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
+    std::ranges::copy(record.view().subspan(local + first_count),
+                      second.mutable_bytes().value().begin() +
+                          static_cast<std::ptrdiff_t>(sizeof(std::uint32_t)));
   }
   {
     auto page_one = TakeValue(pager->WritePage(PageNumber{1}));
-    Store32(page_one.mutable_bytes(), 28U, 4U);
+    Store32(page_one.mutable_bytes().value(), 28U, 4U);
   }
   RequireStatus(pager->Commit());
 
@@ -4634,7 +4669,7 @@ TEST(WritableCursor, SeeksOverflowIndexEntriesAndRejectsPathAliasing) {
     ASSERT_TRUE(cell.first_overflow_page().has_value());
     const std::size_t pointer_offset = TakeValue(parsed.cell_offset(0)).value() +
                                        cell.encoded_size().value() - sizeof(std::uint32_t);
-    Store32(root.mutable_bytes(), pointer_offset, 2U);
+    Store32(root.mutable_bytes().value(), pointer_offset, 2U);
   }
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
@@ -4657,7 +4692,7 @@ TEST(WritableCursor, RejectsAnAncestorCycleWithoutAcquiringAnotherPin) {
   RequireStatus(pager->BeginWrite());
   {
     auto root = TakeValue(pager->WritePage(PageNumber{1}));
-    WriteTableInterior(root.mutable_bytes(), true, PageNumber{1}, PageNumber{1}, 100);
+    WriteTableInterior(root.mutable_bytes().value(), true, PageNumber{1}, PageNumber{1}, 100);
   }
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());

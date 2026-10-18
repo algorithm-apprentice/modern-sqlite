@@ -123,6 +123,17 @@ int main() try {
   if (!benign_growth.has_value() || cache->page_count() != 257U) {
     return 1;
   }
+  auto dont_write = cache->InsertExclusive(PageNumber{258}, MakePage(0x40));
+  if (!dont_write.has_value() || !dont_write->MarkDirty().has_value() ||
+      !dont_write->MarkDontWrite().has_value()) {
+    return 1;
+  }
+  Arm(0);
+  const auto blocked = dont_write->mutable_bytes();
+  Disarm();
+  if (blocked.has_value() || blocked.error().code() != ErrorCode::kOutOfMemory) {
+    return 1;
+  }
   return 0;
 } catch (...) {
   Disarm();

@@ -227,7 +227,11 @@ class BtreeWriterCore final {
       pager_->ReportWriteCoordinatorFailure(ErrorCode::kCorruption);
       return std::unexpected(Corruption("database initialization did not allocate page one"));
     }
-    const MutableByteView bytes = page->mutable_bytes();
+    auto mutable_bytes = page->mutable_bytes();
+    if (!mutable_bytes.has_value()) {
+      return std::unexpected(std::move(mutable_bytes.error()));
+    }
+    const MutableByteView bytes = *mutable_bytes;
     std::ranges::fill(bytes, std::byte{0});
     static constexpr std::array<std::byte, 16> kMagic{
         std::byte{0x53}, std::byte{0x51}, std::byte{0x4c}, std::byte{0x69},

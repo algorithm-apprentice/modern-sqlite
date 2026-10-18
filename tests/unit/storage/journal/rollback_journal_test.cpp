@@ -1289,7 +1289,8 @@ TEST(RollbackJournalLifecycle, UsesConfiguredDeleteDurabilityAndCanBeReused) {
                     })
                     .has_value());
     ASSERT_TRUE(transaction->SyncJournal().has_value());
-    ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+    ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                    .has_value());
     ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
     ASSERT_TRUE(transaction->Commit().has_value());
   }
@@ -1339,7 +1340,9 @@ TEST(RollbackJournalDurability, PublicationFailuresDoNotCreateADurableHotJournal
       const auto synced = transaction->SyncJournal();
       if (failure == FailurePoint::kNone) {
         ASSERT_TRUE(synced.has_value());
-        ASSERT_TRUE(transaction->AuthorizeDatabaseWrite(PageNumber{1}).has_value());
+        ASSERT_TRUE(
+            transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+                .has_value());
       } else {
         ASSERT_FALSE(synced.has_value());
         EXPECT_EQ(ErrorCode::kIo, synced.error().code());

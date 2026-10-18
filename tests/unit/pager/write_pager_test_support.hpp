@@ -640,7 +640,11 @@ using WritePagerFixedVfs = WritePagerMemoryVfs<kWritePagerFileCapacity>;
   if (!page.has_value()) {
     return std::unexpected(std::move(page.error()));
   }
-  const MutableByteView bytes = page->mutable_bytes();
+  auto writable = page->mutable_bytes();
+  if (!writable.has_value()) {
+    return std::unexpected(std::move(writable.error()));
+  }
+  const MutableByteView bytes = *writable;
   static constexpr std::array<std::byte, 16> kMagic{
       std::byte{0x53}, std::byte{0x51}, std::byte{0x4c}, std::byte{0x69},
       std::byte{0x74}, std::byte{0x65}, std::byte{0x20}, std::byte{0x66},

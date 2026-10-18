@@ -571,7 +571,7 @@ class TemporaryDirectory final {
     if (!writable.has_value()) {
       return false;
     }
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   return pager->Commit().has_value();
 }
@@ -586,7 +586,7 @@ class TemporaryDirectory final {
     if (!writable.has_value()) {
       return false;
     }
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto writable = pager->WritePage(PageNumber{1});
@@ -603,6 +603,21 @@ class TemporaryDirectory final {
   return pager->Commit().has_value();
 }
 
+[[nodiscard]] bool CommitMultipleJournalCohorts(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  for (std::uint32_t page_number = 1; page_number <= 5; ++page_number) {
+    auto page = pager->WritePage(PageNumber{page_number});
+    if (!page.has_value()) {
+      return false;
+    }
+    page->mutable_bytes().value()[100] = static_cast<std::byte>(0x20U + page_number);
+  }
+  return pager->Commit().has_value();
+}
+
 [[nodiscard]] bool RollbackSpilledChange(WritableEnvironment& environment) {
   std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -613,7 +628,7 @@ class TemporaryDirectory final {
     if (!writable.has_value()) {
       return false;
     }
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto writable = pager->WritePage(PageNumber{1});
@@ -640,15 +655,15 @@ class TemporaryDirectory final {
     if (!appended.has_value()) {
       return false;
     }
-    appended->mutable_bytes()[100] = std::byte{0x7f};
+    appended->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     auto header = pager->WritePage(PageNumber{1});
     if (!header.has_value()) {
       return false;
     }
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  3);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 3);
   }
   return pager->Commit().has_value();
 }
@@ -663,8 +678,8 @@ class TemporaryDirectory final {
     if (!header.has_value()) {
       return false;
     }
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  2);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 2);
   }
   return pager->TruncateImage(2).has_value() && pager->Commit().has_value();
 }
@@ -787,19 +802,19 @@ TEST(EphemeralPager, SpillsDirtyPagesDirectlyAndReadsThemBack) {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(PageNumber{1}, page->frame().page_number());
-    page->mutable_bytes()[100] = std::byte{0x11};
+    page->mutable_bytes().value()[100] = std::byte{0x11};
   }
   {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(PageNumber{2}, page->frame().page_number());
-    page->mutable_bytes()[100] = std::byte{0x22};
+    page->mutable_bytes().value()[100] = std::byte{0x22};
   }
   {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(PageNumber{3}, page->frame().page_number());
-    page->mutable_bytes()[100] = std::byte{0x33};
+    page->mutable_bytes().value()[100] = std::byte{0x33};
   }
   EXPECT_GT(temporary->write_count, 0U);
   EXPECT_EQ(0U, temporary->sync_count);
@@ -826,7 +841,7 @@ TEST(EphemeralPager, PropagatesSpilledPageReadFailureAndRemainsRetryable) {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(PageNumber{expected}, page->frame().page_number());
-    page->mutable_bytes()[100] = static_cast<std::byte>(expected);
+    page->mutable_bytes().value()[100] = static_cast<std::byte>(expected);
   }
   temporary->failing_read_attempt = temporary->read_attempt_count + 1U;
 
@@ -851,16 +866,16 @@ TEST(EphemeralPager, PromotesAndPermutesPagesWithoutJournalCapture) {
   {
     auto allocated = pager->AllocatePage();
     ASSERT_TRUE(allocated.has_value());
-    allocated->mutable_bytes()[100] = std::byte{0x11};
+    allocated->mutable_bytes().value()[100] = std::byte{0x11};
   }
   auto read = pager->ReadPage(PageNumber{1});
   ASSERT_TRUE(read.has_value());
   auto promoted = pager->WritePage(std::move(*read));
   ASSERT_TRUE(promoted.has_value());
-  promoted->mutable_bytes()[100] = std::byte{0x22};
+  promoted->mutable_bytes().value()[100] = std::byte{0x22};
   auto second = pager->AllocatePage();
   ASSERT_TRUE(second.has_value());
-  second->mutable_bytes()[100] = std::byte{0x33};
+  second->mutable_bytes().value()[100] = std::byte{0x33};
 
   std::array<PageNumberRekey, 2> rekeys{
       PageNumberRekey{
@@ -891,12 +906,12 @@ TEST(EphemeralPager, PoisonsTheWriteGenerationAfterDirectIoFailure) {
   {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x11};
+    page->mutable_bytes().value()[100] = std::byte{0x11};
   }
   {
     auto page = pager->AllocatePage();
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x22};
+    page->mutable_bytes().value()[100] = std::byte{0x22};
   }
   temporary->failing_write_attempt = temporary->write_attempt_count + 1U;
 
@@ -953,7 +968,7 @@ TEST(WritePager, FailedCommitKeepsTheWriteCoordinatorClaimLatched) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   const std::uint64_t transaction_generation = pager->write_transaction_generation();
   environment.main->failing_lock = DatabaseLock::kExclusive;
@@ -1002,7 +1017,7 @@ TEST(WritePager, CoordinatorFailurePoisonsTheGenerationAndRollsBackExactly) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x5a};
+    writable->mutable_bytes().value()[100] = std::byte{0x5a};
   }
   constexpr ErrorCode failure_code = ErrorCode::kBusy;
   pager->ReportWriteCoordinatorFailure(failure_code);
@@ -1092,7 +1107,7 @@ TEST(WritePager, GrantsExclusiveMutableAccessOnlyAfterJournalCapture) {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
     EXPECT_TRUE(environment.JournalPresent());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
     const auto aliased_read = pager->ReadPage(PageNumber{2});
     ASSERT_FALSE(aliased_read.has_value());
     EXPECT_EQ(ErrorCode::kBusy, aliased_read.error().code());
@@ -1114,7 +1129,7 @@ TEST(WritePager, CommitsJournalBeforeDatabaseAndDatabaseBeforeJournalDeletion) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   ASSERT_TRUE(pager->Commit().has_value());
@@ -1145,7 +1160,7 @@ TEST(WritePager, RollsBackToASavepointWithoutEndingTheWriteTransaction) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
@@ -1167,7 +1182,7 @@ TEST(WritePager, SpillsUnderPressureAndFullRollbackRestoresTheDatabase) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto writable = pager->WritePage(PageNumber{1});
@@ -1182,6 +1197,119 @@ TEST(WritePager, SpillsUnderPressureAndFullRollbackRestoresTheDatabase) {
   EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
   ASSERT_TRUE(pager->Rollback().has_value());
   EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
+}
+
+TEST(WritePager, SpillsADurableOlderPageWithoutSynchronizingANewerCohort) {
+  WritableEnvironment environment{MakeDatabaseImage(5)};
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto dirty = [&pager](PageNumber page_number, std::byte marker) {
+    auto page = pager->WritePage(page_number);
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = marker;
+  };
+
+  dirty(PageNumber{1}, std::byte{0x11});
+  dirty(PageNumber{2}, std::byte{0x22});
+  dirty(PageNumber{3}, std::byte{0x33});
+  dirty(PageNumber{4}, std::byte{0x44});
+  const std::size_t syncs_after_first_spill = environment.JournalFile()->sync_count;
+  ASSERT_GT(syncs_after_first_spill, 0U);
+
+  dirty(PageNumber{5}, std::byte{0x55});
+
+  EXPECT_EQ(syncs_after_first_spill, environment.JournalFile()->sync_count);
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, DontWriteRevokesAccessAndSkipsTheDatabaseWrite) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto page = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+    EXPECT_FALSE(page->writable());
+    EXPECT_FALSE(page->mutable_bytes().has_value());
+    const std::array<PageNumberRekey, 1> same_page{
+        PageNumberRekey{.pin = &*page, .final_page = PageNumber{2}},
+    };
+    const auto moved = pager->PermutePageNumbers(same_page);
+    ASSERT_FALSE(moved.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, moved.error().code());
+  }
+
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
+  EXPECT_EQ(1U, environment.main->write_count);
+}
+
+TEST(WritePager, ReauthorizesADontWritePinBeforeLaterMutation) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto page = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(page.has_value());
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+    ASSERT_TRUE(pager->WritePage(*page).has_value());
+    EXPECT_TRUE(page->writable());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+  }
+
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
+  EXPECT_EQ(2U, environment.main->write_count);
+}
+
+TEST(WritePager, SavepointsDisableDontWrite) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto page = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(page.has_value());
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+    EXPECT_TRUE(page->writable());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+  }
+  ASSERT_TRUE(pager->ReleaseSavepoint(*savepoint).has_value());
+
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
+}
+
+TEST(WritePager, SavepointRollbackSynchronizesTheMainJournalFirst) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto page = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+  }
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  EXPECT_EQ(0U, environment.JournalFile()->sync_count);
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+  EXPECT_EQ(2U, environment.JournalFile()->sync_count);
+  ASSERT_TRUE(pager->Rollback().has_value());
 }
 
 TEST(WritePager, AllocatesZeroFilledPagesAndRollbackRemovesThem) {
@@ -1213,8 +1341,8 @@ TEST(WritePager, MakesTruncationTerminalAndDurableBeforePhysicalCleanup) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  2);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 2);
   }
   auto retained_result = pager->ReadPage(PageNumber{2});
   ASSERT_TRUE(retained_result.has_value());
@@ -1245,7 +1373,7 @@ TEST(WritePager, ReopensAndRecoversAHotJournalBeforePublishingTheSnapshot) {
     {
       auto writable = crashed->WritePage(PageNumber{2});
       ASSERT_TRUE(writable.has_value());
-      writable->mutable_bytes()[100] = std::byte{0x7f};
+      writable->mutable_bytes().value()[100] = std::byte{0x7f};
     }
     {
       const auto writable = crashed->WritePage(PageNumber{1});
@@ -1281,7 +1409,7 @@ TEST(WritePager, RetainsHotJournalWhenTheRecoveryHeaderReadIsShort) {
     {
       auto writable = crashed->WritePage(PageNumber{2});
       ASSERT_TRUE(writable.has_value());
-      writable->mutable_bytes()[100] = std::byte{0x7f};
+      writable->mutable_bytes().value()[100] = std::byte{0x7f};
     }
     {
       const auto writable = crashed->WritePage(PageNumber{1});
@@ -1329,7 +1457,7 @@ TEST(WritePager, UpdatesTheChangeCounterOnlyOnceAcrossExclusiveLockRetry) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.main->failing_lock = DatabaseLock::kExclusive;
   environment.main->lock_failures_remaining = 1;
@@ -1356,7 +1484,7 @@ TEST(WritePager, RollsBackAfterAPartiallyFailedDatabaseWrite) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    std::ranges::fill(writable->mutable_bytes(), std::byte{0x7f});
+    std::ranges::fill(writable->mutable_bytes().value(), std::byte{0x7f});
   }
   environment.main->failing_write_attempt = environment.main->write_attempt_count + 1U;
   environment.main->partial_write_before_failure = true;
@@ -1382,7 +1510,7 @@ TEST(WritePager, SavepointRollbackShrinksGrowthThatWasAlreadySpilled) {
   {
     auto appended = pager->AllocatePage();
     ASSERT_TRUE(appended.has_value());
-    appended->mutable_bytes()[100] = std::byte{0x7f};
+    appended->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto trigger = pager->WritePage(PageNumber{1});
@@ -1411,7 +1539,7 @@ TEST(WritePager, WriterFinishedAllowsOnlyTheMatchingCleanupRetry) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.main->failing_unlock = DatabaseLock::kShared;
   environment.main->unlock_failures_remaining = 1;
@@ -1441,7 +1569,7 @@ TEST(WritePager, CacheOnlyRollbackPerformsNoDatabaseIo) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   ASSERT_TRUE(pager->Rollback().has_value());
@@ -1461,14 +1589,14 @@ TEST(WritePager, CacheOnlySavepointRollbackRestoresTheCachedImageWithoutDatabase
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x33};
+    writable->mutable_bytes().value()[100] = std::byte{0x33};
   }
   const auto savepoint = pager->CreateSavepoint();
   ASSERT_TRUE(savepoint.has_value());
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
@@ -1540,7 +1668,7 @@ TEST(WritePager, PromotesTheSoleReadPinWithoutEvictionOrReread) {
     ASSERT_TRUE(write.has_value());
     EXPECT_EQ(frame, &write->frame());
     EXPECT_EQ(reads, environment.main->read_count);
-    write->mutable_bytes()[100] = std::byte{0x6a};
+    write->mutable_bytes().value()[100] = std::byte{0x6a};
   }
   ASSERT_TRUE(pager->Rollback().has_value());
 }
@@ -1721,8 +1849,8 @@ TEST(WritePager, PermutesCapturedDirtyPageNumbersAndSavepointRestoresThem) {
     auto third = pager->WritePage(PageNumber{3});
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(third.has_value());
-    second->mutable_bytes()[100] = std::byte{0x22};
-    third->mutable_bytes()[100] = std::byte{0x33};
+    second->mutable_bytes().value()[100] = std::byte{0x22};
+    third->mutable_bytes().value()[100] = std::byte{0x33};
     std::array<PageNumberRekey, 2> rekeys{
         PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
         PageNumberRekey{.pin = &*third, .final_page = PageNumber{2}},
@@ -1769,9 +1897,9 @@ TEST(WritePager, PermutesAThreePageCycleWithoutExposingTheLockingSentinel) {
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(third.has_value());
     ASSERT_TRUE(fourth.has_value());
-    second->mutable_bytes()[100] = std::byte{0x22};
-    third->mutable_bytes()[100] = std::byte{0x33};
-    fourth->mutable_bytes()[100] = std::byte{0x44};
+    second->mutable_bytes().value()[100] = std::byte{0x22};
+    third->mutable_bytes().value()[100] = std::byte{0x33};
+    fourth->mutable_bytes().value()[100] = std::byte{0x44};
     std::array<PageNumberRekey, 3> rekeys{
         PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
         PageNumberRekey{.pin = &*third, .final_page = PageNumber{4}},
@@ -1828,7 +1956,7 @@ TEST(WritePager, JournalSyncFailurePermitsOnlyRollbackAndDoesNotWriteTheDatabase
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.JournalFile()->sync_failures_remaining = 1;
 
@@ -1854,7 +1982,7 @@ TEST(WritePager, DatabaseSyncFailureRollsBackEveryWrittenPage) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.main->sync_failures_remaining = 1;
 
@@ -1877,7 +2005,7 @@ TEST(WritePager, CommitJournalDeletionFailureEntersPersistentError) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.state->failing_delete = std::string{kCanonicalPath} + "-journal";
   environment.state->delete_failures_remaining = 1;
@@ -1902,7 +2030,7 @@ TEST(WritePager, RollbackJournalDeletionFailureEntersPersistentError) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x7f};
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.state->failing_delete = std::string{kCanonicalPath} + "-journal";
   environment.state->delete_failures_remaining = 1;
@@ -1924,8 +2052,8 @@ TEST(WritePager, PostCommitTruncateFailureRetriesOnlyCleanup) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  2);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 2);
   }
   ASSERT_TRUE(pager->TruncateImage(2).has_value());
   environment.main->truncate_failures_remaining = 1;
@@ -1954,7 +2082,7 @@ TEST(WritePager, HotRecoveryContentionReleasesSharedLockBeforeRetry) {
     {
       auto writable = crashed->WritePage(PageNumber{2});
       ASSERT_TRUE(writable.has_value());
-      writable->mutable_bytes()[100] = std::byte{0x7f};
+      writable->mutable_bytes().value()[100] = std::byte{0x7f};
     }
     {
       const auto writable = crashed->WritePage(PageNumber{1});
@@ -1991,18 +2119,69 @@ TEST(WritePager, RepeatedLargeSectorWritesDoNotReloadProtectedNeighbors) {
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[100] = std::byte{0x33};
+    writable->mutable_bytes().value()[100] = std::byte{0x33};
   }
   const std::size_t reads_after_capture = environment.main->read_count;
 
   {
     auto writable = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(writable.has_value());
-    writable->mutable_bytes()[101] = std::byte{0x44};
+    writable->mutable_bytes().value()[101] = std::byte{0x44};
   }
 
   EXPECT_EQ(reads_after_capture, environment.main->read_count);
   ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, LargeSectorRescanAcceptsExistingWritablePeerPins) {
+  WritableEnvironment environment{MakeDatabaseImage(8)};
+  environment.main->properties.sector_size = ByteCount{4096};
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 8);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto second = pager->WritePage(PageNumber{2});
+    auto third = pager->WritePage(PageNumber{3});
+    auto fourth = pager->WritePage(PageNumber{4});
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    ASSERT_TRUE(fourth.has_value());
+    second->mutable_bytes().value()[100] = std::byte{0x22};
+    third->mutable_bytes().value()[100] = std::byte{0x33};
+    fourth->mutable_bytes().value()[100] = std::byte{0x44};
+    const std::array<PageNumberRekey, 3> cycle{
+        PageNumberRekey{.pin = &*second, .final_page = PageNumber{3}},
+        PageNumberRekey{.pin = &*third, .final_page = PageNumber{4}},
+        PageNumberRekey{.pin = &*fourth, .final_page = PageNumber{2}},
+    };
+
+    ASSERT_TRUE(pager->PermutePageNumbers(cycle).has_value());
+
+    EXPECT_EQ(PageNumber{3}, second->frame().page_number());
+    EXPECT_EQ(PageNumber{4}, third->frame().page_number());
+    EXPECT_EQ(PageNumber{2}, fourth->frame().page_number());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, LargeSectorCaptureDirtiesEveryProtectedPeer) {
+  WritableEnvironment environment{MakeDatabaseImage(8)};
+  environment.main->properties.sector_size = ByteCount{4096};
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 8);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto writable = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(writable.has_value());
+    writable->mutable_bytes().value()[100] = std::byte{0x7f};
+  }
+
+  ASSERT_TRUE(pager->Commit().has_value());
+
+  EXPECT_EQ(8U, environment.main->write_count);
+  EXPECT_EQ(2U, environment.JournalFile()->sync_count);
 }
 
 TEST(WritePager, CommitsLogicalGrowthWhenPageOneMatchesTheNewImageSize) {
@@ -2014,13 +2193,13 @@ TEST(WritePager, CommitsLogicalGrowthWhenPageOneMatchesTheNewImageSize) {
   {
     auto appended = pager->AllocatePage();
     ASSERT_TRUE(appended.has_value());
-    appended->mutable_bytes()[100] = std::byte{0x7f};
+    appended->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  3);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 3);
   }
 
   ASSERT_TRUE(pager->Commit().has_value());
@@ -2047,7 +2226,7 @@ TEST(WritePager, SpilledGrowthRollbackRestoresTheOriginalPhysicalImage) {
   {
     auto appended = pager->AllocatePage();
     ASSERT_TRUE(appended.has_value());
-    appended->mutable_bytes()[100] = std::byte{0x7f};
+    appended->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto header = pager->WritePage(PageNumber{1});
@@ -2075,8 +2254,8 @@ TEST(WritePager, TerminalShrinkRollbackRestoresTheOriginalImage) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  2);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 2);
   }
   ASSERT_TRUE(pager->TruncateImage(2).has_value());
 
@@ -2100,8 +2279,8 @@ TEST(WritePager, FinalImageRejectsEveryOperationExceptCommitOrFullRollback) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  2);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 2);
   }
   ASSERT_TRUE(pager->TruncateImage(2).has_value());
 
@@ -2192,21 +2371,21 @@ TEST(WritePager, NestedSavepointRollbackRestoresEachCapturedGeneration) {
   {
     auto page = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x11};
+    page->mutable_bytes().value()[100] = std::byte{0x11};
   }
   const auto outer = pager->CreateSavepoint();
   ASSERT_TRUE(outer.has_value());
   {
     auto page = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x22};
+    page->mutable_bytes().value()[100] = std::byte{0x22};
   }
   const auto inner = pager->CreateSavepoint();
   ASSERT_TRUE(inner.has_value());
   {
     auto page = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x33};
+    page->mutable_bytes().value()[100] = std::byte{0x33};
   }
 
   ASSERT_TRUE(pager->RollbackToSavepoint(*inner).has_value());
@@ -2234,7 +2413,7 @@ TEST(WritePager, SavepointRollbackReappliesOneChangeCounterUpdateAfterCommitRetr
   {
     auto page = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   const auto savepoint = pager->CreateSavepoint();
   ASSERT_TRUE(savepoint.has_value());
@@ -2258,7 +2437,7 @@ TEST(WritePager, RollbackCleanupFailureRetriesOnlyTheLockDowngrade) {
   {
     auto page = pager->WritePage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   environment.main->failing_unlock = DatabaseLock::kShared;
   environment.main->unlock_failures_remaining = 1;
@@ -2292,7 +2471,7 @@ TEST(WritePager, CreatesAndCommitsAValidPageOneFromAnEmptyDatabase) {
     ASSERT_TRUE(page_one.has_value());
     ASSERT_EQ(PageNumber{1}, page_one->frame().page_number());
     const std::vector<std::byte> image = MakeDatabaseImage(1);
-    std::ranges::copy(image, page_one->mutable_bytes().begin());
+    std::ranges::copy(image, page_one->mutable_bytes().value().begin());
   }
 
   ASSERT_TRUE(pager->Commit().has_value());
@@ -2379,8 +2558,8 @@ TEST(WritePager, CommitRejectsPageSizeChangesOutsideTheActiveGeometry) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    header->mutable_bytes()[16] = std::byte{0x04};
-    header->mutable_bytes()[17] = std::byte{0x00};
+    header->mutable_bytes().value()[16] = std::byte{0x04};
+    header->mutable_bytes().value()[17] = std::byte{0x00};
   }
 
   const auto committed = pager->Commit();
@@ -2401,15 +2580,15 @@ TEST(WritePager, SavepointRollbackRejectsAnIncompatibleRestoredPageSize) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    header->mutable_bytes()[16] = std::byte{0x04};
-    header->mutable_bytes()[17] = std::byte{0x00};
+    header->mutable_bytes().value()[16] = std::byte{0x04};
+    header->mutable_bytes().value()[17] = std::byte{0x00};
   }
   const auto savepoint = pager->CreateSavepoint();
   ASSERT_TRUE(savepoint.has_value());
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    header->mutable_bytes()[68] = std::byte{0x7f};
+    header->mutable_bytes().value()[68] = std::byte{0x7f};
   }
 
   const auto restored = pager->RollbackToSavepoint(*savepoint);
@@ -2433,8 +2612,8 @@ TEST(WritePager, TruncateImageRejectsMissingOrMismatchedPageOneAndZeroSize) {
   {
     auto header = pager->WritePage(PageNumber{1});
     ASSERT_TRUE(header.has_value());
-    StoreBigEndian<std::uint32_t>(std::span<std::byte, 4>{header->mutable_bytes().data() + 28, 4},
-                                  1);
+    StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 1);
   }
   const auto mismatch = pager->TruncateImage(2);
   ASSERT_FALSE(mismatch.has_value());
@@ -2473,7 +2652,7 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
     {
       auto page = pager->WritePage(PageNumber{2});
       ASSERT_TRUE(page.has_value());
-      page->mutable_bytes()[100] = std::byte{0x44};
+      page->mutable_bytes().value()[100] = std::byte{0x44};
     }
     ASSERT_TRUE(pager->Commit().has_value());
     ASSERT_TRUE(pager->EndRead().has_value());
@@ -2514,7 +2693,7 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
     {
       auto page = crashed->WritePage(PageNumber{2});
       ASSERT_TRUE(page.has_value());
-      page->mutable_bytes()[100] = std::byte{0x7f};
+      page->mutable_bytes().value()[100] = std::byte{0x7f};
     }
     {
       const auto page = crashed->WritePage(PageNumber{1});
@@ -2580,7 +2759,7 @@ TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
       {
         auto page = (*crashed)->WritePage(PageNumber{2});
         ASSERT_TRUE(page.has_value());
-        page->mutable_bytes()[100] = std::byte{0x7f};
+        page->mutable_bytes().value()[100] = std::byte{0x7f};
       }
       {
         const auto header = (*crashed)->WritePage(PageNumber{1});
@@ -2716,6 +2895,31 @@ TEST(WritePager, EverySpilledCommitCrashCutRecoversTheOldOrCommittedImage) {
     environment.state->fail_after_mutation = cut;
 
     static_cast<void>(CommitSpilledChange(environment));
+
+    ASSERT_TRUE(environment.state->mutation_cut_triggered);
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    ASSERT_TRUE(RecoverWritableImage(environment));
+    EXPECT_TRUE(environment.main->bytes == original || environment.main->bytes == committed);
+  }
+}
+
+TEST(WritePager, EveryMultiCohortCommitCrashCutRecoversTheOldOrCommittedImage) {
+  WritableEnvironment baseline{MakeDatabaseImage(5)};
+  baseline.main->writes_are_durable = true;
+  ASSERT_TRUE(CommitMultipleJournalCohorts(baseline));
+  const std::vector<std::byte> committed = baseline.main->bytes;
+  const std::size_t mutation_count = baseline.state->mutation_count;
+  ASSERT_GT(mutation_count, 0U);
+
+  const std::vector<std::byte> original = MakeDatabaseImage(5);
+  for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
+    SCOPED_TRACE(cut);
+    WritableEnvironment environment{MakeDatabaseImage(5)};
+    environment.main->writes_are_durable = true;
+    environment.state->fail_after_mutation = cut;
+
+    static_cast<void>(CommitMultipleJournalCohorts(environment));
 
     ASSERT_TRUE(environment.state->mutation_cut_triggered);
     environment.Crash();

@@ -140,7 +140,8 @@ class WritePagePin final {
   [[nodiscard]] const PageFrame& frame() const noexcept { return pin_.frame(); }
   [[nodiscard]] const PageFrame* operator->() const noexcept { return &frame(); }
   [[nodiscard]] const PageFrame& operator*() const noexcept { return frame(); }
-  [[nodiscard]] MutableByteView mutable_bytes() noexcept;
+  [[nodiscard]] Result<MutableByteView> mutable_bytes() noexcept;
+  [[nodiscard]] bool writable() const noexcept { return !pin_.dont_write(); }
   [[nodiscard]] bool sole() const noexcept { return pin_.sole(); }
 
  private:
@@ -213,6 +214,8 @@ class Pager final {
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Result<WritePagePin> WritePage(PageNumber page_number);
   [[nodiscard]] Result<WritePagePin> WritePage(ReadPagePin&& pin);
+  [[nodiscard]] Status WritePage(WritePagePin& pin);
+  [[nodiscard]] Status MarkPageDontWrite(WritePagePin& pin);
   [[nodiscard]] Status PermutePageNumbers(std::span<const PageNumberRekey> pages);
   [[nodiscard]] Result<WritePagePin> AllocatePage();
   [[nodiscard]] Status TruncateImage(std::uint32_t page_count);
@@ -260,11 +263,12 @@ class Pager final {
   [[nodiscard]] Result<PageCache::Pin> AcquirePage(PageNumber page_number, bool exclusive);
   [[nodiscard]] Status MaintainCachePressure();
   [[nodiscard]] Status EnsureJournalTransaction();
-  [[nodiscard]] Status PreparePageWrite(PageNumber page_number, const PageCache::Pin& target,
+  [[nodiscard]] Status PreparePageWrite(PageNumber page_number, PageCache::Pin& target,
                                         std::uint32_t logical_page_count);
-  [[nodiscard]] Status CaptureSector(PageNumber page_number, const PageCache::Pin& target,
+  [[nodiscard]] Status CaptureSector(PageNumber page_number, PageCache::Pin& target,
                                      std::uint32_t logical_page_count);
   [[nodiscard]] Status EnsureExclusiveLock();
+  [[nodiscard]] Status SyncJournalForWriteback();
   [[nodiscard]] Status SpillPage(PageNumber page_number);
   [[nodiscard]] Status UpdateChangeCounter();
   [[nodiscard]] Status FlushDirtyPages();

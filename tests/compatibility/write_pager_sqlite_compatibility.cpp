@@ -172,7 +172,7 @@ void ModifyWithModernSqlite(const std::filesystem::path& path) {
       throw std::runtime_error(std::string{page.error().message()});
     }
     modern_sqlite::StoreBigEndian<std::uint32_t>(
-        std::span<std::byte, sizeof(std::uint32_t)>{page->mutable_bytes().data() + 68,
+        std::span<std::byte, sizeof(std::uint32_t)>{page->mutable_bytes().value().data() + 68,
                                                     sizeof(std::uint32_t)},
         kApplicationId);
   }
