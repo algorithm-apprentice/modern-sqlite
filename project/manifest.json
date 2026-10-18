@@ -29,6 +29,8 @@
     "autonomousExecution": true,
     "mergeAfterRequiredGates": true,
     "canonicalPatternAuditRequired": true,
+    "sqliteMechanismBaselineRequired": true,
+    "implementedMechanismAuditRequiredBeforeFeatureExpansion": true,
     "strictStandardCpp": true,
     "designReviewRequired": true,
     "codeReviewRequired": true,

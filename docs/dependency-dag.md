@@ -199,6 +199,13 @@ ordinary virtual NULL rows.
 ADR-0110 assigns aggregates to the nearest referenced query scope, registers
 outer-owned work in that query's canonical phase-ordered program, and lets
 inline child frames read finalized owner registers without copied state.
+ADR-0111 then pauses further feature expansion for one closed implemented-
+engine mechanism inventory across nodes 1 through 43. Every stateful or
+performance-sensitive path must be reference-faithful, an architectural
+translation of the same mechanism, or an accepted measured alternative.
+Unresolved and repair-required entries are corrected before IN,
+FROM/coroutine, CTE, view, constraint, trigger, window, or other new feature
+slices resume.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

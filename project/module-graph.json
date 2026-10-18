@@ -363,7 +363,10 @@
       "layer": "sql",
       "dependsOn": ["implement-index-planning", "implement-dml-ddl"],
       "deliverable": "Joins, sorting, aggregates, subqueries, CTEs, views, constraints, triggers, and remaining core SQL in reviewed slices.",
-      "acceptance": ["Each feature slice adds its own differential, malformed, and performance tests."],
+      "acceptance": [
+        "Each feature slice adds its own differential, malformed, and performance tests.",
+        "Before feature expansion resumes, every implemented mechanism is classified under ADR-0111 with no unresolved or repair-required entry."
+      ],
       "performanceSensitive": true
     },
     "implement-concurrency-locking": {

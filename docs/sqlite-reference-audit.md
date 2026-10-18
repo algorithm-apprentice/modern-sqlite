@@ -5,15 +5,16 @@
   `cb547ab3e931c7766e24834af5ef6c4578863e3d`, Fossil
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-16.
-- Status: Initial whole-implemented-engine review complete; focused
-  reproductions and corrections remain in progress.
-- Follow-up: A5, D1, D3, D2, A1, A2, R1, and B1 are corrected and verified by
-  merged PRs #205, #204, #206, #207, #208, #209, #210, and #211. ADR-0102 separately
-  improves verification efficiency without changing these corrections or
-  required gates. ADR-0103 corrects B2's writable point-read boundary in the
-  current slice; other findings remain open unless their own evidence states
-  otherwise.
-- Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053.
+- Status: The bounded audit and every named finding below have their recorded
+  corrections. ADR-0111 now requires a closed implemented-mechanism inventory
+  and repair of every unresolved or materially divergent entry before feature
+  expansion resumes.
+- Follow-up: Refresh this document from merged main after PR #220, account for
+  every project-owned production translation unit, transitive private header,
+  generated-source input, and public contract, then execute repairs
+  sequentially from lower dependencies upward.
+- Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053,
+  ADR-0111.
 
 ## Scope and interpretation
 

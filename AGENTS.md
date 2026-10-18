@@ -125,6 +125,16 @@ format, malformed-input, failure-injection, or ownership tests to a later
 
 - Use the pinned SQLite snapshot as the format, behavior, and performance
   oracle.
+- Before implementing a stateful or performance-sensitive mechanism, map the
+  complete relevant SQLite algorithm, state owners, callers, cleanup, and
+  prerequisite helpers from the local pinned source.
+- The first compatible version preserves SQLite's algorithm, state machine,
+  ordering, boundedness, ownership intent, and failure cleanup through the
+  accepted Modern C++ types and dependency DAG. A different mechanism requires
+  an accepted ADR plus matched correctness, lifecycle, fixed-work, allocation,
+  and timing evidence.
+- Review validates a completed source mapping and implementation; it is not the
+  primary oracle for discovering SQLite behavior.
 - Add independent golden vectors for persistent encoders and decoders.
 - Verify both interoperability directions: SQLite writes/Modern reads and
   Modern writes/SQLite reads.
