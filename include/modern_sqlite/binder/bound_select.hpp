@@ -457,6 +457,7 @@ struct BoundGroupingTerm {
 
 struct BoundAggregateProgram {
   std::vector<BoundAggregateInvocationId> invocations{};
+  std::size_t having_invocation_begin = 0;
   std::vector<BoundGroupingTerm> group_by{};
   std::optional<BoundExpressionId> having{};
   std::vector<BoundExpressionId> source_leaves{};
