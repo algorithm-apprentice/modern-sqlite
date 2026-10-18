@@ -717,6 +717,7 @@ Result<PageCache::Entry*> PageCache::AllocateEntry() {
     auto entry = std::make_unique<Entry>(PageNumber{0}, std::move(bytes));
     Entry* const result = entry.get();
     entries_.push_back(std::move(entry));
+    peak_allocated_slot_count_ = std::max(peak_allocated_slot_count_, entries_.size());
     return result;
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());

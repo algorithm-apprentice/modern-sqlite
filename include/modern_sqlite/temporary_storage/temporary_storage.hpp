@@ -120,6 +120,11 @@ class StatementTemporaryStorage final {
   [[nodiscard]] ByteCount overhead_bytes() const noexcept;
   [[nodiscard]] std::size_t live_file_count() const noexcept;
   [[nodiscard]] std::size_t peak_live_file_count() const noexcept;
+  [[nodiscard]] std::size_t relation_cache_capacity_pages() const noexcept;
+  [[nodiscard]] std::size_t relation_cache_page_count() const noexcept;
+  [[nodiscard]] std::size_t relation_cache_allocated_pages() const noexcept;
+  [[nodiscard]] std::size_t relation_cache_peak_allocated_pages() const noexcept;
+  [[nodiscard]] std::size_t relation_cache_pin_count() const noexcept;
 
   [[nodiscard]] Result<TemporaryMemoryAccount> RegisterMemoryOwner();
   // The target is borrowed and must outlive the returned account.

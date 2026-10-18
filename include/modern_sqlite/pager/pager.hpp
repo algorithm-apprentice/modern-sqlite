@@ -229,6 +229,18 @@ class Pager final {
   [[nodiscard]] std::size_t cache_capacity_pages() const noexcept {
     return options_.cache_capacity_pages;
   }
+  [[nodiscard]] std::size_t cache_page_count() const noexcept {
+    return cache_ == nullptr ? 0U : cache_->page_count();
+  }
+  [[nodiscard]] std::size_t cache_allocated_page_count() const noexcept {
+    return cache_ == nullptr ? 0U : cache_->allocated_slot_count();
+  }
+  [[nodiscard]] std::size_t cache_peak_allocated_page_count() const noexcept {
+    return cache_ == nullptr ? 0U : cache_->peak_allocated_slot_count();
+  }
+  [[nodiscard]] std::size_t cache_pin_count() const noexcept {
+    return cache_ == nullptr ? 0U : cache_->pin_count();
+  }
   [[nodiscard]] bool uses_vfs(const Vfs& vfs) const noexcept { return vfs_ == &vfs; }
   [[nodiscard]] std::uint32_t page_count() const noexcept { return current_page_count_; }
   [[nodiscard]] std::uint64_t data_version() const noexcept { return data_version_; }
