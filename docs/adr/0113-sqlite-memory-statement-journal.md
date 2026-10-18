@@ -346,6 +346,49 @@ assertions.
 - Pager durable-cohort authorization, `NEED_SYNC`, and `DONT_WRITE`; and
 - WAL savepoint storage.
 
+## Implementation evidence
+
+Implementation commits `17fbd1669f7eaf35f3f1c420306c74ab365ed514`
+and `362c4f32dc7f78125c1a92bef83965b74baffce5` add the single
+`StatementJournal` owner, the 64 KiB bounded-memory default, immediate-file
+and memory-only modes, atomic spill publication, logical rewind, iterative
+chunk teardown, backend-independent playback, and `WriteSession` temp-store
+translation. The frozen version-1 runner and baseline remain unchanged; the
+version-2 runner validates both current evidence and the historical
+version-1 artifact set independently.
+
+Focused coverage proves:
+
+- retention through the exact threshold and spill on the first byte beyond
+  it;
+- zero-threshold immediate file behavior and multi-chunk memory-only reads;
+- spill open, retained-buffer copy, and triggering-write failures leaving
+  only provisional output;
+- in-memory and spilled logical rewind, prefix overwrite, and stale-tail
+  exclusion;
+- positive-buffer and linked-chunk OOM rollback/reuse;
+- memory/file `WriteSession` propagation across a database-sized savepoint
+  journal; and
+- zero subjournal VFS opens, writes, and bytes in both version-2 profiles.
+
+`benchmarks/write-baseline-v2` was generated from exact source revision
+`362c4f32dc7f78125c1a92bef83965b74baffce5`, tree
+`bdf9697336ac4b19881c619011fbe75b99287868`. The matched-durable guard passes.
+For `insert-batch-explicit`, the historical version-1 matched result was
+7.058144x wall and 7.342122x CPU with one subjournal open, 74,481 writes, and
+305,372,100 written bytes. Version 2 records 5.556505x wall and 5.779553x CPU
+with zero subjournal opens, writes, and bytes. The version-2 engine-default
+profile truthfully reports file mode and also retains each statement below
+the 64 KiB spill threshold; matched-durable truthfully reports memory mode.
+
+Fast-local passes 1,401 batched and 91 isolated tests. Isolated Debug,
+Release, and ASan/UBSan each pass 1,533 tests; instrumentation passes 1,550.
+GCC 16 Debug and Release each pass 1,553 tests. Twenty-seven shared checks
+cover 121 configured instances, 58 native compatibility/performance
+contracts pass, and four 20,000-run fuzz domains complete with seed 102.
+Full production clang-tidy, pinned formatting, graph, engineering discipline,
+historical version-1 validation, and current version-2 validation pass.
+
 ## References
 
 - ADR-0040: Journal Contracts and Durable Ordering

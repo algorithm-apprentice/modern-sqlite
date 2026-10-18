@@ -1,0 +1,4649 @@
+{
+  "aggregate": {
+    "path": "aggregate.json",
+    "sha256": "c048daae0edd5711db1253add12ab22f8751f153648806b03920e9c698ac1b3d",
+    "size_bytes": 60638
+  },
+  "binaries": {
+    "diagnostic": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": true,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "362c4f32dc7f78125c1a92bef83965b74baffce5",
+          "tree": "bdf9697336ac4b19881c619011fbe75b99287868"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "path": "build/benchmark/modern_sqlite_write_diagnostics",
+      "sha256": "a3182553ecb8c9f8cb31268e3d59777bed8354fd24d59015de1efdca15a29d9a",
+      "size_bytes": 5791280
+    },
+    "timing": {
+      "identity": {
+        "build": {
+          "architecture": "arm64",
+          "build_type": "Release",
+          "compiler": {
+            "id": "clang",
+            "version": "21.0.0 (clang-2100.3.34.2)"
+          },
+          "coverage": false,
+          "cplusplus": 202302,
+          "instrumentation": false,
+          "sanitizers": false,
+          "standard_library": {
+            "id": "libc++",
+            "version": "220106"
+          }
+        },
+        "mode": "identity",
+        "schema_version": 1,
+        "source": {
+          "revision": "362c4f32dc7f78125c1a92bef83965b74baffce5",
+          "tree": "bdf9697336ac4b19881c619011fbe75b99287868"
+        },
+        "sqlite": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "DQS=3",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SCHEMA=10000000",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=0",
+            "MUTEX_OMIT",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=0"
+          ],
+          "source_id": "2026-10-02 20:18:07 65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+          "version": "3.54.0"
+        }
+      },
+      "path": "build/benchmark/modern_sqlite_write_benchmark",
+      "sha256": "a04de6368e1f6a1ba71df6c622ccf8b5b7438811a03aba4aa9797480b5e25a74",
+      "size_bytes": 5794592
+    }
+  },
+  "diagnostic_runs": [
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 0,
+      "process": {
+        "elapsed_ns": 256678500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/000-engine-default-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/000-engine-default-create-table-implicit-modern.json",
+        "sha256": "6e808246165c8f9b4be3e7029bcefae55b5a507abe670f58013acfc09e327a87",
+        "size_bytes": 3782
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 1,
+      "process": {
+        "elapsed_ns": 150128750,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/001-engine-default-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/001-engine-default-create-table-implicit-sqlite.json",
+        "sha256": "5f36032b01c1f430869836ee3dcee2d88117ce90530e929242f0632934094987",
+        "size_bytes": 2748
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 2,
+      "process": {
+        "elapsed_ns": 253224000,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/002-engine-default-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/002-engine-default-insert-point-implicit-modern.json",
+        "sha256": "b6fe159b961059970fff819ae17c6e42395d231f61fd44125e0732e0fd1cb3fc",
+        "size_bytes": 3790
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 3,
+      "process": {
+        "elapsed_ns": 221740250,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/003-engine-default-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/003-engine-default-insert-point-implicit-sqlite.json",
+        "sha256": "cb1d84494ba6a5e6ee9f4bf4ce2965731d472f29ebba518767351e1490131890",
+        "size_bytes": 2751
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 4,
+      "process": {
+        "elapsed_ns": 529952916,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/004-engine-default-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/004-engine-default-insert-batch-explicit-modern.json",
+        "sha256": "75e21599b86705cb7a10c472cd79ec38ea2920acc68640ed307f5763c6c11f7c",
+        "size_bytes": 3769
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 5,
+      "process": {
+        "elapsed_ns": 304200792,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/005-engine-default-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/005-engine-default-insert-batch-explicit-sqlite.json",
+        "sha256": "9acc86661b24c82cf77e8d941e42730c300a6a4537d9d82a669598b18f768f2e",
+        "size_bytes": 2776
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 6,
+      "process": {
+        "elapsed_ns": 581222291,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/006-engine-default-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/006-engine-default-update-point-implicit-modern.json",
+        "sha256": "e6005ca42a140312721911833f15ca8c35f397901de73d2acf845bacb5aefec5",
+        "size_bytes": 3808
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 7,
+      "process": {
+        "elapsed_ns": 553071625,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/007-engine-default-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/007-engine-default-update-point-implicit-sqlite.json",
+        "sha256": "e9f95e8fad3de3c06fd0a5bab19012b595a46e327bbb50b759d52e63baff5353",
+        "size_bytes": 2768
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 8,
+      "process": {
+        "elapsed_ns": 970418458,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/008-engine-default-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/008-engine-default-update-scan-implicit-modern.json",
+        "sha256": "3edf7ce968b3be52e2eb93817b017abc5cf531c9ee8ba22f357d0dd4ab1e1a58",
+        "size_bytes": 3792
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 9,
+      "process": {
+        "elapsed_ns": 425153625,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/009-engine-default-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/009-engine-default-update-scan-implicit-sqlite.json",
+        "sha256": "fd8f03435c325743fededda215b0152ef2355e55b5933925fb50636f04fabb4f",
+        "size_bytes": 2770
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 10,
+      "process": {
+        "elapsed_ns": 559508208,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/010-engine-default-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/010-engine-default-delete-point-implicit-modern.json",
+        "sha256": "7599ff7c0af60636e0b5d327d2aaa9b1afb6d0a6c7b94da0bbf8592b83e8a7d0",
+        "size_bytes": 3806
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 11,
+      "process": {
+        "elapsed_ns": 543209500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/011-engine-default-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/011-engine-default-delete-point-implicit-sqlite.json",
+        "sha256": "31d6496d943c780e8f81d3d6ab154de9b2a471133d5885595f04ea4f0a47a4cb",
+        "size_bytes": 2767
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 12,
+      "process": {
+        "elapsed_ns": 872425333,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/012-engine-default-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/012-engine-default-delete-scan-implicit-modern.json",
+        "sha256": "4234f11b91815dd79320ea0c27348d7d0482ae5909d94ca13524a43e3a4e276f",
+        "size_bytes": 3792
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 13,
+      "process": {
+        "elapsed_ns": 261092041,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/013-engine-default-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/013-engine-default-delete-scan-implicit-sqlite.json",
+        "sha256": "c7371b159fd94b6c6c3170e0c66542e1049daaed4077f9e776e680790dd3d357",
+        "size_bytes": 2772
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 14,
+      "process": {
+        "elapsed_ns": 928822708,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/014-engine-default-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/014-engine-default-mixed-batch-commit-modern.json",
+        "sha256": "1110e09d88916b328bb93faff74e0704d3f60ba04b4ebac16bb3cd0a8a667d3f",
+        "size_bytes": 3807
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 15,
+      "process": {
+        "elapsed_ns": 426674792,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/015-engine-default-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/015-engine-default-mixed-batch-commit-sqlite.json",
+        "sha256": "2e976a4feecd72c74fc03a3ef9a3259c50aee83831bcf64fad6648bf39157ce7",
+        "size_bytes": 2781
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 16,
+      "process": {
+        "elapsed_ns": 948628750,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/016-engine-default-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/016-engine-default-mixed-batch-rollback-modern.json",
+        "sha256": "06d392521d8070e6c903b2973c844eb5804126c7f412e933daf1edf8de93a45c",
+        "size_bytes": 3819
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 17,
+      "process": {
+        "elapsed_ns": 486772666,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "stderr": {
+        "path": "raw/diagnostic/017-engine-default-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/017-engine-default-mixed-batch-rollback-sqlite.json",
+        "sha256": "5410d367ea300c3df4af4508d7d2a9c5bd204cd34276717265fe7c998c8111d8",
+        "size_bytes": 2783
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 18,
+      "process": {
+        "elapsed_ns": 280372042,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/018-matched-durable-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/018-matched-durable-create-table-implicit-modern.json",
+        "sha256": "e2006937e1eb8fdb5ccfdf541570bd70991955b323c9ae37987b73a1085fc28b",
+        "size_bytes": 3785
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 19,
+      "process": {
+        "elapsed_ns": 155533125,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/019-matched-durable-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/019-matched-durable-create-table-implicit-sqlite.json",
+        "sha256": "e4faeec5f74e8cae4b2508224d95d0ff6f38d10338ae265cc6b9d82b5794934b",
+        "size_bytes": 2746
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 20,
+      "process": {
+        "elapsed_ns": 246002875,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/020-matched-durable-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/020-matched-durable-insert-point-implicit-modern.json",
+        "sha256": "716476b6dfbc96d7f7157915d5212d504cd3d23367c7e498762c2ec188892849",
+        "size_bytes": 3793
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 21,
+      "process": {
+        "elapsed_ns": 217014833,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/021-matched-durable-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/021-matched-durable-insert-point-implicit-sqlite.json",
+        "sha256": "a9987a527be095544c25423ed831b0a85f98516c1276712b001052c051ffb4b9",
+        "size_bytes": 2749
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 22,
+      "process": {
+        "elapsed_ns": 542881834,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/022-matched-durable-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/022-matched-durable-insert-batch-explicit-modern.json",
+        "sha256": "a802afa714f8f8ef252ba2ff2e802252e860ea5919bd298f5f58fe2dca8c7588",
+        "size_bytes": 3773
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 23,
+      "process": {
+        "elapsed_ns": 284068708,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/023-matched-durable-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/023-matched-durable-insert-batch-explicit-sqlite.json",
+        "sha256": "3eb4a777e42fbb7bb4314bd671bb6863ca52f0b9b86e106580d4087bba1941cf",
+        "size_bytes": 2774
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 24,
+      "process": {
+        "elapsed_ns": 562170291,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/024-matched-durable-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/024-matched-durable-update-point-implicit-modern.json",
+        "sha256": "9b6dd66838b1d904e46f64d430774aadd144a1512bc1d3df3c5e744b0e9de113",
+        "size_bytes": 3811
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 25,
+      "process": {
+        "elapsed_ns": 541370834,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/025-matched-durable-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/025-matched-durable-update-point-implicit-sqlite.json",
+        "sha256": "56f4c60803941f37bedacf91aab3cf897b9681bce1cfc74f6b565942f9e6c93c",
+        "size_bytes": 2766
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 26,
+      "process": {
+        "elapsed_ns": 946013042,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/026-matched-durable-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/026-matched-durable-update-scan-implicit-modern.json",
+        "sha256": "c54ee5059a5599dd14b8ed21125343afcc2253768b8e9c0870c5f42f20e7f8d2",
+        "size_bytes": 3795
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 27,
+      "process": {
+        "elapsed_ns": 422294542,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/027-matched-durable-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/027-matched-durable-update-scan-implicit-sqlite.json",
+        "sha256": "52fcff6d1c7da85bed388313beffbd9f5660bb131979242bd0acb6a371dc8935",
+        "size_bytes": 2768
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 28,
+      "process": {
+        "elapsed_ns": 580304041,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/028-matched-durable-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/028-matched-durable-delete-point-implicit-modern.json",
+        "sha256": "d4754cc76aded9594bd3a72963afa03a56a581e98416da0a92d27cd588e7e568",
+        "size_bytes": 3809
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 29,
+      "process": {
+        "elapsed_ns": 532644375,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/029-matched-durable-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/029-matched-durable-delete-point-implicit-sqlite.json",
+        "sha256": "1c0a27f7463a473834a243a0a00b1962aac2e0c68ace7679e611e623b1fab1a6",
+        "size_bytes": 2765
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 30,
+      "process": {
+        "elapsed_ns": 914836667,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/030-matched-durable-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/030-matched-durable-delete-scan-implicit-modern.json",
+        "sha256": "40664ddc50a542b36c2c7443d893c7efb30a08abd953c965c927ab45da756e7d",
+        "size_bytes": 3795
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 31,
+      "process": {
+        "elapsed_ns": 263169000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/031-matched-durable-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/031-matched-durable-delete-scan-implicit-sqlite.json",
+        "sha256": "d7de2a0d8ed6b3bd4d58831e14f01c7b82841d2549857be0120edbf26e74ee4d",
+        "size_bytes": 2770
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 32,
+      "process": {
+        "elapsed_ns": 920911666,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/032-matched-durable-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/032-matched-durable-mixed-batch-commit-modern.json",
+        "sha256": "32a28a9a4f1b98544771843ed5aae3a6b3409e45875d2baa962730431a0638a9",
+        "size_bytes": 3810
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 33,
+      "process": {
+        "elapsed_ns": 435884042,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/033-matched-durable-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/033-matched-durable-mixed-batch-commit-sqlite.json",
+        "sha256": "47817c36df5cf4abf9a25e9283382b0d5eddac42fb4029f43a53c06d4cf8b782",
+        "size_bytes": 2779
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "modern",
+      "ordinal": 34,
+      "process": {
+        "elapsed_ns": 964232166,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/034-matched-durable-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/034-matched-durable-mixed-batch-rollback-modern.json",
+        "sha256": "89b09bdcb1e94bc4ed787ba612f382e9651ad9540d021ddeef577a5f7aa1e1f0",
+        "size_bytes": 3822
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_diagnostics",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "diagnostic"
+      ],
+      "engine": "sqlite",
+      "ordinal": 35,
+      "process": {
+        "elapsed_ns": 466805708,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "stderr": {
+        "path": "raw/diagnostic/035-matched-durable-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/diagnostic/035-matched-durable-mixed-batch-rollback-sqlite.json",
+        "sha256": "8549fc87ba34881a562e9a96c8c006e717ddba4511bbdd85124532f25f83dc45",
+        "size_bytes": 2781
+      }
+    }
+  ],
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cpu_timer": "CLOCK_PROCESS_CPUTIME_ID",
+    "kernel": "27.0.0",
+    "logical_cpu_count": 14,
+    "os": "Darwin",
+    "wall_timer": "steady_clock"
+  },
+  "inputs": [
+    {
+      "path": "tests/performance/write-workloads-v2.json",
+      "role": "workload-manifest",
+      "sha256": "acd99f61fbaae1cd87cb6026cb8bfaa1984bffa728e0b8e71de89bd0b97668bc",
+      "size_bytes": 12170
+    },
+    {
+      "path": "benchmarks/write_performance.cpp",
+      "role": "benchmark-source",
+      "sha256": "ccaa9ea106cef30c5106d73fbf4c9f152c261acc390ee26677a2ce83a42b12d8",
+      "size_bytes": 120633
+    },
+    {
+      "path": "tools/write_performance_v2.py",
+      "role": "runner-source",
+      "sha256": "1b3094cda4bc60fffce43434441b5dc6da4b313838edd1d4130a93da4069321c",
+      "size_bytes": 117549
+    },
+    {
+      "path": "tests/fixtures/write_performance/schema.db",
+      "role": "fixture-schema",
+      "sha256": "26c59e7c83f4ee09a8a341a54abefb88f381e7fc110e8e63c8df661643eee3fa",
+      "size_bytes": 8192
+    },
+    {
+      "path": "tests/fixtures/write_performance/schema.sql",
+      "role": "fixture-sql-schema",
+      "sha256": "c22a5e309a27d04810ebbe9ad26a0e8d66c39f1b544aeb3ad6407be7083fcce0",
+      "size_bytes": 266
+    },
+    {
+      "path": "tests/fixtures/write_performance/populated.db",
+      "role": "fixture-populated",
+      "sha256": "81fa90c6ac9c3ab20f24f3d08823c564d6203e09f316a397290cdcd546eb0091",
+      "size_bytes": 17952768
+    },
+    {
+      "path": "tests/fixtures/write_performance/populated.sql",
+      "role": "fixture-sql-populated",
+      "sha256": "e495713f888ebb010b9b5cab12565014fbe5e9dba0cdf0e56f7114ae7da8caf1",
+      "size_bytes": 699
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "clean": true,
+    "revision": "362c4f32dc7f78125c1a92bef83965b74baffce5",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "bdf9697336ac4b19881c619011fbe75b99287868",
+    "worktree_content_sha256": "747742f0524fb583a591c199fc96c4f6663b0d8b0ba8912dcea06b473efe8dd2"
+  },
+  "status": "complete",
+  "timing_runs": [
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 0,
+      "process": {
+        "elapsed_ns": 512642500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/000-round-0-engine-default-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/000-round-0-engine-default-create-table-implicit-modern.json",
+        "sha256": "2d808c98d95bde031a522a4a7ed8c3b41294720ad1ff36fed0f5eef2a32cd699",
+        "size_bytes": 3654
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 1,
+      "process": {
+        "elapsed_ns": 280850916,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/001-round-0-engine-default-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/001-round-0-engine-default-create-table-implicit-sqlite.json",
+        "sha256": "071320f31b65b46cb6099eb5e45a0f7f32804c69b6f95e986b73f4dabcbf6527",
+        "size_bytes": 3654
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 2,
+      "process": {
+        "elapsed_ns": 444414583,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/002-round-0-engine-default-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/002-round-0-engine-default-insert-point-implicit-modern.json",
+        "sha256": "40406e95d206a3d8bd0e11779babb4480d948e1c7a3803b947f12c40eb25f22e",
+        "size_bytes": 3663
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 3,
+      "process": {
+        "elapsed_ns": 451030584,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/003-round-0-engine-default-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/003-round-0-engine-default-insert-point-implicit-sqlite.json",
+        "sha256": "fa28ad4aaf572116eb8567776d59c3b759e9dcfdd45d9c5e93fe18cd366c9874",
+        "size_bytes": 3668
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 4,
+      "process": {
+        "elapsed_ns": 1148316083,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/004-round-0-engine-default-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/004-round-0-engine-default-insert-batch-explicit-modern.json",
+        "sha256": "0562690f2d7c3873be1ff84f424283e5097d63b8e878dde9bea29ec076e46bee",
+        "size_bytes": 3714
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 5,
+      "process": {
+        "elapsed_ns": 682433083,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/005-round-0-engine-default-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/005-round-0-engine-default-insert-batch-explicit-sqlite.json",
+        "sha256": "05e8d4dd9205dfa97052a9e8f4c1ab191e5a9c597f94a20141324e4304da487b",
+        "size_bytes": 3713
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 6,
+      "process": {
+        "elapsed_ns": 1165359542,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/006-round-0-engine-default-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/006-round-0-engine-default-update-point-implicit-modern.json",
+        "sha256": "369a9adf5f489e9b1640a44e94c6a8ff75f2f84e76a1bcb63e31acc65c839e08",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 7,
+      "process": {
+        "elapsed_ns": 1085882750,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/007-round-0-engine-default-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/007-round-0-engine-default-update-point-implicit-sqlite.json",
+        "sha256": "c4830b820adf6ce5cbb75aa46e433b09f2536c5b2afe09bda4b460d9f400b4af",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 8,
+      "process": {
+        "elapsed_ns": 1969986625,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/008-round-0-engine-default-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/008-round-0-engine-default-update-scan-implicit-modern.json",
+        "sha256": "9309d4b52d5ec09ec9799e4c6ec377d0a23dd37ddc2f9724841e78083a6131bf",
+        "size_bytes": 3688
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 9,
+      "process": {
+        "elapsed_ns": 856867334,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/009-round-0-engine-default-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/009-round-0-engine-default-update-scan-implicit-sqlite.json",
+        "sha256": "811abf5b4730893874c8355fe027dd45977a5073292e53a3aa1fb2f4687e96ea",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 10,
+      "process": {
+        "elapsed_ns": 1133981542,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/010-round-0-engine-default-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/010-round-0-engine-default-delete-point-implicit-modern.json",
+        "sha256": "4e409e262255d1e6afaadac632fe61e731432c3a67f3c56f747bd2758d3d3629",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 11,
+      "process": {
+        "elapsed_ns": 1086221791,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/011-round-0-engine-default-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/011-round-0-engine-default-delete-point-implicit-sqlite.json",
+        "sha256": "4b516b5093b6a16b5a25ee06eece303e3a6e53424be6ab6d8b96ed79e48c7140",
+        "size_bytes": 3690
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 12,
+      "process": {
+        "elapsed_ns": 1791230958,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/012-round-0-engine-default-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/012-round-0-engine-default-delete-scan-implicit-modern.json",
+        "sha256": "4358ff55bb6361ace5c3540c21b77acfa6b87893fd210167766476cecf6fba8f",
+        "size_bytes": 3684
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 13,
+      "process": {
+        "elapsed_ns": 546830000,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/013-round-0-engine-default-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/013-round-0-engine-default-delete-scan-implicit-sqlite.json",
+        "sha256": "152d6498fbfc06dd690d9d34be27abc2cca0bdf5579bea7e1b4503fb06104f94",
+        "size_bytes": 3683
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 14,
+      "process": {
+        "elapsed_ns": 1862264917,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/014-round-0-engine-default-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/014-round-0-engine-default-mixed-batch-commit-modern.json",
+        "sha256": "c51e9937568b3f206b64048cc5a90ceb2c5dfea6dcd2d6b420275ef74819fa59",
+        "size_bytes": 3718
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 15,
+      "process": {
+        "elapsed_ns": 922475917,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/015-round-0-engine-default-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/015-round-0-engine-default-mixed-batch-commit-sqlite.json",
+        "sha256": "ff19245f86e305bf8c5c4c18ecb2b6a3db82a124507f09442594e37b2ab10942",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 16,
+      "process": {
+        "elapsed_ns": 2039212375,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/016-round-0-engine-default-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/016-round-0-engine-default-mixed-batch-rollback-modern.json",
+        "sha256": "d7f7f0d5c4049e74b31dfcb2ec19b0b108a3019fd79a47a5511123ed720ec146",
+        "size_bytes": 3720
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 17,
+      "process": {
+        "elapsed_ns": 962026083,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/017-round-0-engine-default-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/017-round-0-engine-default-mixed-batch-rollback-sqlite.json",
+        "sha256": "13aad9dda5f5c3b9e492546457aa89bac751fcf63a21fd959d8fcf0af23e730a",
+        "size_bytes": 3719
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 18,
+      "process": {
+        "elapsed_ns": 963189375,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/018-round-1-engine-default-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/018-round-1-engine-default-mixed-batch-rollback-sqlite.json",
+        "sha256": "abe2b76478de6519ac610f338e0da68d04c63ca7abb1018ad63f6f2d584cf92a",
+        "size_bytes": 3719
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 19,
+      "process": {
+        "elapsed_ns": 1849519417,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/019-round-1-engine-default-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/019-round-1-engine-default-mixed-batch-rollback-modern.json",
+        "sha256": "c9d1b443b5175f6388c9f2dcea008204d8c2e592bda49496d083cbb6d6ac84ca",
+        "size_bytes": 3720
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 20,
+      "process": {
+        "elapsed_ns": 902130750,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/020-round-1-engine-default-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/020-round-1-engine-default-mixed-batch-commit-sqlite.json",
+        "sha256": "0bcc00eb831a8a7c1217cb59ed3cad99c5e829594e90b2f3c75d77fe4d454ae4",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 21,
+      "process": {
+        "elapsed_ns": 1879226417,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/021-round-1-engine-default-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/021-round-1-engine-default-mixed-batch-commit-modern.json",
+        "sha256": "6f3dd4bce0f8a0ca62ca1f4096e78bdc255b2132543822ac1e16c9e5226c3c72",
+        "size_bytes": 3718
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 22,
+      "process": {
+        "elapsed_ns": 547517375,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/022-round-1-engine-default-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/022-round-1-engine-default-delete-scan-implicit-sqlite.json",
+        "sha256": "a67604e9680fb70a412094512c7c05f99aba91a2e12f23a2b200324598befbee",
+        "size_bytes": 3683
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 23,
+      "process": {
+        "elapsed_ns": 1748542083,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/023-round-1-engine-default-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/023-round-1-engine-default-delete-scan-implicit-modern.json",
+        "sha256": "af9b783eee72231c2679f2e23e81b4fb71a79cc1d1425b32e49df8ac5d6189c6",
+        "size_bytes": 3684
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 24,
+      "process": {
+        "elapsed_ns": 1083149458,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/024-round-1-engine-default-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/024-round-1-engine-default-delete-point-implicit-sqlite.json",
+        "sha256": "2a1daa92746515a53d378be1b3d7bc9f70965042f3be4ecd46fe030532d44820",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 25,
+      "process": {
+        "elapsed_ns": 1147390791,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/025-round-1-engine-default-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/025-round-1-engine-default-delete-point-implicit-modern.json",
+        "sha256": "8cba9780a7764d72a92720d784f0e2689005123d8fad4407cef3bcb0276a0eb7",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 26,
+      "process": {
+        "elapsed_ns": 860971875,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/026-round-1-engine-default-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/026-round-1-engine-default-update-scan-implicit-sqlite.json",
+        "sha256": "0eb912bbbee9a9c2671f26f73d9001b01c5de0e0772cc7f0057eb0c9ba18b8b2",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 27,
+      "process": {
+        "elapsed_ns": 1956654291,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/027-round-1-engine-default-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/027-round-1-engine-default-update-scan-implicit-modern.json",
+        "sha256": "2eb177a6a998b023254790fefa8d4c8e61ae547c95db8612b431be894f594a25",
+        "size_bytes": 3688
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 28,
+      "process": {
+        "elapsed_ns": 1086710291,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/028-round-1-engine-default-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/028-round-1-engine-default-update-point-implicit-sqlite.json",
+        "sha256": "6df3d07f22e84d9ad6ab52aa36c2a6c938213ef54483f681cd12d25d35806e5e",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 29,
+      "process": {
+        "elapsed_ns": 1103507042,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/029-round-1-engine-default-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/029-round-1-engine-default-update-point-implicit-modern.json",
+        "sha256": "62c778dd93e5f62b1d62accf7704af8e443a743464dd72a2e48dc00f67687300",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 30,
+      "process": {
+        "elapsed_ns": 668142791,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/030-round-1-engine-default-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/030-round-1-engine-default-insert-batch-explicit-sqlite.json",
+        "sha256": "13292ca09927876872fe2d57f77d188c0022699f21212f6042cb64dd9ff48c07",
+        "size_bytes": 3713
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 31,
+      "process": {
+        "elapsed_ns": 1130080708,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/031-round-1-engine-default-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/031-round-1-engine-default-insert-batch-explicit-modern.json",
+        "sha256": "ef1848f259f382c4c95ea9a8fe6babbcdb56a3cabb123c104073ddc2010585fc",
+        "size_bytes": 3714
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 32,
+      "process": {
+        "elapsed_ns": 408820500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/032-round-1-engine-default-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/032-round-1-engine-default-insert-point-implicit-sqlite.json",
+        "sha256": "9904f3bd536c0df0eede2b62d58cf22013c2646989a713c89f55fec1a87d7fc6",
+        "size_bytes": 3666
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 33,
+      "process": {
+        "elapsed_ns": 447988084,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/033-round-1-engine-default-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/033-round-1-engine-default-insert-point-implicit-modern.json",
+        "sha256": "96742b1259f571ee410c2ea1ec78c9bbcaddb569969ecfd5ba68e6a2e3d668fc",
+        "size_bytes": 3663
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 34,
+      "process": {
+        "elapsed_ns": 279157333,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/034-round-1-engine-default-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/034-round-1-engine-default-create-table-implicit-sqlite.json",
+        "sha256": "89a9d1970b56b9d05de5b784ea1731c07f7ae8d80315014e165cb628bfab38e6",
+        "size_bytes": 3654
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 35,
+      "process": {
+        "elapsed_ns": 499066666,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/035-round-1-engine-default-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/035-round-1-engine-default-create-table-implicit-modern.json",
+        "sha256": "7042c6c8ae5d013944db1535ef0edd56995e0509e70301c805e47261c1c853e8",
+        "size_bytes": 3655
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 36,
+      "process": {
+        "elapsed_ns": 489991875,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/036-round-2-engine-default-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/036-round-2-engine-default-create-table-implicit-modern.json",
+        "sha256": "ade25bd39f2009b53b50b3454d265a8e911876a9f3f06a1e8628bec3acf3b98d",
+        "size_bytes": 3654
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 37,
+      "process": {
+        "elapsed_ns": 277864583,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/037-round-2-engine-default-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/037-round-2-engine-default-create-table-implicit-sqlite.json",
+        "sha256": "0f0b24cd15343e960e5fd1ccda9a399ef7794547554888f47930255855a5abe1",
+        "size_bytes": 3654
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 38,
+      "process": {
+        "elapsed_ns": 452140792,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/038-round-2-engine-default-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/038-round-2-engine-default-insert-point-implicit-modern.json",
+        "sha256": "f3df3aaedb326febf23d45f6f4a85006593004cbe35cf300d02b4897d2ed57df",
+        "size_bytes": 3663
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 39,
+      "process": {
+        "elapsed_ns": 400190208,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/039-round-2-engine-default-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/039-round-2-engine-default-insert-point-implicit-sqlite.json",
+        "sha256": "22805d5c8cc46dad989e1d8a114d7ee07e757059ad0c44c3cbc1e4678cb0a13d",
+        "size_bytes": 3665
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 40,
+      "process": {
+        "elapsed_ns": 1138467500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/040-round-2-engine-default-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/040-round-2-engine-default-insert-batch-explicit-modern.json",
+        "sha256": "53079dee7bc329488e093b3e143be3c20709b6ca9f3cf1b822cfcf65c533a537",
+        "size_bytes": 3714
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 41,
+      "process": {
+        "elapsed_ns": 673396000,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/041-round-2-engine-default-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/041-round-2-engine-default-insert-batch-explicit-sqlite.json",
+        "sha256": "1b18117ba863f30d2c1a6bb22bfe9c01e8d22058508e83b62c6bb7e41fe9af6b",
+        "size_bytes": 3713
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 42,
+      "process": {
+        "elapsed_ns": 1104883500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/042-round-2-engine-default-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/042-round-2-engine-default-update-point-implicit-modern.json",
+        "sha256": "047e4b61bc4069a9af67d02e32f307710142c4863d13b065f29fe3478c2ccb32",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 43,
+      "process": {
+        "elapsed_ns": 1072398916,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/043-round-2-engine-default-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/043-round-2-engine-default-update-point-implicit-sqlite.json",
+        "sha256": "ffb93a9e58609f67d6f3e912b6fb842d0cf9e3e39ce68e6114130d4bc3809be1",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 44,
+      "process": {
+        "elapsed_ns": 1902388417,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/044-round-2-engine-default-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/044-round-2-engine-default-update-scan-implicit-modern.json",
+        "sha256": "55439a505cba26866a2ece5b6fe6749f76fe67f3943d36aff99fe504fbec5220",
+        "size_bytes": 3688
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 45,
+      "process": {
+        "elapsed_ns": 851010500,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/045-round-2-engine-default-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/045-round-2-engine-default-update-scan-implicit-sqlite.json",
+        "sha256": "b670ca13f67b4cd6a12568a286c85a59de182fbe3d12ecabb6fa24b6af81e200",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 46,
+      "process": {
+        "elapsed_ns": 1159558875,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/046-round-2-engine-default-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/046-round-2-engine-default-delete-point-implicit-modern.json",
+        "sha256": "d48178d1e64d079ffd7bd36b6f019f270f7531ef7ec86ac17cc8b168c6514a58",
+        "size_bytes": 3686
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 47,
+      "process": {
+        "elapsed_ns": 1067334666,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/047-round-2-engine-default-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/047-round-2-engine-default-delete-point-implicit-sqlite.json",
+        "sha256": "c06f29f8ad128448b121af9c868d5d71313b334a4733c81613b806d48fd63c95",
+        "size_bytes": 3690
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 48,
+      "process": {
+        "elapsed_ns": 1907830667,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/048-round-2-engine-default-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/048-round-2-engine-default-delete-scan-implicit-modern.json",
+        "sha256": "79ad163cf76d604313b726c34b8adeb5e07c3ab2015f78faf1fc90dcca3a6249",
+        "size_bytes": 3684
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 49,
+      "process": {
+        "elapsed_ns": 560733625,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/049-round-2-engine-default-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/049-round-2-engine-default-delete-scan-implicit-sqlite.json",
+        "sha256": "31541273dd1552a15808dade10e74e59dc5687342cbae78973451ec29313a5b9",
+        "size_bytes": 3683
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 50,
+      "process": {
+        "elapsed_ns": 1856644542,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/050-round-2-engine-default-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/050-round-2-engine-default-mixed-batch-commit-modern.json",
+        "sha256": "64c3aeb18c0180f50decb4c5a3249a592966dc8302bf3bdd76af94dd391b8d0c",
+        "size_bytes": 3718
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 51,
+      "process": {
+        "elapsed_ns": 884463541,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/051-round-2-engine-default-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/051-round-2-engine-default-mixed-batch-commit-sqlite.json",
+        "sha256": "be06a27dd384f9732aa81ce125cb6233c905af6a9656b45b25289240d9aea095",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 52,
+      "process": {
+        "elapsed_ns": 1882337875,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/052-round-2-engine-default-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/052-round-2-engine-default-mixed-batch-rollback-modern.json",
+        "sha256": "6f5b15ac05cb3a5a27d7910b584702b7b8aab1ad5d4c2d69836164073ce03d34",
+        "size_bytes": 3720
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "engine-default",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 53,
+      "process": {
+        "elapsed_ns": 951831041,
+        "returncode": 0
+      },
+      "profile": "engine-default",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/053-round-2-engine-default-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/053-round-2-engine-default-mixed-batch-rollback-sqlite.json",
+        "sha256": "452bb223d909d1b5f99ad4ec0719033188bde427448f5c0640b5f07a3a1b39f4",
+        "size_bytes": 3719
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 54,
+      "process": {
+        "elapsed_ns": 497509166,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/054-round-0-matched-durable-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/054-round-0-matched-durable-create-table-implicit-modern.json",
+        "sha256": "67345d71fcabf9f36abba9cedcb741c3dfee395a12a85f0dc1c4414eef213c43",
+        "size_bytes": 3657
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 55,
+      "process": {
+        "elapsed_ns": 273971375,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/055-round-0-matched-durable-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/055-round-0-matched-durable-create-table-implicit-sqlite.json",
+        "sha256": "fc0c0f46b4b22c3876c05cd46fbd59b213cdc9e31e97d8db91f307ba418568d5",
+        "size_bytes": 3652
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 56,
+      "process": {
+        "elapsed_ns": 441377750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/056-round-0-matched-durable-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/056-round-0-matched-durable-insert-point-implicit-modern.json",
+        "sha256": "1594a0ab6f1d75d27956c6b6aa48aff10425e7fcc11910e6cb5b2afac66f51f9",
+        "size_bytes": 3666
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 57,
+      "process": {
+        "elapsed_ns": 420312833,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/057-round-0-matched-durable-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/057-round-0-matched-durable-insert-point-implicit-sqlite.json",
+        "sha256": "c98ed4d923023e1a0a89c9fb41f0599836735a43760b791bbf48facd8d5da786",
+        "size_bytes": 3666
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 58,
+      "process": {
+        "elapsed_ns": 1193212416,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/058-round-0-matched-durable-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/058-round-0-matched-durable-insert-batch-explicit-modern.json",
+        "sha256": "fe16ee7e05dd0f522f98505e6ca34bfae7d3b05bd59a6a17b1ade48fe697adbe",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 59,
+      "process": {
+        "elapsed_ns": 670089875,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/059-round-0-matched-durable-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/059-round-0-matched-durable-insert-batch-explicit-sqlite.json",
+        "sha256": "ba52ba7bf7d11c9d3fec842d04fd27a43138b4da2fa405c31806112251b10466",
+        "size_bytes": 3711
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 60,
+      "process": {
+        "elapsed_ns": 1132771667,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/060-round-0-matched-durable-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/060-round-0-matched-durable-update-point-implicit-modern.json",
+        "sha256": "d07b24ed8e49d98f78b2451627567490332041349ef0564161e6c0ad69a15b5c",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 61,
+      "process": {
+        "elapsed_ns": 1079270375,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/061-round-0-matched-durable-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/061-round-0-matched-durable-update-point-implicit-sqlite.json",
+        "sha256": "554aba3ca0accf26b11bc850359a2d67695b1b3b7311df9e9bb055cb04736605",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 62,
+      "process": {
+        "elapsed_ns": 2005408875,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/062-round-0-matched-durable-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/062-round-0-matched-durable-update-scan-implicit-modern.json",
+        "sha256": "2a9573ec3f775050e604e810d6d1e8bad4b95f61ae8613455b570dc9a181ec90",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 63,
+      "process": {
+        "elapsed_ns": 853662542,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/063-round-0-matched-durable-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/063-round-0-matched-durable-update-scan-implicit-sqlite.json",
+        "sha256": "14c4ff68f8556c1b43c24a965fc9f70b66528ec04ff6ed693a846dde869c7182",
+        "size_bytes": 3685
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 64,
+      "process": {
+        "elapsed_ns": 1114084333,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/064-round-0-matched-durable-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/064-round-0-matched-durable-delete-point-implicit-modern.json",
+        "sha256": "d0a69bb0bfa9821660d89958b32aea60c29feeceb86db87fa305a72d7b242a80",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 65,
+      "process": {
+        "elapsed_ns": 1083217958,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/065-round-0-matched-durable-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/065-round-0-matched-durable-delete-point-implicit-sqlite.json",
+        "sha256": "0c2abd3fc6679bd3d7f4ba8893fb9997a8d04ecd3c0877d2cb00063100d9c28a",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 66,
+      "process": {
+        "elapsed_ns": 1831609250,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/066-round-0-matched-durable-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/066-round-0-matched-durable-delete-scan-implicit-modern.json",
+        "sha256": "57381a229fe4e23a2183c05b3251fbb57e16a42d8477ef702c81d58f12734cc1",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 67,
+      "process": {
+        "elapsed_ns": 540700125,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/067-round-0-matched-durable-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/067-round-0-matched-durable-delete-scan-implicit-sqlite.json",
+        "sha256": "3b9b96dcc8b373d0f620e61822692dde2dbad4de30b78f4cc2c55f5d43bf6ae5",
+        "size_bytes": 3681
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 68,
+      "process": {
+        "elapsed_ns": 1812014292,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/068-round-0-matched-durable-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/068-round-0-matched-durable-mixed-batch-commit-modern.json",
+        "sha256": "48343c4e00d01926d83ccf4435dd3d4cc195f7150c81717f5ce18c1dbe70f2c8",
+        "size_bytes": 3721
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 69,
+      "process": {
+        "elapsed_ns": 906027750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/069-round-0-matched-durable-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/069-round-0-matched-durable-mixed-batch-commit-sqlite.json",
+        "sha256": "7a41cb5b2ba4b57808019040dec703c70ac02d12f60ae5a79f09bb3128109b84",
+        "size_bytes": 3715
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 70,
+      "process": {
+        "elapsed_ns": 1842096000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/070-round-0-matched-durable-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/070-round-0-matched-durable-mixed-batch-rollback-modern.json",
+        "sha256": "0910a4fcd0d262f9fcfa8497500b5c8e9201244dc41bc8b89b2e148d52391fe0",
+        "size_bytes": 3723
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 71,
+      "process": {
+        "elapsed_ns": 951470959,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 0,
+      "stderr": {
+        "path": "raw/timing/071-round-0-matched-durable-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/071-round-0-matched-durable-mixed-batch-rollback-sqlite.json",
+        "sha256": "338f0104da80eb691e3035ccf049d3e25b89d21afd3cb5265963806b0e408825",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 72,
+      "process": {
+        "elapsed_ns": 1065622750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/072-round-1-matched-durable-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/072-round-1-matched-durable-mixed-batch-rollback-sqlite.json",
+        "sha256": "31e921fa076fc89640cc651bcd3488c9ee6af08a3edd293bf0cd1fcdeca90f79",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 73,
+      "process": {
+        "elapsed_ns": 1922318083,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/073-round-1-matched-durable-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/073-round-1-matched-durable-mixed-batch-rollback-modern.json",
+        "sha256": "67cbdca8b803ce62ad79c45bed5273c25c318dfccfb63a867c26f1f6fb7f02b4",
+        "size_bytes": 3723
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 74,
+      "process": {
+        "elapsed_ns": 904816583,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/074-round-1-matched-durable-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/074-round-1-matched-durable-mixed-batch-commit-sqlite.json",
+        "sha256": "e384eeb4300f4a4fa63175b2d08db5a6a04466a2485e7984f3fd898d995fafa4",
+        "size_bytes": 3715
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 75,
+      "process": {
+        "elapsed_ns": 1872528250,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/075-round-1-matched-durable-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/075-round-1-matched-durable-mixed-batch-commit-modern.json",
+        "sha256": "02a3491a0f82e2d9c0683ae7a705cf0994964d65fd6eb8434d42fbf5f26dee2e",
+        "size_bytes": 3721
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 76,
+      "process": {
+        "elapsed_ns": 549643125,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/076-round-1-matched-durable-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/076-round-1-matched-durable-delete-scan-implicit-sqlite.json",
+        "sha256": "26641cf90ca009191836bed427612a54493609f0fd7cb10e4ab1cb3e51600233",
+        "size_bytes": 3681
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 77,
+      "process": {
+        "elapsed_ns": 1749749000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/077-round-1-matched-durable-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/077-round-1-matched-durable-delete-scan-implicit-modern.json",
+        "sha256": "4f225487fe20457fb5c77226dda8916af45845d61407b70e12dc23ff9ec155c5",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 78,
+      "process": {
+        "elapsed_ns": 1075318750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/078-round-1-matched-durable-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/078-round-1-matched-durable-delete-point-implicit-sqlite.json",
+        "sha256": "aa019c4e2936d454cb6ebcb9c9da080328cc435d8ac9057c6924e370028deb5f",
+        "size_bytes": 3688
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 79,
+      "process": {
+        "elapsed_ns": 1126558917,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/079-round-1-matched-durable-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/079-round-1-matched-durable-delete-point-implicit-modern.json",
+        "sha256": "2879d041d51ce28e542fb63312ee591e46011f9e6f42f9785e27fe771b1053a2",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 80,
+      "process": {
+        "elapsed_ns": 844722834,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/080-round-1-matched-durable-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/080-round-1-matched-durable-update-scan-implicit-sqlite.json",
+        "sha256": "ad0199a240dd91de2c92bf7a324c362a16b116a4586b46320125e87bc380529a",
+        "size_bytes": 3685
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 81,
+      "process": {
+        "elapsed_ns": 1900085583,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/081-round-1-matched-durable-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/081-round-1-matched-durable-update-scan-implicit-modern.json",
+        "sha256": "db7b2d0460c8ce1de63d13bb9b4210099649fcee687fd2b3c33d93dcbdf90438",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 82,
+      "process": {
+        "elapsed_ns": 1122461333,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/082-round-1-matched-durable-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/082-round-1-matched-durable-update-point-implicit-sqlite.json",
+        "sha256": "ce7831b3be87a3e2ac43f0b9b44c7044f212cb6becf0673eaac1054202da220d",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 83,
+      "process": {
+        "elapsed_ns": 1113655958,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/083-round-1-matched-durable-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/083-round-1-matched-durable-update-point-implicit-modern.json",
+        "sha256": "6a48900e573150c64b5a6d87eda45290ef2561c190cd2dde11e62e5786b39199",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 84,
+      "process": {
+        "elapsed_ns": 676738625,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/084-round-1-matched-durable-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/084-round-1-matched-durable-insert-batch-explicit-sqlite.json",
+        "sha256": "90bdd59bd5c02d64ea991175e92df2098110b35db85aa9d081612f84bd305cc9",
+        "size_bytes": 3711
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 85,
+      "process": {
+        "elapsed_ns": 1185570334,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/085-round-1-matched-durable-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/085-round-1-matched-durable-insert-batch-explicit-modern.json",
+        "sha256": "a8bed5c5eaf78437c4ca3fd5c92a1506eba08ab2864bf9518474c8aa00580098",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 86,
+      "process": {
+        "elapsed_ns": 410803708,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/086-round-1-matched-durable-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/086-round-1-matched-durable-insert-point-implicit-sqlite.json",
+        "sha256": "b8990f0f9b7b844fd291b53a1b63c2ed050c91bed21a5807296437bc3d3289d6",
+        "size_bytes": 3664
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 87,
+      "process": {
+        "elapsed_ns": 450408333,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/087-round-1-matched-durable-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/087-round-1-matched-durable-insert-point-implicit-modern.json",
+        "sha256": "7c90619203f842749ffe71435de8b228869f3159a72d0ce4877aa8aa7e58e25f",
+        "size_bytes": 3666
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 88,
+      "process": {
+        "elapsed_ns": 279755209,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/088-round-1-matched-durable-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/088-round-1-matched-durable-create-table-implicit-sqlite.json",
+        "sha256": "30ad7211a8fe679b6f70647d38dfc14e6d1e5e95c95d8863f081e5acf77ae350",
+        "size_bytes": 3652
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 89,
+      "process": {
+        "elapsed_ns": 481088125,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 1,
+      "stderr": {
+        "path": "raw/timing/089-round-1-matched-durable-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/089-round-1-matched-durable-create-table-implicit-modern.json",
+        "sha256": "552dfcbea0fddfc703f7de07e95c7907e4744036febb977063503a85a2bdeaf3",
+        "size_bytes": 3656
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 90,
+      "process": {
+        "elapsed_ns": 496566792,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/090-round-2-matched-durable-create-table-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/090-round-2-matched-durable-create-table-implicit-modern.json",
+        "sha256": "46fbbc4a32145e8f11530430ab8017a3d5de4e7740df2a3a74dad50d0e7d1f1a",
+        "size_bytes": 3655
+      }
+    },
+    {
+      "case": "create-table-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "create-table-implicit",
+        "zero-input.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 91,
+      "process": {
+        "elapsed_ns": 279322000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/091-round-2-matched-durable-create-table-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/091-round-2-matched-durable-create-table-implicit-sqlite.json",
+        "sha256": "b0b20ee33514a92c36a28ac6b40a90c1c7e49ff5501c5bae73552e14d1253a95",
+        "size_bytes": 3652
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 92,
+      "process": {
+        "elapsed_ns": 452925000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/092-round-2-matched-durable-insert-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/092-round-2-matched-durable-insert-point-implicit-modern.json",
+        "sha256": "9c4e3b5bb6dd08095452223c77f170e9567ad4a0addc76e62ed00914767187c7",
+        "size_bytes": 3666
+      }
+    },
+    {
+      "case": "insert-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-point-implicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 93,
+      "process": {
+        "elapsed_ns": 413148625,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/093-round-2-matched-durable-insert-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/093-round-2-matched-durable-insert-point-implicit-sqlite.json",
+        "sha256": "190528ab7073688bd2baaa2ca4f0b227fecfc2a3290cdcaff1dcff176c618125",
+        "size_bytes": 3665
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 94,
+      "process": {
+        "elapsed_ns": 1182182625,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/094-round-2-matched-durable-insert-batch-explicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/094-round-2-matched-durable-insert-batch-explicit-modern.json",
+        "sha256": "906b7925f3a778438ebaafb908e97a8a7ea93405d63d1bdb71cb8712d3f6932a",
+        "size_bytes": 3717
+      }
+    },
+    {
+      "case": "insert-batch-explicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "insert-batch-explicit",
+        "schema.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 95,
+      "process": {
+        "elapsed_ns": 669411333,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/095-round-2-matched-durable-insert-batch-explicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/095-round-2-matched-durable-insert-batch-explicit-sqlite.json",
+        "sha256": "c164b8f09db8decc0dca17042fb9519e51c82e72e3db016d72ec895fc08ddc9f",
+        "size_bytes": 3711
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 96,
+      "process": {
+        "elapsed_ns": 1164534583,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/096-round-2-matched-durable-update-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/096-round-2-matched-durable-update-point-implicit-modern.json",
+        "sha256": "b182466bbb072b23ffacde5496b81ec824b6fc993a5f5bcee725eedbae6b850d",
+        "size_bytes": 3690
+      }
+    },
+    {
+      "case": "update-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 97,
+      "process": {
+        "elapsed_ns": 1069820917,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/097-round-2-matched-durable-update-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/097-round-2-matched-durable-update-point-implicit-sqlite.json",
+        "sha256": "5af57bf87b54472319d9d010af5de1c682a36c4d925ef48fbdefcb145cda92de",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 98,
+      "process": {
+        "elapsed_ns": 1852978584,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/098-round-2-matched-durable-update-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/098-round-2-matched-durable-update-scan-implicit-modern.json",
+        "sha256": "395366e726f4a844c1f6e9a308f242ff35eb511c18df275ed75c89438039e6a5",
+        "size_bytes": 3691
+      }
+    },
+    {
+      "case": "update-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "update-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 99,
+      "process": {
+        "elapsed_ns": 835311750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/099-round-2-matched-durable-update-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/099-round-2-matched-durable-update-scan-implicit-sqlite.json",
+        "sha256": "77aadc4a2a1baf726f3b64e88bd3f29739edae7ddbbe03c8453657a7d1b5ca5d",
+        "size_bytes": 3685
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 100,
+      "process": {
+        "elapsed_ns": 1106944042,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/100-round-2-matched-durable-delete-point-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/100-round-2-matched-durable-delete-point-implicit-modern.json",
+        "sha256": "b93301f3fa87371ea397405a93147bef0e8cf21b8d63894cb64fc38249ce22e6",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "delete-point-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-point-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 101,
+      "process": {
+        "elapsed_ns": 1096779834,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/101-round-2-matched-durable-delete-point-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/101-round-2-matched-durable-delete-point-implicit-sqlite.json",
+        "sha256": "4ba66f52d6a7380e6843ce192b93118b7f9a9dbcd4f61e8b8d37b6089f9f8a95",
+        "size_bytes": 3689
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 102,
+      "process": {
+        "elapsed_ns": 1877123750,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/102-round-2-matched-durable-delete-scan-implicit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/102-round-2-matched-durable-delete-scan-implicit-modern.json",
+        "sha256": "410c4bee5d8460f0d6dd8c55dabf77d2fbcec5602ff7de74801f7ec453780ee0",
+        "size_bytes": 3687
+      }
+    },
+    {
+      "case": "delete-scan-implicit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "delete-scan-implicit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 103,
+      "process": {
+        "elapsed_ns": 555372333,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/103-round-2-matched-durable-delete-scan-implicit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/103-round-2-matched-durable-delete-scan-implicit-sqlite.json",
+        "sha256": "d23d166a78db3faeccf648509e7b208dbe8bfabea6d504039ef69cbc1c31e2e7",
+        "size_bytes": 3681
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 104,
+      "process": {
+        "elapsed_ns": 1900381917,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/104-round-2-matched-durable-mixed-batch-commit-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/104-round-2-matched-durable-mixed-batch-commit-modern.json",
+        "sha256": "d1cffaec30895d6c389f36cd8b25eaffa559faf40ec3bcc4f5a7f1c400fd6334",
+        "size_bytes": 3721
+      }
+    },
+    {
+      "case": "mixed-batch-commit",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-commit",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 105,
+      "process": {
+        "elapsed_ns": 891787000,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/105-round-2-matched-durable-mixed-batch-commit-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/105-round-2-matched-durable-mixed-batch-commit-sqlite.json",
+        "sha256": "0e730d50c578783b3534cfa5b7a577bfb63ffa42d9031aea7eaf54754d3e408e",
+        "size_bytes": 3715
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "modern",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "modern",
+      "ordinal": 106,
+      "process": {
+        "elapsed_ns": 1934616458,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/106-round-2-matched-durable-mixed-batch-rollback-modern.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/106-round-2-matched-durable-mixed-batch-rollback-modern.json",
+        "sha256": "d1ce4711d97b67660ea644b0b8ed6f69c01712f86abc2b8d249c3a6718ca7714",
+        "size_bytes": 3723
+      }
+    },
+    {
+      "case": "mixed-batch-rollback",
+      "command": [
+        "modern_sqlite_write_benchmark",
+        "run",
+        "sqlite",
+        "matched-durable",
+        "mixed-batch-rollback",
+        "populated.db",
+        "SCRATCH",
+        "baseline"
+      ],
+      "engine": "sqlite",
+      "ordinal": 107,
+      "process": {
+        "elapsed_ns": 948853958,
+        "returncode": 0
+      },
+      "profile": "matched-durable",
+      "round": 2,
+      "stderr": {
+        "path": "raw/timing/107-round-2-matched-durable-mixed-batch-rollback-sqlite.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      "stdout": {
+        "path": "raw/timing/107-round-2-matched-durable-mixed-batch-rollback-sqlite.json",
+        "sha256": "b4e4b5c97560215bc7e0f4e8646e06ed78245b56f348014f481ad0c1f8eb1fa1",
+        "size_bytes": 3717
+      }
+    }
+  ]
+}

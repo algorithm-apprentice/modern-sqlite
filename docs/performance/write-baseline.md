@@ -102,6 +102,33 @@ The regenerated `benchmarks/write-baseline-v1` run at source revision
 scan-mutation implementation preserves the version-1 workloads and matched
 durability configuration while satisfying the canonical guard.
 
+## Version-2 baseline result
+
+The authoritative `benchmarks/write-baseline-v2` run was generated from
+source revision `362c4f32dc7f78125c1a92bef83965b74baffce5`, tree
+`bdf9697336ac4b19881c619011fbe75b99287868`. Every matched aggregate and
+paired round remains below the 10x guard.
+
+The corrected profile configuration and statement-journal diagnostics are:
+
+- `engine-default` reports and opens Modern with `temp_store=file`;
+- `matched-durable` reports and opens Modern with `temp_store=memory`; and
+- both profiles record zero subjournal VFS opens, writes, and bytes for
+  `insert-batch-explicit`.
+
+The matched `insert-batch-explicit` result improves from the historical
+version-1 7.058144x wall and 7.342122x CPU to 5.556505x wall and 5.779553x
+CPU. Its subjournal work falls from one open, 74,481 writes, and 305,372,100
+bytes to zero for all three counters. The remaining matched scan and batch
+ratios are:
+
+| Case | Wall ratio | CPU ratio |
+|---|---:|---:|
+| `update-scan-implicit` | 6.969554x | 5.598886x |
+| `delete-scan-implicit` | 8.519555x | 7.082721x |
+| `mixed-batch-commit` | 5.741514x | 4.802254x |
+| `mixed-batch-rollback` | 4.931226x | 4.140400x |
+
 ## Fixed profile replay
 
 Profile replay is diagnostic evidence, not baseline timing. It performs one
