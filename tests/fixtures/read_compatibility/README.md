@@ -86,10 +86,11 @@ also uses `tests/compatibility/subquery-corpus-v1.json` and
 `tests/compatibility/subquery-oracle-v1.json`, with the same version-one
 schema, per-file limits, fixture hashes, profile, and generator. Regenerate
 that pair with the command above by substituting those two paths.
-The subquery shard contains 198 records: 190 comparisons and eight unsupported
-boundaries. Its alias admission promotes the earlier pure outer-alias boundary,
-preserves the other 104 historical corpus and oracle records, and keeps
-query-containing definitions and outer aggregate ownership explicitly staged.
+The subquery shard contains 248 records: 246 comparisons and two unsupported
+boundaries. Query-copy, aggregate-ordering, and outer-aggregate deliveries
+promote their owned historical boundaries while preserving the remaining
+historical corpus and oracle records. Only the explicit rollback-replay
+boundaries remain staged.
 Both pairs run through the same differential and clean-regeneration drivers;
 each includes native-valid staged boundaries and ordinary prepare-error
 controls for mismatch-classification regression tests.
@@ -114,7 +115,7 @@ ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5  sqlite3.h
 cf0982cb2f38c893359188a6ed11bd05ff541d5975a57d482f7fd367a4d02981  tests/compatibility/sqlite-oracle-profile-v1.json
 26cb13ba6272c99f5ba6b048694b31bf6759ac61296dec156dc9bc03415d4ba1  tests/compatibility/read-corpus-v1.json
 05b7a7d168e8d24091c397a199135d3be6dd47ed7b62183d712aa7b5cb9251e6  tests/compatibility/read-oracle-v1.json
-312693b38aa340e960c04287ea30d4681e2c45b7ee2336648791dc0a207ef217  tests/compatibility/subquery-corpus-v1.json
-893c793c097027562ab741eb04150df6725e1b2db48ac643939e9ccc7816b6f5  tests/compatibility/subquery-oracle-v1.json
+7e39b75fa82c42a9d5d9836a48c109be94fbba7ec49c463c1bd9524ba2d6a7a9  tests/compatibility/subquery-corpus-v1.json
+45cdaf2bc473f1ab611d1527691ae91404c36b12f641cec94c1232e5d74c3a0a  tests/compatibility/subquery-oracle-v1.json
 24f4c5b458af493128219c1961a6d13cef7c99278c24527e21a2a0f546688592  tools/read_compatibility.py
 ```

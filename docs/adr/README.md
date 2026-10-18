@@ -110,3 +110,6 @@ their corresponding implementation begins.
 105. [ADR-0105: SQLite-Aligned Rowid Range Access](0105-sqlite-aligned-rowid-range-access.md)
 106. [ADR-0106: Batched Related Slice Delivery](0106-batched-related-slice-delivery.md)
 107. [ADR-0107: Joined Predicate Access Phases](0107-joined-predicate-access-phases.md)
+108. [ADR-0108: REAL/IntReal Persistent Serial Forms](0108-real-intreal-persistent-serial-form.md)
+109. [ADR-0109: Index Range-End Verifier State](0109-index-range-end-verifier-state.md)
+110. [ADR-0110: SQLite-Aligned Outer Aggregate Ownership](0110-sqlite-aligned-outer-aggregate-ownership.md)

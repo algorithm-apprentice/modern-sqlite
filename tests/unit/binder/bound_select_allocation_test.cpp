@@ -186,10 +186,20 @@ int main() try {
   if (query_aggregate_ordering_allocations == 0 || query_aggregate_ordering_allocations > 512U) {
     return 1;
   }
+  constexpr std::string_view kOuterAggregateSql =
+      "SELECT count(*) AS x FROM Items o HAVING ("
+      "SELECT sum((SELECT x UNION ALL "
+      "SELECT sum(i.id) FROM Items i ORDER BY sum(id) LIMIT 1))"
+      ")>0";
+  const std::size_t outer_aggregate_allocations = BindAllocationCount(kOuterAggregateSql, catalog);
+  if (outer_aggregate_allocations == 0 || outer_aggregate_allocations > 512U) {
+    return 1;
+  }
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
     if (BindAllocationCount(kAggregateSql, catalog) != aggregate_allocations ||
         BindAllocationCount(kQueryAggregateOrderingSql, catalog) !=
-            query_aggregate_ordering_allocations) {
+            query_aggregate_ordering_allocations ||
+        BindAllocationCount(kOuterAggregateSql, catalog) != outer_aggregate_allocations) {
       return 1;
     }
   }

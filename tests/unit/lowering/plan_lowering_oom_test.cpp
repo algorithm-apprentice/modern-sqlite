@@ -392,13 +392,23 @@ int main() try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 16> aggregate_plans{
+  const std::array<PhysicalPlan, 20> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       AggregateFixture(catalog, "SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x"),
       AggregateFixture(catalog,
                        "SELECT sum((SELECT 1)) AS x FROM Items "
                        "HAVING sum((SELECT 2))>0 "
                        "UNION ALL SELECT 0 ORDER BY x"),
+      AggregateFixture(catalog, "SELECT (SELECT sum(o.id)) FROM Items o"),
+      AggregateFixture(catalog,
+                       "SELECT sum((SELECT 1)) AS x FROM Items "
+                       "HAVING (SELECT x)>0 ORDER BY (SELECT x)"),
+      AggregateFixture(catalog, "SELECT EXISTS(SELECT 1 ORDER BY sum(o.id)) FROM Items o"),
+      AggregateFixture(catalog,
+                       "SELECT ("
+                       "SELECT sum((SELECT 1)+0*o.id)+sum((SELECT 1)+0*i.id) AS x "
+                       "FROM Items i UNION ALL SELECT 0 ORDER BY x"
+                       ") FROM Items o"),
       AggregateFixture(catalog, "SELECT max(id) FROM Items"),
       AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
       AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),

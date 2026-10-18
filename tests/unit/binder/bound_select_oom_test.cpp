@@ -176,12 +176,24 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 26> full_sweep_sqls{
+  const std::array<std::string_view, 31> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
       "SELECT sum((SELECT Name)) AS x FROM Items "
       "UNION ALL SELECT sum((SELECT id)) FROM Items ORDER BY x",
+      "SELECT (SELECT sum(o.id)) FROM Items o",
+      "SELECT sum((SELECT 1)) AS x FROM Items "
+      "HAVING (SELECT x)>0 ORDER BY (SELECT x)",
+      "SELECT EXISTS(SELECT 1 ORDER BY sum(o.id)) FROM Items o",
+      "SELECT ("
+      "SELECT sum((SELECT 1)+0*o.id)+sum((SELECT 1)+0*i.id) AS x "
+      "FROM Items i UNION ALL SELECT 0 ORDER BY x"
+      ") FROM Items o",
+      "SELECT count(*) AS x FROM Items o HAVING ("
+      "SELECT sum((SELECT x UNION ALL "
+      "SELECT sum(i.id) FROM Items i ORDER BY sum(id) LIMIT 1))"
+      ")>0",
       "SELECT a.*,b.Name FROM Items a CROSS JOIN Items b WHERE a.id=?1 "
       "ORDER BY b.Name LIMIT ?2",
       "SELECT a.Name FROM Items a,Items b UNION SELECT ?1 ORDER BY 1",

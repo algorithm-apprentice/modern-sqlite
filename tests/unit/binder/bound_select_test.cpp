@@ -584,7 +584,7 @@ TEST(Binder, DerivesResultValueDemandFromDestinationAndSetConsumers) {
   }
 }
 
-TEST(Binder, RejectsScalarWidthParentAliasesAndMutationQueryFeatures) {
+TEST(Binder, ChecksScalarWidthParentAliasesAndMutationQueryFeatures) {
   const auto catalog = TestCatalog();
   ExpectBindError("SELECT (SELECT id,Name FROM Items)", catalog,
                   BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
@@ -596,8 +596,14 @@ TEST(Binder, RejectsScalarWidthParentAliasesAndMutationQueryFeatures) {
       BindSelectStatement(
           ParseTree("SELECT (SELECT Name) AS x FROM Items WHERE (SELECT x) IS NOT NULL"), catalog)
           .has_value());
-  ExpectBindError("SELECT (SELECT sum(parent.Score)) FROM Items parent", catalog,
-                  BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
+  const BoundSelect outer =
+      BindOrThrow("SELECT (SELECT sum(parent.Score)) FROM Items parent", catalog);
+  ASSERT_EQ(2U, outer.query_count());
+  const auto& outer_core = std::get<BoundSelectCore>(outer.query_cores()[0]);
+  const auto& child_core = std::get<BoundSelectCore>(outer.query_cores()[1]);
+  ASSERT_TRUE(outer_core.aggregate.has_value());
+  EXPECT_EQ(1U, outer_core.aggregate->invocations.size());
+  EXPECT_FALSE(child_core.aggregate.has_value());
   ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
                            BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
                            "subqueries in mutation statements");
@@ -761,7 +767,7 @@ TEST(Binder, PreservesOuterAliasVisibilityPrecedenceAndScopeBarriers) {
   }
 }
 
-TEST(Binder, KeepsOuterAggregateAliasErrorsInTheirDefiningClause) {
+TEST(Binder, PreservesOuterAggregateAliasClauseOwnership) {
   const auto catalog = TestCatalog();
   for (const std::string_view sql : {
            "SELECT sum(Score) AS x FROM Items WHERE (SELECT x)>0",
@@ -777,8 +783,7 @@ TEST(Binder, KeepsOuterAggregateAliasErrorsInTheirDefiningClause) {
            "SELECT sum(Score) AS x FROM Items ORDER BY (SELECT x)",
        }) {
     SCOPED_TRACE(sql);
-    ExpectBindError(sql, catalog, BindErrorCode::kUnsupportedFeature,
-                    "outer-owned aggregates are not supported");
+    EXPECT_TRUE(BindSelectStatement(ParseTree(sql), catalog).has_value());
   }
 }
 
@@ -1107,8 +1112,280 @@ TEST(Binder, RetainsOwnAggregateBindingLeavesWithoutSnapshottingAncestorInputs) 
     ASSERT_TRUE(identity.has_value());
     EXPECT_EQ(inner.table_sources[0].id, identity->source);
   }
-  ExpectBindError("SELECT (SELECT sum(o.Score) FROM Items i) FROM Items o", catalog,
-                  BindErrorCode::kUnsupportedFeature, "outer-owned aggregates are not supported");
+  const BoundSelect outer =
+      BindOrThrow("SELECT (SELECT sum(o.Score) FROM Items i) FROM Items o", catalog);
+  const auto& outer_core = std::get<BoundSelectCore>(outer.query_cores()[0]);
+  const auto& child_core = std::get<BoundSelectCore>(outer.query_cores()[1]);
+  ASSERT_TRUE(outer_core.aggregate.has_value());
+  EXPECT_EQ(1U, outer_core.aggregate->invocations.size());
+  EXPECT_FALSE(child_core.aggregate.has_value());
+}
+
+TEST(Binder, AssignsAggregatesToTheNearestReferencedQuery) {
+  const auto catalog = TestCatalog();
+
+  const BoundSelect direct = BindOrThrow("SELECT (SELECT sum(o.Score)) FROM Items o", catalog);
+  ASSERT_EQ(2U, direct.query_count());
+  const auto& direct_outer = std::get<BoundSelectCore>(direct.query_cores()[0]);
+  const auto& direct_child = std::get<BoundSelectCore>(direct.query_cores()[1]);
+  ASSERT_TRUE(direct_outer.aggregate.has_value());
+  EXPECT_EQ(1U, direct_outer.aggregate->invocations.size());
+  EXPECT_FALSE(direct_child.aggregate.has_value());
+  EXPECT_TRUE(direct.root_query().captures.empty());
+  ASSERT_EQ(1U, direct.query(BoundQueryId{1}).captures.size());
+  const auto* direct_context =
+      std::get_if<BoundAggregateContextCapture>(&direct.query(BoundQueryId{1}).captures.front());
+  ASSERT_NE(nullptr, direct_context);
+  EXPECT_EQ(BoundQueryId{0}, direct_context->query);
+  const BoundAggregateInvocation& direct_invocation =
+      direct.aggregate_invocations()[direct_outer.aggregate->invocations.front().value()];
+  EXPECT_EQ(BoundQueryId{0}, direct_invocation.owner);
+  EXPECT_TRUE(direct_invocation.source_anchored);
+  const BoundExpressionProperties& direct_properties =
+      direct.expression(direct_child.result_columns.front().expression).properties;
+  EXPECT_FALSE(direct_properties.contains_aggregate);
+  EXPECT_TRUE(direct_properties.references_aggregate);
+
+  const BoundSelect modifier = BindOrThrow(
+      "SELECT (SELECT sum(1) FILTER(WHERE o.id>0)),"
+      "(SELECT group_concat(1 ORDER BY o.id)) FROM Items o",
+      catalog);
+  const auto& modifier_outer = std::get<BoundSelectCore>(modifier.query_cores()[0]);
+  ASSERT_TRUE(modifier_outer.aggregate.has_value());
+  EXPECT_EQ(2U, modifier_outer.aggregate->invocations.size());
+  for (std::size_t index = 1; index < modifier.query_count(); ++index) {
+    EXPECT_FALSE(std::get<BoundSelectCore>(modifier.query_cores()[index]).aggregate.has_value());
+  }
+
+  const BoundSelect local =
+      BindOrThrow("SELECT o.id,(SELECT sum(i.id+o.id) FROM Items i) FROM Items o", catalog);
+  EXPECT_FALSE(std::get<BoundSelectCore>(local.query_cores()[0]).aggregate.has_value());
+  const auto& local_child = std::get<BoundSelectCore>(local.query_cores()[1]);
+  ASSERT_TRUE(local_child.aggregate.has_value());
+  EXPECT_EQ(
+      BoundQueryId{1},
+      local.aggregate_invocations()[local_child.aggregate->invocations.front().value()].owner);
+
+  const BoundSelect source_free = BindOrThrow("SELECT o.id,(SELECT sum(1)) FROM Items o", catalog);
+  EXPECT_FALSE(std::get<BoundSelectCore>(source_free.query_cores()[0]).aggregate.has_value());
+  const auto& source_free_child = std::get<BoundSelectCore>(source_free.query_cores()[1]);
+  ASSERT_TRUE(source_free_child.aggregate.has_value());
+  const BoundAggregateInvocation& source_free_invocation =
+      source_free.aggregate_invocations()[source_free_child.aggregate->invocations.front().value()];
+  EXPECT_EQ(BoundQueryId{1}, source_free_invocation.owner);
+  EXPECT_FALSE(source_free_invocation.source_anchored);
+
+  const BoundSelect aliases = BindOrThrow(
+      "SELECT sum((SELECT 1)) AS x FROM Items "
+      "HAVING (SELECT x)>0 ORDER BY (SELECT x)",
+      catalog);
+  const auto& alias_outer = std::get<BoundSelectCore>(aliases.query_cores()[0]);
+  ASSERT_TRUE(alias_outer.aggregate.has_value());
+  EXPECT_EQ(3U, alias_outer.aggregate->invocations.size());
+  for (std::size_t index = 1; index < aliases.query_count(); ++index) {
+    EXPECT_FALSE(std::get<BoundSelectCore>(aliases.query_cores()[index]).aggregate.has_value());
+  }
+  const BoundSelect repeated_alias =
+      BindOrThrow("SELECT sum((SELECT 1)) AS x FROM Items HAVING (SELECT x+x)>0", catalog);
+  const auto& repeated_outer = std::get<BoundSelectCore>(repeated_alias.query_cores()[0]);
+  ASSERT_TRUE(repeated_outer.aggregate.has_value());
+  EXPECT_EQ(3U, repeated_outer.aggregate->invocations.size());
+  ExpectBindError("SELECT sum((SELECT 1)) AS x FROM Items HAVING (SELECT x)>0", catalog,
+                  BindErrorCode::kAggregateTermLimitExceeded, "too many aggregate terms",
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
+
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT count(*) AS x FROM Items "
+                                            "HAVING (SELECT sum(x))>0"),
+                                  catalog)
+                  .has_value());
+  ExpectBindError("SELECT count(Id) AS x FROM Items HAVING (SELECT sum(x))>0", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+  for (const std::string_view expression : {"x+y", "y+x"}) {
+    ExpectBindError("SELECT count(*) AS x,count(Id) AS y FROM Items HAVING (SELECT sum(" +
+                        std::string{expression} + "))>0",
+                    catalog, BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+  }
+  EXPECT_TRUE(
+      BindSelectStatement(
+          ParseTree("SELECT (SELECT sum(o.Id) AS x WHERE (SELECT x)>0) FROM Items o"), catalog)
+          .has_value());
+
+  const BoundSelect nested =
+      BindOrThrow("SELECT (SELECT sum((SELECT o.Id))) FROM Items o", catalog);
+  ASSERT_EQ(3U, nested.query_count());
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, nested.query(BoundQueryId{2}).parent);
+
+  const BoundSelect transitive_order = BindOrThrow(
+      "SELECT ("
+      "SELECT (SELECT sum(o.Id+(SELECT 1))) AS x ORDER BY x"
+      ") FROM Items o",
+      catalog);
+  const auto& transitive_outer = std::get<BoundSelectCore>(transitive_order.query_cores()[0]);
+  ASSERT_TRUE(transitive_outer.aggregate.has_value());
+  EXPECT_EQ(2U, transitive_outer.aggregate->invocations.size());
+
+  const BoundSelect joined = BindOrThrow(
+      "SELECT (SELECT sum(b.Score)) "
+      "FROM Items a LEFT JOIN Items b ON b.Id=a.Id",
+      catalog);
+  ASSERT_TRUE(std::get<BoundSelectCore>(joined.query_cores()[0]).aggregate.has_value());
+
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT count(*) AS x FROM Items o HAVING ("
+                                            "SELECT sum(("
+                                            "SELECT x UNION ALL "
+                                            "SELECT sum(i.Id) FROM Items i ORDER BY sum(Id) LIMIT 1"
+                                            "))"
+                                            ")>0"),
+                                  catalog)
+                  .has_value());
+  ExpectBindError(
+      "SELECT ("
+      "SELECT (SELECT sum(o.Id+(SELECT sum(d.Id)))) FROM Items d"
+      ") FROM Items o",
+      catalog, BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+}
+
+TEST(Binder, PreservesOuterAggregateClauseAndDiscardedOrderingRules) {
+  const auto catalog = TestCatalog();
+  const BoundSelect discarded =
+      BindOrThrow("SELECT EXISTS(SELECT 1 ORDER BY sum(o.Score)) FROM Items o", catalog);
+  const auto& outer = std::get<BoundSelectCore>(discarded.query_cores()[0]);
+  ASSERT_TRUE(outer.aggregate.has_value());
+  EXPECT_EQ(1U, outer.aggregate->invocations.size());
+  EXPECT_TRUE(discarded.query(BoundQueryId{1}).order_by.empty());
+
+  EXPECT_TRUE(
+      BindSelectStatement(ParseTree("SELECT (SELECT 1 ORDER BY sum(1)) FROM Items"), catalog)
+          .has_value());
+  EXPECT_TRUE(BindSelectStatement(
+                  ParseTree("SELECT (SELECT 1 ORDER BY sum((SELECT 1,2))) FROM Items"), catalog)
+                  .has_value());
+  ExpectBindError("SELECT (SELECT 1 ORDER BY sum((1 COLLATE missing)=2)) FROM Items", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  ExpectBindError("SELECT (SELECT 1 ORDER BY sum(missing)) FROM Items", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing");
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT (SELECT 1 ORDER BY "
+                                            "sum(1) FILTER(WHERE (SELECT 1,2))) FROM Items"),
+                                  catalog)
+                  .has_value());
+  EXPECT_TRUE(
+      BindSelectStatement(ParseTree("SELECT (SELECT 1 ORDER BY "
+                                    "sum(1) FILTER(WHERE (1 COLLATE missing)=2)) FROM Items"),
+                          catalog)
+          .has_value());
+  EXPECT_TRUE(
+      BindSelectStatement(ParseTree("SELECT (SELECT 1 ORDER BY "
+                                    "group_concat(1 ORDER BY (1 COLLATE missing)=2)) FROM Items"),
+                          catalog)
+          .has_value());
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT sum(Id) FROM Items o "
+                                            "HAVING (SELECT 1 GROUP BY sum(o.Id))"),
+                                  catalog)
+                  .has_value());
+  {
+    constexpr std::string_view sql =
+        "SELECT sum(Id) AS x FROM Items o HAVING (SELECT 1 GROUP BY x)";
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kAggregateMisuse,
+                    "aggregate functions are not allowed in the GROUP BY clause");
+  }
+  {
+    constexpr std::string_view sql =
+        "SELECT sum(Id) AS x FROM Items o HAVING (SELECT x GROUP BY 1)";
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kAggregateMisuse,
+                    "aggregate functions are not allowed in the GROUP BY clause");
+  }
+  ExpectBindError("SELECT Id FROM Items o WHERE (SELECT sum(o.Id))>0", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+  ExpectBindError("SELECT Id FROM Items o GROUP BY (SELECT sum(o.Id))", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "aggregate functions are not allowed in the GROUP BY clause");
+  ExpectBindError("SELECT EXISTS(SELECT 1 ORDER BY sum((SELECT 1,2)+o.Id)) FROM Items o", catalog,
+                  BindErrorCode::kColumnCountMismatch, "sub-select returns 2 columns - expected 1");
+  {
+    constexpr std::string_view sql =
+        "SELECT (SELECT 1 ORDER BY sum((SELECT 1,2)+o.Id)) FROM Items o";
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kColumnCountMismatch,
+                    "sub-select returns 2 columns - expected 1");
+  }
+  ExpectBindError("SELECT EXISTS(SELECT 1 ORDER BY sum(((1 COLLATE missing)=2)+o.Id)) FROM Items o",
+                  catalog, BindErrorCode::kNoSuchCollation, "no such collation sequence: missing");
+  {
+    constexpr std::string_view sql =
+        "SELECT (SELECT 1 ORDER BY "
+        "sum(1) FILTER(WHERE ((1 COLLATE missing)=2)+o.Id)) FROM Items o";
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kNoSuchCollation,
+                    "no such collation sequence: missing");
+  }
+  const BoundSelect retained_surviving_alias =
+      BindOrThrow("SELECT EXISTS(SELECT o.Id AS x ORDER BY sum(x)) FROM Items o", catalog);
+  ASSERT_TRUE(
+      std::get<BoundSelectCore>(retained_surviving_alias.query_cores()[0]).aggregate.has_value());
+  ExpectBindError(
+      "SELECT EXISTS("
+      "SELECT 1 ORDER BY (SELECT o.Id AS x ORDER BY sum(x))"
+      ") FROM Items o",
+      catalog, BindErrorCode::kUnsupportedFeature,
+      "discarded outer aggregate aliases are not supported");
+  ExpectBindError(
+      "SELECT ("
+      "SELECT sum(i.Id+(SELECT sum(o.Id))) AS x FROM Items i "
+      "UNION ALL SELECT 0 ORDER BY x"
+      ") FROM Items o",
+      catalog, BindErrorCode::kUnsupportedFeature,
+      "compound aggregate ordering replay is not supported");
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT EXISTS("
+                                            "SELECT 1 FROM Items i "
+                                            "ORDER BY sum(EXISTS(SELECT 1 ORDER BY sum(i.Id)))"
+                                            ")"),
+                                  catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(
+                  ParseTree("SELECT o.Id,EXISTS("
+                            "SELECT 0 UNION ALL SELECT sum(i.Id) FROM Items i ORDER BY sum(Id)"
+                            ") FROM Items o ORDER BY o.Id"),
+                  catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT Id AS x FROM Items GROUP BY Id "
+                                            "HAVING EXISTS(SELECT 1 ORDER BY sum(x))"),
+                                  catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(
+                  ParseTree("SELECT (SELECT 1 AS y ORDER BY sum(y+o.Id)) FROM Items o"), catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(
+                  ParseTree("SELECT Id FROM Items o WHERE (SELECT 1 ORDER BY sum(o.Id))"), catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(
+                  ParseTree("SELECT sum((SELECT 1 ORDER BY sum(o.Id))) FROM Items o"), catalog)
+                  .has_value());
+  EXPECT_TRUE(BindSelectStatement(ParseTree("SELECT Id FROM Items o "
+                                            "WHERE (SELECT 1 ORDER BY (SELECT sum(o.Id)))"),
+                                  catalog)
+                  .has_value());
+  EXPECT_TRUE(
+      BindSelectStatement(
+          ParseTree("SELECT sum((SELECT 1 ORDER BY (SELECT sum(o.Id)))) FROM Items o"), catalog)
+          .has_value());
+  const BoundSelect retained_nested =
+      BindOrThrow("SELECT (SELECT 1 ORDER BY (SELECT sum(o.Id))) FROM Items o", catalog);
+  ASSERT_TRUE(std::get<BoundSelectCore>(retained_nested.query_cores()[0]).aggregate.has_value());
+  const BoundSelect retained_across_nested_rollback = BindOrThrow(
+      "SELECT ("
+      "SELECT 1 ORDER BY EXISTS(SELECT 1 ORDER BY sum(o.Id))"
+      ") FROM Items o",
+      catalog);
+  ASSERT_TRUE(std::get<BoundSelectCore>(retained_across_nested_rollback.query_cores()[0])
+                  .aggregate.has_value());
+
+  ASSERT_EQ(1U, discarded.query(BoundQueryId{1}).captures.size());
+  const auto* context =
+      std::get_if<BoundAggregateContextCapture>(&discarded.query(BoundQueryId{1}).captures.front());
+  ASSERT_NE(nullptr, context);
+  EXPECT_EQ(BoundQueryId{0}, context->query);
 }
 
 TEST(Binder, PublishesGlobalOrderingRetentionWithTheNativeSimpleCountException) {

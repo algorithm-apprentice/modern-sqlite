@@ -1681,6 +1681,250 @@ TEST_F(ReadLoweringAggregateIntegration, InstantiatesIndependentQueryAliasCopies
   EXPECT_EQ(1U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, ExecutesOuterOwnedAggregatesInOwnerPhases) {
+  const CustomEnvironment custom;
+  const std::size_t count = Execute("SELECT id FROM Items").size();
+
+  callback_count = 0;
+  const auto direct = Execute("SELECT (SELECT sum(volatile_counter()+o.id)) FROM Items o",
+                              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, direct.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ(12, direct[0][0].integer_value());
+
+  callback_count = 0;
+  const auto mixed = Execute(
+      "SELECT o.id,(SELECT sum(volatile_counter()+i.id+o.id) FROM Items i) "
+      "FROM Items o ORDER BY o.id",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, mixed.size());
+  EXPECT_EQ(9U, callback_count);
+
+  callback_count = 0;
+  const auto pure_alias =
+      Execute("SELECT sum(volatile_counter()) AS x FROM Items HAVING (SELECT x)>0", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, pure_alias.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ(6, pure_alias[0][0].integer_value());
+
+  callback_count = 0;
+  const auto query_alias =
+      Execute("SELECT sum((SELECT volatile_counter())) AS x FROM Items HAVING (SELECT x)>0",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, query_alias.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), query_alias[0][0].integer_value());
+
+  callback_count = 0;
+  const auto repeated_alias =
+      Execute("SELECT sum((SELECT volatile_counter())) AS x FROM Items HAVING (SELECT x+x)>0",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, repeated_alias.size());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto phases = Execute(
+      "SELECT sum((SELECT volatile_counter())) AS x FROM Items "
+      "HAVING (SELECT x)=9 ORDER BY (SELECT x)",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, phases.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), phases[0][0].integer_value());
+
+  callback_count = 0;
+  const auto discarded =
+      Execute("SELECT EXISTS(SELECT 1 ORDER BY sum(volatile_counter()+o.id)) FROM Items o",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, discarded.size());
+  EXPECT_EQ(1, discarded[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto discarded_surviving_alias = Execute(
+      "SELECT EXISTS("
+      "SELECT o.Id+volatile_counter() AS x ORDER BY sum(x)"
+      ") FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, discarded_surviving_alias.size());
+  EXPECT_EQ(1, discarded_surviving_alias[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto outer_filter = Execute(
+      "SELECT (SELECT sum(volatile_counter()) FILTER(WHERE o.Id>0) FROM Items i) "
+      "FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, outer_filter.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ(6, outer_filter[0][0].integer_value());
+
+  callback_count = 0;
+  const auto outer_order = Execute(
+      "SELECT (SELECT group_concat(volatile_counter() ORDER BY o.Id) FROM Items i) "
+      "FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, outer_order.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ("1,2,3", TextBytes(outer_order[0][0]));
+
+  callback_count = 0;
+  const auto source_free_order =
+      Execute("SELECT (SELECT 1 ORDER BY sum(volatile_counter())) FROM Items", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(count, source_free_order.size());
+  EXPECT_EQ(0U, callback_count);
+
+  callback_count = 0;
+  const auto skipped =
+      Execute("SELECT coalesce(1,(SELECT sum(volatile_counter()+o.id))) FROM Items o",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, skipped.size());
+  EXPECT_EQ(1, skipped[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto exists_zero =
+      Execute("SELECT EXISTS(SELECT sum(volatile_counter()+o.Id) LIMIT 0) FROM Items o",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, exists_zero.size());
+  EXPECT_EQ(0, exists_zero[0][0].integer_value());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto scalar_zero =
+      Execute("SELECT (SELECT sum(volatile_counter()+o.Id) LIMIT 0) FROM Items o", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, scalar_zero.size());
+  EXPECT_EQ(SqlValueType::kNull, scalar_zero[0][0].type());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto direct_order =
+      Execute("SELECT (SELECT sum(o.id+(SELECT volatile_counter())) AS x ORDER BY x) FROM Items o",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, direct_order.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(9, direct_order[0][0].integer_value());
+
+  callback_count = 0;
+  const auto compound_order = Execute(
+      "SELECT ("
+      "SELECT sum(o.id+(SELECT volatile_counter())) AS x "
+      "UNION ALL SELECT 0 ORDER BY x"
+      ") FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, compound_order.size());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const auto mixed_direct_order = Execute(
+      "SELECT ("
+      "SELECT sum((SELECT volatile_counter())+0*o.id)+"
+      "sum((SELECT volatile_counter())+0*i.id) AS x "
+      "FROM Items i ORDER BY x"
+      ") FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, mixed_direct_order.size());
+  EXPECT_EQ(4U, callback_count);
+
+  callback_count = 0;
+  const auto mixed_compound_order = Execute(
+      "SELECT ("
+      "SELECT sum((SELECT volatile_counter())+0*o.id)+"
+      "sum((SELECT volatile_counter())+0*i.id) AS x "
+      "FROM Items i UNION ALL SELECT 0 ORDER BY x"
+      ") FROM Items o",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, mixed_compound_order.size());
+  EXPECT_EQ(3U, callback_count);
+
+  callback_count = 0;
+  const auto grouped = Execute(
+      "SELECT o.Name,(SELECT sum((SELECT volatile_counter())+o.Id)) "
+      "FROM Items o GROUP BY o.Name ORDER BY o.Name",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(count, grouped.size());
+  EXPECT_EQ(1U, callback_count);
+  for (std::size_t index = 0; index < grouped.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 2U), grouped[index][1].integer_value());
+  }
+
+  const auto intermediate_alias =
+      Execute("SELECT (SELECT sum(o.Id) AS x WHERE (SELECT x)>0) FROM Items o");
+  ASSERT_EQ(1U, intermediate_alias.size());
+  EXPECT_EQ(6, intermediate_alias[0][0].integer_value());
+
+  const auto nested_discarded = Execute(
+      "SELECT EXISTS("
+      "SELECT 1 FROM Items i "
+      "ORDER BY sum(EXISTS(SELECT 1 ORDER BY sum(i.Id)))"
+      ")");
+  ASSERT_EQ(1U, nested_discarded.size());
+  EXPECT_EQ(1, nested_discarded[0][0].integer_value());
+
+  const auto speculative_compound = Execute(
+      "SELECT o.Id,EXISTS("
+      "SELECT 0 UNION ALL SELECT sum(i.Id) FROM Items i ORDER BY sum(Id)"
+      ") FROM Items o ORDER BY o.Id");
+  ASSERT_EQ(count, speculative_compound.size());
+  for (std::size_t index = 0; index < speculative_compound.size(); ++index) {
+    EXPECT_EQ(static_cast<std::int64_t>(index + 1U),
+              speculative_compound[index][0].integer_value());
+    EXPECT_EQ(1, speculative_compound[index][1].integer_value());
+  }
+
+  const auto capture_rollback = Execute(
+      "SELECT count(*) AS x FROM Items o HAVING ("
+      "SELECT sum(("
+      "SELECT x UNION ALL "
+      "SELECT sum(i.Id) FROM Items i ORDER BY sum(Id) LIMIT 1"
+      "))"
+      ")>0");
+  ASSERT_EQ(1U, capture_rollback.size());
+  EXPECT_EQ(static_cast<std::int64_t>(count), capture_rollback[0][0].integer_value());
+
+  const auto surviving_alias = Execute(
+      "SELECT Id AS x FROM Items GROUP BY Id "
+      "HAVING EXISTS(SELECT 1 ORDER BY sum(x)) ORDER BY Id");
+  ASSERT_EQ(count, surviving_alias.size());
+
+  const auto source_free_alias =
+      Execute("SELECT (SELECT 1 AS y ORDER BY sum(y+o.Id)) FROM Items o");
+  ASSERT_EQ(1U, source_free_alias.size());
+  EXPECT_EQ(1, source_free_alias[0][0].integer_value());
+
+  const auto discarded_where =
+      Execute("SELECT Id FROM Items o WHERE (SELECT 1 ORDER BY sum(o.Id)) ORDER BY Id");
+  ASSERT_EQ(count, discarded_where.size());
+
+  const auto discarded_argument = Execute("SELECT sum((SELECT 1 ORDER BY sum(o.Id))) FROM Items o");
+  ASSERT_EQ(1U, discarded_argument.size());
+  EXPECT_EQ(static_cast<std::int64_t>(count), discarded_argument[0][0].integer_value());
+
+  const auto nested_discarded_where = Execute(
+      "SELECT Id FROM Items o "
+      "WHERE (SELECT 1 ORDER BY (SELECT sum(o.Id))) ORDER BY Id");
+  ASSERT_EQ(count, nested_discarded_where.size());
+
+  const auto nested_discarded_argument =
+      Execute("SELECT sum((SELECT 1 ORDER BY (SELECT sum(o.Id)))) FROM Items o");
+  ASSERT_EQ(1U, nested_discarded_argument.size());
+  EXPECT_EQ(static_cast<std::int64_t>(count), nested_discarded_argument[0][0].integer_value());
+
+  const auto nested_retained =
+      Execute("SELECT (SELECT 1 ORDER BY (SELECT sum(o.Id))) FROM Items o");
+  ASSERT_EQ(1U, nested_retained.size());
+  EXPECT_EQ(1, nested_retained[0][0].integer_value());
+
+  const auto nested_rollback_retained = Execute(
+      "SELECT ("
+      "SELECT 1 ORDER BY EXISTS(SELECT 1 ORDER BY sum(o.Id))"
+      ") FROM Items o");
+  ASSERT_EQ(1U, nested_rollback_retained.size());
+  EXPECT_EQ(1, nested_rollback_retained[0][0].integer_value());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ReevaluatesConstantAliasContextWithoutSourceFields) {
   const CustomEnvironment custom;
   const auto rows = Execute("SELECT 1 AS x FROM Items WHERE (SELECT volatile_counter()+x)>0",

@@ -1,0 +1,4 @@
+SELECT (SELECT sum(o.value)) AS x
+FROM model_rows o
+HAVING (SELECT x) IS NOT NULL
+ORDER BY (SELECT x);
