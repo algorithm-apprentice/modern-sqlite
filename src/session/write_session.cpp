@@ -901,6 +901,7 @@ Result<WriteSession> WriteSession::Open(std::unique_ptr<Vfs> vfs, std::string_vi
     }
     auto pager = Pager::OpenWritable(*vfs, path,
                                      WritablePagerOptions{
+                                         .pager = {},
                                          .journal = journal_options,
                                      });
     if (!pager.has_value()) {
