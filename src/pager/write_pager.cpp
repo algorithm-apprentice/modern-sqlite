@@ -510,45 +510,16 @@ Status Pager::PermutePageNumbers(std::span<const PageNumberRekey> pages) {
     }
   }
 
-  const PageNumber temporary{LockingPage(page_size())};
-  std::array<bool, 5> complete{};
-  for (std::size_t start = 0; start < pages.size(); ++start) {
-    if (complete[start] || current[start] == target[start]) {
-      complete[start] = true;
-      continue;
-    }
-    auto moved = cache_->RekeyExclusiveForPager(pages[start].pin->pin_, temporary);
-    if (!moved.has_value()) {
-      return EnterError(std::move(moved.error()));
-    }
-    PageNumber hole = current[start];
-    current[start] = temporary;
-    while (target[start] != hole) {
-      std::size_t next = pages.size();
-      for (std::size_t index = 0; index < pages.size(); ++index) {
-        if (index != start && target[index] == hole) {
-          next = index;
-          break;
-        }
-      }
-      if (next == pages.size()) {
-        return EnterError(Internal("page permutation cycle is inconsistent"));
-      }
-      const PageNumber next_hole = current[next];
-      moved = cache_->RekeyExclusiveForPager(pages[next].pin->pin_, hole);
-      if (!moved.has_value()) {
-        return EnterError(std::move(moved.error()));
-      }
-      current[next] = hole;
-      complete[next] = true;
-      hole = next_hole;
-    }
-    moved = cache_->RekeyExclusiveForPager(pages[start].pin->pin_, hole);
-    if (!moved.has_value()) {
-      return EnterError(std::move(moved.error()));
-    }
-    current[start] = hole;
-    complete[start] = true;
+  std::array<PageCache::PageCacheRekey, 5> cache_rekeys{};
+  for (std::size_t index = 0; index < pages.size(); ++index) {
+    cache_rekeys[index] = PageCache::PageCacheRekey{
+        .pin = &pages[index].pin->pin_,
+        .final_page = target[index],
+    };
+  }
+  auto moved = cache_->PermuteExclusiveForPager(std::span{cache_rekeys}.first(pages.size()));
+  if (!moved.has_value()) {
+    return EnterError(std::move(moved.error()));
   }
   return {};
 }

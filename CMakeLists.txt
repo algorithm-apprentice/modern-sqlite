@@ -919,6 +919,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_internal_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_internal_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/btree/writer_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_allocation_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/cache/page_cache_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/database_format_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/storage/journal/journal_allocation_test.cpp"
