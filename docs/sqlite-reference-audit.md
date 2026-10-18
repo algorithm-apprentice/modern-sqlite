@@ -7,8 +7,8 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Nine are reference-faithful,
-  fourteen are accepted architectural translations, eight require repair, and
+  90 production paths map to 36 mechanisms. Ten are reference-faithful,
+  fourteen are accepted architectural translations, seven require repair, and
   five remain unresolved pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -82,12 +82,12 @@ infrastructure rather than production mechanisms.
 
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|
-| Storage and transaction | 40 | 12 | 6 | 4 | 2 | 0 |
+| Storage and transaction | 40 | 12 | 7 | 4 | 1 | 0 |
 | Runtime and temporary storage | 12 | 7 | 2 | 0 | 3 | 2 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 1 | 1 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 2 | 0 |
-| **Total** | **90** | **36** | **9** | **14** | **8** | **5** |
+| **Total** | **90** | **36** | **10** | **14** | **7** | **5** |
 
 ### Mechanism dispositions
 
@@ -100,7 +100,7 @@ infrastructure rather than production mechanisms.
 | `storage-page-cache` | Cache-local intrusive hash, unpublished fills, bounded clean-frame recycling, and sync-safe dirty selection | `pcache.c`/`pcache1.c` local hash, LRU, recycling, and `pSynced` dirty selection | `reference-faithful` |
 | `storage-page-bitvec` | Shared adaptive page set | `bitvec.c` | `reference-faithful` |
 | `storage-rollback-journal` | Main journal plus SQLite-shaped memory/spill statement journal | `pager.c` rollback state plus `memjournal.c` in-memory chunks and spill | `reference-faithful` |
-| `storage-pager` | Typed read/write pager and oldest-dirty pressure spill | `pager.c`, including `PGHDR_NEED_SYNC`, `PGHDR_DONT_WRITE`, per-cohort write authorization, and `pHasContent` | `repair-required` |
+| `storage-pager` | Typed read/write pager with page-local sync eligibility and freed-page suppression | `pager.c`, including `PGHDR_NEED_SYNC`, `PGHDR_DONT_WRITE`, per-cohort write authorization, and `pHasContent` | `reference-faithful` |
 | `storage-btree-read` | Typed page views and read cursors | `btree.c` page/cursor mechanisms | `reference-faithful` |
 | `storage-btree-write` | Writable cursor, bounded page owner, `CellArray`, and balancing | `btree.c` allocation, cell editing, balancing, insert, delete, and root lifecycle | `architectural-translation` |
 | `storage-diagnostics` | Offline ownership and corruption workspace | `btree.c` integrity mechanisms | `architectural-translation` |
@@ -142,12 +142,12 @@ ordinal below, and its child ADR is created before production changes.
 | `storage-coding-format` — `implement-coding`, `implement-read-pager` | `util.c:1610-1750` varints; `btree.c:3312-3479` database-header and payload geometry. | Bytes/results, independent coding goldens, malformed headers, SQLite-created files. | `reference-faithful`; no open uncertainty. |
 | `storage-record-codec` — `implement-record-codec` | `vdbeaux.c:3862-4190` serial types/get/put, `vdbeaux.c:4260-5130` record comparison, `vdbe.c:3600-3765` MakeRecord affinity/serialization. | SQL values/collations/coding; independent record goldens, malformed/OOM, prefix comparison, bidirectional images. | `reference-faithful`; ADR-0101 and ADR-0108 repairs are merged. |
 | `storage-vfs-posix` — `implement-vfs-contracts`, `implement-posix-vfs` | `os_unix.c:1350-1575` deferred close, `:1672-2289` locks, `:3435-4035` positioned I/O/sync, `:6300-7218` open/access/delete. | Typed results/bytes; real-filesystem, short-I/O, locking, sync, recovery, and ADR-0097 evidence. | `architectural-translation`; WAL shared-memory ranges remain unimplemented node-45 scope. |
-| `storage-page-cache` — `implement-page-cache` | `pcache.c:23-43,203-255,403-528,551-658` dirty lists, `pSynced`, fetch/release; `pcache1.c:117-210,537-641,876-1119` hash, LRU, recycling, rekey. | Byte ownership; cache unit/OOM/allocation tests, six isolated configurations, four fuzz domains, native contracts, and fresh matched read evidence. | `reference-faithful`; ADR-0112, implementation commit `f128e5915c95b4bcdfe637ce9edfcf16ec54fa99`, PR #222. Pager publication/authorization remains ledger 3. |
+| `storage-page-cache` — `implement-page-cache` | `pcache.c:23-43,203-255,403-528,551-658` dirty lists, `pSynced`, fetch/release; `pcache1.c:117-210,537-641,876-1119` hash, LRU, recycling, rekey. | Byte ownership; cache unit/OOM/allocation tests, six isolated configurations, four fuzz domains, native contracts, and fresh matched read evidence. | `reference-faithful`; ADR-0112, implementation commit `f128e5915c95b4bcdfe637ce9edfcf16ec54fa99`, PR #222. ADR-0114 closes Pager publication and authorization. |
 | `storage-page-bitvec` — `implement-journal-contracts`, `implement-write-pager` | `bitvec.c:15-541` bitmap, sparse hash, subdivision, recursive Set/Test/Clear. | Typed allocation errors; journal membership, savepoint suppression, `pHasContent`, OOM tests. | `reference-faithful`; ADR-0045 mechanism is merged. |
 | `storage-rollback-journal` — `implement-rollback-journal` | `pager.c:1039-1079,1849-1871,2280-2410,2872-2995,4188-4641` savepoint/main playback; `memjournal.c:1-16,84-290,353-392` chunked memory journal and spill. | VFS/coding/journal contracts; crash, torn-write, hot recovery, metadata, savepoint, OOM, configuration propagation, version-2 matched baseline, and interoperability evidence. | `reference-faithful`; ADR-0113 and implementation commits `17fbd16`, `362c4f3`. Conditional journal admission remains ledger 8. |
-| `storage-pager` — `implement-read-pager`, `implement-write-pager` | `pager.c:137-357` states, `:3075-3140` page reads, `:4714-4724` sync-safe spill, `:5597-5698` fetch, `:6050-6273` journal-before-write and sector propagation, `:6338-6352` DONT_WRITE, `:7240-7358` page-move sync transfer, `:6510-6799` commit; `pcache.c:445-470,645-658` sync-safe selection/flag clearing. | VFS/cache/journal; crash, savepoint, spill, recovery, allocation, read/write baseline evidence. | `repair-required`; ledger 3, accepted ADR-0114. Must close NEED_SYNC/pSynced, page-number transfer, durable-cohort authorization, and DONT_WRITE. |
+| `storage-pager` — `implement-read-pager`, `implement-write-pager` | `pager.c:137-357` states, `:3075-3140` page reads, `:4714-4724` sync-safe spill, `:5597-5698` fetch, `:6050-6273` journal-before-write and sector propagation, `:6338-6352` DONT_WRITE, `:7240-7358` page-move sync transfer, `:6510-6799` commit; `pcache.c:445-470,645-658` sync-safe selection/flag clearing. | VFS/cache/journal; crash, savepoint, spill, sector, permutation, OOM/allocation, native contracts, and fresh version-2 write evidence. | `reference-faithful`; ADR-0114 and implementation commits `2aadeee`, `c145097`, `022e369`. |
 | `storage-btree-read` — `implement-btree-page`, `implement-btree-read` | `btree.c:1205-2294` page/cell geometry, `:5155-5473` payload, `:5486-6520` cursor open/seek/traversal. | Pager/record/collation; goldens, malformed/fuzz, signed rowid/index seek, OOM and SQLite-created traversal. | `reference-faithful`; no open valid-file finding. |
-| `storage-btree-write` — `implement-btree-write` | `btree.c:3540-3573,6546-7290,7320-9300,9441-10060,10098-10480` database/root, allocation/free, cell edit/balance, insert/delete/clear/drop. | Writable Pager and read B-tree; model, crash, OOM/allocation, bidirectional integrity. | `architectural-translation`; algorithm is preserved through typed owners. Pager DONT_WRITE remains ledger 3. |
+| `storage-btree-write` — `implement-btree-write` | `btree.c:3540-3573,6546-7290,7320-9300,9441-10060,10098-10480` database/root, allocation/free, cell edit/balance, insert, delete, and root lifecycle. | Writable Pager and read B-tree; model, crash, OOM/allocation, bidirectional integrity. | `architectural-translation`; algorithm is preserved through typed owners, and ADR-0114 closes freed-page write suppression. |
 | `storage-diagnostics` — `implement-storage-diagnostics` | `btree.c:10694-11310` integrity ownership/reachability plus format decoders above. | Read Pager/B-tree/record; whole-file corruption, freelist, overflow, pointer-map, stable output tests. | `architectural-translation`; offline workspace is outside point hot paths. |
 | `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; lifecycle, crash, changes/rowid/autocommit, retry, savepoint evidence. | `repair-required`; ledger 8, child ADR pending. ADR-0047 explicitly deferred precise admission. |
 | `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
@@ -184,6 +184,7 @@ baselines; values greater than one mean Modern is slower.
 |---|---|---|
 | Read | 1.53x fit scan; 1.49x pressure scan | `benchmarks/read-baseline-v1/aggregate.json` |
 | Write | 8.52x matched delete scan; 6.97x matched update scan; 5.56x matched explicit batch insert | `benchmarks/write-baseline-v2/aggregate.json` |
+| Write after ADR-0114 | 5.73x matched explicit batch insert; 2.79x matched delete scan; 1.83x matched update scan | ADR-0114 implementation evidence |
 | ORDER BY | 7.68x file top-N; 6.44x memory top-N; 6.37x multi-spill | `benchmarks/order-by-baseline-v1/aggregate.json` |
 | DISTINCT/compound | 26.55x high-cardinality memory DISTINCT; 17.58x file UNION replacement; 12.90x file keyed relation | `benchmarks/distinct-compound-baseline-v1/aggregate.json` |
 | Aggregate/grouping | 7.56x DISTINCT state; 6.91x sorted file grouping; 6.90x unique local ordering; 6.32x global functions | `benchmarks/aggregate-baseline-v1/aggregate.json` |
@@ -196,13 +197,11 @@ than timing noise:
   bytes through 74,481 file writes while reporting `temp_store=memory`;
   ADR-0113's truthful version-2 profiles both record zero subjournal opens,
   writes, and bytes;
-- delete scan writes 4,380 Modern database pages and performs thousands of
-  journal sync calls, while SQLite records 73 cache writes; source review
-  confirms that Modern lacks `PGHDR_DONT_WRITE`;
-- matched update scan writes the same 4,371 database pages in both engines,
-  but Modern issues 7,722 journal sync calls and remains 6.97x slower; source
-  review confirms that Modern lacks SQLite's `PGHDR_NEED_SYNC` and
-  `PCache.pSynced` sync-safe dirty-page selection;
+- historical delete scan wrote 4,380 Modern database pages and issued 7,738
+  journal sync calls; ADR-0114 reduces those counts to 20 and 18;
+- historical matched update scan issued 7,722 journal sync calls and remained
+  6.97x slower; ADR-0114 preserves the 4,371 database writes, reduces journal
+  syncs to 18, and records a fresh 1.83x wall ratio;
 - high-cardinality memory DISTINCT inserts into a sorted array and shifts the
   suffix on every new key;
 - a 65,536-row memory sorter performs about 131,000 Modern allocations because
@@ -221,7 +220,7 @@ than timing noise:
 |---:|---|---|---|
 | 1 | `storage-page-cache` | **Complete** | ADR-0112/PR #222 adds cache-local hashing, unpublished fills, bounded frame recycling, atomic sync-state permutation, zero-allocation pressure fills, and fresh matched evidence. |
 | 2 | `storage-rollback-journal` | **Complete** | ADR-0113 adds the SQLite `memjournal.c` in-memory statement-journal path, explicit spill policy, independent historical validation, and a truthful version-2 baseline. |
-| 3 | `storage-pager` | Repair | ADR-0114 publishes and clears `NEED_SYNC`, preserves page-number sync state across moves, authorizes sync-safe pages from durable cohorts while newer cohorts remain dirty, and adds `DONT_WRITE` for freed leaves. |
+| 3 | `storage-pager` | **Complete** | ADR-0114 publishes and clears `NEED_SYNC`, preserves page-number sync state across moves, authorizes sync-safe pages from durable cohorts while newer cohorts remain dirty, and suppresses cached freed-leaf writes. |
 | 4 | `runtime-temporary-core` | Resolve | Compare the shared Pager/extent/poison design with per-cursor SQLite ownership. Retain it only as a measured alternative or repair the ownership and failure domains before dependent structures. |
 | 5 | `runtime-sorter` | Repair | Coallocate metadata and payload per record in memory mode; use SQLite's bulk arena in file mode before dependent sorter consumers are repaired. |
 | 6 | `runtime-ephemeral-relation` | Repair | Use one SQLite-style ephemeral B-tree in memory and file modes; remove sorted-array insertion. |
@@ -868,7 +867,7 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its remaining eight repairs and five resolutions must
+blocking work ledger. Its remaining seven repairs and five resolutions must
 close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as repairs proceed.

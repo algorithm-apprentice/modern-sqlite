@@ -402,6 +402,68 @@ baseline.
 - WAL writeback and checkpoint sync state; and
 - shared-cache and multi-connection synchronization.
 
+## Implementation evidence
+
+Design commit `f4c99b2`, core implementation commit `2aadeee`, GCC guard
+commit `c145097`, and cached freed-page completion commit `022e369` activate
+the ADR-0112 state end to end. Main-journal capture publishes page/sector
+`needs_sync`, successful sync clears dirty flags, pressure uses the
+`pSynced` preference, and Journal authorization accepts a durable older page
+while a newer cohort remains dirty. Savepoint playback synchronizes first,
+bounded permutation preserves physical sync state, and every direct sync path
+updates the monotonic first-sync latch.
+
+`dont_write` revokes mutable access and permutation until the same pin
+re-enters Pager authorization. Freelist-leaf insertion marks any cached dirty
+freed page without acquiring or duplicating ownership. Skipped EOF pages are
+followed by an authorized physical growth before database sync, so committed
+images reopen at the exact logical size.
+
+Focused coverage includes:
+
+- one durable cohort, one dirty newer cohort, and a sync-safe pressure spill;
+- simultaneous writable peers and a three-page permutation inside one
+  physical sector;
+- dirty-only sync clearing, first-sync savepoint rollback, sync failure, and
+  sector-wide capture;
+- typed OOM while mutable access is revoked;
+- same-pin write reauthorization and savepoint-disabled `dont_write`;
+- owner-released cached freelist leaves, new-trunk control, and EOF
+  growth/reopen; and
+- every crash cut of a commit spanning multiple journal cohorts.
+
+A fresh complete version-2 write run from source revision
+`022e369dc819b1ee19d8e13b42039840f318994f`, tree
+`f43c2666f07f6ae1fba0c997fab0fbdf87758424`, preserves every logical result,
+database metadata, integrity result, workload, deadline, counter family, and
+the matched 10x guard. Pinned SQLite opens every Modern output and reports
+`PRAGMA integrity_check = ok`.
+
+Against the immutable pre-repair baseline:
+
+| Matched case | Wall ratio | CPU ratio | Journal syncs | Journal writes | Database writes |
+|---|---:|---:|---:|---:|---:|
+| `update-scan-implicit` before | 6.969554x | 5.598886x | 7,722 | 12,093 | 4,371 |
+| `update-scan-implicit` after | 1.833778x | 1.908406x | 18 | 4,389 | 4,371 |
+| `delete-scan-implicit` before | 8.519555x | 7.082721x | 7,738 | 12,118 | 4,380 |
+| `delete-scan-implicit` after | 2.790973x | 2.888376x | 18 | 4,398 | 20 |
+
+The delete result keeps the same 4,383 pages, 4,381 freelist pages, schema
+cookie, file size, empty result, and integrity result. Its physical SHA-256
+changes from
+`a7cbb9adfac72d3281c0127c35a7126e608857caeccad0fac6f763c4fe70fc59`
+to
+`27ad79a13c8b46822f25dfba54737e468608dc2db2d98de44de52ab3f2fd7987`
+because unreachable freelist-leaf bytes are intentionally no longer written.
+
+Fast-local passes 1,412 batched and 91 isolated tests. Isolated Debug,
+Release, and ASan/UBSan each pass 1,544 tests; instrumentation passes 1,561.
+GCC 16 Debug and Release each pass 1,564 tests. Twenty-seven shared checks
+cover 121 configured instances, 58 native compatibility/performance
+contracts pass, and four 20,000-run fuzz domains complete with seed 102.
+Full production clang-tidy, pinned formatting, graph, engineering discipline,
+implementation review, and evidence review pass.
+
 ## References
 
 - ADR-0040: Journal Contracts and Durable Ordering
