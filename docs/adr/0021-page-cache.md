@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-10-03
+- Amended by: ADR-0112 replaces the standard hash and destructive pressure
+  eviction with SQLite-style cache-local hashing, frame recycling, fill
+  publication, sync eligibility, and atomic page-number permutation.
 
 ## Context
 

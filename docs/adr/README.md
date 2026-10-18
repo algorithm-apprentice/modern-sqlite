@@ -114,3 +114,4 @@ their corresponding implementation begins.
 109. [ADR-0109: Index Range-End Verifier State](0109-index-range-end-verifier-state.md)
 110. [ADR-0110: SQLite-Aligned Outer Aggregate Ownership](0110-sqlite-aligned-outer-aggregate-ownership.md)
 111. [ADR-0111: SQLite Mechanism Baseline and Implemented-Engine Audit](0111-sqlite-mechanism-baseline-audit.md)
+112. [ADR-0112: SQLite Page-Cache Hash, Recycling, and Sync Eligibility](0112-sqlite-page-cache-hash-recycling-and-sync-eligibility.md)

@@ -206,6 +206,10 @@ translation of the same mechanism, or an accepted measured alternative.
 Unresolved and repair-required entries are corrected before IN,
 FROM/coroutine, CTE, view, constraint, trigger, window, or other new feature
 slices resume.
+ADR-0112 begins that ordered repair ledger with SQLite's cache-local hash,
+clean-frame recycling, unpublished Pager fills, sync-safe dirty selection,
+and page-number-owned sync metadata. Journal and Pager transitions remain the
+next ordered repairs.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
