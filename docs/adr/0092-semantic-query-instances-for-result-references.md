@@ -312,8 +312,39 @@ and five explicit unsupported boundaries without changing any inherited SQL,
 operations, or oracle outcome outside those promotions.
 
 Direct and compound aggregate ORDER registration, phase partitioning, and
-replacement retained-leaf analysis remain the third delivery. Outer aggregate
-ownership remains the following prerequisite. Node 43 is still active.
+replacement retained-leaf analysis are delivered by the final ordered slice
+below.
+
+### Aggregate ordering delivery
+
+The third delivery keeps direct ORDER BY aliases and ordinals mapped to the
+original result value while binding the complete query-containing aggregate
+definition once more in the ordering phase. Fresh nested-query identities
+therefore create independent aggregate work, while equivalent ordinary
+aggregate calls continue to deduplicate and discarded scalar siblings remain
+unevaluated.
+
+`BoundAggregateProgram` retains the first HAVING-only invocation index.
+Canonical finalization inserts new ordering invocations at that boundary and
+promotes an equivalent HAVING invocation to the ordering partition instead of
+creating another state. Runtime consumers still iterate the one canonical
+invocation vector and require no planner, lowering, bytecode, or VM change.
+
+Compound ORDER BY first completes ordinary output-column resolution. For live
+ordering, each SELECT arm then rebinds its selected definition with that arm's
+original sources active throughout binding, finalization, and analysis.
+Retained-leaf analysis maps ordering back to the owning core's result column,
+computes both replacement vectors before publishing either, and never applies
+the left core's source identities to another arm. The existing EXISTS
+checkpoint leaves discarded compound ordering unchanged.
+
+Seven deterministic direct, compound, phase, reset, and ignored-EXISTS cases
+extend the pinned subquery shard to 220 comparisons and five explicit
+unsupported boundaries. Callback tests separately pin the native independent
+invocation counts and result/ORDER/HAVING execution order.
+
+This completes ADR-0092's three ordered deliveries. Outer aggregate ownership
+remains the following prerequisite, and node 43 remains active.
 
 ## Verification
 

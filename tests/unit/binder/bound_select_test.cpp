@@ -935,6 +935,111 @@ TEST(Binder, PreservesQueryCopyOrderingGroupingAndValidatedDepth) {
   }
 }
 
+TEST(Binder, RegistersDirectQueryAggregateOrderingBeforeHaving) {
+  const auto catalog = TestCatalog();
+  const BoundSelect bound = BindOrThrow(
+      "SELECT sum((SELECT 1)) AS x FROM Items "
+      "HAVING sum((SELECT 2))>0 ORDER BY x",
+      catalog);
+  ASSERT_EQ(4U, bound.query_count());
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores().front());
+  ASSERT_TRUE(core.aggregate.has_value());
+  ASSERT_EQ(3U, core.aggregate->invocations.size());
+  EXPECT_EQ(2U, core.aggregate->having_invocation_begin);
+
+  const auto invocation_query = [](const BoundSelect& select, BoundAggregateInvocationId id) {
+    const BoundAggregateInvocation& invocation = select.aggregate_invocations()[id.value()];
+    EXPECT_EQ(1U, invocation.arguments.size());
+    if (invocation.arguments.empty()) {
+      return BoundQueryId{0};
+    }
+    const auto* query =
+        std::get_if<BoundSubqueryExpression>(&select.expression(invocation.arguments[0]).payload);
+    EXPECT_NE(nullptr, query);
+    return query == nullptr ? BoundQueryId{0} : query->query;
+  };
+  EXPECT_EQ(BoundQueryId{1}, invocation_query(bound, core.aggregate->invocations[0]));
+  EXPECT_EQ(BoundQueryId{3}, invocation_query(bound, core.aggregate->invocations[1]));
+  EXPECT_EQ(BoundQueryId{2}, invocation_query(bound, core.aggregate->invocations[2]));
+  for (const BoundQueryId query : {BoundQueryId{1}, BoundQueryId{2}, BoundQueryId{3}}) {
+    EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, bound.query(query).parent);
+  }
+
+  const auto* ordering_reference = std::get_if<BoundAliasReferenceExpression>(
+      &bound.expression(bound.order_by().front().expression).payload);
+  ASSERT_NE(nullptr, ordering_reference);
+  EXPECT_EQ(core.result_columns.front().expression, ordering_reference->target);
+
+  const BoundSelect sibling =
+      BindOrThrow("SELECT sum(Id)+(SELECT 1) AS x FROM Items ORDER BY x", catalog);
+  ASSERT_EQ(3U, sibling.query_count());
+  const auto& sibling_core = std::get<BoundSelectCore>(sibling.query_cores().front());
+  ASSERT_TRUE(sibling_core.aggregate.has_value());
+  EXPECT_EQ(1U, sibling_core.aggregate->invocations.size());
+  EXPECT_EQ(1U, sibling_core.aggregate->having_invocation_begin);
+  ExpectBindError("SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x", catalog,
+                  BindErrorCode::kAggregateTermLimitExceeded, "too many aggregate terms",
+                  BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
+}
+
+TEST(Binder, RegistersCompoundQueryAggregateOrderingPerOwningCore) {
+  const auto catalog = TestCatalog();
+  const BoundSelect bound = BindOrThrow(
+      "SELECT sum((SELECT a.Score)) AS x FROM Items a "
+      "UNION ALL SELECT sum((SELECT b.Id)) FROM Items b ORDER BY x",
+      catalog);
+  ASSERT_EQ(5U, bound.query_count());
+  ASSERT_EQ(4U, bound.aggregate_invocations().size());
+  EXPECT_TRUE(bound.root_query().captures.empty());
+
+  const auto invocation_query = [](const BoundSelect& select, BoundAggregateInvocationId id) {
+    const BoundAggregateInvocation& invocation = select.aggregate_invocations()[id.value()];
+    EXPECT_EQ(1U, invocation.arguments.size());
+    if (invocation.arguments.empty()) {
+      return BoundQueryId{0};
+    }
+    const auto* query =
+        std::get_if<BoundSubqueryExpression>(&select.expression(invocation.arguments[0]).payload);
+    EXPECT_NE(nullptr, query);
+    return query == nullptr ? BoundQueryId{0} : query->query;
+  };
+  for (std::size_t core_index = 0; core_index < 2U; ++core_index) {
+    const auto& core = std::get<BoundSelectCore>(bound.query_cores()[core_index]);
+    ASSERT_TRUE(core.aggregate.has_value());
+    ASSERT_EQ(2U, core.aggregate->invocations.size());
+    EXPECT_EQ(2U, core.aggregate->having_invocation_begin);
+    ASSERT_EQ(1U, core.table_sources.size());
+    ASSERT_EQ(1U, core.aggregate->source_leaves.size());
+    const auto retained = BoundSourceLeafIdentityOf(
+        bound.expression(core.aggregate->source_leaves.front()), bound.source_columns());
+    ASSERT_TRUE(retained.has_value());
+    EXPECT_EQ(core.table_sources.front().id, retained->source);
+
+    const BoundQueryId original = invocation_query(bound, core.aggregate->invocations[0]);
+    const BoundQueryId ordering = invocation_query(bound, core.aggregate->invocations[1]);
+    EXPECT_EQ(BoundQueryId{static_cast<std::uint32_t>(core_index + 1U)}, original);
+    EXPECT_EQ(BoundQueryId{static_cast<std::uint32_t>(core_index + 3U)}, ordering);
+    EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, bound.query(ordering).parent);
+    ASSERT_EQ(1U, bound.query(ordering).captures.size());
+    const auto* capture = std::get_if<BoundSourceCapture>(&bound.query(ordering).captures.front());
+    ASSERT_NE(nullptr, capture);
+    EXPECT_EQ(core.table_sources.front().id, capture->identity.source);
+  }
+
+  const BoundSelect phased = BindOrThrow(
+      "SELECT sum((SELECT 1)) AS x FROM Items "
+      "HAVING sum((SELECT 2))>0 "
+      "UNION ALL SELECT 0 ORDER BY x",
+      catalog);
+  const auto& left = std::get<BoundSelectCore>(phased.query_cores().front());
+  ASSERT_TRUE(left.aggregate.has_value());
+  ASSERT_EQ(3U, left.aggregate->invocations.size());
+  EXPECT_EQ(2U, left.aggregate->having_invocation_begin);
+  EXPECT_EQ(BoundQueryId{1}, invocation_query(phased, left.aggregate->invocations[0]));
+  EXPECT_EQ(BoundQueryId{3}, invocation_query(phased, left.aggregate->invocations[1]));
+  EXPECT_EQ(BoundQueryId{2}, invocation_query(phased, left.aggregate->invocations[2]));
+}
+
 TEST(Binder, ResolvesOuterSourcesWithCanonicalQualificationAndFallbackRules) {
   struct Case {
     std::string_view sql;
@@ -2536,6 +2641,11 @@ TEST(Binder, DeduplicatesAggregateInvocationsInClauseOrderPerCore) {
   EXPECT_EQ(1U, compound_order.aggregate_functions().size());
   ASSERT_EQ(1U, compound_order.order_by().size());
   EXPECT_EQ(std::optional<std::size_t>{0}, compound_order.order_by()[0].result_column);
+  for (const BoundQueryCore& candidate : compound_order.query_cores()) {
+    const auto& ordered_core = std::get<BoundSelectCore>(candidate);
+    ASSERT_TRUE(ordered_core.aggregate.has_value());
+    EXPECT_EQ(1U, ordered_core.aggregate->having_invocation_begin);
+  }
   ExpectBindError(
       "SELECT sum(Score) FROM Items UNION ALL "
       "SELECT sum(Score) FROM Items ORDER BY sum(Id)",

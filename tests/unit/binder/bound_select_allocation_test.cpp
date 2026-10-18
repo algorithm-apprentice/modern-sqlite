@@ -177,8 +177,19 @@ int main() try {
   if (aggregate_allocations == 0 || aggregate_allocations > 512U) {
     return 1;
   }
+  constexpr std::string_view kQueryAggregateOrderingSql =
+      "SELECT sum((SELECT Name)) AS x FROM Items "
+      "HAVING sum((SELECT id))>0 "
+      "UNION ALL SELECT sum((SELECT id)) FROM Items ORDER BY x";
+  const std::size_t query_aggregate_ordering_allocations =
+      BindAllocationCount(kQueryAggregateOrderingSql, catalog);
+  if (query_aggregate_ordering_allocations == 0 || query_aggregate_ordering_allocations > 512U) {
+    return 1;
+  }
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
-    if (BindAllocationCount(kAggregateSql, catalog) != aggregate_allocations) {
+    if (BindAllocationCount(kAggregateSql, catalog) != aggregate_allocations ||
+        BindAllocationCount(kQueryAggregateOrderingSql, catalog) !=
+            query_aggregate_ordering_allocations) {
       return 1;
     }
   }
@@ -260,6 +271,7 @@ int main() try {
     if (const auto* selected = std::get_if<BoundSelectCore>(&core);
         selected != nullptr && selected->aggregate.has_value()) {
       checksum += selected->aggregate->invocations.size();
+      checksum += selected->aggregate->having_invocation_begin;
       checksum += selected->aggregate->group_by.size();
       checksum += selected->aggregate->source_leaves.size();
       checksum += selected->aggregate->representative_leaves.size();

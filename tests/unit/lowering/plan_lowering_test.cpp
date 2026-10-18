@@ -1631,8 +1631,54 @@ TEST_F(ReadLoweringAggregateIntegration, InstantiatesIndependentQueryAliasCopies
       Execute("SELECT sum((SELECT volatile_counter())) AS x FROM Items ORDER BY x", custom.Binder(),
               custom.Vm());
   ASSERT_EQ(1U, direct_aggregate_order.size());
-  EXPECT_EQ(1U, callback_count);
+  EXPECT_EQ(2U, callback_count);
   EXPECT_EQ(static_cast<std::int64_t>(count), direct_aggregate_order[0][0].integer_value());
+
+  callback_count = 0;
+  const auto ordinal_aggregate_order =
+      Execute("SELECT sum((SELECT volatile_counter())) FROM Items ORDER BY 1", custom.Binder(),
+              custom.Vm());
+  ASSERT_EQ(1U, ordinal_aggregate_order.size());
+  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), ordinal_aggregate_order[0][0].integer_value());
+
+  callback_count = 0;
+  const auto scalar_sibling_order =
+      Execute("SELECT sum(Id)+(SELECT volatile_counter()) AS x FROM Items ORDER BY x",
+              custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, scalar_sibling_order.size());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const auto compound_order = Execute(
+      "SELECT sum((SELECT volatile_counter())) AS x FROM Items "
+      "UNION ALL SELECT sum((SELECT volatile_counter())) FROM Items ORDER BY x",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(2U, compound_order.size());
+  EXPECT_EQ(4U, callback_count);
+  EXPECT_EQ(static_cast<std::int64_t>(count), compound_order[0][0].integer_value());
+  EXPECT_EQ(static_cast<std::int64_t>(3U * count), compound_order[1][0].integer_value());
+
+  callback_count = 0;
+  const std::string phased_sql =
+      "SELECT sum((SELECT volatile_counter())) AS x FROM Items "
+      "HAVING sum((SELECT volatile_counter()))=" +
+      std::to_string(3U * count) + " UNION ALL SELECT 0 ORDER BY x";
+  const auto phased = Execute(phased_sql, custom.Binder(), custom.Vm());
+  ASSERT_EQ(2U, phased.size());
+  EXPECT_EQ(3U, callback_count);
+  EXPECT_EQ(0, phased[0][0].integer_value());
+  EXPECT_EQ(static_cast<std::int64_t>(count), phased[1][0].integer_value());
+
+  callback_count = 0;
+  const auto ignored_order = Execute(
+      "SELECT EXISTS("
+      "SELECT sum((SELECT volatile_counter())) AS x FROM Items "
+      "UNION ALL SELECT 0 ORDER BY x)",
+      custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, ignored_order.size());
+  EXPECT_EQ(1, ignored_order[0][0].integer_value());
+  EXPECT_EQ(1U, callback_count);
 }
 
 TEST_F(ReadLoweringAggregateIntegration, ReevaluatesConstantAliasContextWithoutSourceFields) {

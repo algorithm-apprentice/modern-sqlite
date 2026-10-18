@@ -112,6 +112,14 @@ struct CoreBindingMetadata {
   std::vector<ResultDefinition> result_definitions{};
 };
 
+struct AggregateLeafAnalysisView {
+  std::span<const BoundTableSource> table_sources;
+  std::span<const BoundResultColumn> result_columns;
+  std::optional<BoundExpressionId> where;
+  std::span<const BoundOrderingTerm> order_by;
+  bool order_by_uses_result_columns = false;
+};
+
 enum class AggregateOccurrencePhase : std::uint8_t {
   kResult,
   kOrderBy,
@@ -2405,18 +2413,18 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool CanOmitCountOrderingRepresentatives(
-      const BoundAggregateProgram& program) const {
-    if (!program.group_by.empty() || program.having.has_value() || impl_->where.has_value() ||
-        impl_->table_sources.size() != 1U || impl_->result_columns.size() != 1U ||
+      const BoundAggregateProgram& program, const AggregateLeafAnalysisView& view) const {
+    if (!program.group_by.empty() || program.having.has_value() || view.where.has_value() ||
+        view.table_sources.size() != 1U || view.result_columns.size() != 1U ||
         program.invocations.size() != 1U) {
       return false;
     }
-    const BoundSourceKind kind = impl_->table_sources.front().kind;
+    const BoundSourceKind kind = view.table_sources.front().kind;
     if (kind != BoundSourceKind::kCatalogTable && kind != BoundSourceKind::kSchemaTable) {
       return false;
     }
     const auto* call = std::get_if<BoundAggregateCallExpression>(
-        &impl_->expressions[impl_->result_columns.front().expression.value()].payload);
+        &impl_->expressions[view.result_columns.front().expression.value()].payload);
     if (call == nullptr || call->invocation != program.invocations.front()) {
       return false;
     }
@@ -2427,7 +2435,8 @@ class StatementBinder final {
            invocation.order_by.empty();
   }
 
-  [[nodiscard]] BindExpected<void> AnalyzeAggregateLeaves(BoundAggregateProgram& program) {
+  [[nodiscard]] BindExpected<void> AnalyzeAggregateLeaves(BoundAggregateProgram& program,
+                                                          const AggregateLeafAnalysisView& view) {
     std::vector<BoundSourceCapture> source_leaves;
     std::vector<BoundSourceCapture> representative_leaves;
     bool valid = true;
@@ -2453,11 +2462,19 @@ class StatementBinder final {
         }
       }
     }
-    for (const BoundResultColumn& result : impl_->result_columns) {
+    for (const BoundResultColumn& result : view.result_columns) {
       collect(result.expression, representative_leaves);
     }
-    for (const BoundOrderingTerm& term : ActiveQuery().order_by) {
-      collect(term.expression, representative_leaves);
+    for (const BoundOrderingTerm& term : view.order_by) {
+      if (!view.order_by_uses_result_columns) {
+        collect(term.expression, representative_leaves);
+        continue;
+      }
+      if (!term.result_column.has_value() || *term.result_column >= view.result_columns.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "compound aggregate ordering result is invalid"));
+      }
+      collect(view.result_columns[*term.result_column].expression, representative_leaves);
     }
     if (program.having.has_value()) {
       collect(*program.having, representative_leaves);
@@ -2480,20 +2497,97 @@ class StatementBinder final {
     if (retained.size() > options_.maximum_aggregate_terms) {
       const SourceSpan span =
           program.having.has_value() ? impl_->expressions[program.having->value()].span
-          : impl_->result_columns.front().expression.value() < impl_->expressions.size()
-              ? impl_->expressions[impl_->result_columns.front().expression.value()].span
+          : !view.result_columns.empty() &&
+                  view.result_columns.front().expression.value() < impl_->expressions.size()
+              ? impl_->expressions[view.result_columns.front().expression.value()].span
               : SourceSpan{};
       return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded, span,
                                          "too many aggregate terms"));
     }
-    if (CanOmitCountOrderingRepresentatives(program)) {
+    if (CanOmitCountOrderingRepresentatives(program, view)) {
       representative_leaves.clear();
     }
-    if (auto published = PublishAggregateLeaves(source_leaves, program.source_leaves);
+    std::vector<BoundExpressionId> published_source_leaves;
+    std::vector<BoundExpressionId> published_representative_leaves;
+    if (auto published = PublishAggregateLeaves(source_leaves, published_source_leaves);
         !published.has_value()) {
       return published;
     }
-    return PublishAggregateLeaves(representative_leaves, program.representative_leaves);
+    if (auto published =
+            PublishAggregateLeaves(representative_leaves, published_representative_leaves);
+        !published.has_value()) {
+      return published;
+    }
+    program.source_leaves = std::move(published_source_leaves);
+    program.representative_leaves = std::move(published_representative_leaves);
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> FinalizeAggregatePhase(BoundAggregateProgram& program,
+                                                          AggregateOccurrencePhase phase) {
+    if (program.having_invocation_begin > program.invocations.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "aggregate invocation phase boundary is invalid"));
+    }
+    for (PendingAggregateInvocation& pending : pending_aggregates_) {
+      if (pending.phase != phase) {
+        continue;
+      }
+      std::optional<std::size_t> selected_index;
+      for (std::size_t index = 0; index < program.invocations.size(); ++index) {
+        const BoundAggregateInvocationId id = program.invocations[index];
+        if (AggregateInvocationsEquivalent(impl_->aggregate_invocations[id.value()],
+                                           pending.invocation)) {
+          selected_index = index;
+          break;
+        }
+      }
+
+      BoundAggregateInvocationId selected{0};
+      if (selected_index.has_value()) {
+        selected = program.invocations[*selected_index];
+        if (phase == AggregateOccurrencePhase::kOrderBy &&
+            *selected_index >= program.having_invocation_begin) {
+          std::rotate(
+              program.invocations.begin() +
+                  static_cast<std::ptrdiff_t>(program.having_invocation_begin),
+              program.invocations.begin() + static_cast<std::ptrdiff_t>(*selected_index),
+              program.invocations.begin() + static_cast<std::ptrdiff_t>(*selected_index + 1U));
+          ++program.having_invocation_begin;
+        }
+      } else {
+        if (program.invocations.size() >= options_.maximum_aggregate_terms) {
+          return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded,
+                                             pending.invocation.span, "too many aggregate terms"));
+        }
+        if (impl_->aggregate_invocations.size() >= std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             pending.invocation.span,
+                                             "bound aggregate invocation ID overflow"));
+        }
+        selected = BoundAggregateInvocationId{
+            static_cast<std::uint32_t>(impl_->aggregate_invocations.size())};
+        impl_->aggregate_invocations.push_back(std::move(pending.invocation));
+        if (phase == AggregateOccurrencePhase::kOrderBy) {
+          program.invocations.insert(
+              program.invocations.begin() +
+                  static_cast<std::ptrdiff_t>(program.having_invocation_begin),
+              selected);
+          ++program.having_invocation_begin;
+        } else {
+          program.invocations.push_back(selected);
+        }
+      }
+      auto* call = std::get_if<BoundAggregateCallExpression>(
+          &impl_->expressions[pending.expression.value()].payload);
+      if (call == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                           impl_->expressions[pending.expression.value()].span,
+                                           "pending aggregate expression is invalid"));
+      }
+      call->invocation = selected;
+    }
+    return {};
   }
 
   [[nodiscard]] BindExpected<std::optional<BoundAggregateProgram>> FinalizeAggregateProgram() {
@@ -2503,49 +2597,18 @@ class StatementBinder final {
     }
     BoundAggregateProgram program;
     program.invocations.reserve(pending_aggregates_.size());
-    constexpr std::array phases{
-        AggregateOccurrencePhase::kResult,
-        AggregateOccurrencePhase::kOrderBy,
-        AggregateOccurrencePhase::kHaving,
-    };
-    for (const AggregateOccurrencePhase phase : phases) {
-      for (PendingAggregateInvocation& pending : pending_aggregates_) {
-        if (pending.phase != phase) {
-          continue;
-        }
-        std::optional<BoundAggregateInvocationId> selected;
-        for (const BoundAggregateInvocationId id : program.invocations) {
-          if (AggregateInvocationsEquivalent(impl_->aggregate_invocations[id.value()],
-                                             pending.invocation)) {
-            selected = id;
-            break;
-          }
-        }
-        if (!selected.has_value()) {
-          if (program.invocations.size() >= options_.maximum_aggregate_terms) {
-            return std::unexpected(BinderError(BindErrorCode::kAggregateTermLimitExceeded,
-                                               pending.invocation.span,
-                                               "too many aggregate terms"));
-          }
-          if (impl_->aggregate_invocations.size() >= std::numeric_limits<std::uint32_t>::max()) {
-            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
-                                               pending.invocation.span,
-                                               "bound aggregate invocation ID overflow"));
-          }
-          selected = BoundAggregateInvocationId{
-              static_cast<std::uint32_t>(impl_->aggregate_invocations.size())};
-          impl_->aggregate_invocations.push_back(std::move(pending.invocation));
-          program.invocations.push_back(*selected);
-        }
-        auto* call = std::get_if<BoundAggregateCallExpression>(
-            &impl_->expressions[pending.expression.value()].payload);
-        if (call == nullptr) {
-          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
-                                             impl_->expressions[pending.expression.value()].span,
-                                             "pending aggregate expression is invalid"));
-        }
-        call->invocation = *selected;
-      }
+    if (auto finalized = FinalizeAggregatePhase(program, AggregateOccurrencePhase::kResult);
+        !finalized.has_value()) {
+      return std::unexpected(std::move(finalized.error()));
+    }
+    program.having_invocation_begin = program.invocations.size();
+    if (auto finalized = FinalizeAggregatePhase(program, AggregateOccurrencePhase::kOrderBy);
+        !finalized.has_value()) {
+      return std::unexpected(std::move(finalized.error()));
+    }
+    if (auto finalized = FinalizeAggregatePhase(program, AggregateOccurrencePhase::kHaving);
+        !finalized.has_value()) {
+      return std::unexpected(std::move(finalized.error()));
     }
     program.group_by = std::move(active_group_by_);
     program.having = active_having_;
@@ -2564,7 +2627,13 @@ class StatementBinder final {
       return std::unexpected(std::move(aggregate.error()));
     }
     if (aggregate->has_value()) {
-      BindExpected<void> analyzed = AnalyzeAggregateLeaves(**aggregate);
+      BindExpected<void> analyzed =
+          AnalyzeAggregateLeaves(**aggregate, AggregateLeafAnalysisView{
+                                                  .table_sources = impl_->table_sources,
+                                                  .result_columns = impl_->result_columns,
+                                                  .where = impl_->where,
+                                                  .order_by = ActiveQuery().order_by,
+                                              });
       if (!analyzed.has_value()) {
         return analyzed;
       }
@@ -3025,6 +3094,7 @@ class StatementBinder final {
 
   void ActivateQueryCore(std::size_t core_index) {
     const std::size_t global_index = ActiveQuery().core_begin + core_index;
+    active_core_ = global_index;
     const CoreBindingMetadata& metadata = core_metadata_[global_index];
     source_states_ = metadata.source_states;
     active_source_begin_ = metadata.source_column_begin;
@@ -3034,6 +3104,9 @@ class StatementBinder final {
     if (const auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
         select != nullptr) {
       impl_->table_sources = select->table_sources;
+      active_core_is_aggregate_ = select->aggregate.has_value();
+    } else {
+      active_core_is_aggregate_ = false;
     }
   }
 
@@ -3047,6 +3120,147 @@ class StatementBinder final {
       }
       return std::holds_alternative<CollateExpression>(expression.payload);
     }
+  }
+
+  [[nodiscard]] bool ResultDefinitionNeedsAggregateOrderingCopy(
+      const ResultDefinition& definition, const BoundResultColumn& result) const noexcept {
+    return definition.has_subqueries && Properties(result.expression).contains_aggregate;
+  }
+
+  [[nodiscard]] BindExpected<void> BindDirectAggregateOrderingCopy(std::size_t result_column,
+                                                                   SourceSpan span) {
+    if (result_column >= impl_->result_columns.size() ||
+        result_column >= impl_->result_definitions.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "aggregate ordering result definition is invalid"));
+    }
+    const ResultDefinition& definition = impl_->result_definitions[result_column];
+    if (!ResultDefinitionNeedsAggregateOrderingCopy(definition,
+                                                    impl_->result_columns[result_column])) {
+      return {};
+    }
+    const BindScope copy_scope{
+        .source_columns = true,
+        .result_aliases = false,
+        .aggregates = AggregatePermission::kAllowed,
+        .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
+    };
+    const NameScopeView names = CurrentNameScope(copy_scope);
+    auto copied = BindResultDefinitionCopy(definition, names, copy_scope, span);
+    if (!copied.has_value()) {
+      return std::unexpected(std::move(copied.error()));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindCompoundAggregateOrderingCopies() {
+    if (ActiveQuery().destination == BoundQueryDestination::kExists) {
+      return {};
+    }
+    QueryBindingScope saved = SaveQueryScope(BindScope{
+        .source_columns = true,
+        .result_aliases = false,
+        .aggregates = AggregatePermission::kAllowed,
+        .requires_value = true,
+    });
+    BindExpected<void> registered = [&]() -> BindExpected<void> {
+      const std::size_t core_count = ActiveQuery().core_count;
+      const std::size_t order_count = ActiveQuery().order_by.size();
+      for (std::size_t core_index = 0; core_index < core_count; ++core_index) {
+        ActivateQueryCore(core_index);
+        active_aggregate_phase_ = AggregateOccurrencePhase::kOrderBy;
+        pending_aggregates_.clear();
+        bool copied_definition = false;
+        for (std::size_t order_index = 0; order_index < order_count; ++order_index) {
+          const std::optional<std::size_t> result_column =
+              ActiveQuery().order_by[order_index].result_column;
+          if (!result_column.has_value()) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kInternalInvariant, {},
+                            "compound aggregate ordering has no selected result column"));
+          }
+
+          const std::size_t global_index = ActiveQuery().core_begin + core_index;
+          const auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
+          if (select == nullptr || !select->aggregate.has_value()) {
+            continue;
+          }
+          CoreBindingMetadata& metadata = core_metadata_[global_index];
+          if (*result_column >= select->result_columns.size() ||
+              *result_column >= metadata.result_definitions.size()) {
+            return std::unexpected(
+                BinderError(BindErrorCode::kInternalInvariant, {},
+                            "compound aggregate ordering result definition is invalid"));
+          }
+          ResultDefinition& definition = metadata.result_definitions[*result_column];
+          if (!ResultDefinitionNeedsAggregateOrderingCopy(definition,
+                                                          select->result_columns[*result_column])) {
+            continue;
+          }
+
+          const BindScope copy_scope{
+              .source_columns = true,
+              .result_aliases = false,
+              .aggregates = AggregatePermission::kAllowed,
+              .requires_value = true,
+          };
+          const NameScopeView names{
+              .query = active_query_,
+              .sources = source_states_,
+              .table_sources = impl_->table_sources,
+              .aliases = {},
+              .result_definitions = metadata.result_definitions,
+              .outer = outer_scope_,
+              .scope = copy_scope,
+          };
+          const SourceSpan span = definition.syntax.has_value()
+                                      ? tree_.expression(*definition.syntax).span
+                                      : SourceSpan{};
+          auto copied = BindResultDefinitionCopy(definition, names, copy_scope, span);
+          if (!copied.has_value()) {
+            return std::unexpected(std::move(copied.error()));
+          }
+          copied_definition = true;
+        }
+        if (!copied_definition) {
+          continue;
+        }
+
+        const std::size_t global_index = ActiveQuery().core_begin + core_index;
+        auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
+        if (select == nullptr || !select->aggregate.has_value()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                             "compound aggregate program is unavailable"));
+        }
+        BoundAggregateProgram& program = *select->aggregate;
+        program.invocations.reserve(program.invocations.size() + pending_aggregates_.size());
+        if (auto finalized = FinalizeAggregatePhase(program, AggregateOccurrencePhase::kOrderBy);
+            !finalized.has_value()) {
+          return finalized;
+        }
+        pending_aggregates_.clear();
+
+        select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
+        if (select == nullptr || !select->aggregate.has_value()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                             "compound aggregate program was invalidated"));
+        }
+        if (auto analyzed = AnalyzeAggregateLeaves(*select->aggregate,
+                                                   AggregateLeafAnalysisView{
+                                                       .table_sources = select->table_sources,
+                                                       .result_columns = select->result_columns,
+                                                       .where = select->where,
+                                                       .order_by = ActiveQuery().order_by,
+                                                       .order_by_uses_result_columns = true,
+                                                   });
+            !analyzed.has_value()) {
+          return analyzed;
+        }
+      }
+      return {};
+    }();
+    RestoreQueryScope(std::move(saved));
+    return registered;
   }
 
   [[nodiscard]] BindExpected<void> BindCompoundOrderBy(const SelectStatement& select) {
@@ -3167,6 +3381,9 @@ class StatementBinder final {
           .result_column = *result_column,
           .explicit_collation = OrderByHasExplicitCollation(term.expression),
       });
+    }
+    if (auto registered = BindCompoundAggregateOrderingCopies(); !registered.has_value()) {
+      return registered;
     }
     active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
     return {};
@@ -4413,6 +4630,12 @@ class StatementBinder final {
         }
       }
 
+      if (result_column.has_value()) {
+        if (auto copied = BindDirectAggregateOrderingCopy(*result_column, term.span);
+            !copied.has_value()) {
+          return copied;
+        }
+      }
       BindExpected<BoundExpressionId> expression =
           result_column.has_value()
               ? BindOrderByResultReference(term.expression, *result_column)

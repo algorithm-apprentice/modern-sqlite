@@ -5307,6 +5307,163 @@
         }
       ],
       "sql_hex": "53454c454354204558495354532856414c55455328312c56616c75653d31292c282853454c45435420312c32292c312920494e544552534543542056414c55455328312c3129292046524f4d20437573746f6d436f6c6c6174696f6e"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-direct-alias-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "2"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c454354203f31292920415320782046524f4d206974656d73204f524445522042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-direct-ordinal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c45435420696429292046524f4d206974656d73204f524445522042592031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-scalar-sibling",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d286964292b2853454c45435420312920415320782046524f4d206974656d73204f524445522042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-compound-one-aggregate-arm",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c454354206964292920415320782046524f4d206974656d7320554e494f4e20414c4c2053454c4543542030204f524445522042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-compound-two-aggregate-arms",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c454354206964292920415320782046524f4d206974656d732057484552452069643c3d3220554e494f4e20414c4c2053454c4543542073756d282853454c45435420696429292046524f4d206974656d732057484552452069643e3d32204f524445522042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-result-order-having-phases",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542073756d282853454c454354206964292920415320782046524f4d206974656d7320484156494e472073756d282853454c45435420696429293d313520554e494f4e20414c4c2053454c4543542030204f524445522042592078"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "query-alias-ordering",
+      "id": "query-order-ignored-exists-compound",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542073756d282853454c454354206964292920415320782046524f4d206974656d7320554e494f4e20414c4c2053454c4543542030204f52444552204259207829"
     }
   ],
   "databases": [
@@ -5341,6 +5498,7 @@
     "correlated-subquery",
     "execution-errors",
     "prepare-errors",
-    "query-alias-copies"
+    "query-alias-copies",
+    "query-alias-ordering"
   ]
 }

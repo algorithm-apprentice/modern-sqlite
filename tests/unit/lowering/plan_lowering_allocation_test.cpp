@@ -428,12 +428,16 @@ int main() try {
     }
   }
 
-  const std::array<PhysicalPlan, 2> aggregate_integration_plans{
+  const std::array<PhysicalPlan, 3> aggregate_integration_plans{
       PhysicalFixture(catalog, "SELECT DISTINCT count() FROM Items GROUP BY Name ORDER BY 1"),
       PhysicalFixture(catalog,
                       "SELECT count() FROM Items UNION ALL SELECT sum(id) FROM Items ORDER BY 1"),
+      PhysicalFixture(catalog,
+                      "SELECT sum((SELECT 1)) AS x FROM Items "
+                      "HAVING sum((SELECT 2))>0 "
+                      "UNION ALL SELECT 0 ORDER BY x"),
   };
-  constexpr std::array<std::size_t, 2> kExpectedAggregateIntegrationAllocations{77U, 82U};
+  constexpr std::array<std::size_t, 3> kExpectedAggregateIntegrationAllocations{77U, 82U, 101U};
   for (std::size_t plan_index = 0; plan_index < aggregate_integration_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
       allocation_count.store(0, std::memory_order_relaxed);
