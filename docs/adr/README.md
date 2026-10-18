@@ -115,3 +115,4 @@ their corresponding implementation begins.
 110. [ADR-0110: SQLite-Aligned Outer Aggregate Ownership](0110-sqlite-aligned-outer-aggregate-ownership.md)
 111. [ADR-0111: SQLite Mechanism Baseline and Implemented-Engine Audit](0111-sqlite-mechanism-baseline-audit.md)
 112. [ADR-0112: SQLite Page-Cache Hash, Recycling, and Sync Eligibility](0112-sqlite-page-cache-hash-recycling-and-sync-eligibility.md)
+113. [ADR-0113: SQLite In-Memory Statement Journal and Spill](0113-sqlite-memory-statement-journal.md)
