@@ -405,7 +405,7 @@ template <typename T>
     if (!page.has_value()) {
       return {};
     }
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   Arm(failure);
@@ -481,7 +481,7 @@ template <typename T>
     if (!page.has_value()) {
       return {};
     }
-    page->mutable_bytes()[100] = std::byte{0x33};
+    page->mutable_bytes().value()[100] = std::byte{0x33};
   }
   const auto savepoint = pager->CreateSavepoint();
   if (!savepoint.has_value()) {
@@ -492,7 +492,7 @@ template <typename T>
     if (!page.has_value()) {
       return {};
     }
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
 
   Arm(failure);
@@ -513,7 +513,7 @@ template <typename T>
     if (!page.has_value()) {
       return false;
     }
-    page->mutable_bytes()[100] = std::byte{0x7f};
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
   }
   {
     const auto page = pager.WritePage(modern_sqlite::PageNumber{1});

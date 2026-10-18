@@ -561,6 +561,31 @@ TEST(PageCache, PrefersSyncSafeDirtyPagesAndAcceptsSharedPeerMarking) {
   EXPECT_FALSE((**shared_peer).needs_sync());
 }
 
+TEST(PageCache, DontWriteRevokesMutableAccessUntilTheNextDirtyTransition) {
+  auto cache = MakeCache(8, 2);
+  auto page = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+  ASSERT_TRUE(page.has_value());
+  ASSERT_TRUE(page->MarkDirty().has_value());
+  ASSERT_TRUE(page->MarkNeedsSync().has_value());
+  ASSERT_TRUE(page->MarkDontWrite().has_value());
+
+  EXPECT_TRUE(page->dont_write());
+  EXPECT_TRUE(page->needs_sync());
+  const auto blocked = page->mutable_bytes();
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, blocked.error().code());
+
+  ASSERT_TRUE(page->MarkDirty().has_value());
+  EXPECT_FALSE(page->dont_write());
+  EXPECT_TRUE(page->needs_sync());
+  EXPECT_TRUE(page->mutable_bytes().has_value());
+
+  ASSERT_TRUE(page->MarkDontWrite().has_value());
+  ASSERT_TRUE(page->MarkClean().has_value());
+  EXPECT_FALSE(page->dont_write());
+  EXPECT_FALSE(page->needs_sync());
+}
+
 TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {
   auto cache = MakeCache(8, 3);
   ASSERT_NE(nullptr, cache);
@@ -576,6 +601,7 @@ TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {
   ASSERT_TRUE(third->MarkDirty().has_value());
   ASSERT_TRUE(first->MarkNeedsSync().has_value());
   ASSERT_TRUE(third->MarkNeedsSync().has_value());
+  ASSERT_TRUE(first->MarkDontWrite().has_value());
 
   const PageFrame* const first_frame = &first->frame();
   const PageFrame* const second_frame = &second->frame();
@@ -596,6 +622,9 @@ TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {
   EXPECT_FALSE(first->needs_sync());
   EXPECT_TRUE(second->needs_sync());
   EXPECT_TRUE(third->needs_sync());
+  EXPECT_TRUE(first->dont_write());
+  EXPECT_FALSE(second->dont_write());
+  EXPECT_FALSE(third->dont_write());
 }
 
 TEST(PageCache, ReleasesTemporaryOverflowSlotsAfterPinsSubside) {

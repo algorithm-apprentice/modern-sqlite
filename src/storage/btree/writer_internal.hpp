@@ -52,6 +52,7 @@ class MutationPageOwner final {
   [[nodiscard]] Result<std::size_t> AllocatePage();
   [[nodiscard]] Result<std::size_t> Borrow(PageNumber page_number) const;
   [[nodiscard]] Status Promote(std::size_t slot);
+  [[nodiscard]] Status MarkDontWrite(PageNumber page_number);
   [[nodiscard]] Status RequireSolePin(std::size_t slot) const;
   [[nodiscard]] Status PermutePageNumbers(std::span<const MutationPageRekey> pages);
   void Release(std::size_t slot) noexcept;

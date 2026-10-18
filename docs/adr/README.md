@@ -116,3 +116,4 @@ their corresponding implementation begins.
 111. [ADR-0111: SQLite Mechanism Baseline and Implemented-Engine Audit](0111-sqlite-mechanism-baseline-audit.md)
 112. [ADR-0112: SQLite Page-Cache Hash, Recycling, and Sync Eligibility](0112-sqlite-page-cache-hash-recycling-and-sync-eligibility.md)
 113. [ADR-0113: SQLite In-Memory Statement Journal and Spill](0113-sqlite-memory-statement-journal.md)
+114. [ADR-0114: SQLite Pager Sync Eligibility and DONT_WRITE](0114-sqlite-pager-sync-eligibility-and-dont-write.md)

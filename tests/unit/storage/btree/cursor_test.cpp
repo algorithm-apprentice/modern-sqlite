@@ -893,7 +893,7 @@ TEST_F(BtreePrefixComparisonTest, KeepsFullChainValidationSeparateFromOrdinaryRa
   ASSERT_GT(pages.size(), 3U);
   {
     WritePagePin page = TakeValue(pager_->WritePage(pages[pages.size() - 2U]));
-    Write32(page.mutable_bytes(), 0, 0);
+    Write32(page.mutable_bytes().value(), 0, 0);
   }
   IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
@@ -997,8 +997,8 @@ TEST_F(BtreePrefixComparisonTest, PrioritizesLateReadFailuresOverStagedFormatErr
     SCOPED_TRACE(offset);
     {
       WritePagePin pin = TakeValue(pager_->WritePage(root));
-      std::ranges::copy(original.view(), pin.mutable_bytes().begin());
-      pin.mutable_bytes()[payload_offset + offset] = replacement;
+      std::ranges::copy(original.view(), pin.mutable_bytes().value().begin());
+      pin.mutable_bytes().value()[payload_offset + offset] = replacement;
     }
     IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
     ASSERT_TRUE(TakeValue(cursor.First()));
@@ -1037,7 +1037,7 @@ TEST_F(BtreePrefixComparisonTest, AcceptsInvalidAndCyclicUnusedFinalOverflowLink
     SCOPED_TRACE(unused);
     {
       WritePagePin pin = TakeValue(pager_->WritePage(pages.back()));
-      Write32(pin.mutable_bytes(), 0, unused);
+      Write32(pin.mutable_bytes().value(), 0, unused);
     }
     IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
     ASSERT_TRUE(TakeValue(cursor.First()));

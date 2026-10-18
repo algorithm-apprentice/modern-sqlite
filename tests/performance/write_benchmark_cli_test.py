@@ -22,6 +22,9 @@ from tools import write_performance_v2 as write_performance
 
 
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
+_MAXIMUM_SCAN_JOURNAL_SYNCS = 32
+_MAXIMUM_DELETE_SCAN_DATABASE_WRITES = 128
+_MAXIMUM_SCAN_JOURNAL_SYNCS = 32
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -380,6 +383,33 @@ class WriteBenchmarkCliTest(unittest.TestCase):
                                                 "vfs"
                                             ]["subjournal"].values()
                                         )
+                                    )
+                                if case["id"] in {
+                                    "update-scan-implicit",
+                                    "delete-scan-implicit",
+                                }:
+                                    self.assertLessEqual(
+                                        report["counters"]["vfs"][
+                                            "main_journal"
+                                        ]["sync_calls"],
+                                        _MAXIMUM_SCAN_JOURNAL_SYNCS,
+                                    )
+                                if case["id"] == "delete-scan-implicit":
+                                    self.assertLessEqual(
+                                        report["counters"]["vfs"][
+                                            "main_database"
+                                        ]["write_calls"],
+                                        _MAXIMUM_DELETE_SCAN_DATABASE_WRITES,
+                                    )
+                                if case["id"] in {
+                                    "update-scan-implicit",
+                                    "delete-scan-implicit",
+                                }:
+                                    self.assertLessEqual(
+                                        report["counters"]["vfs"][
+                                            "main_journal"
+                                        ]["sync_calls"],
+                                        _MAXIMUM_SCAN_JOURNAL_SYNCS,
                                     )
                             else:
                                 self.assertEqual(

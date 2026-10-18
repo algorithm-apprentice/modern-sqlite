@@ -419,6 +419,102 @@ Result<WritePagePin> Pager::WritePage(ReadPagePin&& read_pin) {
   }
 }
 
+Status Pager::WritePage(WritePagePin& write_pin) {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (!in_write_transaction() || state_ == PagerState::kWriterFinished) {
+    return std::unexpected(Misuse("writable page requires an active write transaction"));
+  }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "writable page requires transaction rollback"));
+  }
+  if (write_attempt_sealed_ || final_image_) {
+    return std::unexpected(Misuse("writable page requires a mutable transaction image"));
+  }
+  if (!cache_->OwnsPinForPager(write_pin.pin_) || !write_pin.pin_.exclusive() ||
+      !write_pin.frame().dirty()) {
+    return std::unexpected(Misuse("writable page reauthorization requires a dirty exclusive pin"));
+  }
+  if (write_pin.writable()) {
+    return {};
+  }
+
+  const PageNumber page_number = write_pin.frame().page_number();
+  auto valid = ValidatePageNumber(page_number);
+  if (!valid.has_value()) {
+    return valid;
+  }
+  auto prepared = PreparePageWrite(page_number, write_pin.pin_, current_page_count_);
+  if (!prepared.has_value()) {
+    return prepared;
+  }
+  auto dirty = write_pin.pin_.MarkDirty();
+  if (!dirty.has_value()) {
+    return dirty;
+  }
+  transaction_modified_ = true;
+  if (state_ == PagerState::kWriterLocked) {
+    state_ = PagerState::kWriterCacheModified;
+  }
+  return {};
+}
+
+Status Pager::MarkPageDontWrite(WritePagePin& write_pin) {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (!in_write_transaction() || state_ == PagerState::kWriterFinished || write_attempt_sealed_ ||
+      final_image_) {
+    return std::unexpected(Misuse("DONT_WRITE requires an active mutable write transaction"));
+  }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "DONT_WRITE requires transaction rollback"));
+  }
+  if (!cache_->OwnsPinForPager(write_pin.pin_) || !write_pin.pin_.exclusive() ||
+      !write_pin.frame().dirty()) {
+    return std::unexpected(Misuse("DONT_WRITE requires a dirty exclusive pin"));
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return {};
+  }
+  if (journal_transaction_ == nullptr) {
+    return std::unexpected(Internal("DONT_WRITE requires an active rollback journal"));
+  }
+  if (journal_transaction_->savepoint_count() != 0U) {
+    return {};
+  }
+  return write_pin.pin_.MarkDontWrite();
+}
+
+Status Pager::MarkPageDontWrite(PageNumber page_number) {
+  if (state_ == PagerState::kError) {
+    return StoredError();
+  }
+  if (!in_write_transaction() || state_ == PagerState::kWriterFinished || write_attempt_sealed_ ||
+      final_image_) {
+    return std::unexpected(Misuse("DONT_WRITE requires an active mutable write transaction"));
+  }
+  if (const auto failure = write_failure_code(); failure.has_value()) {
+    return std::unexpected(MakeError(*failure, "DONT_WRITE requires transaction rollback"));
+  }
+  auto valid = ValidatePageNumber(page_number);
+  if (!valid.has_value()) {
+    return valid;
+  }
+  if (storage_mode_ == StorageMode::kEphemeral) {
+    return {};
+  }
+  if (journal_transaction_ == nullptr) {
+    return std::unexpected(Internal("DONT_WRITE requires an active rollback journal"));
+  }
+  if (journal_transaction_->savepoint_count() != 0U) {
+    return {};
+  }
+  static_cast<void>(cache_->MarkDontWriteForPager(page_number));
+  return {};
+}
+
 Result<std::uint32_t> Pager::IncrementSchemaCookie() {
   if (current_page_count_ == 0U) {
     return std::unexpected(Misuse("schema cookie increment requires an initialized database"));
@@ -427,20 +523,23 @@ Result<std::uint32_t> Pager::IncrementSchemaCookie() {
   if (!page_one.has_value()) {
     return std::unexpected(std::move(page_one.error()));
   }
-  const MutableByteView bytes = page_one->mutable_bytes();
+  auto bytes = page_one->mutable_bytes();
+  if (!bytes.has_value()) {
+    return std::unexpected(std::move(bytes.error()));
+  }
   constexpr std::size_t kSchemaCookieOffset = 40U;
-  if (bytes.size() < kSchemaCookieOffset + sizeof(std::uint32_t)) {
+  if (bytes->size() < kSchemaCookieOffset + sizeof(std::uint32_t)) {
     return std::unexpected(
         MakeError(ErrorCode::kCorruption, "database page 1 is too small for the schema cookie"));
   }
   const auto encoded = std::span<const std::byte, sizeof(std::uint32_t)>{
-      bytes.data() + kSchemaCookieOffset, sizeof(std::uint32_t)};
+      bytes->data() + kSchemaCookieOffset, sizeof(std::uint32_t)};
   const std::uint32_t next = LoadBigEndian<std::uint32_t>(encoded) + 1U;
   StoreBigEndian<std::uint32_t>(
-      std::span<std::byte, sizeof(std::uint32_t)>{bytes.data() + kSchemaCookieOffset,
+      std::span<std::byte, sizeof(std::uint32_t)>{bytes->data() + kSchemaCookieOffset,
                                                   sizeof(std::uint32_t)},
       next);
-  auto parsed = ParseDatabaseHeader(bytes);
+  auto parsed = ParseDatabaseHeader(*bytes);
   if (!parsed.has_value()) {
     return std::unexpected(std::move(parsed.error()));
   }
@@ -478,7 +577,7 @@ Status Pager::PermutePageNumbers(std::span<const PageNumberRekey> pages) {
     if (!cache_->OwnsPinForPager(pin.pin_)) {
       return std::unexpected(Misuse("page permutation requires pins from this pager"));
     }
-    if (!pin.pin_.exclusive() || !pin.frame().dirty()) {
+    if (!pin.pin_.exclusive() || !pin.frame().dirty() || !pin.writable()) {
       return std::unexpected(Misuse("page permutation requires dirty exclusive pins"));
     }
     current[index] = pin.frame().page_number();
@@ -745,6 +844,12 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
   if (cache_ != nullptr && cache_->pin_count() != 0) {
     return std::unexpected(Busy("savepoint rollback requires all page pins to be released"));
   }
+  if (journal_transaction_->main_journal_dirty()) {
+    auto synced = SyncJournalForWriteback();
+    if (!synced.has_value()) {
+      return synced;
+    }
+  }
 
   write_attempt_sealed_ = true;
   AdvanceWriteTransactionGeneration();
@@ -831,13 +936,39 @@ Status Pager::Commit() {
   if (!exclusive.has_value()) {
     return exclusive;
   }
-  auto synced_journal = journal_transaction_->SyncJournal();
+  auto synced_journal = SyncJournalForWriteback();
   if (!synced_journal.has_value()) {
     return synced_journal;
   }
   auto flushed = FlushDirtyPages();
   if (!flushed.has_value()) {
     return flushed;
+  }
+  if (image_size_changed_) {
+    auto target_size = DatabaseSize(current_page_count_, page_size());
+    if (!target_size.has_value()) {
+      journal_transaction_->ReportDatabaseFailure(target_size.error().code());
+      return std::unexpected(std::move(target_size.error()));
+    }
+    auto actual_size = file_->Size();
+    if (!actual_size.has_value()) {
+      journal_transaction_->ReportDatabaseFailure(actual_size.error().code());
+      return std::unexpected(std::move(actual_size.error()));
+    }
+    if (*actual_size < *target_size) {
+      auto authorized =
+          journal_transaction_->AuthorizeDatabaseResize(std::span<const PageNumber>{});
+      if (!authorized.has_value()) {
+        return authorized;
+      }
+      auto grown = file_->Truncate(*target_size);
+      if (!grown.has_value()) {
+        journal_transaction_->ReportDatabaseFailure(grown.error().code());
+        return grown;
+      }
+      database_bytes_modified_ = true;
+      state_ = PagerState::kWriterDatabaseModified;
+    }
   }
   auto synced_database = file_->Sync(SyncOptions{
       .mode = SyncMode::kNormal,
@@ -989,7 +1120,7 @@ Status Pager::EnsureJournalTransaction() {
   return {};
 }
 
-Status Pager::PreparePageWrite(PageNumber page_number, const PageCache::Pin& target,
+Status Pager::PreparePageWrite(PageNumber page_number, PageCache::Pin& target,
                                std::uint32_t logical_page_count) {
   if (storage_mode_ == StorageMode::kEphemeral) {
     return {};
@@ -1022,7 +1153,7 @@ void Pager::ReportWriteCoordinatorFailure(ErrorCode code) noexcept {
   }
 }
 
-Status Pager::CaptureSector(PageNumber page_number, const PageCache::Pin& target,
+Status Pager::CaptureSector(PageNumber page_number, PageCache::Pin& target,
                             std::uint32_t logical_page_count) {
   assert(journal_transaction_ != nullptr);
   const std::uint64_t page_size_value = page_size().value();
@@ -1036,15 +1167,38 @@ Status Pager::CaptureSector(PageNumber page_number, const PageCache::Pin& target
       std::min<std::uint64_t>(last, std::max(logical_page_count, transaction_start_page_count_));
   const std::uint32_t locking_page = LockingPage(page_size());
 
+  bool sector_needs_sync = page_number.value() > transaction_start_page_count_ &&
+                           !journal_transaction_->journal_ever_synced();
   for (std::uint64_t current = first; current <= upper; ++current) {
     if (current == locking_page) {
       continue;
     }
     const PageNumber current_page{static_cast<std::uint32_t>(current)};
+    sector_needs_sync =
+        sector_needs_sync || journal_transaction_->NeedsMainJournalCapture(current_page);
+    if (current_page == page_number) {
+      sector_needs_sync = sector_needs_sync || target.needs_sync();
+      continue;
+    }
+    sector_needs_sync = sector_needs_sync || cache_->NeedsSyncForPager(current_page);
+  }
+
+  for (std::uint64_t current = first; current <= upper; ++current) {
+    if (current == locking_page) {
+      continue;
+    }
+    const PageNumber current_page{static_cast<std::uint32_t>(current)};
+    const bool needs_main_capture = journal_transaction_->NeedsMainJournalCapture(current_page);
     if (!journal_transaction_->NeedsCapture(current_page)) {
       continue;
     }
     if (current_page == page_number) {
+      if (needs_main_capture) {
+        auto marked = target.MarkNeedsSync();
+        if (!marked.has_value()) {
+          return marked;
+        }
+      }
       auto captured = journal_transaction_->CapturePage(JournalPageImage{
           .page_number = current_page,
           .bytes = target.frame().bytes(),
@@ -1055,17 +1209,45 @@ Status Pager::CaptureSector(PageNumber page_number, const PageCache::Pin& target
       continue;
     }
 
-    auto neighbor = AcquirePage(current_page, false);
-    if (!neighbor.has_value()) {
-      return std::unexpected(std::move(neighbor.error()));
+    std::optional<ByteView> cached_bytes = cache_->CachedBytesForPager(current_page);
+    std::optional<PageCache::Pin> neighbor;
+    if (!cached_bytes.has_value()) {
+      auto acquired = AcquirePage(current_page, false);
+      if (!acquired.has_value()) {
+        return std::unexpected(std::move(acquired.error()));
+      }
+      neighbor.emplace(std::move(*acquired));
+      cached_bytes = neighbor->frame().bytes();
+    }
+    if (needs_main_capture) {
+      cache_->MarkDirtyForPager(current_page);
+      cache_->MarkNeedsSyncForPager(current_page);
     }
     auto captured = journal_transaction_->CapturePage(JournalPageImage{
         .page_number = current_page,
-        .bytes = neighbor->frame().bytes(),
+        .bytes = *cached_bytes,
     });
     if (!captured.has_value()) {
       return captured;
     }
+  }
+
+  if (!sector_needs_sync) {
+    return {};
+  }
+  for (std::uint64_t current = first; current <= upper; ++current) {
+    if (current == locking_page) {
+      continue;
+    }
+    const PageNumber current_page{static_cast<std::uint32_t>(current)};
+    if (current_page == page_number) {
+      auto marked = target.MarkNeedsSync();
+      if (!marked.has_value()) {
+        return marked;
+      }
+      continue;
+    }
+    cache_->MarkNeedsSyncForPager(current_page);
   }
   return {};
 }
@@ -1079,6 +1261,19 @@ Status Pager::EnsureExclusiveLock() {
     return std::unexpected(std::move(locked.error()));
   }
   database_lock_ = DatabaseLock::kExclusive;
+  return {};
+}
+
+Status Pager::SyncJournalForWriteback() {
+  auto exclusive = EnsureExclusiveLock();
+  if (!exclusive.has_value()) {
+    return exclusive;
+  }
+  auto synced = journal_transaction_->SyncJournal();
+  if (!synced.has_value()) {
+    return synced;
+  }
+  cache_->ClearSyncFlags();
   return {};
 }
 
@@ -1121,11 +1316,20 @@ Status Pager::SpillPage(PageNumber page_number) {
   if (!exclusive.has_value()) {
     return exclusive;
   }
-  auto synced = journal_transaction_->SyncJournal();
-  if (!synced.has_value()) {
-    return synced;
+  if ((**pin).needs_sync()) {
+    auto synced = SyncJournalForWriteback();
+    if (!synced.has_value()) {
+      return synced;
+    }
   }
-  auto authorized = journal_transaction_->AuthorizeDatabaseWrite(page_number);
+  if ((**pin).needs_sync()) {
+    return std::unexpected(Internal("journal sync did not clear the writeback page flag"));
+  }
+  if ((**pin).dont_write()) {
+    return (**pin).MarkClean();
+  }
+  auto authorized =
+      journal_transaction_->AuthorizeDatabaseWrite(page_number, RollbackImageDurability::Durable);
   if (!authorized.has_value()) {
     return authorized;
   }

@@ -140,6 +140,11 @@ enum class JournalTransactionState : std::uint8_t {
   kError,
 };
 
+enum class RollbackImageDurability : std::uint8_t {
+  Unsynchronized,
+  Durable,
+};
+
 class JournalTransaction final {
  private:
   struct ConstructionKey final {};
@@ -165,13 +170,15 @@ class JournalTransaction final {
 
   [[nodiscard]] Status CapturePage(JournalPageImage image);
   [[nodiscard]] bool NeedsCapture(PageNumber page_number) const noexcept;
+  [[nodiscard]] bool NeedsMainJournalCapture(PageNumber page_number) const noexcept;
   [[nodiscard]] Result<JournalSavepointId> CreateSavepoint(std::uint32_t current_page_count);
   [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint,
                                            JournalRecoveryTarget& target);
 
   [[nodiscard]] Status SyncJournal();
-  [[nodiscard]] Status AuthorizeDatabaseWrite(PageNumber page_number);
+  [[nodiscard]] Status AuthorizeDatabaseWrite(PageNumber page_number,
+                                              RollbackImageDurability durability);
   [[nodiscard]] Status AuthorizeDatabaseResize(std::span<const PageNumber> rollback_pages);
   void ReportDatabaseFailure(ErrorCode code) noexcept;
   [[nodiscard]] Status MarkDatabaseSynced();
@@ -182,6 +189,7 @@ class JournalTransaction final {
   [[nodiscard]] JournalTransactionState state() const noexcept { return state_; }
   [[nodiscard]] JournalTransactionInfo info() const noexcept { return info_; }
   [[nodiscard]] bool main_journal_dirty() const noexcept { return main_journal_dirty_; }
+  [[nodiscard]] bool journal_ever_synced() const noexcept { return journal_ever_synced_; }
   [[nodiscard]] bool database_may_be_modified() const noexcept { return database_may_be_modified_; }
   [[nodiscard]] bool database_synced() const noexcept { return database_synced_; }
   [[nodiscard]] std::size_t savepoint_count() const noexcept { return savepoints_.size(); }
@@ -205,6 +213,7 @@ class JournalTransaction final {
   JournalTransactionState state_ = JournalTransactionState::kActive;
   std::optional<ErrorCode> failure_code_;
   bool main_journal_dirty_ = true;
+  bool journal_ever_synced_ = false;
   bool database_may_be_modified_ = false;
   bool database_synced_ = false;
 };

@@ -140,7 +140,10 @@ int main() {
              })
              .has_value() ||
         !transaction->SyncJournal().has_value() ||
-        !transaction->AuthorizeDatabaseWrite(modern_sqlite::PageNumber{1}).has_value() ||
+        !transaction
+             ->AuthorizeDatabaseWrite(modern_sqlite::PageNumber{1},
+                                      modern_sqlite::RollbackImageDurability::Durable)
+             .has_value() ||
         !transaction->MarkDatabaseSynced().has_value()) {
       return 1;
     }
