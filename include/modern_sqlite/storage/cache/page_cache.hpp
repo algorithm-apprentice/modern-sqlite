@@ -1,11 +1,14 @@
 #ifndef MODERN_SQLITE_STORAGE_CACHE_PAGE_CACHE_HPP_
 #define MODERN_SQLITE_STORAGE_CACHE_PAGE_CACHE_HPP_
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
-#include <unordered_map>
+#include <span>
 #include <utility>
+#include <vector>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
@@ -14,6 +17,7 @@
 namespace modern_sqlite {
 
 class PageCache;
+class PageCacheTestPeer;
 class Pager;
 
 class PageFrame final {
@@ -29,9 +33,8 @@ class PageFrame final {
   [[nodiscard]] bool dirty() const noexcept { return dirty_; }
 
  private:
-  friend class Pager;
-
   friend class PageCache;
+  friend class Pager;
 
   PageFrame(PageNumber page_number, ByteBuffer bytes) noexcept
       : page_number_(page_number), bytes_(std::move(bytes)) {}
@@ -48,6 +51,7 @@ struct PageCacheOptions {
 
 struct PageWritebackRequest {
   PageNumber page_number;
+  bool journal_sync_required = false;
 };
 
 struct PageCachePressure {
@@ -60,6 +64,7 @@ struct PageCachePressure {
 class PageCache final {
  private:
   friend class Pager;
+  friend class PageCacheTestPeer;
 
   struct Entry;
   struct ConstructionKey final {};
@@ -81,8 +86,10 @@ class PageCache final {
 
     [[nodiscard]] Status MarkDirty();
     [[nodiscard]] Status MarkClean();
+    [[nodiscard]] Status MarkNeedsSync();
     [[nodiscard]] bool exclusive() const noexcept { return exclusive_; }
     [[nodiscard]] bool sole() const noexcept;
+    [[nodiscard]] bool needs_sync() const noexcept;
 
    private:
     friend class PageCache;
@@ -115,21 +122,45 @@ class PageCache final {
   [[nodiscard]] Status DiscardAfter(std::uint32_t page_count);
   [[nodiscard]] Status Clear();
   [[nodiscard]] std::size_t ReclaimClean() noexcept;
+  void ClearSyncFlags() noexcept;
 
   [[nodiscard]] std::optional<PageWritebackRequest> writeback_candidate() const noexcept;
   [[nodiscard]] PageCachePressure pressure() const noexcept;
   [[nodiscard]] ByteCount page_size() const noexcept { return page_size_; }
   [[nodiscard]] std::size_t capacity_pages() const noexcept { return capacity_pages_; }
-  [[nodiscard]] std::size_t page_count() const noexcept { return pages_.size(); }
+  [[nodiscard]] std::size_t page_count() const noexcept { return active_page_count_; }
   [[nodiscard]] std::size_t dirty_page_count() const noexcept { return dirty_page_count_; }
   [[nodiscard]] std::size_t pin_count() const noexcept { return total_pin_count_; }
   [[nodiscard]] std::size_t exclusive_pin_count() const noexcept { return exclusive_pin_count_; }
 
  private:
-  struct PageNumberHash final {
-    [[nodiscard]] std::size_t operator()(std::uint32_t value) const noexcept {
-      return static_cast<std::size_t>(value);
-    }
+  class Fill final {
+   public:
+    Fill(const Fill&) = delete;
+    Fill& operator=(const Fill&) = delete;
+    Fill(Fill&& other) noexcept;
+    Fill& operator=(Fill&& other) noexcept;
+    ~Fill();
+
+    [[nodiscard]] MutableByteView mutable_bytes() noexcept;
+    [[nodiscard]] Result<Pin> Publish(bool exclusive);
+
+   private:
+    friend class PageCache;
+
+    Fill(PageCache& cache, Entry& entry, PageNumber page_number) noexcept
+        : cache_(&cache), entry_(&entry), page_number_(page_number) {}
+
+    void Reset() noexcept;
+
+    PageCache* cache_;
+    Entry* entry_;
+    PageNumber page_number_;
+  };
+
+  struct PageCacheRekey {
+    Pin* pin = nullptr;
+    PageNumber final_page;
   };
 
   struct Entry final {
@@ -144,39 +175,71 @@ class PageCache final {
 
     PageFrame frame;
     std::size_t pin_count = 0;
+    Entry* hash_next = nullptr;
     Entry* clean_previous = nullptr;
     Entry* clean_next = nullptr;
     Entry* dirty_previous = nullptr;
     Entry* dirty_next = nullptr;
+    Entry* free_next = nullptr;
+    bool active = false;
     bool in_clean_list = false;
     bool in_dirty_list = false;
     bool exclusively_pinned = false;
+    bool needs_sync = false;
   };
 
-  using PageMap = std::unordered_map<std::uint32_t, Entry, PageNumberHash>;
+  [[nodiscard]] Result<Fill> PrepareFill(PageNumber page_number);
+  [[nodiscard]] Pin PublishFill(Fill& fill, bool exclusive) noexcept;
+  void AbortFill(Fill& fill) noexcept;
 
   [[nodiscard]] Pin Acquire(Entry& entry, bool exclusive) noexcept;
   [[nodiscard]] bool OwnsPinForPager(const Pin& pin) const noexcept;
   [[nodiscard]] Status PromoteExclusiveForPager(Pin& pin);
-  [[nodiscard]] Status RekeyExclusiveForPager(Pin& pin, PageNumber new_page);
+  [[nodiscard]] Status PermuteExclusiveForPager(std::span<const PageCacheRekey> pages);
   void Release(Entry& entry) noexcept;
   void MarkDirty(Entry& entry) noexcept;
   void MarkClean(Entry& entry) noexcept;
+  void MarkNeedsSync(Entry& entry) noexcept;
+
+  [[nodiscard]] Entry* Find(PageNumber page_number) const noexcept;
+  [[nodiscard]] std::size_t HashIndex(PageNumber page_number) const noexcept;
+  void MaybeGrowHash() noexcept;
+  void LinkHash(Entry& entry) noexcept;
+  void UnlinkHash(Entry& entry) noexcept;
+
+  [[nodiscard]] Result<Entry*> AcquireFillSlot();
+  [[nodiscard]] Result<Entry*> AllocateEntry();
+  [[nodiscard]] Entry* TakeFreeSlot() noexcept;
+  [[nodiscard]] Entry* TakeCleanVictim() noexcept;
+  void RetainOrDestroyFreeSlot(Entry& entry) noexcept;
+  void PushFreeSlot(Entry& entry) noexcept;
+  void RemoveFreeSlot(Entry& entry) noexcept;
+  void DestroyEntry(Entry& entry) noexcept;
+  void RemoveActive(Entry& entry) noexcept;
+  void ResetEntry(Entry& entry) noexcept;
 
   void AppendCleanNewest(Entry& entry) noexcept;
   void RemoveClean(Entry& entry) noexcept;
   void AppendDirtyNewest(Entry& entry) noexcept;
   void RemoveDirty(Entry& entry) noexcept;
   void RefreshDirtyRecency(Entry& entry) noexcept;
+  void RepairSyncedCandidate() noexcept;
   void EnforceCapacity() noexcept;
+
+  static constexpr std::size_t kInitialHashBuckets = 256;
+  static constexpr std::size_t kMaximumPermutationPages = 5;
 
   ByteCount page_size_;
   std::size_t capacity_pages_;
-  PageMap pages_;
+  std::vector<std::unique_ptr<Entry>> entries_;
+  std::vector<Entry*> buckets_;
+  Entry* free_slots_ = nullptr;
   Entry* clean_oldest_ = nullptr;
   Entry* clean_newest_ = nullptr;
   Entry* dirty_oldest_ = nullptr;
   Entry* dirty_newest_ = nullptr;
+  mutable Entry* synced_candidate_ = nullptr;
+  std::size_t active_page_count_ = 0;
   std::size_t dirty_page_count_ = 0;
   std::size_t total_pin_count_ = 0;
   std::size_t exclusive_pin_count_ = 0;

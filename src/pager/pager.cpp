@@ -616,18 +616,20 @@ Result<PageCache::Pin> Pager::AcquirePage(PageNumber page_number, bool exclusive
     return std::unexpected(TooLarge("database page offset is not representable"));
   }
   const std::uint64_t offset = page_index * page_size_value;
-  ByteBuffer bytes{cache_->page_size()};
+  auto fill = cache_->PrepareFill(page_number);
+  if (!fill.has_value()) {
+    return std::unexpected(std::move(fill.error()));
+  }
   MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesRead, 1U);
-  auto read = file_->ReadAt(bytes.mutable_view(), FileOffset{offset});
+  auto read = file_->ReadAt(fill->mutable_bytes(), FileOffset{offset});
   if (!read.has_value()) {
     return std::unexpected(std::move(read.error()));
   }
-  auto inserted = exclusive ? cache_->InsertExclusive(page_number, std::move(bytes))
-                            : cache_->Insert(page_number, std::move(bytes));
-  if (!inserted.has_value()) {
-    return std::unexpected(std::move(inserted.error()));
+  auto published = fill->Publish(exclusive);
+  if (!published.has_value()) {
+    return std::unexpected(std::move(published.error()));
   }
-  return std::move(*inserted);
+  return std::move(*published);
 } catch (const std::bad_alloc&) {
   return std::unexpected(Error::OutOfMemory());
 }

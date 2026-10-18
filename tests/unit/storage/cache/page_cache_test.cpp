@@ -2,18 +2,45 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 
 namespace modern_sqlite {
+
+class PageCacheTestPeer final {
+ public:
+  struct Rekey {
+    PageCache::Pin* pin;
+    PageNumber final_page;
+  };
+
+  [[nodiscard]] static Status Permute(PageCache& cache, std::span<const Rekey> pages) {
+    std::array<PageCache::PageCacheRekey, 5> rekeys{};
+    for (std::size_t index = 0; index < pages.size(); ++index) {
+      rekeys[index] = PageCache::PageCacheRekey{
+          .pin = pages[index].pin,
+          .final_page = pages[index].final_page,
+      };
+    }
+    return cache.PermuteExclusiveForPager(std::span{rekeys}.first(pages.size()));
+  }
+
+  [[nodiscard]] static std::size_t allocated_slots(const PageCache& cache) noexcept {
+    return cache.entries_.size();
+  }
+};
+
 namespace {
 
 static_assert(!std::is_copy_constructible_v<PageCache>);
@@ -469,6 +496,127 @@ TEST(PageCache, ZeroCapacityRetainsCleanPagesOnlyWhilePinned) {
   EXPECT_EQ(0U, cache->page_count());
   EXPECT_EQ(0U, cache->pin_count());
   EXPECT_FALSE(Contains(*cache, PageNumber{1}));
+}
+
+TEST(PageCache, ResolvesHashCollisionsAndBenignlyGrowsTheBucketTable) {
+  auto cache = MakeCache(8, 300);
+  ASSERT_NE(nullptr, cache);
+
+  {
+    const auto first = cache->Insert(PageNumber{1}, MakePage(0x10));
+    const auto collision = cache->Insert(PageNumber{257}, MakePage(0x20));
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(collision.has_value());
+  }
+  EXPECT_TRUE(Contains(*cache, PageNumber{1}));
+  EXPECT_TRUE(Contains(*cache, PageNumber{257}));
+
+  for (std::uint32_t page = 2; page <= 256; ++page) {
+    const auto inserted =
+        cache->Insert(PageNumber{page}, MakePage(static_cast<std::uint8_t>(page)));
+    ASSERT_TRUE(inserted.has_value()) << page;
+  }
+  EXPECT_EQ(257U, cache->page_count());
+  EXPECT_TRUE(Contains(*cache, PageNumber{1}));
+  EXPECT_TRUE(Contains(*cache, PageNumber{128}));
+  EXPECT_TRUE(Contains(*cache, PageNumber{257}));
+}
+
+TEST(PageCache, PrefersSyncSafeDirtyPagesAndAcceptsSharedPeerMarking) {
+  auto cache = MakeCache(8, 2);
+  ASSERT_NE(nullptr, cache);
+
+  for (std::uint32_t page = 1; page <= 3; ++page) {
+    auto inserted = cache->InsertExclusive(PageNumber{page}, MakePage(0x10));
+    ASSERT_TRUE(inserted.has_value());
+    ASSERT_TRUE(inserted->MarkDirty().has_value());
+    if (page <= 2U) {
+      ASSERT_TRUE(inserted->MarkNeedsSync().has_value());
+    }
+  }
+  auto candidate = cache->writeback_candidate();
+  ASSERT_TRUE(candidate.has_value());
+  EXPECT_EQ(PageNumber{3}, candidate->page_number);
+  EXPECT_FALSE(candidate->journal_sync_required);
+
+  auto safe_pin = cache->Lookup(PageNumber{3});
+  ASSERT_TRUE(safe_pin.has_value());
+  ASSERT_TRUE(safe_pin->has_value());
+  candidate = cache->writeback_candidate();
+  ASSERT_TRUE(candidate.has_value());
+  EXPECT_EQ(PageNumber{1}, candidate->page_number);
+  EXPECT_TRUE(candidate->journal_sync_required);
+
+  safe_pin->reset();
+  candidate = cache->writeback_candidate();
+  ASSERT_TRUE(candidate.has_value());
+  EXPECT_EQ(PageNumber{3}, candidate->page_number);
+  EXPECT_FALSE(candidate->journal_sync_required);
+
+  auto shared_peer = cache->Lookup(PageNumber{1});
+  ASSERT_TRUE(shared_peer.has_value());
+  ASSERT_TRUE(shared_peer->has_value());
+  EXPECT_TRUE((**shared_peer).MarkNeedsSync().has_value());
+  cache->ClearSyncFlags();
+  EXPECT_FALSE((**shared_peer).needs_sync());
+}
+
+TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {
+  auto cache = MakeCache(8, 3);
+  ASSERT_NE(nullptr, cache);
+
+  auto first = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+  auto second = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
+  auto third = cache->InsertExclusive(PageNumber{3}, MakePage(0x30));
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(third.has_value());
+  ASSERT_TRUE(first->MarkDirty().has_value());
+  ASSERT_TRUE(second->MarkDirty().has_value());
+  ASSERT_TRUE(third->MarkDirty().has_value());
+  ASSERT_TRUE(first->MarkNeedsSync().has_value());
+  ASSERT_TRUE(third->MarkNeedsSync().has_value());
+
+  const PageFrame* const first_frame = &first->frame();
+  const PageFrame* const second_frame = &second->frame();
+  const PageFrame* const third_frame = &third->frame();
+  const std::array rekeys{
+      PageCacheTestPeer::Rekey{.pin = &*first, .final_page = PageNumber{2}},
+      PageCacheTestPeer::Rekey{.pin = &*second, .final_page = PageNumber{3}},
+      PageCacheTestPeer::Rekey{.pin = &*third, .final_page = PageNumber{1}},
+  };
+  ASSERT_TRUE(PageCacheTestPeer::Permute(*cache, rekeys).has_value());
+
+  EXPECT_EQ(first_frame, &first->frame());
+  EXPECT_EQ(second_frame, &second->frame());
+  EXPECT_EQ(third_frame, &third->frame());
+  EXPECT_EQ(PageNumber{2}, first->frame().page_number());
+  EXPECT_EQ(PageNumber{3}, second->frame().page_number());
+  EXPECT_EQ(PageNumber{1}, third->frame().page_number());
+  EXPECT_FALSE(first->needs_sync());
+  EXPECT_TRUE(second->needs_sync());
+  EXPECT_TRUE(third->needs_sync());
+}
+
+TEST(PageCache, ReleasesTemporaryOverflowSlotsAfterPinsSubside) {
+  auto cache = MakeCache(8, 1);
+  ASSERT_NE(nullptr, cache);
+
+  std::optional<PageCache::Pin> first;
+  std::optional<PageCache::Pin> second;
+  auto first_result = cache->Insert(PageNumber{1}, MakePage(0x10));
+  auto second_result = cache->Insert(PageNumber{2}, MakePage(0x20));
+  ASSERT_TRUE(first_result.has_value());
+  ASSERT_TRUE(second_result.has_value());
+  first.emplace(std::move(*first_result));
+  second.emplace(std::move(*second_result));
+  ASSERT_EQ(2U, PageCacheTestPeer::allocated_slots(*cache));
+
+  first.reset();
+  EXPECT_EQ(1U, cache->page_count());
+  EXPECT_EQ(1U, PageCacheTestPeer::allocated_slots(*cache));
+  second.reset();
+  EXPECT_EQ(1U, PageCacheTestPeer::allocated_slots(*cache));
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION

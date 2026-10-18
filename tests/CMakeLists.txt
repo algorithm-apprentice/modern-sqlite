@@ -224,6 +224,38 @@ foreach(kind allocation oom)
 endforeach()
 
 add_executable(
+  modern_sqlite_page_cache_allocation_test
+  unit/storage/cache/page_cache_allocation_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_page_cache_allocation_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_page_cache_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_page_cache_allocation_test)
+add_test(
+  NAME storage.page_cache_allocation
+  COMMAND modern_sqlite_page_cache_allocation_test
+)
+set_tests_properties(storage.page_cache_allocation PROPERTIES LABELS unit TIMEOUT 10)
+
+add_executable(
+  modern_sqlite_page_cache_oom_test
+  unit/storage/cache/page_cache_oom_test.cpp
+)
+target_link_libraries(
+  modern_sqlite_page_cache_oom_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_page_cache_oom_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_page_cache_oom_test)
+add_test(
+  NAME storage.page_cache_oom
+  COMMAND modern_sqlite_page_cache_oom_test
+)
+set_tests_properties(storage.page_cache_oom PROPERTIES LABELS unit TIMEOUT 10)
+
+add_executable(
   modern_sqlite_btree_cursor_allocation_test
   unit/storage/btree/cursor_allocation_test.cpp
 )

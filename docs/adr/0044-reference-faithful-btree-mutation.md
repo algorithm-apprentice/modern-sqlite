@@ -2,6 +2,10 @@
 
 **Status:** Accepted
 
+ADR-0112 supersedes the one-entry locking-page-sentinel rekey implementation
+with one bounded atomic cache permutation that preserves sync eligibility by
+physical page number.
+
 ## Context
 
 ADR-0043 selected a custom point-mutation design built around owning node
