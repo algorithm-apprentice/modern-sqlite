@@ -1207,7 +1207,8 @@ TEST(TransactionCoordinatorBaseline, RecordsImplicitAndExplicitFixedWork) {
   EXPECT_EQ(1U, explicit_vfs.total_database_syncs());
   EXPECT_EQ(3U, explicit_vfs.total_journal_writes());
   EXPECT_EQ(2U, explicit_vfs.total_journal_syncs());
-  EXPECT_EQ(2U, explicit_vfs.total_subjournal_writes());
+  EXPECT_EQ(0U, explicit_vfs.total_subjournal_writes());
+  EXPECT_EQ(0U, explicit_vfs.pathless_open_count());
   EXPECT_EQ(1U, explicit_vfs.total_journal_deletes());
 }
 

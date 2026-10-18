@@ -58,6 +58,8 @@ struct MemoryFileState {
   std::optional<std::pair<FileOffset, ByteCount>> short_read;
   bool fail_next_size = false;
   bool fail_next_write = false;
+  std::size_t write_calls = 0;
+  std::optional<std::size_t> failing_write_call;
   bool fail_next_truncate = false;
 };
 
@@ -108,8 +110,13 @@ class MemoryFile final : public File {
 
   Status DoWriteAt(ByteView source, FileOffset offset) override {
     RecordEvent(*state_, "write", offset.value(), source.size());
+    ++state_->write_calls;
     if (state_->fail_next_write) {
       state_->fail_next_write = false;
+      return std::unexpected(Error::Create(ErrorCode::kIo, "injected memory-file write failure"));
+    }
+    if (state_->failing_write_call == state_->write_calls) {
+      state_->failing_write_call.reset();
       return std::unexpected(Error::Create(ErrorCode::kIo, "injected memory-file write failure"));
     }
     if (offset.value() > std::numeric_limits<std::size_t>::max()) {
@@ -205,6 +212,7 @@ class MemoryVfs final : public Vfs {
   bool throw_bad_alloc_on_open = false;
   bool throw_bad_alloc_on_full_path = false;
   bool unlink_before_delete_error = false;
+  std::optional<std::size_t> temporary_write_failure_call;
 
   [[nodiscard]] const std::vector<std::byte>& Bytes(std::string_view path) const {
     return files_.at(std::string{path})->bytes;
@@ -220,6 +228,10 @@ class MemoryVfs final : public Vfs {
 
   [[nodiscard]] std::vector<std::byte>& MutableTemporaryBytes(std::size_t index) {
     return temporary_files_.at(index)->bytes;
+  }
+
+  [[nodiscard]] std::size_t temporary_file_count() const noexcept {
+    return temporary_files_.size();
   }
 
   [[nodiscard]] bool HasFile(std::string_view path) const {
@@ -260,6 +272,8 @@ class MemoryVfs final : public Vfs {
   void FailNextWrite(std::string_view path) {
     files_.at(std::string{path})->fail_next_write = true;
   }
+
+  void FailTemporaryWriteCall(std::size_t call) { temporary_write_failure_call = call; }
 
   void FailNextTruncate(std::string_view path) {
     files_.at(std::string{path})->fail_next_truncate = true;
@@ -312,6 +326,8 @@ class MemoryVfs final : public Vfs {
       state->properties = journal_properties;
       state->path = "<temporary-" + std::to_string(temporary_sequence_++) + ">";
       state->events = &events;
+      state->failing_write_call = temporary_write_failure_call;
+      temporary_write_failure_call.reset();
       temporary_files_.push_back(state);
     }
     RecordEvent(*state, "open");
@@ -1831,9 +1847,207 @@ TEST(RollbackJournalSavepoint, CombinesLaterMainRecordsAndSubjournalImages) {
   EXPECT_EQ(second_page, transaction_target.restored_images[1]);
 }
 
-TEST(RollbackJournalSavepoint, ReusesReleasedSubjournalSpaceWhenSafe) {
+TEST(RollbackJournalSavepoint, KeepsDefaultSmallStatementJournalInMemory) {
   MemoryVfs vfs;
   std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const std::vector<std::byte> transaction_page = Page(std::byte{0x31});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{1},
+                      .bytes = transaction_page,
+                  })
+                  .has_value());
+  const auto savepoint = transaction->CreateSavepoint(3);
+  ASSERT_TRUE(savepoint.has_value());
+  const std::vector<std::byte> statement_page = Page(std::byte{0x42});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{1},
+                      .bytes = statement_page,
+                  })
+                  .has_value());
+  EXPECT_EQ(0U, vfs.temporary_file_count());
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+
+  ASSERT_EQ(1U, target.restored_images.size());
+  EXPECT_EQ(statement_page, target.restored_images.front());
+}
+
+TEST(RollbackJournalSavepoint, SpillsOnlyAfterCrossingTheConfiguredThreshold) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = ByteCount{516},
+                    });
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const std::vector<std::byte> first_original = Page(std::byte{0x10});
+  const std::vector<std::byte> second_original = Page(std::byte{0x20});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{1},
+                      .bytes = first_original,
+                  })
+                  .has_value());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{2},
+                      .bytes = second_original,
+                  })
+                  .has_value());
+  const auto savepoint = transaction->CreateSavepoint(3);
+  ASSERT_TRUE(savepoint.has_value());
+  const std::vector<std::byte> first_statement = Page(std::byte{0x31});
+  const std::vector<std::byte> second_statement = Page(std::byte{0x42});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{1},
+                      .bytes = first_statement,
+                  })
+                  .has_value());
+  EXPECT_EQ(0U, vfs.temporary_file_count());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{2},
+                      .bytes = second_statement,
+                  })
+                  .has_value());
+  ASSERT_EQ(1U, vfs.temporary_file_count());
+  ASSERT_EQ(1032U, vfs.TemporaryBytes(0).size());
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+
+  EXPECT_EQ((std::vector<PageNumber>{PageNumber{1}, PageNumber{2}}), target.restored_pages);
+  ASSERT_EQ(2U, target.restored_images.size());
+  EXPECT_EQ(first_statement, target.restored_images[0]);
+  EXPECT_EQ(second_statement, target.restored_images[1]);
+}
+
+TEST(RollbackJournalSavepoint, LeavesOnlyProvisionalOutputWhenAtomicSpillFails) {
+  enum class FailurePoint : std::uint8_t {
+    Open,
+    Copy,
+    TriggeringWrite,
+  };
+  for (const FailurePoint failure :
+       {FailurePoint::Open, FailurePoint::Copy, FailurePoint::TriggeringWrite}) {
+    SCOPED_TRACE(static_cast<unsigned>(failure));
+    MemoryVfs vfs;
+    std::unique_ptr<RollbackJournal> journal =
+        CreateJournal(vfs, Properties(ByteCount{512}),
+                      RollbackJournalOptions{
+                          .statement_journal_spill_threshold = ByteCount{516},
+                      });
+    ASSERT_NE(nullptr, journal);
+    std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+    ASSERT_NE(nullptr, transaction);
+    const std::vector<std::byte> first_original = Page(std::byte{0x10});
+    const std::vector<std::byte> second_original = Page(std::byte{0x20});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{1},
+                        .bytes = first_original,
+                    })
+                    .has_value());
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{2},
+                        .bytes = second_original,
+                    })
+                    .has_value());
+    const auto savepoint = transaction->CreateSavepoint(3);
+    ASSERT_TRUE(savepoint.has_value());
+    const std::vector<std::byte> first_statement = Page(std::byte{0x31});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{1},
+                        .bytes = first_statement,
+                    })
+                    .has_value());
+
+    if (failure == FailurePoint::Open) {
+      vfs.open_error = Error::Create(ErrorCode::kIo, "injected spill open failure");
+    } else {
+      vfs.FailTemporaryWriteCall(failure == FailurePoint::Copy ? 1U : 2U);
+    }
+    const auto spilled = transaction->CapturePage(JournalPageImage{
+        .page_number = PageNumber{2},
+        .bytes = Page(std::byte{0x42}),
+    });
+    ASSERT_FALSE(spilled.has_value());
+    EXPECT_EQ(ErrorCode::kIo, spilled.error().code());
+    vfs.open_error.reset();
+    if (failure == FailurePoint::Open) {
+      EXPECT_EQ(0U, vfs.temporary_file_count());
+    } else {
+      ASSERT_EQ(1U, vfs.temporary_file_count());
+      EXPECT_EQ(failure == FailurePoint::Copy ? 0U : 516U, vfs.TemporaryBytes(0).size());
+    }
+
+    EXPECT_EQ(JournalTransactionState::kFailed, transaction->state());
+    RecordingTarget target;
+    ASSERT_TRUE(transaction->Rollback(target).has_value());
+    EXPECT_EQ(2U, target.restored_images.size());
+    EXPECT_NE(nullptr, BeginTransaction(*journal));
+  }
+}
+
+TEST(RollbackJournalSavepoint, ReadsAcrossMemoryOnlyChunksWithoutOpeningAFile) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = std::nullopt,
+                    });
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction =
+      BeginTransaction(*journal, ByteCount{512}, ByteCount{512}, 4);
+  ASSERT_NE(nullptr, transaction);
+  for (std::uint32_t page = 1; page <= 3; ++page) {
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{page},
+                        .bytes = Page(static_cast<std::byte>(page)),
+                    })
+                    .has_value());
+  }
+  const auto savepoint = transaction->CreateSavepoint(4);
+  ASSERT_TRUE(savepoint.has_value());
+  std::vector<std::vector<std::byte>> images;
+  for (std::uint32_t page = 1; page <= 3; ++page) {
+    images.push_back(Page(static_cast<std::byte>(0x50U + page)));
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{page},
+                        .bytes = images.back(),
+                    })
+                    .has_value());
+  }
+  EXPECT_EQ(0U, vfs.temporary_file_count());
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+
+  EXPECT_EQ((std::vector<PageNumber>{PageNumber{1}, PageNumber{2}, PageNumber{3}}),
+            target.restored_pages);
+  EXPECT_EQ(images, target.restored_images);
+}
+
+TEST(RollbackJournalSavepoint, ReusesReleasedSubjournalSpaceWhenSafe) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = ByteCount{0},
+                    });
   ASSERT_NE(nullptr, journal);
   std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
   ASSERT_NE(nullptr, transaction);
@@ -1865,9 +2079,97 @@ TEST(RollbackJournalSavepoint, ReusesReleasedSubjournalSpaceWhenSafe) {
   EXPECT_TRUE(std::ranges::equal(second_image, ByteView{subjournal}.subspan(4, 512)));
 }
 
-TEST(RollbackJournalSavepoint, RetainsSharedSubjournalRecordsForAnOlderSavepoint) {
+TEST(RollbackJournalSavepoint, RewindsSpilledJournalLogicallyAndOverwritesItsPrefix) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = ByteCount{516},
+                    });
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const auto first = transaction->CreateSavepoint(3);
+  const auto second = transaction->CreateSavepoint(5);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{4},
+                      .bytes = Page(std::byte{0x44}),
+                  })
+                  .has_value());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{5},
+                      .bytes = Page(std::byte{0x55}),
+                  })
+                  .has_value());
+  ASSERT_EQ(1U, vfs.temporary_file_count());
+  ASSERT_EQ(1032U, vfs.TemporaryBytes(0).size());
+  ASSERT_TRUE(transaction->ReleaseSavepoint(*second).has_value());
+  const auto third = transaction->CreateSavepoint(5);
+  ASSERT_TRUE(third.has_value());
+  const std::vector<std::byte> replacement = Page(std::byte{0x66});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{4},
+                      .bytes = replacement,
+                  })
+                  .has_value());
+
+  const auto& subjournal = vfs.TemporaryBytes(0);
+  ASSERT_EQ(1032U, subjournal.size());
+  EXPECT_EQ(4U, ReadU32(subjournal, 0));
+  EXPECT_TRUE(std::ranges::equal(replacement, ByteView{subjournal}.subspan(4, 512)));
+  RecordingTarget target;
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*third, target).has_value());
+  ASSERT_EQ(1U, target.restored_images.size());
+  EXPECT_EQ(replacement, target.restored_images.front());
+}
+
+TEST(RollbackJournalSavepoint, RewindsInMemoryStatementJournalOnRelease) {
   MemoryVfs vfs;
   std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const auto first = transaction->CreateSavepoint(3);
+  const auto second = transaction->CreateSavepoint(4);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{4},
+                      .bytes = Page(std::byte{0x44}),
+                  })
+                  .has_value());
+  ASSERT_TRUE(transaction->ReleaseSavepoint(*second).has_value());
+  const auto third = transaction->CreateSavepoint(4);
+  ASSERT_TRUE(third.has_value());
+  const std::vector<std::byte> replacement = Page(std::byte{0x55});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{4},
+                      .bytes = replacement,
+                  })
+                  .has_value());
+  EXPECT_EQ(0U, vfs.temporary_file_count());
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->RollbackToSavepoint(*third, target).has_value());
+
+  ASSERT_EQ(1U, target.restored_images.size());
+  EXPECT_EQ(replacement, target.restored_images.front());
+}
+
+TEST(RollbackJournalSavepoint, RetainsSharedSubjournalRecordsForAnOlderSavepoint) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = ByteCount{0},
+                    });
   ASSERT_NE(nullptr, journal);
   std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
   ASSERT_NE(nullptr, transaction);
@@ -1908,7 +2210,11 @@ TEST(RollbackJournalSavepoint, RetainsSharedSubjournalRecordsForAnOlderSavepoint
 
 TEST(RollbackJournalSavepoint, ReportsMalformedLiveSubjournalRecordsAsInternal) {
   MemoryVfs vfs;
-  std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  std::unique_ptr<RollbackJournal> journal =
+      CreateJournal(vfs, Properties(ByteCount{512}),
+                    RollbackJournalOptions{
+                        .statement_journal_spill_threshold = ByteCount{0},
+                    });
   ASSERT_NE(nullptr, journal);
   std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
   ASSERT_NE(nullptr, transaction);

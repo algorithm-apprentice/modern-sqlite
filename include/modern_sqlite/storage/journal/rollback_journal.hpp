@@ -1,7 +1,9 @@
 #ifndef MODERN_SQLITE_STORAGE_JOURNAL_ROLLBACK_JOURNAL_HPP_
 #define MODERN_SQLITE_STORAGE_JOURNAL_ROLLBACK_JOURNAL_HPP_
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "modern_sqlite/base/bytes.hpp"
@@ -11,9 +13,13 @@
 
 namespace modern_sqlite {
 
+inline constexpr std::size_t kDefaultStatementJournalSpillBytes = 64U * 1024U;
+
 struct RollbackJournalOptions {
   ByteCount legacy_page_size{4096};
   DirectorySync delete_directory_sync{DirectorySync::kNo};
+  std::optional<ByteCount> statement_journal_spill_threshold{
+      ByteCount{kDefaultStatementJournalSpillBytes}};
 
   constexpr bool operator==(const RollbackJournalOptions&) const noexcept = default;
 };

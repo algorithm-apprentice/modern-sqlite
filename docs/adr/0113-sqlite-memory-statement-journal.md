@@ -66,8 +66,8 @@ It exposes only the operations the backend requires:
 ```cpp
 class StatementJournal final {
  public:
-  [[nodiscard]] static Result<StatementJournal> Create(
-      Vfs& vfs, std::optional<ByteCount> spill_threshold);
+  StatementJournal(
+      Vfs& vfs, std::optional<ByteCount> spill_threshold) noexcept;
 
   [[nodiscard]] Status Append(ByteView bytes);
   [[nodiscard]] Status ReadAt(MutableByteView output, FileOffset offset);
@@ -123,7 +123,9 @@ targets.
 Each memory-only allocation is therefore one independently owned fixed chunk.
 There is no contiguous metadata allocation, container relocation, or
 allocation proportional to total journal size. Append and read walk logical
-chunk order, and truncation releases the linked suffix.
+chunk order. Truncation and close release linked suffixes iteratively so
+database-sized journals cannot recurse through one destructor frame per
+chunk.
 
 ### 3. Make memory append transactional
 
@@ -182,6 +184,9 @@ from the retained record count.
 - File mode changes only the logical size. It does not issue `Truncate()`;
   later appends overwrite the retained tail.
 
+An equal-size rewind only resets the read cursor and returns; it does not walk
+the chunk list.
+
 Savepoint rollback reads records only through the published logical size.
 Stale file-tail bytes are unreachable.
 
@@ -238,7 +243,8 @@ do not reinterpret its profile identifiers.
 Add a version-2 workload/report contract and baseline path:
 
 - `tests/performance/write-workloads-v2.json`;
-- workload/report semantics version 2 in the runner and validators; and
+- workload/report semantics version 2 in
+  `tools/write_performance_v2.py`; and
 - `benchmarks/write-baseline-v2/`.
 
 Version 2 keeps the SQL, fixtures, scales, digests, timing protocol, and
@@ -257,7 +263,10 @@ temporary state must be gone before content verification.
 Generate and commit the complete version-2 baseline with pinned provenance.
 The version-1 validator continues to validate historical artifacts byte for
 byte; version 2 becomes the authority for this and later write-performance
-repairs.
+repairs. Because the current benchmark source intentionally diverges from the
+version-1 input fingerprint, the version-2 runner provides an independent
+historical-artifact mode that validates every recorded report and artifact
+without rebinding the frozen source-input references to the current tree.
 
 ### 9. Freeze source-derived tests before implementation
 
@@ -271,8 +280,8 @@ Add red tests for:
 - in-memory rewind releasing later chunks;
 - file-mode rewind retaining a physical tail but hiding it logically;
 - append after rewind overwriting the logical tail;
-- spill open failure and first/middle/final copy-write failure retaining the
-  exact memory image;
+- spill open failure and retained-buffer copy failure leaving only provisional
+  output;
 - triggering-write failure after successful copy retaining memory ownership
   and the old logical size;
 - OOM at the positive-threshold buffer and each linked memory-only chunk with

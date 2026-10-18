@@ -74,6 +74,7 @@ constexpr std::uint64_t kSplitMixIncrement = 0x9E3779B97F4A7C15ULL;
 constexpr std::uint64_t kKeyOrderSeed = 0xD1B54A32D192ED03ULL;
 constexpr std::size_t kValueSize = 256;
 constexpr std::size_t kTimingRepetitions = 3;
+constexpr std::uint32_t kWorkloadSemanticsVersion = 2;
 constexpr std::uint64_t kMinimumWallNanoseconds = 20'000'000ULL;
 constexpr std::int64_t kPopulatedRows = 65'536;
 constexpr std::string_view kInsertSql = "INSERT INTO kv(k,v,version) VALUES(?1,?2,0)";
@@ -904,12 +905,12 @@ void VerifySqliteIdentity() {
   return configuration;
 }
 
-[[nodiscard]] EffectiveConfiguration ModernConfiguration() {
+[[nodiscard]] EffectiveConfiguration ModernConfiguration(ProfileKind profile) {
   return EffectiveConfiguration{
       .page_size = 4096,
       .cache_size = 512,
       .mmap_bytes = 0,
-      .temp_store = "memory",
+      .temp_store = profile == ProfileKind::kMatchedDurable ? "memory" : "file",
       .journal_mode = "delete",
       .synchronous = "full",
       .locking_mode = "normal",
@@ -1578,15 +1579,20 @@ void FinalizeModern(modern_sqlite::WriteStatement& statement) {
 }
 
 [[nodiscard]] Execution ExecuteModernWork(CaseKind kind, const std::filesystem::path& path,
-                                          const WorkloadScale& scale,
+                                          ProfileKind profile, const WorkloadScale& scale,
                                           std::span<const std::int64_t> key_order, bool measured,
                                           std::size_t index, VfsDiagnosticCounters* vfs_counters) {
+  modern_sqlite::WriteSessionOptions options;
+  options.temporary_storage.mode = profile == ProfileKind::kMatchedDurable
+                                       ? modern_sqlite::TemporaryStoreMode::kMemory
+                                       : modern_sqlite::TemporaryStoreMode::kFile;
   modern_sqlite::Result<modern_sqlite::WriteSession> opened =
-      vfs_counters == nullptr ? modern_sqlite::WriteSession::Open(path.string())
-                              : modern_sqlite::WriteSession::Open(
-                                    std::make_unique<CountingVfs>(*vfs_counters), path.string());
+      vfs_counters == nullptr
+          ? modern_sqlite::WriteSession::Open(path.string(), options)
+          : modern_sqlite::WriteSession::Open(std::make_unique<CountingVfs>(*vfs_counters),
+                                              path.string(), options);
   modern_sqlite::WriteSession session = TakeValue(std::move(opened));
-  const EffectiveConfiguration configuration = ModernConfiguration();
+  const EffectiveConfiguration configuration = ModernConfiguration(profile);
   TimedWork timed;
   switch (kind) {
     case CaseKind::kCreate: {
@@ -2297,10 +2303,10 @@ struct TimingRun {
                                     std::size_t index,
                                     VfsDiagnosticCounters* vfs_counters = nullptr,
                                     SqliteCounterValues* sqlite_counters = nullptr) {
-  return engine == EngineKind::kModern
-             ? ExecuteModernWork(kind, path, scale, key_order, measured, index, vfs_counters)
-             : ExecuteSqliteWork(kind, profile, path, scale, key_order, measured, index,
-                                 sqlite_counters);
+  return engine == EngineKind::kModern ? ExecuteModernWork(kind, path, profile, scale, key_order,
+                                                           measured, index, vfs_counters)
+                                       : ExecuteSqliteWork(kind, profile, path, scale, key_order,
+                                                           measured, index, sqlite_counters);
 }
 
 [[nodiscard]] std::int64_t ExpectedLastInsertRowid(CaseKind kind, const WorkloadScale& scale) {
@@ -2768,7 +2774,7 @@ void PrintWork(std::ostream& output, const WorkloadScale& scale, const WorkResul
   PrintSourceIdentity(std::cout);
   std::cout << R"(,"sqlite":)";
   PrintSqliteIdentity(std::cout);
-  std::cout << R"(,"workload_semantics_version":1})" << '\n';
+  std::cout << R"(,"workload_semantics_version":)" << kWorkloadSemanticsVersion << "}\n";
 }
 
 #if MODERN_SQLITE_WRITE_PERFORMANCE_DIAGNOSTICS
@@ -2866,7 +2872,7 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
   PrintSqliteIdentity(std::cout);
   std::cout << R"(,"work":{)";
   PrintWork(std::cout, run.scale, run.work.work, run.work.verification, run.work.final_database);
-  std::cout << R"(},"workload_semantics_version":1})" << '\n';
+  std::cout << R"(},"workload_semantics_version":)" << kWorkloadSemanticsVersion << "}\n";
 }
 #endif
 
@@ -2911,7 +2917,7 @@ void PrintDiagnosticReport(std::string_view engine, ProfileKind profile, std::st
                R"("wall":"steady_clock"},"warmup":{)";
   PrintWork(std::cout, run.scale, run.warmup.work, run.warmup.verification,
             run.warmup.final_database);
-  std::cout << R"(},"workload_semantics_version":1})" << '\n';
+  std::cout << R"(},"workload_semantics_version":)" << kWorkloadSemanticsVersion << "}\n";
 }
 
 int Run(int argument_count, char* const* arguments) {

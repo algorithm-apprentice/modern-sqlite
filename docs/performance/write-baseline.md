@@ -1,8 +1,9 @@
 # Write Performance Baseline
 
-ADR-0050 defines the authoritative public-session write benchmark. The
-baseline compares Modern SQLite with pinned SQLite 3.54.0 under separate
-`engine-default` and `matched-durable` profiles.
+ADR-0050 defines the public-session write benchmark. ADR-0113 adds the
+authoritative version-2 contract, which compares Modern SQLite with pinned
+SQLite 3.54.0 under separate `engine-default` and `matched-durable` profiles
+while preserving version 1 as historical evidence.
 
 ## Build
 
@@ -32,12 +33,12 @@ Generation requires a clean committed worktree, binaries configured from that
 exact revision and tree, and an absent output directory:
 
 ```sh
-python3 tools/write_performance.py generate-baseline \
+python3 tools/write_performance_v2.py generate-baseline \
   --repository-root . \
-  --workloads tests/performance/write-workloads-v1.json \
+  --workloads tests/performance/write-workloads-v2.json \
   --timing-binary build/benchmark/modern_sqlite_write_benchmark \
   --diagnostic-binary build/benchmark/modern_sqlite_write_diagnostics \
-  --output benchmarks/write-baseline-v1
+  --output benchmarks/write-baseline-v2
 ```
 
 Exit code `2` means the complete structurally valid baseline was written but
@@ -48,13 +49,26 @@ correctness, process, timeout, or artifact failure.
 Offline validation never reruns timing:
 
 ```sh
-python3 tools/write_performance.py validate-baseline \
+python3 tools/write_performance_v2.py validate-baseline \
+  --repository-root . \
+  --workloads tests/performance/write-workloads-v2.json \
+  --baseline benchmarks/write-baseline-v2
+```
+
+`tools/write_performance.py`, `tests/performance/write-workloads-v1.json`,
+and `benchmarks/write-baseline-v1/` remain frozen together. They document the
+original profile semantics and are not regenerated after version 2 becomes
+available. Validate their recorded artifacts without binding them to the
+current benchmark source:
+
+```sh
+python3 tools/write_performance_v2.py validate-historical-baseline \
   --repository-root . \
   --workloads tests/performance/write-workloads-v1.json \
   --baseline benchmarks/write-baseline-v1
 ```
 
-## Pre-commit baseline finding
+## Historical version-1 findings
 
 Two independent full-generation probes produced the same schedules, work,
 provenance, logical results, database fingerprints, diagnostic counter
@@ -73,7 +87,7 @@ The original baseline therefore recorded a validated guard failure instead of
 widening the threshold or replacing samples. ADR-0008's
 optimization-admission process admitted ADR-0051 as a separate reviewed node.
 
-## Canonical baseline result
+## Historical version-1 canonical result
 
 The regenerated `benchmarks/write-baseline-v1` run at source revision
 `83c1344c53d756ca4e0d14dbf33db5e6c8c25872` records:

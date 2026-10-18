@@ -895,7 +895,14 @@ Result<WriteSession> WriteSession::Open(std::unique_ptr<Vfs> vfs, std::string_vi
     if (!valid_options.has_value()) {
       return std::unexpected(std::move(valid_options.error()));
     }
-    auto pager = Pager::OpenWritable(*vfs, path);
+    RollbackJournalOptions journal_options;
+    if (options.temporary_storage.mode == TemporaryStoreMode::kMemory) {
+      journal_options.statement_journal_spill_threshold = std::nullopt;
+    }
+    auto pager = Pager::OpenWritable(*vfs, path,
+                                     WritablePagerOptions{
+                                         .journal = journal_options,
+                                     });
     if (!pager.has_value()) {
       return std::unexpected(std::move(pager.error()));
     }

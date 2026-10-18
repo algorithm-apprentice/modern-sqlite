@@ -468,6 +468,46 @@ TEST(WriteSession, AcceptsTemporaryStorageOptionsAndRejectsInvalidConfiguration)
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
 }
 
+TEST(WriteSession, PropagatesTemporaryStoreModeToStatementJournalSpillPolicy) {
+  constexpr std::size_t kRowCount = 300;
+  constexpr std::size_t kPayloadBytes = 400;
+  constexpr std::size_t kFileCapacity = 256U * 1024U;
+  using LargeWriteVfs = test::WritePagerMemoryVfs<kFileCapacity>;
+
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kFile, TemporaryStoreMode::kMemory}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    auto owned_vfs = std::make_unique<LargeWriteVfs>(false);
+    LargeWriteVfs* const vfs = owned_vfs.get();
+    WriteSession session =
+        TakeValue(WriteSession::Open(std::move(owned_vfs), test::kWritePagerDatabasePath,
+                                     WriteSessionOptions{
+                                         .temporary_storage =
+                                             TemporaryStorageOptions{
+                                                 .mode = mode,
+                                             },
+                                     }));
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, payload TEXT)");
+    ExecuteDone(session, "BEGIN");
+    const std::string original(kPayloadBytes, 'x');
+    for (std::size_t index = 0; index < kRowCount; ++index) {
+      ExecuteDone(session, "INSERT INTO Items VALUES(" + std::to_string(index + 1U) + ",'" +
+                               original + "')");
+    }
+    ExecuteDone(session, "COMMIT");
+
+    ExecuteDone(session, "BEGIN");
+    const std::string replacement(kPayloadBytes, 'y');
+    ExecuteDone(session, "UPDATE Items SET payload='" + replacement + "'");
+    ExecuteDone(session, "SAVEPOINT retained");
+    const std::string savepoint_replacement(kPayloadBytes, 'z');
+    ExecuteDone(session, "UPDATE Items SET payload='" + savepoint_replacement + "'");
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, vfs->pathless_open_count() > 0U);
+    ExecuteDone(session, "ROLLBACK TO retained");
+    ExecuteDone(session, "RELEASE retained");
+    ExecuteDone(session, "ROLLBACK");
+  }
+}
+
 TEST(WriteSession, MaintainsIndexesForDmlStatements) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();

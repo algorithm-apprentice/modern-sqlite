@@ -198,12 +198,54 @@ template <typename Runner>
   const modern_sqlite::ErrorCode error =
       captured ? modern_sqlite::ErrorCode::kGeneric
                : transaction->failure_code().value_or(modern_sqlite::ErrorCode::kGeneric);
+  bool reusable = captured;
+  if (!captured) {
+    modern_sqlite::test::CountingRecoveryTarget target;
+    reusable = transaction->state() == modern_sqlite::JournalTransactionState::kFailed &&
+               transaction->Rollback(target).has_value() && BeginTransaction(**created) != nullptr;
+  }
   return ScenarioOutcome{
       .allocations = allocations,
       .succeeded = captured,
       .error = error,
-      .invariant_holds =
-          captured || transaction->state() == modern_sqlite::JournalTransactionState::kFailed,
+      .invariant_holds = reusable,
+  };
+}
+
+[[nodiscard]] ScenarioOutcome RunMemorySubjournalChunkGrowth(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::FixedMemoryVfs vfs;
+  auto created = modern_sqlite::RollbackJournal::Create(
+      vfs, "database.sqlite", modern_sqlite::test::FixedMemoryVfs::DatabaseProperties(),
+      modern_sqlite::RollbackJournalOptions{
+          .statement_journal_spill_threshold = std::nullopt,
+      });
+  if (!created.has_value()) {
+    return {};
+  }
+  std::unique_ptr<modern_sqlite::JournalTransaction> transaction = BeginTransaction(**created);
+  if (transaction == nullptr || !Capture(*transaction, 1) || !Capture(*transaction, 2) ||
+      !transaction->CreateSavepoint(64).has_value() || !Capture(*transaction, 1)) {
+    return {};
+  }
+
+  Arm(failure);
+  const bool captured = Capture(*transaction, 2);
+  const std::size_t allocations = Disarm();
+  const modern_sqlite::ErrorCode error =
+      captured ? modern_sqlite::ErrorCode::kGeneric
+               : transaction->failure_code().value_or(modern_sqlite::ErrorCode::kGeneric);
+  bool reusable = captured;
+  if (!captured) {
+    modern_sqlite::test::CountingRecoveryTarget target;
+    reusable = transaction->state() == modern_sqlite::JournalTransactionState::kFailed &&
+               transaction->Rollback(target).has_value() && BeginTransaction(**created) != nullptr;
+  }
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = captured,
+      .error = error,
+      .invariant_holds = reusable,
   };
 }
 
@@ -395,28 +437,31 @@ int main() {
   if (!ExhaustAllocations(RunSubjournalSetup)) {
     return 4;
   }
-  if (!ExhaustAllocations(RunCohortGrowth)) {
+  if (!ExhaustAllocations(RunMemorySubjournalChunkGrowth)) {
     return 5;
   }
-  if (!ExhaustAllocations(RunSavepointPlayback)) {
+  if (!ExhaustAllocations(RunCohortGrowth)) {
     return 6;
   }
-  if (!ExhaustAllocations(RunTransactionPlayback)) {
+  if (!ExhaustAllocations(RunSavepointPlayback)) {
     return 7;
+  }
+  if (!ExhaustAllocations(RunTransactionPlayback)) {
+    return 8;
   }
   if (!ExhaustAllocations(
           [](std::optional<std::size_t> failure) { return RunHotPlayback(failure); })) {
-    return 8;
+    return 9;
   }
   constexpr std::string_view kSuperJournal =
       "/allocation-tests/modern-sqlite/super-journal/database.sqlite-mj000000900";
   if (!ExhaustAllocations([kSuperJournal](std::optional<std::size_t> failure) {
         return RunHotPlayback(failure, kSuperJournal);
       })) {
-    return 9;
+    return 10;
   }
   if (!ExhaustAllocations(RunShortMetadataRead, modern_sqlite::ErrorCode::kIo)) {
-    return 10;
+    return 11;
   }
   return 0;
 }
