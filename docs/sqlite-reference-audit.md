@@ -8,8 +8,9 @@
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   90 production paths map to 36 mechanisms. Ten are reference-faithful,
-  fourteen are accepted architectural translations, seven require repair, and
-  five remain unresolved pending matched profiles or preparation baselines.
+  fourteen are accepted architectural translations, one is an accepted
+  measured alternative, seven require repair, and four remain unresolved
+  pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
   every dependent inventory suffix after a lower mechanism changes, and do
@@ -80,14 +81,14 @@ Every one of the 90 paths appears in the coverage appendix below. Tests,
 benchmarks, tools, CMake modules, and third-party sources are evidence or build
 infrastructure rather than production mechanisms.
 
-| Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Repair required | Unresolved |
-|---|---:|---:|---:|---:|---:|---:|
-| Storage and transaction | 40 | 12 | 7 | 4 | 1 | 0 |
-| Runtime and temporary storage | 12 | 7 | 2 | 0 | 3 | 2 |
-| Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 2 |
-| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 1 | 1 |
-| Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 2 | 0 |
-| **Total** | **90** | **36** | **10** | **14** | **7** | **5** |
+| Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Storage and transaction | 40 | 12 | 7 | 4 | 0 | 1 | 0 |
+| Runtime and temporary storage | 12 | 7 | 2 | 0 | 1 | 3 | 1 |
+| Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
+| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 0 | 1 | 1 |
+| Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 0 | 2 | 0 |
+| **Total** | **90** | **36** | **10** | **14** | **1** | **7** | **4** |
 
 ### Mechanism dispositions
 
@@ -108,7 +109,7 @@ infrastructure rather than production mechanisms.
 | `runtime-values` | SQL values, affinity, numeric scanners, and exact comparison | `vdbemem.c` and SQLite floating conversion | `reference-faithful` |
 | `runtime-collation` | BINARY, NOCASE, RTRIM, and custom descriptors | SQLite collation registry and comparators | `reference-faithful` |
 | `runtime-functions` | Scalar and aggregate state registry | `func.c` plus `vdbe.c` function/AggStep invocation | `unresolved` |
-| `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `unresolved` |
+| `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `measured-alternative` |
 | `runtime-sorter` | One `ByteBuffer` and heap node per input record | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `repair-required` |
 | `runtime-topn` | Sorted linked-list memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `repair-required` |
 | `runtime-ephemeral-relation` | Sorted array memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `repair-required` |
@@ -153,7 +154,7 @@ ordinal below, and its child ADR is created before production changes.
 | `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
 | `runtime-collation` — `implement-collation` | `main.c:1082-1135` RTRIM/NOCASE, `main.c:2907-2965,3577-3586,3812-3868` registration/BINARY built-ins. | SQL values/text; allocation-free ordering, custom callback, record/index integration tests. | `reference-faithful`; UTF-16 adapters remain unimplemented scope. |
 | `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:1870-2340,3399-3550` aggregate/scalar states; `vdbe.c:7982-8180,9034-9098` AggStep/final/function invocation. | Values/collation/VM; full semantic, overflow, callback, reset and aggregate differential matrices. | `unresolved`; ledger 13. Profile must attribute the 6.32x global-functions gap before a child ADR. |
-| `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor; `vdbe.c:987-990,9482-9520` and `vdbeaux.c:2805-2859,3326-3510` statement-wide failure cleanup. | VFS/Pager/B-tree and statement budgets; ADR-0058 budget/file/root/extent/poison tests, consumer semantics, and wide-modifier matched evidence. | `unresolved`; ledger 4, accepted ADR-0115. Cache pin-bound diagnostics and exact-tree evidence remain to close. |
+| `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor; `vdbe.c:987-990,9482-9520` and `vdbeaux.c:2805-2859,3326-3510` statement-wide cursor cleanup. | VFS/Pager/B-tree and statement budgets; ADR-0058 budget/file/root/extent/poison tests, consumer semantics, wide-modifier matched evidence, and 32-positioned-root cache diagnostics. | `measured-alternative`; ADR-0115 and diagnostic commit `537dfe2`. Explicit-transaction rollback differences remain ledger 8. |
 | `runtime-sorter` — `implement-advanced-sql` | `vdbesort.c:1081-1177` mode setup, `:1944-2046` memory/file record admission, `:1725-1910` PMA spill, `:2517-2817` merge/rewind/next. | Temporary core/record/VFS; sorter differential, malformed/OOM, PMA, buffered-I/O, ordering baselines. | `repair-required`; ledger 5, child ADR pending. Memory and file modes require different native allocation owners. |
 | `runtime-topn` — `implement-advanced-sql` | `select.c:742-903` `pushOntoSorter()` LIMIT queue; `vdbe.c:4685-4750,6484-6794` ephemeral open, largest/delete/insert iteration. | Temporary core and ephemeral B-tree; order/limit differential, lifecycle/OOM, memory/file benchmarks. | `repair-required`; ledger 7, child ADR pending after ledger 6. |
 | `runtime-ephemeral-relation` — `implement-advanced-sql` | `select.c:904-996,1198-1388,2983-3740` DISTINCT/compound destinations; `vdbe.c:4685-4750,5506-5568,6728-6848` ephemeral membership/insert/delete. | Temporary core, record comparator, B-tree; DISTINCT/compound differential, OOM, spill, baseline evidence. | `repair-required`; ledger 6, child ADR pending. Sorted-array memory insertion is the confirmed O(N^2) divergence. |
@@ -221,7 +222,7 @@ than timing noise:
 | 1 | `storage-page-cache` | **Complete** | ADR-0112/PR #222 adds cache-local hashing, unpublished fills, bounded frame recycling, atomic sync-state permutation, zero-allocation pressure fills, and fresh matched evidence. |
 | 2 | `storage-rollback-journal` | **Complete** | ADR-0113 adds the SQLite `memjournal.c` in-memory statement-journal path, explicit spill policy, independent historical validation, and a truthful version-2 baseline. |
 | 3 | `storage-pager` | **Complete** | ADR-0114 publishes and clears `NEED_SYNC`, preserves page-number sync state across moves, authorizes sync-safe pages from durable cohorts while newer cohorts remain dirty, and suppresses cached freed-leaf writes. |
-| 4 | `runtime-temporary-core` | Resolve | Accepted ADR-0115 compares the shared Pager/extent/poison design with SQLite per-cursor ownership and retains it only after bounded-resource and statement-failure evidence closes. |
+| 4 | `runtime-temporary-core` | **Complete** | ADR-0115 retains statement-shared relation/sorter arenas as a measured alternative with explicit file, memory, cache-pin, failure, reset, and matched evidence. |
 | 5 | `runtime-sorter` | Repair | Coallocate metadata and payload per record in memory mode; use SQLite's bulk arena in file mode before dependent sorter consumers are repaired. |
 | 6 | `runtime-ephemeral-relation` | Repair | Use one SQLite-style ephemeral B-tree in memory and file modes; remove sorted-array insertion. |
 | 7 | `runtime-topn` | Repair | Reuse that ephemeral B-tree for logarithmic ORDER BY LIMIT admission and deletion. |
@@ -867,7 +868,7 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its remaining seven repairs and five resolutions must
+blocking work ledger. Its remaining seven repairs and four resolutions must
 close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as repairs proceed.

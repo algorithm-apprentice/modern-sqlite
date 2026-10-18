@@ -337,6 +337,56 @@ Closure requires:
 - attached-database temporary ownership; and
 - shared-cache or multi-connection synchronization.
 
+## Implementation evidence
+
+Design commit `368143a` and diagnostic commit `537dfe2` close the ownership
+resolution without changing sorter, relation, top-N, or VM semantics.
+
+The new many-root diagnostic positions 32 simultaneous one-page file-backed
+relations. It records:
+
+- one pathless relation file;
+- relation-cache soft target 1;
+- 32 current active pages;
+- 32 current allocated frames;
+- 32 current pins; and
+- 33 peak allocated frames.
+
+This is exactly one pinned page per single-level root plus one bounded
+in-progress fill. It satisfies both the stable-state bound and the general
+`kMaximumBtreeDepth`/`kMaximumMutationPages` formula. Closing every relation
+returns the pin count to zero.
+
+The existing shared-resource and failure suites remain green:
+
+- many file-backed relations share one file and independent roots;
+- many spilled sorters share one file and nonoverlapping extents;
+- mixed relation/sorter statements use exactly two files;
+- root reuse does not increase retained arena overhead;
+- sorter and relation I/O/corruption failures poison siblings and defer
+  cleanup until statement storage destruction;
+- reset creates fresh state after success or failure; and
+- OOM/allocation/accounting tests cover registration, pressure, working sets,
+  roots, extents, merge publication, and positioned records.
+
+The immutable `wide-modifier-file` diagnostic exercises two ordered sorters
+and two keyed relations in one statement. It records four aggregate opens,
+four finalizations, four closes, two total temporary file acquisitions,
+`live_files_peak = 2`, `retained_bytes_peak = 2,097,147`,
+`working_set_bytes_peak = 2,101,243`, 282 sorter spill writes, the expected
+digest `c9abc9b4135a16a2`, and a passing committed 40x guard. The 6.321198x
+wall ratio remains assigned to dependent allocation/layout mechanisms,
+including ledger 5's 545,693-allocation sorter path, not to ownership
+multiplication.
+
+Fast-local passes 1,413 batched and 91 isolated tests. Isolated Debug,
+Release, and ASan/UBSan each pass 1,545 tests; instrumentation passes 1,562.
+GCC 16 Debug and Release each pass 1,565 tests. Twenty-seven shared checks
+cover 121 configured instances, 58 native compatibility/performance
+contracts pass, and four 20,000-run fuzz domains complete with seed 102.
+Full production clang-tidy, pinned formatting, graph, engineering discipline,
+design review, implementation review, and evidence review pass.
+
 ## References
 
 - ADR-0053: SQLite-Aligned Advanced SQL Architecture
