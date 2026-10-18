@@ -1,18 +1,20 @@
 # Implemented-Engine SQLite Reference Audit
 
-- Audit revision: `ebeb974bdc0c935ef627f90b9da076814eee8091`.
+- Audit revision: `f9baa39e09e911003380ec7e93a23065222ceb7e`
+  (tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`).
 - Reference: SQLite 3.54.0, Git
   `cb547ab3e931c7766e24834af5ef6c4578863e3d`, Fossil
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
-- Date: 2026-10-16.
-- Status: The bounded audit and every named finding below have their recorded
-  corrections. ADR-0111 now requires a closed implemented-mechanism inventory
-  and repair of every unresolved or materially divergent entry before feature
-  expansion resumes.
-- Follow-up: Refresh this document from merged main after PR #220, account for
-  every project-owned production translation unit, transitive private header,
-  generated-source input, and public contract, then execute repairs
-  sequentially from lower dependencies upward.
+- Date: 2026-10-18.
+- Status: ADR-0111's closed implemented-mechanism inventory is complete:
+  90 production paths map to 36 mechanisms. Seven are reference-faithful,
+  fourteen are accepted architectural translations, ten require repair, and
+  five remain unresolved pending matched profiles or preparation baselines.
+  Feature expansion remains paused.
+- Follow-up: Execute the ordered repair and resolution ledger below. Refresh
+  every dependent inventory suffix after a lower mechanism changes, and do
+  not resume node-43 feature work until no `repair-required` or `unresolved`
+  entry remains.
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053,
   ADR-0111.
 
@@ -62,7 +64,224 @@ oracle profile, including UTF-8, database settings, compile-option checks,
 source hashes, and limits. A second reproduction uses the unchanged joined
 index fixture, avoiding dependence on a new diagnostic schema.
 
-### Source coverage
+## ADR-0111 closed implemented-mechanism inventory
+
+### Coverage population
+
+The production population is closed over:
+
+- 43 project-owned production translation units: the 42
+  `MODERN_SQLITE_ENGINE_SOURCES` plus the instrumentation target;
+- nine project-owned private production headers under `src/`;
+- 38 public production headers under `include/modern_sqlite/`; and
+- zero project-owned generated-source inputs at this revision.
+
+Every one of the 90 paths appears in the coverage appendix below. Tests,
+benchmarks, tools, CMake modules, and third-party sources are evidence or build
+infrastructure rather than production mechanisms.
+
+| Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Repair required | Unresolved |
+|---|---:|---:|---:|---:|---:|---:|
+| Storage and transaction | 40 | 12 | 4 | 4 | 4 | 0 |
+| Runtime and temporary storage | 12 | 7 | 2 | 0 | 3 | 2 |
+| Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 2 |
+| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 1 | 1 |
+| Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 2 | 0 |
+| **Total** | **90** | **36** | **7** | **14** | **10** | **5** |
+
+### Mechanism dispositions
+
+| Inventory entry | Modern mechanism | Pinned SQLite mechanism | Disposition |
+|---|---|---|---|
+| `storage-infrastructure` | Typed bytes, results, and optional counters | Narrow infrastructure equivalents in `sqliteInt.h` and `status.c` | `architectural-translation` |
+| `storage-coding-format` | Coding, database header, and page-number contracts | `util.c`, `btree.c`, and `pager.c` format rules | `reference-faithful` |
+| `storage-record-codec` | Shared record encoder/decoder and comparator | `vdbeaux.c`, `vdbemem.c`, and `vdbe.c` record rules | `reference-faithful` |
+| `storage-vfs-posix` | Typed VFS and POSIX backend | `os.c` and `os_unix.c` | `architectural-translation` |
+| `storage-page-cache` | Node-based unordered map plus intrusive clean/dirty lists | `pcache.c`/`pcache1.c` local hash, LRU, recycling, bulk allocation, and `pSynced` dirty selection | `repair-required` |
+| `storage-page-bitvec` | Shared adaptive page set | `bitvec.c` | `reference-faithful` |
+| `storage-rollback-journal` | Main journal plus file-only subjournal | `pager.c` rollback state plus `memjournal.c` in-memory chunks and spill | `repair-required` |
+| `storage-pager` | Typed read/write pager and oldest-dirty pressure spill | `pager.c`, including `PGHDR_NEED_SYNC`, `PGHDR_DONT_WRITE`, and `pHasContent` | `repair-required` |
+| `storage-btree-read` | Typed page views and read cursors | `btree.c` page/cursor mechanisms | `reference-faithful` |
+| `storage-btree-write` | Writable cursor, bounded page owner, `CellArray`, and balancing | `btree.c` allocation, cell editing, balancing, insert, delete, and root lifecycle | `architectural-translation` |
+| `storage-diagnostics` | Offline ownership and corruption workspace | `btree.c` integrity mechanisms | `architectural-translation` |
+| `storage-transaction` | Transaction coordinator and anonymous savepoints | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `repair-required` |
+| `runtime-values` | SQL values, affinity, numeric scanners, and exact comparison | `vdbemem.c` and SQLite floating conversion | `reference-faithful` |
+| `runtime-collation` | BINARY, NOCASE, RTRIM, and custom descriptors | SQLite collation registry and comparators | `reference-faithful` |
+| `runtime-functions` | Scalar and aggregate state registry | `func.c` plus `vdbe.c` function/AggStep invocation | `unresolved` |
+| `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `unresolved` |
+| `runtime-sorter` | One `ByteBuffer` and heap node per input record | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `repair-required` |
+| `runtime-topn` | Sorted linked-list memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `repair-required` |
+| `runtime-ephemeral-relation` | Sorted array memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `repair-required` |
+| `binding-text-lexer` | UTF-8/source text and tokenizer | `utf.c` and `tokenize.c` | `reference-faithful` |
+| `binding-ast` | Immutable postorder syntax arena | Mutable `Expr`/`Select` ownership produced by `parse.y` | `architectural-translation` |
+| `binding-parser` | Handwritten recursive descent plus Pratt expressions | Lemon `parse.y`/`parse.c` | `unresolved` |
+| `binding-catalog-model` | Immutable dense catalog plus open-addressed lookups | SQLite Schema and Hash ownership | `architectural-translation` |
+| `binding-catalog-loader` | Acyclic scan, parse, derive, and publish pipeline | `prepare.c`, `build.c`, and `analyze.c` schema initialization | `architectural-translation` |
+| `binding-name-resolution` | Immutable bound arenas and lexical query owners | `resolve.c` NameContext walkers and `select.c` result processing | `unresolved` |
+| `execution-logical-plan` | Immutable semantic query-block DAG | `select.c` semantic phases before code generation | `architectural-translation` |
+| `execution-optimizer` | Local candidate selection in declared source order | `where.c` WhereLoop construction and path solving | `repair-required` |
+| `execution-lowering` | Separate typed bytecode emission | `select.c`, `wherecode.c`, and `expr.c` schedules | `architectural-translation` |
+| `execution-bytecode` | Immutable typed instructions and separate verifier | Mutable `VdbeOp` emission/finalization | `architectural-translation` |
+| `execution-vm` | `std::variant`/`std::visit` dispatch with typed values and cursors | Compact `vdbe.c` opcode loop, `Mem`, and `VdbeCursor` | `unresolved` |
+| `execution-read-session` | RAII prepare, bind, step, reset, and reprepare owner | `prepare.c`, `vdbeapi.c`, and `vdbeaux.c` lifecycle | `architectural-translation` |
+| `write-session-lifecycle` | Writable RAII session over compiler, VM, and coordinator | SQLite write statement and connection lifecycle | `architectural-translation` |
+| `write-dml-mutation` | Typed DML plans over one-pass cursors and index maintenance | `insert.c`, `update.c`, `delete.c`, and mutation opcodes | `architectural-translation` |
+| `write-create-index` | Direct uniqueness probe plus B-tree insert for every source row | `build.c::sqlite3RefillIndex()` sorter and bulk ordered insertion | `repair-required` |
+| `write-analyze` | Monolithic VM scan with payload copy and owned decode per row | `analyze.c` retained `StatAccum`, `stat_push`, and `stat_get` | `repair-required` |
+| `write-schema-ddl` | Typed schema-row mutation, cookie update, and catalog refresh | `build.c`, `prepare.c`, and schema VDBE operations | `architectural-translation` |
+
+### Per-mechanism source maps and evidence
+
+Modern paths are listed in the closed coverage appendix. A pending repair has
+no commit or PR identity yet; its stable identity is the blocking-ledger
+ordinal below, and its child ADR is created before production changes.
+
+| Inventory entry / DAG owner | Pinned SQLite functions and ranges | Prerequisites and current evidence | Disposition, uncertainty, and repair traceability |
+|---|---|---|---|
+| `storage-infrastructure` — `implement-bytes`, `implement-error-result`, `implement-instrumentation` | No source-identical database mechanism; narrow ownership/status analogues live in `sqliteInt.h` and `status.c`. | ADR-0004, ADR-0010-0012; ownership, allocation, compiler, and zero-cost instrumentation tests. | `architectural-translation`; no database-sized algorithm is replaced. |
+| `storage-coding-format` — `implement-coding`, `implement-read-pager` | `util.c:1610-1750` varints; `btree.c:3312-3479` database-header and payload geometry. | Bytes/results, independent coding goldens, malformed headers, SQLite-created files. | `reference-faithful`; no open uncertainty. |
+| `storage-record-codec` — `implement-record-codec` | `vdbeaux.c:3862-4190` serial types/get/put, `vdbeaux.c:4260-5130` record comparison, `vdbe.c:3600-3765` MakeRecord affinity/serialization. | SQL values/collations/coding; independent record goldens, malformed/OOM, prefix comparison, bidirectional images. | `reference-faithful`; ADR-0101 and ADR-0108 repairs are merged. |
+| `storage-vfs-posix` — `implement-vfs-contracts`, `implement-posix-vfs` | `os_unix.c:1350-1575` deferred close, `:1672-2289` locks, `:3435-4035` positioned I/O/sync, `:6300-7218` open/access/delete. | Typed results/bytes; real-filesystem, short-I/O, locking, sync, recovery, and ADR-0097 evidence. | `architectural-translation`; WAL shared-memory ranges remain unimplemented node-45 scope. |
+| `storage-page-cache` — `implement-page-cache` | `pcache.c:23-43,203-255,403-528,551-658` dirty lists, `pSynced`, fetch/release; `pcache1.c:117-210,537-641,876-1119` hash, LRU, recycling, rekey. | Byte ownership; cache unit tests and committed read pressure baseline. | `repair-required`; ledger 1, child ADR pending. Current uncertainty is isolated hash/recycle versus VM/cursor cost. |
+| `storage-page-bitvec` — `implement-journal-contracts`, `implement-write-pager` | `bitvec.c:15-541` bitmap, sparse hash, subdivision, recursive Set/Test/Clear. | Typed allocation errors; journal membership, savepoint suppression, `pHasContent`, OOM tests. | `reference-faithful`; ADR-0045 mechanism is merged. |
+| `storage-rollback-journal` — `implement-rollback-journal` | `pager.c:1039-1079,1849-1871,2280-2410,2872-2995,4188-4641` savepoint/main playback; `memjournal.c:1-16,84-290,353-392` chunked memory journal and spill. | VFS/coding/journal contracts; crash, torn-write, hot recovery, metadata, savepoint, interoperability evidence. | `repair-required`; ledger 2, child ADR pending. Main journal is aligned; subjournal medium/spill policy is not. |
+| `storage-pager` — `implement-read-pager`, `implement-write-pager` | `pager.c:137-357` states, `:3075-3140` page reads, `:5597-5698` fetch, `:6050-6264` journal-before-write, `:6338-6352` DONT_WRITE, `:6510-6799` commit; `pcache.c:445-470,645-658` sync-safe spill selection/flag clearing. | VFS/cache/journal; crash, savepoint, spill, recovery, allocation, read/write baseline evidence. | `repair-required`; ledger 3, child ADR pending. Must close both NEED_SYNC/pSynced and DONT_WRITE. |
+| `storage-btree-read` — `implement-btree-page`, `implement-btree-read` | `btree.c:1205-2294` page/cell geometry, `:5155-5473` payload, `:5486-6520` cursor open/seek/traversal. | Pager/record/collation; goldens, malformed/fuzz, signed rowid/index seek, OOM and SQLite-created traversal. | `reference-faithful`; no open valid-file finding. |
+| `storage-btree-write` — `implement-btree-write` | `btree.c:3540-3573,6546-7290,7320-9300,9441-10060,10098-10480` database/root, allocation/free, cell edit/balance, insert/delete/clear/drop. | Writable Pager and read B-tree; model, crash, OOM/allocation, bidirectional integrity. | `architectural-translation`; algorithm is preserved through typed owners. Pager DONT_WRITE remains ledger 3. |
+| `storage-diagnostics` — `implement-storage-diagnostics` | `btree.c:10694-11310` integrity ownership/reachability plus format decoders above. | Read Pager/B-tree/record; whole-file corruption, freelist, overflow, pointer-map, stable output tests. | `architectural-translation`; offline workspace is outside point hot paths. |
+| `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; lifecycle, crash, changes/rowid/autocommit, retry, savepoint evidence. | `repair-required`; ledger 8, child ADR pending. ADR-0047 explicitly deferred precise admission. |
+| `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
+| `runtime-collation` — `implement-collation` | `main.c:1082-1135` RTRIM/NOCASE, `main.c:2907-2965,3577-3586,3812-3868` registration/BINARY built-ins. | SQL values/text; allocation-free ordering, custom callback, record/index integration tests. | `reference-faithful`; UTF-16 adapters remain unimplemented scope. |
+| `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:1870-2340,3399-3550` aggregate/scalar states; `vdbe.c:7982-8180,9034-9098` AggStep/final/function invocation. | Values/collation/VM; full semantic, overflow, callback, reset and aggregate differential matrices. | `unresolved`; ledger 13. Profile must attribute the 6.32x global-functions gap before a child ADR. |
+| `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor. | VFS/Pager/B-tree and statement budgets; ADR-0058 failure/accounting tests and all temporary baselines. | `unresolved`; ledger 4. ADR-0058 is the alternative identity; matched ownership/file/cache/failure evidence is incomplete. |
+| `runtime-sorter` — `implement-advanced-sql` | `vdbesort.c:1081-1177` mode setup, `:1944-2046` memory/file record admission, `:1725-1910` PMA spill, `:2517-2817` merge/rewind/next. | Temporary core/record/VFS; sorter differential, malformed/OOM, PMA, buffered-I/O, ordering baselines. | `repair-required`; ledger 5, child ADR pending. Memory and file modes require different native allocation owners. |
+| `runtime-topn` — `implement-advanced-sql` | `select.c:742-903` `pushOntoSorter()` LIMIT queue; `vdbe.c:4685-4750,6484-6794` ephemeral open, largest/delete/insert iteration. | Temporary core and ephemeral B-tree; order/limit differential, lifecycle/OOM, memory/file benchmarks. | `repair-required`; ledger 7, child ADR pending after ledger 6. |
+| `runtime-ephemeral-relation` — `implement-advanced-sql` | `select.c:904-996,1198-1388,2983-3740` DISTINCT/compound destinations; `vdbe.c:4685-4750,5506-5568,6728-6848` ephemeral membership/insert/delete. | Temporary core, record comparator, B-tree; DISTINCT/compound differential, OOM, spill, baseline evidence. | `repair-required`; ledger 6, child ADR pending. Sorted-array memory insertion is the confirmed O(N^2) divergence. |
+| `binding-text-lexer` — `implement-text`, `implement-lexer` | `tokenize.c:216-265,600-744` contextual tokens/prepare loop plus `utf.c` byte classes. | Bytes/text; token streams, offsets, comments, NUL, fallback keywords, malformed inputs. | `reference-faithful`; no open mechanism. |
+| `binding-ast` — `implement-ast` | No source-identical ownership; `parse.y` semantic values and SQLite `Expr`/`Select` graphs define input semantics. | Text/results; immutable arena, reference, source-span, depth, destruction and OOM tests. | `architectural-translation`; explicit non-native infrastructure. |
+| `binding-parser` — `implement-parser` | `parse.y:1-170,268-340,396-478,600-979,1070-1525,1622-1637`; generated `parse.c:2473-2511,6116+`; `tokenize.c:600-744`. | Lexer/AST; broad grammar/error differential and deep/wide limits. | `unresolved`; ledger 14. ADR-0028 is the alternative identity; matched parse/prepare evidence is missing. |
+| `binding-catalog-model` — `implement-catalog-model` | `build.c:338-399,527-544,1549-1960,2437-2555,4020-4620`; `prepare.c:96-203`; `analyze.c:20-67,1523-1648`. | AST/values; immutable identity, lookup, constraints, indexes, statistics tests. | `architectural-translation`; no open hot-path evidence beyond prepare ledger 15. |
+| `binding-catalog-loader` — `implement-catalog-loader` | `prepare.c:96-203,225-445`; `build.c:1040-1120,1549-1960,2437-2555,4020-4620`; `analyze.c:1523-1648,1942-2008`. | Catalog/parser/B-tree/record; SQLite-created schema, malformed rows, DDL identity, STAT1, reload tests. | `architectural-translation`; recursive prepare is intentionally split. |
+| `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 are semantic authorities; matched preparation evidence is missing. |
+| `execution-logical-plan` — `implement-logical-plan`, `implement-advanced-sql` | `select.c:7709-7728,8371-8473,1224-1344,2573-2618`; `where.c:6948-6965`. | Binder/catalog; plan ownership, clause order, joins, compounds, aggregate and allocation tests. | `architectural-translation`; semantic phases only, no runtime resources. |
+| `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7120`; `wherecode.c:1680-2245`. | Logical plan/catalog/statistics; access choice, scaling, fixed-work, conditional/join audits. | `repair-required`; ledger 9, child ADR pending. Current source-order selector is not the WhereLoop/path solver. |
+| `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
+| `execution-bytecode` — `implement-bytecode` | `vdbeaux.c:271-363,598-658,876-975,1286-1355,2658-2890`; `vdbe.h:50-93`. | SQL values/results; builder/verifier dataflow, capability, malformed/OOM, size tests. | `architectural-translation`; runtime representation uncertainty is owned by `execution-vm`. |
+| `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbeapi.c:834-980`. | Bytecode/Pager/B-tree/functions/temp storage; complete semantic/lifecycle suites and all matched execution baselines. | `unresolved`; ledger 12. Profile identity precedes any compact-dispatch child ADR. |
+| `execution-read-session` — `implement-read-session-api` | `main.c:1273-1408,3388-3770`; `prepare.c:703-1000`; `vdbeapi.c:105-174,980-1120,1695-2060`. | Parser/catalog/compiler/VM/POSIX; prepare/step/reset/finalize, schema change, allocation, differential lifecycle. | `architectural-translation`; no open lifecycle finding. |
+| `write-session-lifecycle` — `implement-dml-ddl` | `prepare.c:703-1000`; `vdbeapi.c:105-174,834-1120`; `vdbeaux.c:3220-3510`; `main.c:1273-1408`. | Read session/transaction/VM; writable reset/rebind, changes, rowid, autocommit, rollback and schema-refresh traces. | `architectural-translation`; statement-journal admission remains ledger 8. |
+| `write-dml-mutation` — `implement-dml-ddl`, `optimize-one-pass-mutations`, `implement-index-planning` | `insert.c:888-1700`; `update.c:296-950`; `delete.c:288-859`; `vdbe.c:3577-3725,5744-6135,7203-7250`. | Binder/plans/VM/transaction/B-tree; model, crash, fuzz, one-pass, index-maintenance and interoperability evidence. | `architectural-translation`; remaining baseline gaps are assigned to lower ledger entries. |
+| `write-create-index` — `implement-index-planning` | `build.c:3851-3943` `sqlite3RefillIndex()` sorter, adjacent UNIQUE check, bulk cursor and ordered `IdxInsert`. | Sorter, writable B-tree, schema mutation; index compatibility and baseline evidence. | `repair-required`; ledger 10, child ADR pending after sorter closure. |
+| `write-analyze` — `implement-index-planning` | `analyze.c:166-250,695-945,977-1510,1523-1648` STAT1 table, `StatAccum`, scan, encode/load. | Index cursor/record/VM/schema refresh; STAT1 differential and index baseline evidence. | `repair-required`; ledger 11, child ADR pending. |
+| `write-schema-ddl` — `implement-dml-ddl`, `implement-index-planning` | `build.c:1265-1540,2716-2940,4020-4558`; `prepare.c:96-445`; schema opcodes in `vdbe.c:3577-3725,7203-7250`. | Catalog/transaction/B-tree; SQLite-readable schema rows, cookie/crash/no-op/reprepare tests. | `architectural-translation`; CREATE INDEX population is separately ledger 10. |
+
+### Current matched performance evidence
+
+All ratios below are aggregate wall ratios from the committed immutable
+baselines; values greater than one mean Modern is slower.
+
+| Baseline | Largest material ratios | Source evidence |
+|---|---|---|
+| Read | 1.53x fit scan; 1.49x pressure scan | `benchmarks/read-baseline-v1/aggregate.json` |
+| Write | 9.08x matched delete scan; 7.06x matched explicit batch insert; 6.93x matched update scan | `benchmarks/write-baseline-v1/aggregate.json` |
+| ORDER BY | 7.68x file top-N; 6.44x memory top-N; 6.37x multi-spill | `benchmarks/order-by-baseline-v1/aggregate.json` |
+| DISTINCT/compound | 26.55x high-cardinality memory DISTINCT; 17.58x file UNION replacement; 12.90x file keyed relation | `benchmarks/distinct-compound-baseline-v1/aggregate.json` |
+| Aggregate/grouping | 7.56x DISTINCT state; 6.91x sorted file grouping; 6.90x unique local ordering; 6.32x global functions | `benchmarks/aggregate-baseline-v1/aggregate.json` |
+| Index | 6.41x CREATE INDEX; 5.40x unselective covering read; 3.67x noncovering range; 2.84x ANALYZE | `benchmarks/index-baseline-v1/aggregate.json` |
+
+The following fixed-work observations identify mechanism differences rather
+than timing noise:
+
+- explicit batch insert writes 305,372,100 subjournal bytes through 74,481
+  file writes while the reported matched configuration says
+  `temp_store=memory`;
+- delete scan writes 4,380 Modern database pages and performs thousands of
+  journal sync calls, while SQLite records 73 cache writes; source review
+  confirms that Modern lacks `PGHDR_DONT_WRITE`;
+- matched update scan writes the same 4,371 database pages in both engines,
+  but Modern issues 7,722 journal sync calls and remains 6.93x slower; source
+  review confirms that Modern lacks SQLite's `PGHDR_NEED_SYNC` and
+  `PCache.pSynced` sync-safe dirty-page selection;
+- high-cardinality memory DISTINCT inserts into a sorted array and shifts the
+  suffix on every new key;
+- a 65,536-row memory sorter performs about 131,000 Modern allocations because
+  each row owns a payload allocation and a node allocation;
+- unselective covering-index execution records 8,202 Modern versus 8,201
+  SQLite VM instructions but remains 5.40x slower;
+- CREATE INDEX performs 118,924 Modern allocations and 105,193 cache hits
+  because it probes and inserts each source key directly instead of sorting
+  and bulk-appending; and
+- ANALYZE performs 25,079 Modern allocations for 12,288 input rows because it
+  copies and fully decodes each index record.
+
+### Blocking repair and resolution ledger
+
+| Order | Inventory entry | Classification | Required closure |
+|---:|---|---|---|
+| 1 | `storage-page-cache` | Repair | Translate the single-connection `pcache1` hash/recycling baseline plus `pSynced` sync-safe dirty selection, then add isolated fit/pressure allocation evidence. |
+| 2 | `storage-rollback-journal` | Repair | Add the SQLite `memjournal.c` in-memory statement-journal path, explicit spill policy, and truthful benchmark configuration. |
+| 3 | `storage-pager` | Repair | Publish and clear `NEED_SYNC`, prefer sync-safe spill candidates, and add `DONT_WRITE` for freed leaf pages while preserving savepoints and `pHasContent`. |
+| 4 | `runtime-temporary-core` | Resolve | Compare the shared Pager/extent/poison design with per-cursor SQLite ownership. Retain it only as a measured alternative or repair the ownership and failure domains before dependent structures. |
+| 5 | `runtime-sorter` | Repair | Coallocate metadata and payload per record in memory mode; use SQLite's bulk arena in file mode before dependent sorter consumers are repaired. |
+| 6 | `runtime-ephemeral-relation` | Repair | Use one SQLite-style ephemeral B-tree in memory and file modes; remove sorted-array insertion. |
+| 7 | `runtime-topn` | Repair | Reuse that ephemeral B-tree for logarithmic ORDER BY LIMIT admission and deletion. |
+| 8 | `storage-transaction` | Repair | Publish `isMultiWrite`/`mayAbort` and open statement savepoints only when SQLite sets `usesStmtJournal`. |
+| 9 | `execution-optimizer` | Repair | Translate the bounded SQLite WhereLoop/path solver for currently admitted accesses and join barriers. |
+| 10 | `write-create-index` | Repair | Reuse the repaired sorter and add ordered bulk index construction with adjacent UNIQUE checks. |
+| 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
+| 12 | `execution-vm` | Resolve | Profile same-work covering-index, aggregate, and sorter controls; repair compact dispatch/register/cursor mechanisms if confirmed. |
+| 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
+| 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
+| 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
+
+This order is dependency-sensitive. A lower repair invalidates dependent
+performance evidence. Each repair remains one documentation-first,
+test-first coherent slice; no new node-43 feature begins between repairs.
+
+### Closed path coverage
+
+The following mapping accounts for every project-owned production path at the
+audited revision.
+
+| Inventory entry | Production paths |
+|---|---|
+| `storage-infrastructure` | `include/modern_sqlite/base/bytes.hpp`<br>`include/modern_sqlite/base/result.hpp`<br>`include/modern_sqlite/instrumentation/counters.hpp`<br>`src/base/bytes.cpp`<br>`src/base/result.cpp`<br>`src/instrumentation/counters.cpp` |
+| `storage-coding-format` | `include/modern_sqlite/base/coding.hpp`<br>`include/modern_sqlite/storage/database_format.hpp`<br>`include/modern_sqlite/storage/page_number.hpp`<br>`src/base/coding.cpp`<br>`src/storage/database_format.cpp` |
+| `storage-record-codec` | `include/modern_sqlite/format/record_codec.hpp`<br>`src/format/record_codec.cpp` |
+| `storage-vfs-posix` | `include/modern_sqlite/platform/vfs.hpp`<br>`include/modern_sqlite/platform/posix_vfs.hpp`<br>`src/platform/vfs.cpp`<br>`src/platform/posix_vfs.cpp` |
+| `storage-page-cache` | `include/modern_sqlite/storage/cache/page_cache.hpp`<br>`src/storage/cache/page_cache.cpp` |
+| `storage-page-bitvec` | `include/modern_sqlite/storage/page_bitvec.hpp`<br>`src/storage/page_bitvec.cpp` |
+| `storage-rollback-journal` | `include/modern_sqlite/storage/journal/journal.hpp`<br>`include/modern_sqlite/storage/journal/rollback_journal.hpp`<br>`src/storage/journal/journal.cpp`<br>`src/storage/journal/rollback_journal.cpp` |
+| `storage-pager` | `include/modern_sqlite/pager/pager.hpp`<br>`src/pager/pager.cpp`<br>`src/pager/write_pager.cpp` |
+| `storage-btree-read` | `include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp` |
+| `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
+| `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
+| `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |
+| `runtime-values` | `include/modern_sqlite/runtime/sql_value.hpp`<br>`src/runtime/sql_value.cpp`<br>`src/runtime/sqlite_float.hpp`<br>`src/runtime/sqlite_float.cpp` |
+| `runtime-collation` | `include/modern_sqlite/runtime/collation.hpp`<br>`src/runtime/collation.cpp` |
+| `runtime-functions` | `include/modern_sqlite/runtime/function_registry.hpp`<br>`src/runtime/function_registry.cpp` |
+| `runtime-temporary-core` | `include/modern_sqlite/temporary_storage/temporary_storage.hpp`<br>`src/temporary_storage/temporary_storage_internal.hpp`<br>`src/temporary_storage/temporary_storage.cpp` |
+| `runtime-ephemeral-relation` | `src/temporary_storage/ephemeral_relation.cpp` |
+| `binding-text-lexer` | `include/modern_sqlite/text/text.hpp`<br>`src/text/text.cpp`<br>`include/modern_sqlite/syntax/lexer.hpp`<br>`src/syntax/lexer.cpp`<br>`src/syntax/token_text.hpp` |
+| `binding-ast` | `include/modern_sqlite/syntax/ast.hpp`<br>`src/syntax/ast.cpp` |
+| `binding-parser` | `include/modern_sqlite/syntax/parser.hpp`<br>`src/syntax/parser.cpp` |
+| `binding-catalog-model` | `include/modern_sqlite/catalog/catalog.hpp`<br>`src/catalog/catalog.cpp` |
+| `binding-catalog-loader` | `include/modern_sqlite/catalog/catalog_loader.hpp`<br>`src/catalog/catalog_loader.cpp` |
+| `binding-name-resolution` | `include/modern_sqlite/binder/bound_select.hpp`<br>`include/modern_sqlite/binder/bound_statement.hpp`<br>`src/binder/bound_select.cpp` |
+| `execution-logical-plan` | `include/modern_sqlite/planner/logical_plan.hpp`<br>`src/planner/logical_plan.cpp` |
+| `execution-optimizer` | `include/modern_sqlite/optimizer/physical_plan.hpp`<br>`src/optimizer/physical_plan.cpp` |
+| `execution-lowering` | `include/modern_sqlite/lowering/plan_lowering.hpp`<br>`src/lowering/plan_lowering.cpp`<br>`src/lowering/plan_lowering_internal.hpp`<br>`src/lowering/global_aggregate_access.hpp`<br>`src/lowering/global_aggregate_access.cpp`<br>`src/lowering/grouped_aggregate_lowering.hpp`<br>`src/lowering/grouped_aggregate_lowering.cpp`<br>`src/lowering/aggregate_modifier_lowering.hpp`<br>`src/lowering/aggregate_modifier_lowering.cpp` |
+| `execution-bytecode` | `include/modern_sqlite/bytecode/program.hpp`<br>`src/bytecode/program.cpp` |
+| `execution-vm` | `include/modern_sqlite/vm/vm.hpp`<br>`src/vm/vm.cpp` |
+| `execution-read-session` | `include/modern_sqlite/session/read_session.hpp`<br>`src/session/read_session.cpp`<br>`src/session/session_internal.hpp` |
+| `write-session-lifecycle` | `include/modern_sqlite/session/write_session.hpp`<br>`src/session/write_session.cpp` |
+
+`runtime-sorter`, `runtime-topn`, `write-create-index`, `write-analyze`,
+`write-dml-mutation`, and `write-schema-ddl` are mechanisms implemented inside
+paths already listed under their owning production files. The path population
+is counted once; mechanism entries may overlap one path.
+
+### Prior bounded source coverage
 
 | Area | Reviewed seams and evidence | Disposition |
 |---|---|---|
@@ -78,14 +297,14 @@ index fixture, avoiding dependence on a new diagnostic schema.
 | Temporary storage | Shared budgets, migration, buffered PMAs, stable run order, bounded fan-in, top-N, relation borrowing, poison/reset/cleanup | No confirmed additional sorter/relation/order/budget defect in the bounded review. |
 | Writable SQL and public transaction state | DML snapshots, duplicate targets, constraints, index maintenance, schema/statistics, savepoint outcomes, 98 independent traces | Ordinary traces match; injected implicit commit failure exposes a separate completion seam. |
 
-The three independent source reviewers used GPT-5.6 Sol. They read their
+The prior bounded review used three independent GPT-5.6 Sol source reviewers. They read their
 assigned production files in full or function by function and mapped actual
 native mechanisms. Test inventories and relevant assertions were reviewed;
 not every assertion or every native source line was re-audited. The main
 agent directly reviewed SQL compilation seams and executed cross-feature
 comparisons. Absence of a confirmed finding is not module-wide equivalence.
 
-## Evidence collected
+## Prior audit evidence
 
 | Evidence | Result at the audit revision | Limitation |
 |---|---|---|
@@ -638,36 +857,21 @@ completion remains separate. Direct bytecode rejects range-end reads, accepts
 seek-miss/range-end unpositioned merges, and preserves the no-range NULL-row
 control.
 
-## Repair ordering and remaining verification
+## Historical correction closure and current gate
 
-D1, A5, D3, D2, A1, A2, R1, and B1 have merged with exact-head hosted proof,
-and the preserved binder foundation is integrated. The user-requested
-ADR-0102 verification-efficiency slice merged in PR #212 as
-`356bbca5a51d6e3d539bb25fc7f6154e0d49d129`, accepted tree
-`e120b0543f6f9f184ffb36e69b72e3522f023b76`. All nine first-head hosted checks
-passed; the unchanged original sanitizer model passed in 6.45 seconds under
-its ten-second deadline. Main, parent, trailer, and named branch cleanup were
-verified. ADR-0103 corrected B2 in PR #213 as
-`c7ae1e86cee99ed3f911a5087eb3f32c52ba52ad`, accepted tree
-`014603ef28a12441327f2b35841d5e0bfe587043`. All nine first-head hosted checks
-passed; the unchanged original sanitizer model passed in 3.28 seconds under
-its ten-second deadline. Main, parent, trailer, and named branch cleanup were
-verified. ADR-0104 corrects conditional predicate branching in the current
-slice; PR #214 merged as `dee4020e73f61bd1b1b2349ed4e97278d55c1288`,
-accepted tree `a684376db7308f865a50b59de0f6518e8b6a5d89`. All nine final-head
-hosted checks passed, including the unchanged original model in 6.38 seconds
-under its ten-second deadline. Main, parent, trailer, and named branch cleanup
-were verified. ADR-0105 next addresses the independent rowid-range
-access schedule.
-Prioritize the remaining durable/lifecycle
-and silent-result defects according to their reproduced scope. The earlier
-NULL-range design is now resumed under ADR-0094; the independent page-view
-optimization remains preserved and is not treated as a delivered correction.
+Every historical D1-D3, A1-A5, R1-R2, B1-B2, and direct-bytecode finding in
+this document has its recorded merged correction. ADR-0092's query-copy and
+aggregate-ordering work and ADR-0110's outer aggregate ownership correction
+subsequently merged through PR #220. The accepted PR #220 head and squash
+merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
-Conditional predicate and ON/access scheduling need bounded designs before
-arithmetic admission is broadened. Preserve each source-derived versus
-executed distinction above as reproductions are completed. No production
-claim of universal equivalence follows from the reviewed inventory.
+That closure does not imply whole-engine mechanism parity. The ADR-0111
+inventory above supersedes the old prospective ordering and is now the
+blocking work ledger. Its ten repairs and five resolutions must close in
+dependency order before new advanced-SQL feature slices resume.
+
+Preserve each source-derived versus executed distinction as repairs proceed.
+No production claim of universal input equivalence follows from the inventory.
 
 The audit does not advance the DAG, complete node 43, authorize a blind
 sanitizer retry, or weaken any existing gate. Every correction remains a
