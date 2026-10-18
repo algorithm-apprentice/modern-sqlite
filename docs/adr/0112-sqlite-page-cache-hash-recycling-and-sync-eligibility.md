@@ -346,6 +346,65 @@ reported but does not replace the exact allocation contract.
 - memory-pressure hooks outside the configured soft page capacity; and
 - WAL-specific page-cache state.
 
+## Implementation evidence
+
+The implementation replaces `std::unordered_map` with one cache-local
+power-of-two intrusive hash and stable heap-owned entries. Pager misses now
+read directly into an unpublished fill capability. At capacity, the cache
+rekeys and reuses the oldest clean frame and its existing page buffer; failed
+reads return that slot without publishing partial bytes. Explicit discard,
+snapshot invalidation, clear, and overflow contraction still release retained
+memory.
+
+The cache publishes `needs_sync`, sync-safe dirty selection, and bounded
+page-number permutation. Sync state follows physical page numbers across two-
+and three-page cycles, shared pins may mark sector peers, and the approximate
+sync candidate is repaired after pin release, dirty recency changes, sync
+clearing, removal, and permutation. Pager continues to synchronize
+conservatively until the ordered Journal and Pager repairs.
+
+The focused allocation regression failed before production changes with 65
+allocations across 32 pressure reads after a two-page warmup. It now passes
+with exactly zero allocations. Focused coverage also includes:
+
+- hash collisions and benign growth failure;
+- stable frame addresses across promotion and permutation;
+- failed fills and zero-capacity no-retention;
+- pinned/dirty overflow contraction;
+- sync-safe preference, unsynced fallback, and shared-peer marking;
+- page-number-owned sync flags through a three-page cycle; and
+- typed OOM at cache creation, entry allocation, page-buffer allocation, and
+  benign hash growth.
+
+Fast-local passes 1,394 batched and 91 isolated tests. Isolated Debug,
+Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,524 tests;
+instrumentation passes 1,541. Fifty-six native compatibility/performance
+contracts pass, and 28 shared checks reconcile 168 configured instances.
+Four fresh 20,000-run fuzz domains complete with seed 102. Full production
+clang-tidy, pinned formatting, graph, engineering discipline, and whitespace
+checks pass.
+
+A fresh matched read baseline at implementation commit
+`f128e5915c95b4bcdfe637ce9edfcf16ec54fa99` preserves every result,
+cache-miss/page-read count, workload, fixture, guard, and deadline:
+
+| Workload | Prior allocations | New allocations | Allocation delta | Prior wall ratio | New wall ratio |
+|---|---:|---:|---:|---:|---:|
+| point present, pressure | 379,131 | 262,228 | -116,903 | 1.321990 | 1.264210 |
+| point missing, pressure | 313,595 | 196,692 | -116,903 | 1.321887 | 1.250459 |
+| scan, pressure | 74,362 | 65,612 | -8,750 | 1.491876 | 1.479414 |
+
+The fit workloads add 12-15 one-time setup allocations from the explicit
+cache hash/owner arrays; their wall ratios change by -0.94%, -0.38%, and
++1.15%, within the existing run variation. The pressure allocation deltas
+equal two removed allocations per miss plus the fixed setup difference.
+
+GPT-5.6 Sol design review found and closed physical-page sync transfer,
+shared-pin sector marking, future Journal authorization, and retained-overflow
+requirements. Final code review found one stale sync-candidate case on newest
+dirty-page release; its focused regression failed before the correction and
+the complete frozen matrix passes afterward.
+
 ## References
 
 - ADR-0008: SQLite Performance Parity Strategy
