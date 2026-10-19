@@ -74,11 +74,13 @@ class TemporaryMemoryAccount final {
   [[nodiscard]] Status Release(ByteCount amount);
 
  private:
+  friend class RecordSorter;
   friend class StatementTemporaryStorage;
   friend struct temporary_storage_detail::StatementState;
 
   explicit TemporaryMemoryAccount(
       std::unique_ptr<temporary_storage_detail::MemoryRegistration> registration) noexcept;
+  [[nodiscard]] Status ReserveExcludingSelf(ByteCount amount);
 
   std::unique_ptr<temporary_storage_detail::MemoryRegistration> registration_;
 };
@@ -260,6 +262,7 @@ class RecordSorter final {
   [[nodiscard]] std::size_t spilled_run_count() const noexcept;
   [[nodiscard]] std::size_t merge_level_count() const noexcept;
 
+  [[nodiscard]] Status Insert(std::span<const SqlValue> values);
   [[nodiscard]] Status Insert(ByteBuffer record);
   [[nodiscard]] Status Rewind();
   // The returned view remains valid until Next(), Reset(), Close(), move

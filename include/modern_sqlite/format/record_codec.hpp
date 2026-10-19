@@ -18,6 +18,10 @@
 
 namespace modern_sqlite {
 
+namespace record_codec_detail {
+class ValidatedRecordAccess;
+}  // namespace record_codec_detail
+
 using RecordSchemaFormat = DatabaseSchemaFormat;
 
 struct RecordCodecOptions {
@@ -108,6 +112,8 @@ class RecordView final {
   [[nodiscard]] Result<RecordFieldView> field(std::size_t index) const;
 
  private:
+  friend class record_codec_detail::ValidatedRecordAccess;
+
   RecordView(ByteView encoded, std::size_t header_offset, std::size_t header_end,
              std::size_t field_count) noexcept
       : encoded_(encoded),

@@ -2561,11 +2561,7 @@ struct Vm::Impl {
     }
     const auto values = std::span<const SqlValue>{registers_}.subspan(operation.first_value.value(),
                                                                       operation.value_count);
-    auto encoded = EncodeRecord(values, record_options_);
-    if (!encoded.has_value()) {
-      return std::unexpected(std::move(encoded.error()));
-    }
-    auto inserted = runtime->Insert(std::move(*encoded));
+    auto inserted = runtime->Insert(values);
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }

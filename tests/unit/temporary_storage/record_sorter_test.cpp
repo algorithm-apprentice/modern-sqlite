@@ -348,6 +348,93 @@ TEST(RecordSorter, PreservesStableTiesAcrossBottomUpMergeRuns) {
   }
 }
 
+TEST(RecordSorter, DirectlyEncodesValuesIntoTheMemoryOwner) {
+  SorterEnvironment environment;
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  const std::array<SqlValue, 2> first{
+      SqlValue::Integer(2),
+      SqlValue::Text("second"),
+  };
+  const std::array<SqlValue, 2> second{
+      SqlValue::Integer(1),
+      SqlValue::Text("first"),
+  };
+
+  ASSERT_TRUE(sorter.Insert(first).has_value());
+  ASSERT_TRUE(sorter.Insert(second).has_value());
+  EXPECT_EQ(2U, sorter.record_count());
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  EXPECT_EQ("first", TextField(TakeValue(sorter.current_record()), 1));
+  ASSERT_TRUE(TakeValue(sorter.Next()));
+  EXPECT_EQ("second", TextField(TakeValue(sorter.current_record()), 1));
+  EXPECT_FALSE(TakeValue(sorter.Next()));
+}
+
+TEST(RecordSorter, GrowsBulkArenaGeometricallyAndPreservesWideStableRecords) {
+  constexpr std::size_t kFieldCount = 33;
+  constexpr std::size_t kRecordCount = 256;
+  SorterEnvironment environment{ByteCount{1U << 16U}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(RecordSorterDescriptor{
+      .field_count = kFieldCount,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              IndexColumnOrder{BinaryCollation()},
+          },
+  }));
+
+  std::size_t growth_count = 0;
+  ByteCount previous_usage{0};
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    std::vector<SqlValue> fields;
+    fields.reserve(kFieldCount);
+    fields.push_back(SqlValue::Integer(1));
+    fields.push_back(SqlValue::Integer(static_cast<std::int64_t>(index)));
+    while (fields.size() < kFieldCount) {
+      fields.push_back(SqlValue::Integer(static_cast<std::int64_t>(fields.size())));
+    }
+    ASSERT_TRUE(sorter.Insert(fields).has_value());
+    if (sorter.memory_usage() != previous_usage) {
+      ++growth_count;
+      previous_usage = sorter.memory_usage();
+    }
+  }
+
+  EXPECT_FALSE(sorter.has_spilled());
+  EXPECT_LE(growth_count, 8U);
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    const RecordView current = TakeValue(sorter.current_record());
+    EXPECT_EQ(static_cast<std::int64_t>(index), TakeValue(current.field(1)).integer_value());
+    EXPECT_EQ(index + 1U < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
+TEST(RecordSorter, KeepsGeometricGrowthAfterCrossingAMultiOwnerFairShare) {
+  constexpr std::size_t kRecordCount = 1000;
+  SorterEnvironment environment{ByteCount{1U << 16U}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  RecordSorter sibling = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+
+  std::size_t growth_count = 0;
+  ByteCount previous_usage{0};
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    const std::array<SqlValue, 2> fields{
+        SqlValue::Integer(static_cast<std::int64_t>(kRecordCount - index)),
+        SqlValue::Integer(static_cast<std::int64_t>(index)),
+    };
+    ASSERT_TRUE(sorter.Insert(fields).has_value());
+    if (sorter.memory_usage() != previous_usage) {
+      ++growth_count;
+      previous_usage = sorter.memory_usage();
+    }
+  }
+
+  EXPECT_LE(growth_count, 12U);
+  EXPECT_FALSE(sorter.has_spilled());
+  EXPECT_FALSE(sibling.has_spilled());
+}
+
 TEST(RecordSorter, EnforcesLifecycleAndResetSemantics) {
   SorterEnvironment environment;
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(TwoKeyDescriptor()));
@@ -467,7 +554,7 @@ TEST(RecordSorter, RejectsInvalidDescriptorsBeforeAllocatingRuntimeState) {
 }
 
 TEST(RecordSorter, SpillsBeforeThresholdCrossingAndAppendsTwoPmasAtRewind) {
-  SorterEnvironment environment{ByteCount{512}, TemporaryStoreMode::kFile};
+  SorterEnvironment environment{ByteCount{400}, TemporaryStoreMode::kFile};
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(TwoKeyDescriptor()));
 
   const std::string first_payload(180U, 'f');
@@ -515,15 +602,105 @@ TEST(RecordSorter, SpillsBeforeThresholdCrossingAndAppendsTwoPmasAtRewind) {
   EXPECT_FALSE(environment.vfs().pathless_file_present());
 }
 
+TEST(RecordSorter, SupportsRepeatedPageSizedPmasThroughDirectInsertion) {
+  SorterEnvironment environment{ByteCount{test::kWritePagerPageSize}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  constexpr std::int64_t kRecordCount = 64;
+  for (std::int64_t key = kRecordCount; key > 0; --key) {
+    ByteBuffer payload{ByteCount{180}};
+    std::ranges::fill(payload.mutable_view(), std::byte{0x5a});
+    const std::array<SqlValue, 2> fields{
+        SqlValue::Integer(key),
+        SqlValue::Blob(std::move(payload)),
+    };
+    ASSERT_TRUE(sorter.Insert(fields).has_value());
+  }
+
+  EXPECT_TRUE(sorter.has_spilled());
+  EXPECT_TRUE(sorter.spilled_run_count() > 1U || sorter.merge_level_count() > 0U);
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  for (std::int64_t key = 1; key <= kRecordCount; ++key) {
+    EXPECT_EQ(key, TakeValue(TakeValue(sorter.current_record()).field(0)).integer_value());
+    EXPECT_EQ(key < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
+TEST(RecordSorter, AvoidsPublishedRunMergeWhenSelfSpillCreatesExactHeadroom) {
+  SorterEnvironment environment{ByteCount{test::kWritePagerPageSize}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  constexpr std::int64_t kRecordCount = 19;
+  for (std::int64_t key = kRecordCount; key > 0; --key) {
+    ASSERT_TRUE(sorter.Insert(BlobRecord({.key = key, .payload_size = 32U})).has_value());
+  }
+
+  EXPECT_GE(sorter.spilled_run_count(), 3U);
+  EXPECT_EQ(0U, sorter.merge_level_count());
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  for (std::int64_t key = 1; key <= kRecordCount; ++key) {
+    EXPECT_EQ(key, TakeValue(TakeValue(sorter.current_record()).field(0)).integer_value());
+    EXPECT_EQ(key < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
+TEST(RecordSorter, PreflightsDirectPmaMetadataAtTinyThresholds) {
+  SorterEnvironment probe{ByteCount{128}, TemporaryStoreMode::kFile};
+  RecordSorter probe_sorter = TakeValue(probe.storage().CreateRecordSorter(OneKeyDescriptor()));
+  ASSERT_TRUE(probe_sorter.Insert(BlobRecord({.key = 1, .payload_size = 900U})).has_value());
+  const std::size_t metadata_bytes = probe_sorter.memory_usage().value();
+  ASSERT_GT(metadata_bytes, 1U);
+  probe_sorter.Close();
+
+  SorterEnvironment below{ByteCount{metadata_bytes - 1U}, TemporaryStoreMode::kFile};
+  RecordSorter rejected = TakeValue(below.storage().CreateRecordSorter(OneKeyDescriptor()));
+  const auto failed = rejected.Insert(BlobRecord({.key = 1, .payload_size = 900U}));
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+  EXPECT_FALSE(rejected.valid());
+  EXPECT_EQ(0U, below.vfs().pathless_open_count());
+  EXPECT_EQ(0U, below.vfs().total_subjournal_writes());
+
+  for (const std::size_t threshold : {metadata_bytes, metadata_bytes + 1U}) {
+    SCOPED_TRACE(threshold);
+    SorterEnvironment accepted{ByteCount{threshold}, TemporaryStoreMode::kFile};
+    RecordSorter sorter = TakeValue(accepted.storage().CreateRecordSorter(OneKeyDescriptor()));
+    ASSERT_TRUE(sorter.Insert(BlobRecord({.key = 1, .payload_size = 900U})).has_value());
+    EXPECT_TRUE(sorter.has_spilled());
+    EXPECT_EQ(ByteCount{metadata_bytes}, sorter.memory_usage());
+    EXPECT_EQ(1U, accepted.vfs().pathless_open_count());
+  }
+}
+
+TEST(RecordSorter, ExcludesRequesterDuringBulkGrowthAndRetriesAfterSelfPressure) {
+  SorterEnvironment environment{ByteCount{512}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  constexpr std::int64_t kRecordCount = 40;
+  for (std::int64_t key = kRecordCount; key > 0; --key) {
+    ByteBuffer payload{ByteCount{180}};
+    std::ranges::fill(payload.mutable_view(), std::byte{0x6b});
+    const std::array<SqlValue, 2> fields{
+        SqlValue::Integer(key),
+        SqlValue::Blob(std::move(payload)),
+    };
+    ASSERT_TRUE(sorter.Insert(fields).has_value());
+  }
+
+  EXPECT_TRUE(sorter.has_spilled());
+  EXPECT_GT(sorter.merge_level_count(), 0U);
+  ASSERT_TRUE(sorter.Rewind().has_value());
+  for (std::int64_t key = 1; key <= kRecordCount; ++key) {
+    EXPECT_EQ(key, TakeValue(TakeValue(sorter.current_record()).field(0)).integer_value());
+    EXPECT_EQ(key < kRecordCount, TakeValue(sorter.Next()));
+  }
+}
+
 TEST(RecordSorter, BuffersPmaIoByPageInsteadOfRecord) {
   constexpr std::int64_t kRows = 512;
-  SorterEnvironment environment{ByteCount{8192}, TemporaryStoreMode::kFile};
+  SorterEnvironment environment{ByteCount{16384}, TemporaryStoreMode::kFile};
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
   for (std::int64_t key = kRows; key > 0; --key) {
     ASSERT_TRUE(sorter.Insert(BlobRecord({.key = key, .payload_size = 32U})).has_value());
   }
   ASSERT_TRUE(sorter.Rewind().has_value());
-  ASSERT_EQ(0U, sorter.merge_level_count());
   const std::size_t page_call_bound =
       1U + environment.vfs().pathless_file_bytes().size() / test::kWritePagerPageSize +
       sorter.spilled_run_count();
@@ -682,7 +859,7 @@ TEST(RecordSorter, RejectsMalformedPmaHeadersPayloadsAndFieldShapes) {
   };
   for (const CorruptionKind kind : kinds) {
     SCOPED_TRACE(static_cast<int>(kind));
-    SorterEnvironment environment{ByteCount{64}, TemporaryStoreMode::kFile};
+    SorterEnvironment environment{ByteCount{40}, TemporaryStoreMode::kFile};
     RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
     const std::array<SqlValue, 2> fields{SqlValue::Integer(0), SqlValue::Integer(0)};
     ASSERT_TRUE(sorter.Insert(Encode(fields)).has_value());
@@ -795,12 +972,42 @@ TEST(RecordSorter, SpillsLargestSorterUnderStatementMemoryPressure) {
 
   ASSERT_TRUE(first.Insert(BlobRecord({.key = 1, .payload_size = 200U})).has_value());
   ASSERT_TRUE(second.Insert(BlobRecord({.key = 2, .payload_size = 16U})).has_value());
-  EXPECT_GT(first.memory_usage(), second.memory_usage());
+  EXPECT_FALSE(first.has_spilled());
+  EXPECT_FALSE(second.has_spilled());
   ASSERT_TRUE(second.Insert(BlobRecord({.key = 3, .payload_size = 250U})).has_value());
   EXPECT_TRUE(first.has_spilled());
   EXPECT_FALSE(second.has_spilled());
   EXPECT_EQ(first.memory_usage().value() + second.memory_usage().value(),
             environment.storage().retained_bytes().value());
+}
+
+TEST(RecordSorter, DoesNotSpillSparseArenasWhenALaterSorterOpens) {
+  SorterEnvironment environment{ByteCount{1024}, TemporaryStoreMode::kFile};
+  RecordSorter first = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  RecordSorter second = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  const std::array<SqlValue, 2> first_values{
+      SqlValue::Integer(1),
+      SqlValue::Integer(1),
+  };
+  const std::array<SqlValue, 2> second_values{
+      SqlValue::Integer(2),
+      SqlValue::Integer(2),
+  };
+  ASSERT_TRUE(first.Insert(first_values).has_value());
+  ASSERT_TRUE(second.Insert(second_values).has_value());
+
+  RecordSorter third = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  const std::array<SqlValue, 2> third_values{
+      SqlValue::Integer(3),
+      SqlValue::Integer(3),
+  };
+  ASSERT_TRUE(third.Insert(third_values).has_value());
+  EXPECT_FALSE(first.has_spilled());
+  EXPECT_FALSE(second.has_spilled());
+  EXPECT_FALSE(third.has_spilled());
+  EXPECT_EQ(
+      first.memory_usage().value() + second.memory_usage().value() + third.memory_usage().value(),
+      environment.storage().retained_bytes().value());
 }
 
 TEST(RecordSorter, PreservesTieOrderWhenOversizedRecordFollowsMemoryRun) {
@@ -869,7 +1076,7 @@ TEST(RecordSorter, CoexistsWithRelationArenaWithinTwoStatementFiles) {
 }
 
 TEST(RecordSorter, BuildsFanInSixteenMergeLevelsAndStreamsSortedRecords) {
-  PosixSorterEnvironment environment{ByteCount{4096}};
+  PosixSorterEnvironment environment{ByteCount{2048}};
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(RecordSorterDescriptor{
       .field_count = 2,
       .key_field_count = 1,
@@ -888,7 +1095,7 @@ TEST(RecordSorter, BuildsFanInSixteenMergeLevelsAndStreamsSortedRecords) {
     ASSERT_TRUE(sorter.Insert(Encode(fields)).has_value());
   }
   ASSERT_TRUE(sorter.Rewind().has_value());
-  EXPECT_EQ(1U, sorter.merge_level_count());
+  EXPECT_GT(sorter.merge_level_count(), 0U);
   EXPECT_LE(sorter.spilled_run_count(), 16U);
 
   for (std::size_t index = 0; index < kRecordCount; ++index) {
@@ -928,7 +1135,7 @@ TEST(RecordSorter, PreservesStableTiesAcrossPmaRuns) {
 }
 
 TEST(RecordSorter, PoisonsStatementAndDefersFileCleanupAfterSpillFailures) {
-  SorterEnvironment write_failure{ByteCount{512}, TemporaryStoreMode::kFile};
+  SorterEnvironment write_failure{ByteCount{400}, TemporaryStoreMode::kFile};
   RecordSorter writer = TakeValue(write_failure.storage().CreateRecordSorter(TwoKeyDescriptor()));
   RecordSorter sibling = TakeValue(write_failure.storage().CreateRecordSorter(TwoKeyDescriptor()));
   std::vector<SqlValue> fields;
@@ -950,7 +1157,7 @@ TEST(RecordSorter, PoisonsStatementAndDefersFileCleanupAfterSpillFailures) {
   write_failure.ResetStorage();
   EXPECT_FALSE(write_failure.vfs().pathless_file_present());
 
-  SorterEnvironment read_failure{ByteCount{512}, TemporaryStoreMode::kFile};
+  SorterEnvironment read_failure{ByteCount{400}, TemporaryStoreMode::kFile};
   RecordSorter reader = TakeValue(read_failure.storage().CreateRecordSorter(TwoKeyDescriptor()));
   ASSERT_TRUE(reader.Insert(Encode(fields)).has_value());
   ASSERT_TRUE(reader.Insert(Encode(fields)).has_value());
@@ -966,12 +1173,11 @@ TEST(RecordSorter, PoisonsStatementAndDefersFileCleanupAfterSpillFailures) {
 }
 
 TEST(RecordSorter, PreservesInputExtentsUntilMergedOutputPublication) {
-  SorterEnvironment environment{ByteCount{4096}, TemporaryStoreMode::kFile};
+  SorterEnvironment environment{ByteCount{2048}, TemporaryStoreMode::kFile};
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
-  for (std::int64_t key = 160; key >= 1; --key) {
-    ASSERT_TRUE(sorter.Insert(BlobRecord({.key = key, .payload_size = 300U})).has_value());
+  for (std::int64_t key = 20; key >= 1; --key) {
+    ASSERT_TRUE(sorter.Insert(BlobRecord({.key = key, .payload_size = 3000U})).has_value());
   }
-  ASSERT_TRUE(sorter.Insert(BlobRecord({.key = 0, .payload_size = 5000U})).has_value());
   ASSERT_GT(sorter.spilled_run_count(), 16U);
   const ByteView before = environment.vfs().pathless_file_bytes();
   const std::vector<std::byte> input_bytes(before.begin(), before.end());
@@ -997,7 +1203,7 @@ TEST(RecordSorter, PoisonsStatementOnLateSharedPmaReadFailure) {
     ASSERT_TRUE(sorter.Insert(BlobRecord({.key = key, .payload_size = 200U})).has_value());
   }
   TemporaryMemoryAccount pressure = TakeValue(environment.storage().RegisterMemoryOwner());
-  const ByteCount pressure_bytes{environment.storage().memory_budget().value() / 2U};
+  const ByteCount pressure_bytes{environment.storage().memory_budget().value() - 64U};
   ASSERT_TRUE(pressure.Reserve(pressure_bytes).has_value());
   ASSERT_TRUE(pressure.Release(pressure_bytes).has_value());
   ASSERT_EQ(1U, sorter.spilled_run_count());

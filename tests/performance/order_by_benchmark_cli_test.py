@@ -16,6 +16,10 @@ from tools import read_performance
 
 
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
+_FILE_SPILL_ALLOCATION_LIMITS = {
+    "libc++": 270_000,
+    "libstdc++": 400_000,
+}
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -41,6 +45,30 @@ class OrderByBenchmarkCliTest(unittest.TestCase):
             repository_root=cls.root,
             manifest_path=cls.workload_path,
         )
+        identity_completed = subprocess.run(
+            [str(cls.arguments.diagnostic_binary), "identity"],
+            cwd=cls.root,
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+        if identity_completed.returncode != 0 or identity_completed.stderr:
+            raise RuntimeError(identity_completed.stderr.decode("utf-8", errors="replace"))
+        identity = json.loads(identity_completed.stdout)
+        standard_library = identity["build"]["standard_library"]["id"]
+        if standard_library not in _FILE_SPILL_ALLOCATION_LIMITS:
+            raise RuntimeError(
+                f"unsupported diagnostic standard library: {standard_library}"
+            )
+        cls.modern_allocation_limits = {
+            "order-integer-memory": 70_000,
+            "order-minimal-spill-file": _FILE_SPILL_ALLOCATION_LIMITS[
+                standard_library
+            ],
+            "order-multi-spill-file": _FILE_SPILL_ALLOCATION_LIMITS[
+                standard_library
+            ],
+        }
         cls.fixture = (
             cls.root
             / pathlib.PurePosixPath(cls.workloads["fixtures"][0]["path"])
@@ -119,6 +147,11 @@ class OrderByBenchmarkCliTest(unittest.TestCase):
                         sqlite_spill_bytes[case_id] = report["counters"]["sqlite"][
                             "temp_bytes_spilled"
                         ]
+                    if engine == "modern" and case_id in self.modern_allocation_limits:
+                        self.assertLessEqual(
+                            report["counters"]["modern"]["allocations"],
+                            self.modern_allocation_limits[case_id],
+                        )
                     if engine == "modern" and case_id == "order-topn-file":
                         self.assertGreater(
                             report["counters"]["modern"]["pages_written"],
