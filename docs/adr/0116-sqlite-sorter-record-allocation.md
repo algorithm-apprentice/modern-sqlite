@@ -114,10 +114,12 @@ bytes. For optional arena growth, the fairness threshold is the current
 statement budget divided by the number of registered memory owners, capped by
 the per-sorter threshold. Exact admission may exceed that fair share; the
 share only prevents one arena from opportunistically consuming memory needed
-by sibling owners. Later admission first reserves the exact growth required
-for the pending cell, then opportunistically doubles within the fairness
-threshold and remaining headroom. Failure to reserve optional growth is not
-an insertion failure.
+by sibling owners during its first sparse allocation. Later admission first
+reserves the exact growth required for the pending cell, then opportunistically
+doubles within the per-sorter threshold and remaining statement headroom.
+Optional growth never spills a sibling, so an arena that grows beyond its
+initial fair share consumes only otherwise-free headroom. Failure to reserve
+optional growth is not an insertion failure.
 
 Each record is encoded as:
 

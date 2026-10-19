@@ -1952,8 +1952,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       const std::size_t doubled = current_size > memory_threshold.value() - current_size
                                       ? memory_threshold.value()
                                       : current_size * 2U;
-      requested =
-          std::max(required, std::min(doubled, std::max(required, BulkFairnessThreshold())));
+      requested = std::max(required, doubled);
     }
     return ReplaceBulkBuffer(BulkGrowth{
         .required_size = required,

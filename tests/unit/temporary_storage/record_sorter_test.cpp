@@ -410,6 +410,31 @@ TEST(RecordSorter, GrowsBulkArenaGeometricallyAndPreservesWideStableRecords) {
   }
 }
 
+TEST(RecordSorter, KeepsGeometricGrowthAfterCrossingAMultiOwnerFairShare) {
+  constexpr std::size_t kRecordCount = 1000;
+  SorterEnvironment environment{ByteCount{1U << 16U}, TemporaryStoreMode::kFile};
+  RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+  RecordSorter sibling = TakeValue(environment.storage().CreateRecordSorter(OneKeyDescriptor()));
+
+  std::size_t growth_count = 0;
+  ByteCount previous_usage{0};
+  for (std::size_t index = 0; index < kRecordCount; ++index) {
+    const std::array<SqlValue, 2> fields{
+        SqlValue::Integer(static_cast<std::int64_t>(kRecordCount - index)),
+        SqlValue::Integer(static_cast<std::int64_t>(index)),
+    };
+    ASSERT_TRUE(sorter.Insert(fields).has_value());
+    if (sorter.memory_usage() != previous_usage) {
+      ++growth_count;
+      previous_usage = sorter.memory_usage();
+    }
+  }
+
+  EXPECT_LE(growth_count, 12U);
+  EXPECT_FALSE(sorter.has_spilled());
+  EXPECT_FALSE(sibling.has_spilled());
+}
+
 TEST(RecordSorter, EnforcesLifecycleAndResetSemantics) {
   SorterEnvironment environment;
   RecordSorter sorter = TakeValue(environment.storage().CreateRecordSorter(TwoKeyDescriptor()));
