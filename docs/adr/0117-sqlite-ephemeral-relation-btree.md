@@ -298,6 +298,80 @@ Run:
 - TEMP schema databases; and
 - WAL or multi-connection temporary storage.
 
+## Implementation evidence
+
+Design commit `caa6912`, core implementation commit `f0cfe4d`, POSIX OOM
+cleanup commit `95139c9`, aggregate ownership-contract commit `3b37ce1`, and
+const-only quality correction `e2b191a` implement this decision.
+
+Memory and file relations now acquire a canonical index B-tree root on the
+first accepted record. Memory mode uses a fileless ephemeral Pager whose
+resident cache and hard page limit derive from the temporary threshold; file
+mode uses the existing delete-on-close transient Pager. Both modes reuse
+`IndexBtreeWriter` and `IndexBtreeCursor` for insert, replacement, erase,
+membership, ordered drain, and prefix lookup. Empty handles remain lazy, root
+reuse preserves fresh comparison metadata, and any mutation failure poisons
+the statement arena.
+
+Focused coverage includes:
+
+- no VFS open or file acquisition for memory relations;
+- a one-page main cache with a larger independent temporary threshold;
+- page-one/root limits below, at, and above the minimum useful capacity;
+- first-record B-tree ownership in both modes;
+- representative replacement, collation, numeric, NULL, overflow, ordered
+  rewind, prefix lookup, reset, and root reuse semantics;
+- many positioned roots under one bounded cache;
+- exhaustive memory-Pager and relation allocation failures;
+- statement poisoning after page-limit and backend failures; and
+- cross-standard-library session OOM cleanup without leaked descriptors or
+  visible pathless temporary files.
+
+Fresh exact-input DISTINCT/compound evidence generated from core
+implementation revision `f0cfe4d` preserves every result, digest, workload,
+configuration, deadline, and the committed 40x guard:
+
+| Workload | Prior wall ratio | New wall ratio |
+|---|---:|---:|
+| high-cardinality memory DISTINCT | 26.546831 | 8.904458 |
+| file UNION replacement | 17.579147 | 16.182973 |
+| ordered UNION merge | 8.294706 | 6.721865 |
+| long mixed compound | 2.156691 | 1.793925 |
+| low-cardinality memory DISTINCT | 4.047993 | 9.522887 |
+| collated memory DISTINCT | 4.293979 | 9.178163 |
+| DISTINCT ORDER/LIMIT | 9.393792 | 17.236709 |
+| keyed UNION before file pressure | 12.902891 | 13.949456 |
+
+The high-cardinality adverse case materially improves after removing suffix
+shifts. The low-cardinality controls retain the expected fixed B-tree page
+cost, and the DISTINCT ORDER/LIMIT case remains assigned partly to ledger 7's
+unrepaired top-N mechanism. Current aggregate diagnostics record zero
+retained-owner bytes for relation-only DISTINCT state; immutable aggregate
+baseline v1 validation retains its historical positive expectation under the
+explicit v1 contract. The fresh evidence is retained as
+`ephemeral-relation-distinct-compound-baseline-v1`. It is retained
+implementation evidence rather than a committed baseline replacement or
+final-head timing artifact; the later closing commits do not change the
+relation algorithm, while `95139c9` does change POSIX temporary-path setup.
+
+Fast-local passes 1,426 batched and 92 isolated tests. Isolated Debug,
+Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,560 tests;
+instrumentation passes 1,577. Twenty-seven shared checks reconcile 121
+configured instances, and 58 native compatibility/performance contracts
+pass. Four fresh 20,000-run fuzz domains complete with seed 102. Full
+production clang-tidy, pinned formatting, graph, engineering discipline, and
+whitespace checks pass.
+
+GPT-5.6 Sol design review corrected an initial proposal that would have
+limited the memory temporary database by the main Pager cache target.
+Implementation review approved the canonical B-tree reuse. Closing review
+then found libstdc++ allocation-failure crashes in filesystem path mutation,
+an orphan-file window after `mkstemp()`, lost temporary-directory environment
+precedence, fixed-buffer `realpath()` narrowing, and historical aggregate
+contract coupling. The final POSIX path stages, non-allocating cleanup guards,
+trusted environment lookup, dynamic canonical path owner, isolated OOM
+regression, and source-scoped aggregate contracts close those findings.
+
 ## References
 
 - ADR-0056: SQLite-Aligned DISTINCT, VALUES, and Compound SELECT
