@@ -119,3 +119,4 @@ their corresponding implementation begins.
 114. [ADR-0114: SQLite Pager Sync Eligibility and DONT_WRITE](0114-sqlite-pager-sync-eligibility-and-dont-write.md)
 115. [ADR-0115: Retain Statement-Shared Temporary Arenas](0115-retain-statement-shared-temporary-arenas.md)
 116. [ADR-0116: SQLite Sorter Record Allocation](0116-sqlite-sorter-record-allocation.md)
+117. [ADR-0117: SQLite Ephemeral Relation B-Tree](0117-sqlite-ephemeral-relation-btree.md)
