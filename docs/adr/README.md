@@ -120,3 +120,4 @@ their corresponding implementation begins.
 115. [ADR-0115: Retain Statement-Shared Temporary Arenas](0115-retain-statement-shared-temporary-arenas.md)
 116. [ADR-0116: SQLite Sorter Record Allocation](0116-sqlite-sorter-record-allocation.md)
 117. [ADR-0117: SQLite Ephemeral Relation B-Tree](0117-sqlite-ephemeral-relation-btree.md)
+118. [ADR-0118: SQLite Top-N Ephemeral B-Tree](0118-sqlite-top-n-ephemeral-btree.md)

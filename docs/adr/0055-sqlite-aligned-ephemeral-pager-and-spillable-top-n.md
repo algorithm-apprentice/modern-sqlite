@@ -20,6 +20,12 @@ candidate-pending lifecycle, ephemeral Pager policy, encoded key-prefix
 mutation, runtime LIMIT lowering, and all SQL-visible behavior below remain
 authoritative.
 
+ADR-0118 supersedes section 4's two-backend storage decision and the eager
+file-current materialization path. Both temporary modes use the canonical
+ephemeral B-tree, while the admission rule, stable sequence, packed
+queue-record format, candidate-pending lifecycle, and SQL-visible behavior
+remain authoritative.
+
 ## Context
 
 ADR-0054 requires ORDER BY with a syntactic LIMIT or OFFSET to use a
