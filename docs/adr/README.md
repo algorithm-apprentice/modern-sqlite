@@ -118,3 +118,4 @@ their corresponding implementation begins.
 113. [ADR-0113: SQLite In-Memory Statement Journal and Spill](0113-sqlite-memory-statement-journal.md)
 114. [ADR-0114: SQLite Pager Sync Eligibility and DONT_WRITE](0114-sqlite-pager-sync-eligibility-and-dont-write.md)
 115. [ADR-0115: Retain Statement-Shared Temporary Arenas](0115-retain-statement-shared-temporary-arenas.md)
+116. [ADR-0116: SQLite Sorter Record Allocation](0116-sqlite-sorter-record-allocation.md)
