@@ -107,6 +107,13 @@ enum class ProgramRollbackMode : std::uint8_t {
   kStatement,
 };
 
+struct ProgramWriteEffects {
+  bool multi_write = false;
+  bool may_abort = false;
+
+  constexpr bool operator==(const ProgramWriteEffects&) const noexcept = default;
+};
+
 enum class CursorFieldSourceKind : std::uint8_t {
   kRecordField,
   kRowId,
@@ -918,6 +925,7 @@ struct ProgramInput {
   ProgramStatementKind statement_kind = ProgramStatementKind::kSelect;
   ProgramTransactionAccess transaction_access = ProgramTransactionAccess::kRead;
   ProgramRollbackMode rollback_mode = ProgramRollbackMode::kTransaction;
+  ProgramWriteEffects write_effects{};
   MutationResultMetadata mutation_result{};
   std::uint32_t register_count = 0;
   std::uint32_t parameter_count = 0;
@@ -1074,6 +1082,11 @@ class BytecodeProgram final {
     return input_.transaction_access;
   }
   [[nodiscard]] ProgramRollbackMode rollback_mode() const noexcept { return input_.rollback_mode; }
+  [[nodiscard]] ProgramWriteEffects write_effects() const noexcept { return input_.write_effects; }
+  [[nodiscard]] bool uses_statement_journal() const noexcept {
+    return input_.transaction_access == ProgramTransactionAccess::kWrite &&
+           input_.write_effects.multi_write && input_.write_effects.may_abort;
+  }
   [[nodiscard]] const MutationResultMetadata& mutation_result() const noexcept {
     return input_.mutation_result;
   }
@@ -1186,7 +1199,9 @@ class ProgramBuilder final {
       Label entry, Label last, SubroutineKind kind = SubroutineKind::kValue);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
-      ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {});
+      ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {},
+      ProgramWriteEffects write_effects = {});
+  [[nodiscard]] ProgramResult<void> MarkMayAbort();
   [[nodiscard]] ProgramResult<void> RequireDatabaseSnapshot();
 
   [[nodiscard]] ProgramResult<Label> CreateLabel();

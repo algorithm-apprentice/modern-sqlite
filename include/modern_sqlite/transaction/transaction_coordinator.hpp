@@ -49,6 +49,7 @@ enum class StatementRollbackMode : std::uint8_t {
 struct TransactionStatementOptions {
   StatementAccess access = StatementAccess::kRead;
   StatementRollbackMode rollback = StatementRollbackMode::kStatement;
+  bool uses_statement_journal = true;
 };
 
 struct TransactionWorkCounters {
@@ -109,7 +110,7 @@ class TransactionStatement final {
   [[nodiscard]] TransactionWriter* writer() noexcept;
 
   [[nodiscard]] Status Succeed();
-  [[nodiscard]] Status Rollback();
+  [[nodiscard]] Status Rollback(std::optional<ErrorCode> cause = std::nullopt);
 
  private:
   friend class TransactionCoordinator;

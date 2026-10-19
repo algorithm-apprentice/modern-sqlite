@@ -145,7 +145,7 @@ template <typename Runner>
   };
 }
 
-[[nodiscard]] Outcome RunWriteStatement(std::optional<std::size_t> failure) {
+[[nodiscard]] Outcome RunWriteStatement(std::optional<std::size_t> failure, bool journal) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
   auto opened = OpenCoordinator(vfs);
@@ -156,15 +156,17 @@ template <typename Runner>
   Arm(failure);
   auto statement = coordinator.BeginStatement(modern_sqlite::TransactionStatementOptions{
       .access = modern_sqlite::StatementAccess::kWrite,
+      .uses_statement_journal = journal,
   });
   const std::size_t allocations = Disarm();
   const modern_sqlite::ErrorCode error = ErrorCodeOf(statement);
   bool invariant = false;
   if (statement.has_value()) {
-    invariant = statement->Rollback().has_value() && coordinator.Rollback().has_value();
+    invariant = statement->Rollback().has_value() &&
+                (coordinator.autocommit() || coordinator.Rollback().has_value());
   } else if (coordinator.autocommit()) {
     invariant = !coordinator.statement_active();
-  } else {
+  } else if (journal) {
     invariant = !coordinator.statement_active() && coordinator.Rollback().has_value();
   }
   return Outcome{
@@ -312,7 +314,8 @@ int main() try {
   if (!ExhaustAllocations(RunReadStatement)) {
     return 2;
   }
-  if (!ExhaustAllocations(RunWriteStatement)) {
+  if (!ExhaustAllocations([](auto failure) { return RunWriteStatement(failure, true); }) ||
+      !ExhaustAllocations([](auto failure) { return RunWriteStatement(failure, false); })) {
     return 3;
   }
   if (!ExhaustAllocations(RunLogicalSavepoint)) {

@@ -193,6 +193,26 @@ class CoordinatorState final {
     }
   }
 
+  [[nodiscard]] Error FailStatementSetup(TransactionStatementOptions options, Error error) {
+    const ErrorCode cause = error.code();
+    const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
+    const bool full_rollback =
+        cause == ErrorCode::kIo ||
+        (cause == ErrorCode::kInterrupted && options.access == StatementAccess::kWrite) ||
+        (resource_error && (options.access == StatementAccess::kRead ||
+                            options.rollback == StatementRollbackMode::kTransaction ||
+                            !options.uses_statement_journal));
+    if (full_rollback && !active_.has_value() && terminal_phase_ == TerminalPhase::kNone &&
+        (!autocommit() || pager_->state() != PagerState::kOpen)) {
+      auto failed = AutomaticFullRollback(std::move(error));
+      if (failed.has_value()) {
+        std::terminate();
+      }
+      return std::move(failed.error());
+    }
+    return error;
+  }
+
   [[nodiscard]] Status Begin(TransactionMode mode) {
     if (active_.has_value()) {
       return std::unexpected(Busy("cannot begin a transaction with an active statement"));
@@ -424,7 +444,8 @@ class CoordinatorState final {
     }
 
     std::optional<JournalSavepointId> statement_savepoint;
-    if (!implicit && options.rollback == StatementRollbackMode::kStatement) {
+    if (!implicit && options.rollback == StatementRollbackMode::kStatement &&
+        options.uses_statement_journal) {
       auto created = pager_->CreateSavepoint();
       if (!created.has_value()) {
         return AutomaticFullRollback(std::move(created.error()));
@@ -534,7 +555,7 @@ class CoordinatorState final {
     return {};
   }
 
-  [[nodiscard]] Status StatementRollback(std::uint64_t token) {
+  [[nodiscard]] Status StatementRollback(std::uint64_t token, std::optional<ErrorCode> cause) {
     ActiveStatement* active = FindStatement(token);
     if (active == nullptr) {
       return std::unexpected(SchemaChanged("transaction statement is stale"));
@@ -546,19 +567,27 @@ class CoordinatorState final {
         terminal_phase_ == TerminalPhase::kRollbackCleanup) {
       return ContinueRollback();
     }
-    if (active->access == StatementAccess::kRead) {
+    const bool io_error = cause == ErrorCode::kIo;
+    const bool interrupted = cause == ErrorCode::kInterrupted;
+    const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
+    if (active->access == StatementAccess::kRead && !io_error && !resource_error) {
       return FinishReadStatement();
     }
 
     EndActiveWriterEpoch();
-    writer_.reset();
-    if (active->implicit || active->rollback == StatementRollbackMode::kTransaction) {
+    if (active->implicit || active->rollback == StatementRollbackMode::kTransaction || io_error ||
+        interrupted ||
+        (!active->savepoint.has_value() &&
+         (resource_error || !cause.has_value() || pager_->write_failure_code().has_value()))) {
+      writer_.reset();
       return PerformFullRollback();
     }
 
     if (!active->savepoint.has_value()) {
-      return std::unexpected(Misuse("statement rollback savepoint is absent"));
+      active_.reset();
+      return {};
     }
+    writer_.reset();
     auto rolled_back = pager_->RollbackToSavepoint(*active->savepoint);
     if (!rolled_back.has_value()) {
       return AutomaticFullRollback(std::move(rolled_back.error()));
@@ -860,12 +889,12 @@ Status TransactionStatement::Succeed() {
   }
 }
 
-Status TransactionStatement::Rollback() {
+Status TransactionStatement::Rollback(std::optional<ErrorCode> cause) {
   if (!valid()) {
     return std::unexpected(SchemaChanged("transaction statement is stale"));
   }
   try {
-    return impl_->state->StatementRollback(impl_->token);
+    return impl_->state->StatementRollback(impl_->token, cause);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
@@ -1032,16 +1061,18 @@ Result<TransactionStatement> TransactionCoordinator::BeginStatement(
   if (state_ == nullptr) {
     return std::unexpected(Misuse("transaction coordinator is moved from"));
   }
+  bool reserved = false;
   try {
     auto token = state_->ReserveStatementToken(options);
     if (!token.has_value()) {
       return std::unexpected(std::move(token.error()));
     }
+    reserved = true;
     std::unique_ptr<TransactionWriter> writer;
     if (options.access == StatementAccess::kWrite) {
       auto capability = state_->CreateWriterCapability(*token);
       if (!capability.has_value()) {
-        return std::unexpected(std::move(capability.error()));
+        return std::unexpected(state_->FailStatementSetup(options, std::move(capability.error())));
       }
       writer = std::move(*capability);
     }
@@ -1049,13 +1080,15 @@ Result<TransactionStatement> TransactionCoordinator::BeginStatement(
                                                              std::move(writer));
     auto begun = state_->BeginStatement(options, *token);
     if (!begun.has_value()) {
-      return std::unexpected(std::move(begun.error()));
+      return std::unexpected(state_->FailStatementSetup(options, std::move(begun.error())));
     }
     return TransactionStatement{std::move(impl)};
   } catch (const std::bad_alloc&) {
-    return std::unexpected(Error::OutOfMemory());
+    return std::unexpected(reserved ? state_->FailStatementSetup(options, Error::OutOfMemory())
+                                    : Error::OutOfMemory());
   } catch (const std::length_error&) {
-    return std::unexpected(Error::OutOfMemory());
+    return std::unexpected(reserved ? state_->FailStatementSetup(options, Error::OutOfMemory())
+                                    : Error::OutOfMemory());
   }
 }
 

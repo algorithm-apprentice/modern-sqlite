@@ -651,12 +651,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   ? ProgramRollbackMode::kStatement
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
-        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kDelete,
-                                                   ProgramTransactionAccess::kWrite, rollback_mode,
-                                                   MutationResultMetadata{
-                                                       .publishes_changes = true,
-                                                       .publishes_last_insert_rowid = false,
-                                                   }),
+        AssumeValue(builder_).SetExecutionMetadata(
+            ProgramStatementKind::kDelete, ProgramTransactionAccess::kWrite, rollback_mode,
+            MutationResultMetadata{
+                .publishes_changes = true,
+                .publishes_last_insert_rowid = false,
+            },
+            ProgramWriteEffects{
+                .multi_write = delete_plan.access.kind == MutationAccessKind::kTableScan,
+            }),
         "unable to set DELETE execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
@@ -730,12 +733,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   ? ProgramRollbackMode::kStatement
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
-        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kUpdate,
-                                                   ProgramTransactionAccess::kWrite, rollback_mode,
-                                                   MutationResultMetadata{
-                                                       .publishes_changes = true,
-                                                       .publishes_last_insert_rowid = false,
-                                                   }),
+        AssumeValue(builder_).SetExecutionMetadata(
+            ProgramStatementKind::kUpdate, ProgramTransactionAccess::kWrite, rollback_mode,
+            MutationResultMetadata{
+                .publishes_changes = true,
+                .publishes_last_insert_rowid = false,
+            },
+            ProgramWriteEffects{
+                .multi_write = update.access.kind == MutationAccessKind::kTableScan,
+                .may_abort = update.access.kind != MutationAccessKind::kEmpty &&
+                             bound_update_->changes_rowid(),
+            }),
         "unable to set UPDATE execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
@@ -807,8 +815,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   ? ProgramRollbackMode::kStatement
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
-        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kCreateTable,
-                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        AssumeValue(builder_).SetExecutionMetadata(
+            ProgramStatementKind::kCreateTable, ProgramTransactionAccess::kWrite, rollback_mode, {},
+            ProgramWriteEffects{
+                .multi_write = !create.no_op,
+                .may_abort = !create.no_op,
+            }),
         "unable to set CREATE TABLE execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
@@ -874,8 +886,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   ? ProgramRollbackMode::kStatement
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
-        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kCreateIndex,
-                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        AssumeValue(builder_).SetExecutionMetadata(
+            ProgramStatementKind::kCreateIndex, ProgramTransactionAccess::kWrite, rollback_mode, {},
+            ProgramWriteEffects{
+                .multi_write = !create.no_op,
+                .may_abort = !create.no_op,
+            }),
         "unable to set CREATE INDEX execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
@@ -936,8 +952,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   ? ProgramRollbackMode::kStatement
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
-        AssumeValue(builder_).SetExecutionMetadata(ProgramStatementKind::kAnalyze,
-                                                   ProgramTransactionAccess::kWrite, rollback_mode),
+        AssumeValue(builder_).SetExecutionMetadata(
+            ProgramStatementKind::kAnalyze, ProgramTransactionAccess::kWrite, rollback_mode, {},
+            ProgramWriteEffects{
+                .multi_write = analyze.creates_stat1 ||
+                               bound_analyze_->scope() != BoundAnalyzeScope::kDatabase,
+                .may_abort = analyze.creates_stat1 || !bound_analyze_->indexes().empty(),
+            }),
         "unable to set ANALYZE execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
@@ -4671,6 +4692,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     for (std::size_t index = 0; index < target.columns.size(); ++index) {
       const BoundMutationColumn& column = target.columns[index];
+      const bool check_not_null =
+          column.not_null &&
+          (bound_update_ == nullptr || column.rowid_alias ||
+           std::ranges::any_of(
+               bound_update_->assignments(), [&](const BoundUpdateAssignment& assignment) {
+                 return assignment.effective && assignment.target.column == column.column;
+               }));
+      if (check_not_null && !column.rowid_alias &&
+          (bound_insert_ != nullptr || bound_update_ != nullptr)) {
+        auto marked = ConvertProgramResult(AssumeValue(builder_).MarkMayAbort(),
+                                           "unable to mark NOT NULL failure");
+        if (!marked.has_value()) {
+          return std::unexpected(std::move(marked.error()));
+        }
+      }
       std::optional<ConstantId> default_value;
       if (default_constants != nullptr && !column.rowid_alias && column.default_value != nullptr) {
         auto constant = AddConstant(column.default_value->Clone());
@@ -4689,7 +4725,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       descriptor.columns.push_back(WriteColumnDescriptor{
           .affinity = column.affinity,
-          .not_null = column.not_null,
+          .not_null = check_not_null,
           .rowid_alias = column.rowid_alias,
           .default_value = default_value,
       });
@@ -5127,6 +5163,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> Append(Instruction instruction) {
+    if (mutation_plan_ != nullptr &&
+        (std::holds_alternative<CallScalarInstruction>(instruction) ||
+         std::holds_alternative<CheckInsertRowIdInstruction>(instruction) ||
+         std::holds_alternative<CheckUniqueIndexInstruction>(instruction))) {
+      auto marked = ConvertProgramResult(AssumeValue(builder_).MarkMayAbort(),
+                                         "unable to mark abortable mutation");
+      if (!marked.has_value()) {
+        return std::unexpected(std::move(marked.error()));
+      }
+    }
     if (bound_select_ != nullptr &&
         bound_select_->query().destination != BoundQueryDestination::kClient) {
       if (const auto* row = std::get_if<ResultRowInstruction>(&instruction); row != nullptr) {
