@@ -385,6 +385,97 @@ Run:
 - top-N selection based on estimated cost rather than SQLite's current
   syntactic bounded-LIMIT rule.
 
+## Implementation evidence
+
+Design commit `2b9e60c`, core implementation commit `cda0505`, and diagnostic
+contract commit `edd6ef0` implement this decision.
+
+Positive-bound top-N capabilities now acquire one relation-arena index root in
+both temporary modes. Memory mode uses the fileless Pager and opens no VFS
+file; file mode uses the existing pathless transient Pager. Both modes retain
+the accepted `[keys, sequence, packed record]` wrapper, compare competitive
+candidates through a borrowed encoded prefix, delete the positioned maximum
+through `IndexBtreeWriter::DeleteLast()`, and materialize current wrappers only
+when a field is actually requested.
+
+The lower B-tree changes are shared primitives rather than top-N-specific
+containers:
+
+- `CompareRecordPrefixes()` accepts a stored `RecordPrefixView` against a
+  complete encoded key;
+- `IndexBtreeCursor::CompareCurrentRecordPrefix()` reads only the requested
+  local or overflow prefix; and
+- writable rightmost descent feeds the existing `DeleteIndexAt()` balancing,
+  overflow cleanup, and rollback-required machinery.
+
+Focused coverage includes:
+
+- memory B-tree page ownership with zero pathless opens and zero retained row
+  owners;
+- zero-bound root/file laziness;
+- page-one/root capacity below and at the minimum;
+- accepted, rejected, evicted, and stable equivalent candidates;
+- full-queue pending-budget and sequence preflight before victim deletion;
+- direct last deletion through root splits, overflow records, and repeated
+  rebalancing;
+- pending-after-eviction abandonment, post-eviction insertion failure,
+  sibling rejection, and full-root reset recovery;
+- lazy local drain, charged overflow-current ownership, OFFSET-style
+  allocation-free advancement, and pressure-failure precedence;
+- shared memory/file arena ownership and root reuse with fresh collation and
+  direction metadata; and
+- exhaustive memory/file creation, insertion, full-check, rewind, next, and
+  allocation-failure cleanup.
+
+Fresh exact-input ORDER BY evidence at core revision `cda0505` preserves every
+SQL string, result, digest, configuration, deadline, and guard:
+
+| Workload | Prior wall ratio | New wall ratio | Prior allocations | New allocations |
+|---|---:|---:|---:|---:|
+| memory top-N | 6.410409 | 5.890616 | 67,540 | 69,304 |
+| file top-N | 8.229991 | 7.801553 | 624,675 | 488,132 |
+
+Memory top-N records 65,408 B-tree comparisons with zero page writes. File
+top-N records 5,472 B-tree comparisons and preserves 8,078 page writes while
+removing 136,543 allocations and eager materialization of the 60,000
+OFFSET-skipped rows. Unrelated sorter workloads preserve their results,
+digests, spill behavior, and existing allocation contracts.
+
+Cross-standard-library diagnostics record:
+
+| Standard library | Memory top-N allocations | File top-N allocations |
+|---|---:|---:|
+| libc++ | 69,304 | 488,132 |
+| libstdc++ | 201,311 | 488,128 |
+
+The native diagnostic CLI therefore enforces 80,000/550,000 allocation
+ceilings for libc++ memory/file top-N and 250,000/550,000 for libstdc++.
+Both cases must record B-tree comparisons; memory must write zero pages and
+file mode must write at least one page. The immutable baseline retains its
+historical diagnostics and is not weakened.
+
+The pre-repair and repaired artifacts are retained as
+`topn-order-before-baseline-v1` and `topn-order-after-baseline-v1`. The repaired
+artifact is core-implementation evidence rather than a committed baseline
+replacement or final-head timing artifact; the later commit changes only the
+diagnostic test contract.
+
+Fast-local passes 1,435 batched and 92 isolated tests. Isolated Debug,
+Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,569 tests;
+instrumentation passes 1,586. Twenty-seven shared checks reconcile 121
+configured instances, and 58 native compatibility/performance contracts
+pass. Four fresh 20,000-run fuzz domains complete with seed 102. Full
+production clang-tidy, pinned formatting, graph, engineering discipline, and
+whitespace checks pass.
+
+GPT-5.6 Sol design review required sequence and pending-key preflight before
+eviction, statement poisoning for abandoned post-eviction candidates, the
+unchanged public const `current_record()` contract, and corrected native
+opcode mapping. Implementation review required an end-to-end sequence
+exhaustion regression that reads the retired root and proves the victim was
+not deleted. Diagnostic review added the explicit zero-write memory contract.
+All findings are closed in the reviewed implementation.
+
 ## References
 
 - ADR-0054: SQLite-Aligned ORDER BY and External Sorter
