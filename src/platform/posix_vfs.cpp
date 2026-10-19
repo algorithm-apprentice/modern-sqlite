@@ -9,6 +9,9 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -19,6 +22,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <limits>
@@ -48,6 +52,14 @@ constexpr off_t kSharedSize = 510;
 constexpr off_t kSharedMemoryLockBase = 120;
 constexpr off_t kSharedMemoryDeadmanSwitch = 128;
 constexpr std::size_t kRandomnessChunkSize = 256;
+constexpr std::string_view kFallbackTemporaryDirectory = "/tmp";
+constexpr std::string_view kTemporaryFileTemplate = "modern-sqlite-XXXXXX";
+constexpr std::array<const char*, 4> kTemporaryDirectoryEnvironmentVariables{
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TEMPDIR",
+};
 
 #ifdef O_CLOEXEC
 constexpr int kCloseOnExecOpenFlag = O_CLOEXEC;
@@ -156,6 +168,31 @@ class ScopedDescriptor final {
 
  private:
   int descriptor_ = -1;
+};
+
+class ScopedUnlink final {
+ public:
+  explicit ScopedUnlink(const char* path) noexcept : path_(path) {}
+
+  ScopedUnlink(const ScopedUnlink&) = delete;
+  ScopedUnlink& operator=(const ScopedUnlink&) = delete;
+  ScopedUnlink(ScopedUnlink&&) = delete;
+  ScopedUnlink& operator=(ScopedUnlink&&) = delete;
+
+  ~ScopedUnlink() {
+    if (path_ == nullptr) {
+      return;
+    }
+    int result = -1;
+    do {
+      result = ::unlink(path_);
+    } while (result == -1 && errno == EINTR);
+  }
+
+  void release() noexcept { path_ = nullptr; }
+
+ private:
+  const char* path_;
 };
 
 [[nodiscard]] Status SetCloseOnExec(int descriptor, std::string_view path) {
@@ -564,13 +601,14 @@ struct SharedMemoryState {
 }
 
 [[nodiscard]] Result<std::string> CanonicalExistingPath(std::string_view path) {
-  std::error_code error;
-  const std::filesystem::path canonical =
-      std::filesystem::canonical(std::filesystem::path{path}, error);
-  if (error) {
-    return std::unexpected(SystemError(ErrorCode::kCannotOpen, "canonical", path, error.value()));
+  const std::string owned_path{path};
+  errno = 0;
+  const std::unique_ptr<char, decltype(&std::free)> canonical{
+      ::realpath(owned_path.c_str(), nullptr), &std::free};
+  if (canonical == nullptr) {
+    return std::unexpected(SystemError(ErrorCode::kCannotOpen, "realpath", path, errno));
   }
-  return canonical.string();
+  return std::string{canonical.get()};
 }
 
 [[nodiscard]] std::string ParentPath(std::string_view path) {
@@ -579,6 +617,39 @@ struct SharedMemoryState {
     parent = ".";
   }
   return parent.string();
+}
+
+[[nodiscard]] const char* TrustedEnvironmentValue(const char* name) noexcept {
+#if defined(__linux__)
+  return ::getauxval(AT_SECURE) == 0 ? std::getenv(name) : nullptr;
+#else
+  return ::issetugid() == 0 ? std::getenv(name) : nullptr;
+#endif
+}
+
+[[nodiscard]] Result<std::string> TemporaryFilePattern() {
+  std::string_view directory = kFallbackTemporaryDirectory;
+  for (const char* variable : kTemporaryDirectoryEnvironmentVariables) {
+    const char* configured_directory = TrustedEnvironmentValue(variable);
+    if (configured_directory == nullptr) {
+      continue;
+    }
+    if (configured_directory[0] == '\0') {
+      return std::unexpected(
+          Error::Create(ErrorCode::kCannotOpen, "temporary directory path is empty"));
+    }
+    directory = configured_directory;
+    break;
+  }
+
+  std::string pattern;
+  pattern.reserve(directory.size() + 1 + kTemporaryFileTemplate.size());
+  pattern.append(directory);
+  if (!pattern.ends_with('/')) {
+    pattern.push_back('/');
+  }
+  pattern.append(kTemporaryFileTemplate);
+  return pattern;
 }
 
 [[nodiscard]] Result<mode_t> CreationMode(std::string_view path, FileOpenOptions options) {
@@ -1716,15 +1787,11 @@ void PosixFile::BestEffortUnmapSharedMemory() noexcept {
 }
 
 [[nodiscard]] Result<OpenedFile> OpenTemporaryFile(FileOpenOptions options) {
-  std::error_code path_error;
-  const std::filesystem::path temporary_directory =
-      std::filesystem::temp_directory_path(path_error);
-  if (path_error) {
-    return std::unexpected(
-        SystemError(ErrorCode::kCannotOpen, "find temporary directory", {}, path_error.value()));
+  auto selected_pattern = TemporaryFilePattern();
+  if (!selected_pattern.has_value()) {
+    return std::unexpected(std::move(selected_pattern.error()));
   }
-
-  std::string pattern = (temporary_directory / "modern-sqlite-XXXXXX").string();
+  std::string pattern = std::move(*selected_pattern);
   std::vector<char> mutable_pattern(pattern.begin(), pattern.end());
   mutable_pattern.push_back('\0');
   int descriptor = -1;
@@ -1735,8 +1802,9 @@ void PosixFile::BestEffortUnmapSharedMemory() noexcept {
     return std::unexpected(SystemError(ErrorCode::kCannotOpen, "mkstemp", pattern, errno));
   }
 
-  const std::string created_path{mutable_pattern.data()};
   ScopedDescriptor opened_descriptor{descriptor};
+  ScopedUnlink unlink_guard{mutable_pattern.data()};
+  const std::string created_path{mutable_pattern.data()};
   auto close_on_exec = SetCloseOnExec(descriptor, created_path);
   if (!close_on_exec.has_value()) {
     return std::unexpected(std::move(close_on_exec.error()));
@@ -1762,6 +1830,7 @@ void PosixFile::BestEffortUnmapSharedMemory() noexcept {
     return std::unexpected(
         SystemError(ErrorCode::kIo, "unlink temporary file", created_path, errno));
   }
+  unlink_guard.release();
 
   auto file =
       std::make_unique<PosixFile>(std::move(registered), std::move(*canonical), options.kind,

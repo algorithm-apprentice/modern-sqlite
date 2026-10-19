@@ -561,6 +561,19 @@ class TemporaryDirectory final {
   return std::move(*opened);
 }
 
+[[nodiscard]] std::unique_ptr<Pager> OpenEphemeralMemory(WritableEnvironment& environment,
+                                                         std::size_t cache_pages) {
+  auto opened = Pager::OpenEphemeralMemory(environment.vfs,
+                                           PagerOptions{
+                                               .empty_database_page_size = ByteCount{kPageSize},
+                                               .cache_capacity_pages = cache_pages,
+                                           });
+  if (!opened.has_value()) {
+    return nullptr;
+  }
+  return std::move(*opened);
+}
+
 [[nodiscard]] bool CommitOnePageChange(WritableEnvironment& environment) {
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -788,6 +801,64 @@ TEST(EphemeralPager, ValidatesBeforeVfsUseAndPropagatesPathlessOpenFailure) {
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
   EXPECT_EQ(1U, environment.state->opens.size());
   EXPECT_TRUE(environment.state->temporary_files.empty());
+}
+
+TEST(EphemeralPager, MemoryModeRetainsDirtyPagesWithoutVfsAndEnforcesPageLimit) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenEphemeralMemory(environment, 2U);
+  ASSERT_NE(nullptr, pager);
+  EXPECT_TRUE(environment.state->opens.empty());
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+
+  {
+    auto first = pager->AllocatePage();
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(PageNumber{1}, first->frame().page_number());
+    auto bytes = first->mutable_bytes();
+    ASSERT_TRUE(bytes.has_value());
+    (*bytes)[100] = std::byte{0x5a};
+  }
+  {
+    auto second = pager->AllocatePage();
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(PageNumber{2}, second->frame().page_number());
+  }
+  const auto exceeded = pager->AllocatePage();
+  ASSERT_FALSE(exceeded.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, exceeded.error().code());
+
+  auto first = pager->ReadPage(PageNumber{1});
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(std::byte{0x5a}, first->frame().bytes()[100]);
+  EXPECT_TRUE(environment.state->opens.empty());
+  EXPECT_TRUE(environment.state->accesses.empty());
+}
+
+TEST(EphemeralPager, MemoryModeRejectsInvalidPageGeometryBeforeVfsUse) {
+  WritableEnvironment environment;
+  const auto invalid_page =
+      Pager::OpenEphemeralMemory(environment.vfs, PagerOptions{
+                                                      .empty_database_page_size = ByteCount{513},
+                                                      .cache_capacity_pages = 2,
+                                                  });
+  ASSERT_FALSE(invalid_page.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_page.error().code());
+  const auto zero_limit = Pager::OpenEphemeralMemory(
+      environment.vfs, PagerOptions{
+                           .empty_database_page_size = ByteCount{kPageSize},
+                           .cache_capacity_pages = 0,
+                       });
+  ASSERT_FALSE(zero_limit.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, zero_limit.error().code());
+  const auto oversized_limit = Pager::OpenEphemeralMemory(
+      environment.vfs, PagerOptions{
+                           .empty_database_page_size = ByteCount{kPageSize},
+                           .cache_capacity_pages = std::numeric_limits<std::size_t>::max(),
+                       });
+  ASSERT_FALSE(oversized_limit.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, oversized_limit.error().code());
+  EXPECT_TRUE(environment.state->opens.empty());
 }
 
 TEST(EphemeralPager, SpillsDirtyPagesDirectlyAndReadsThemBack) {

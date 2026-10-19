@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <exception>
@@ -9,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -94,9 +92,9 @@ namespace {
 
 }  // namespace
 
-struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
-  struct FileBackend {
-    explicit FileBackend(temporary_storage_detail::RelationRootLease owned_root) noexcept
+struct EphemeralRelation::Impl final {
+  struct BtreeBackend {
+    explicit BtreeBackend(temporary_storage_detail::RelationRootLease owned_root) noexcept
         : root(std::move(owned_root)) {}
 
     temporary_storage_detail::RelationRootLease root;
@@ -110,70 +108,26 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
       : descriptor(std::move(owned_descriptor)),
         statement_state(
             &temporary_storage_detail::StatementStorageAccess::State(statement_storage)),
-        memory_threshold(statement_storage.memory_budget()),
-        spill_enabled(statement_storage.file_spill_enabled()) {}
+        physical_file_mode(statement_storage.file_spill_enabled()) {}
 
-  ~Impl() override {
-    ClearPosition();
-    ReleaseMemoryStorage();
-  }
+  ~Impl() { ClearPosition(); }
 
-  [[nodiscard]] bool file_backed() const noexcept { return file.has_value(); }
+  [[nodiscard]] bool has_btree() const noexcept { return btree.has_value(); }
 
-  [[nodiscard]] FileBackend& File() noexcept {
-    if (!file.has_value()) {
+  [[nodiscard]] bool file_backed() const noexcept { return physical_file_mode && has_btree(); }
+
+  [[nodiscard]] BtreeBackend& Btree() noexcept {
+    if (!btree.has_value()) {
       std::terminate();
     }
-    return *file;
+    return *btree;
   }
 
-  [[nodiscard]] const FileBackend& File() const noexcept {
-    if (!file.has_value()) {
+  [[nodiscard]] const BtreeBackend& Btree() const noexcept {
+    if (!btree.has_value()) {
       std::terminate();
     }
-    return *file;
-  }
-
-  void ClearFileCurrent() noexcept {
-    current_view.reset();
-    if (file.has_value()) {
-      FileBackend& backend = File();
-      if (backend.current_bytes != 0U) {
-        const std::size_t released_bytes = backend.current_bytes;
-        backend.current_record = ByteBuffer{};
-        backend.current_bytes = 0;
-        const auto released = Account().Release(ByteCount{released_bytes});
-        if (!released.has_value()) {
-          std::terminate();
-        }
-      } else {
-        backend.current_record = ByteBuffer{};
-      }
-    }
-  }
-
-  void ClearPosition() noexcept {
-    ClearFileCurrent();
-    current_index = 0;
-    if (file.has_value()) {
-      file->cursor.reset();
-    }
-  }
-
-  void ReleaseMemoryStorage() noexcept {
-    if (memory_storage_bytes != 0U) {
-      const std::size_t released_bytes = memory_storage_bytes;
-      records.reset();
-      record_capacity = 0;
-      memory_storage_bytes = 0;
-      const auto released = Account().Release(ByteCount{released_bytes});
-      if (!released.has_value()) {
-        std::terminate();
-      }
-    } else {
-      records.reset();
-      record_capacity = 0;
-    }
+    return *btree;
   }
 
   [[nodiscard]] TemporaryMemoryAccount& Account() noexcept {
@@ -197,72 +151,63 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
     return {};
   }
 
-  void MarkFileFailure() noexcept {
-    if (file.has_value()) {
-      file->root.MarkStatementFailed();
+  void MarkStatementFailed() noexcept {
+    temporary_storage_detail::StatementStorageAccess::MarkFailed(*statement_state);
+  }
+
+  void MarkBtreeFailure() noexcept {
+    if (btree.has_value()) {
+      btree->root.MarkStatementFailed();
+    } else {
+      MarkStatementFailed();
     }
   }
 
-  [[nodiscard]] ByteCount reclaimable_bytes() const noexcept override {
-    if (!spill_enabled || file_backed() || state != EphemeralRelationState::kWriting) {
-      return ByteCount{0};
-    }
-    return ByteCount{memory_storage_bytes};
-  }
-
-  [[nodiscard]] Status SpillForPressure() override { return MigrateToFile(true); }
-
-  [[nodiscard]] Result<void> MigrateToFile(bool release_memory) {
-    if (file_backed()) {
+  [[nodiscard]] Status EnsureBtree() {
+    if (btree.has_value()) {
       return {};
-    }
-    if (!spill_enabled) {
-      return std::unexpected(TooLarge("ephemeral relation cannot spill in memory mode"));
-    }
-    if (state != EphemeralRelationState::kWriting) {
-      return std::unexpected(Misuse("ephemeral relation cannot spill outside the writing state"));
     }
     auto root = temporary_storage_detail::RelationArenaAccess::Acquire(*statement_state,
                                                                        descriptor.key_columns);
     if (!root.has_value()) {
+      MarkStatementFailed();
       return std::unexpected(std::move(root.error()));
     }
-    for (std::size_t index = 0; index < count; ++index) {
-      auto inserted = root->writer().InsertEncoded(records[index].view());
-      if (!inserted.has_value()) {
-        root->MarkStatementFailed();
-        return std::unexpected(std::move(inserted.error()));
+    btree.emplace(std::move(*root));
+    return {};
+  }
+
+  void ClearBtreeCurrent() noexcept {
+    current_view.reset();
+    if (!btree.has_value()) {
+      return;
+    }
+    BtreeBackend& backend = Btree();
+    if (backend.current_bytes != 0U) {
+      const std::size_t released_bytes = backend.current_bytes;
+      backend.current_record = ByteBuffer{};
+      backend.current_bytes = 0;
+      const auto released = Account().Release(ByteCount{released_bytes});
+      if (!released.has_value()) {
+        std::terminate();
       }
+    } else {
+      backend.current_record = ByteBuffer{};
     }
-    file.emplace(std::move(*root));
-    if (release_memory) {
-      ReleaseMemoryStorage();
-    }
-    return {};
   }
 
-  [[nodiscard]] Result<void> LoadMemoryCurrent() {
-    current_view.reset();
-    if (current_index >= count) {
-      return std::unexpected(Internal("ephemeral relation memory cursor is out of range"));
+  void ClearPosition() noexcept {
+    ClearBtreeCurrent();
+    if (btree.has_value()) {
+      btree->cursor.reset();
     }
-    auto parsed = RecordView::Parse(records[current_index].view(), descriptor.record_options);
-    if (!parsed.has_value()) {
-      return std::unexpected(std::move(parsed.error()));
-    }
-    if (parsed->field_count() != descriptor.field_count) {
-      return std::unexpected(
-          Corruption("ephemeral relation memory record has an invalid field count"));
-    }
-    current_view = *parsed;
-    return {};
   }
 
-  [[nodiscard]] Result<void> LoadFileCurrent() {
+  [[nodiscard]] Result<void> LoadBtreeCurrent() {
     current_view.reset();
-    FileBackend& backend = File();
+    BtreeBackend& backend = Btree();
     if (!backend.cursor.has_value()) {
-      return std::unexpected(Internal("ephemeral relation file cursor is unavailable"));
+      return std::unexpected(Internal("ephemeral relation B-tree cursor is unavailable"));
     }
     auto payload = backend.cursor->payload();
     if (!payload.has_value()) {
@@ -275,18 +220,20 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
       }
       if (parsed->field_count() != descriptor.field_count) {
         return std::unexpected(
-            Corruption("ephemeral relation file record has an invalid field count"));
+            Corruption("ephemeral relation B-tree record has an invalid field count"));
       }
       current_view = *parsed;
       return {};
     }
+
     auto copied = backend.cursor->CopyPayload();
     if (!copied.has_value()) {
       return std::unexpected(std::move(copied.error()));
     }
     const std::size_t copied_bytes = copied->capacity().value();
     auto reserved = Account().Reserve(ByteCount{copied_bytes});
-    if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge) {
+    if (!reserved.has_value() && physical_file_mode &&
+        reserved.error().code() == ErrorCode::kTooLarge) {
       reserved = Account().ReserveWorkingSet(ByteCount{copied_bytes});
     }
     if (!reserved.has_value()) {
@@ -300,14 +247,14 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
     }
     if (parsed->field_count() != descriptor.field_count) {
       return std::unexpected(
-          Corruption("ephemeral relation file record has an invalid field count"));
+          Corruption("ephemeral relation B-tree record has an invalid field count"));
     }
     current_view = *parsed;
     return {};
   }
 
-  [[nodiscard]] Result<IndexBtreeCursor*> OpenFileCursor() {
-    FileBackend& backend = File();
+  [[nodiscard]] Result<IndexBtreeCursor*> OpenBtreeCursor() {
+    BtreeBackend& backend = Btree();
     auto cursor = IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(),
                                          descriptor.key_columns);
     if (!cursor.has_value()) {
@@ -316,129 +263,37 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
     return &backend.cursor.emplace(std::move(*cursor));
   }
 
-  [[nodiscard]] Result<void> LoadCurrent() {
-    return file_backed() ? LoadFileCurrent() : LoadMemoryCurrent();
-  }
-
   [[nodiscard]] Result<bool> AdvancePosition() {
-    if (file_backed()) {
-      FileBackend& backend = File();
-      if (!backend.cursor.has_value()) {
-        return std::unexpected(Internal("ephemeral relation file cursor is unavailable"));
-      }
-      ClearFileCurrent();
-      auto advanced = backend.cursor->Next();
-      if (!advanced.has_value()) {
-        return std::unexpected(std::move(advanced.error()));
-      }
-      if (*advanced) {
-        return true;
-      }
-    } else {
-      current_view.reset();
-      ++current_index;
-      if (current_index < count) {
-        return true;
-      }
+    BtreeBackend& backend = Btree();
+    if (!backend.cursor.has_value()) {
+      return std::unexpected(Internal("ephemeral relation B-tree cursor is unavailable"));
+    }
+    ClearBtreeCurrent();
+    auto advanced = backend.cursor->Next();
+    if (!advanced.has_value()) {
+      return std::unexpected(std::move(advanced.error()));
+    }
+    if (*advanced) {
+      return true;
     }
     ClearPosition();
     return false;
   }
 
-  [[nodiscard]] Result<std::weak_ordering> CompareMemoryPrefix(
-      const RecordView& stored, std::span<const SqlValue> key) const {
-    return CompareIndexRecord(stored, key, descriptor.key_columns)
-        .transform([](IndexKeyComparison comparison) { return comparison.ordering; });
-  }
-
   [[nodiscard]] Result<std::weak_ordering> CompareCurrentPrefix(std::span<const SqlValue> key) {
-    if (file_backed()) {
-      FileBackend& backend = File();
-      if (!backend.cursor.has_value()) {
-        return std::unexpected(Internal("ephemeral relation file cursor is unavailable"));
-      }
-      return backend.cursor->CompareCurrent(key);
+    BtreeBackend& backend = Btree();
+    if (!backend.cursor.has_value()) {
+      return std::unexpected(Internal("ephemeral relation B-tree cursor is unavailable"));
     }
-    auto stored = RecordView::Parse(records[current_index].view(), descriptor.record_options);
-    if (!stored.has_value()) {
-      return std::unexpected(std::move(stored.error()));
-    }
-    return CompareMemoryPrefix(*stored, key);
+    return backend.cursor->CompareCurrent(key);
   }
 
-  template <typename Compare>
-  [[nodiscard]] Result<std::pair<std::size_t, bool>> FindMemory(Compare compare,
-                                                                bool first_equivalent) const {
-    std::size_t lower = 0;
-    std::size_t upper = count;
-    bool found = false;
-    while (lower < upper) {
-      const std::size_t middle = lower + (upper - lower) / 2U;
-      auto stored = RecordView::Parse(records[middle].view(), descriptor.record_options);
-      if (!stored.has_value()) {
-        return std::unexpected(std::move(stored.error()));
-      }
-      auto comparison = compare(*stored);
-      if (!comparison.has_value()) {
-        return std::unexpected(std::move(comparison.error()));
-      }
-      if (*comparison == std::weak_ordering::equivalent) {
-        if (!first_equivalent) {
-          return std::pair{middle, true};
-        }
-        found = true;
-        upper = middle;
-        continue;
-      }
-      if (*comparison == std::weak_ordering::less) {
-        lower = middle + 1U;
-      } else {
-        upper = middle;
-      }
-    }
-    return std::pair{lower, found};
-  }
-
-  [[nodiscard]] Result<std::pair<std::size_t, bool>> FindMemory(const RecordView& key) const {
-    return FindMemory(
-        [&](const RecordView& stored) {
-          return CompareRecordPrefixes(stored, key, descriptor.key_columns);
-        },
-        false);
-  }
-
-  [[nodiscard]] Result<std::pair<std::size_t, bool>> FindMemory(
-      std::span<const SqlValue> key) const {
-    return FindMemory([&](const RecordView& stored) { return CompareMemoryPrefix(stored, key); },
-                      true);
-  }
-
-  [[nodiscard]] Result<std::size_t> GrowthCapacity() const {
-    if (count < record_capacity) {
-      return record_capacity;
-    }
-    if (record_capacity == 0U) {
-      return 1U;
-    }
-    if (record_capacity > std::numeric_limits<std::size_t>::max() / 2U) {
-      return std::unexpected(TooLarge("ephemeral relation capacity is exhausted"));
-    }
-    return record_capacity * 2U;
-  }
-
-  [[nodiscard]] static Result<std::size_t> ArrayBytes(std::size_t capacity) {
-    if (capacity > std::numeric_limits<std::size_t>::max() / sizeof(ByteBuffer)) {
-      return std::unexpected(TooLarge("ephemeral relation array accounting overflowed"));
-    }
-    return capacity * sizeof(ByteBuffer);
-  }
-
-  [[nodiscard]] Result<EphemeralInsertResult> InsertFile(ByteBuffer record,
-                                                         EphemeralInsertMode mode) {
-    FileBackend& backend = File();
+  [[nodiscard]] Result<EphemeralInsertResult> InsertBtree(ByteBuffer record,
+                                                          EphemeralInsertMode mode) {
+    BtreeBackend& backend = Btree();
     auto contained = backend.root.writer().ContainsEncoded(record.view());
     if (!contained.has_value()) {
-      MarkFileFailure();
+      MarkBtreeFailure();
       return std::unexpected(std::move(contained.error()));
     }
     if (*contained) {
@@ -447,7 +302,7 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
       }
       auto replaced = backend.root.writer().ReplaceEncoded(record.view());
       if (!replaced.has_value()) {
-        MarkFileFailure();
+        MarkBtreeFailure();
         return std::unexpected(std::move(replaced.error()));
       }
       return EphemeralInsertResult::kReplaced;
@@ -457,184 +312,18 @@ struct EphemeralRelation::Impl final : TemporaryStorageSpillTarget {
     }
     auto inserted = backend.root.writer().InsertEncoded(record.view());
     if (!inserted.has_value()) {
-      MarkFileFailure();
+      MarkBtreeFailure();
       return std::unexpected(std::move(inserted.error()));
     }
     ++count;
     return EphemeralInsertResult::kInserted;
   }
 
-  [[nodiscard]] Result<EphemeralInsertResult> ReplaceMemory(std::size_t index, ByteBuffer record) {
-    const std::size_t old_bytes = records[index].capacity().value();
-    const std::size_t new_bytes = record.capacity().value();
-    if (new_bytes > old_bytes) {
-      const std::size_t additional = new_bytes - old_bytes;
-      if (additional > memory_threshold.value() ||
-          memory_storage_bytes > memory_threshold.value() - additional) {
-        if (!spill_enabled) {
-          return std::unexpected(
-              TooLarge("ephemeral relation memory threshold exceeded in memory mode"));
-        }
-        auto spilled = MigrateToFile(false);
-        if (!spilled.has_value()) {
-          return std::unexpected(std::move(spilled.error()));
-        }
-        auto replaced = InsertFile(std::move(record), EphemeralInsertMode::kReplaceExisting);
-        if (!replaced.has_value()) {
-          return std::unexpected(std::move(replaced.error()));
-        }
-        if (*replaced != EphemeralInsertResult::kReplaced) {
-          MarkFileFailure();
-          return std::unexpected(Internal("migrated ephemeral relation replacement lost its key"));
-        }
-        ReleaseMemoryStorage();
-        return *replaced;
-      }
-      auto reserved = Account().Reserve(ByteCount{additional});
-      if (!reserved.has_value()) {
-        return std::unexpected(std::move(reserved.error()));
-      }
-      if (file_backed()) {
-        const auto released = Account().Release(ByteCount{additional});
-        if (!released.has_value()) {
-          std::terminate();
-        }
-        auto replaced = InsertFile(std::move(record), EphemeralInsertMode::kReplaceExisting);
-        if (!replaced.has_value()) {
-          return std::unexpected(std::move(replaced.error()));
-        }
-        if (*replaced != EphemeralInsertResult::kReplaced) {
-          MarkFileFailure();
-          return std::unexpected(Internal("pressure-spilled relation replacement lost its key"));
-        }
-        return *replaced;
-      }
-      memory_storage_bytes += additional;
-    } else if (old_bytes > new_bytes) {
-      const std::size_t released_bytes = old_bytes - new_bytes;
-      if (released_bytes > memory_storage_bytes) {
-        std::terminate();
-      }
-      records[index] = std::move(record);
-      const auto released = Account().Release(ByteCount{released_bytes});
-      if (!released.has_value()) {
-        std::terminate();
-      }
-      memory_storage_bytes -= released_bytes;
-      return EphemeralInsertResult::kReplaced;
-    }
-    records[index] = std::move(record);
-    return EphemeralInsertResult::kReplaced;
-  }
-
-  [[nodiscard]] Result<EphemeralInsertResult> InsertMemory(std::size_t index, ByteBuffer record) {
-    if (count == std::numeric_limits<std::size_t>::max()) {
-      return std::unexpected(TooLarge("ephemeral relation record count is exhausted"));
-    }
-    auto next_capacity = GrowthCapacity();
-    if (!next_capacity.has_value()) {
-      return std::unexpected(std::move(next_capacity.error()));
-    }
-    auto old_array_bytes = ArrayBytes(record_capacity);
-    if (!old_array_bytes.has_value()) {
-      return std::unexpected(std::move(old_array_bytes.error()));
-    }
-    auto next_array_bytes = ArrayBytes(*next_capacity);
-    if (!next_array_bytes.has_value()) {
-      return std::unexpected(std::move(next_array_bytes.error()));
-    }
-    const std::size_t array_delta = *next_array_bytes - *old_array_bytes;
-    const std::size_t record_bytes = record.capacity().value();
-    if (record_bytes > std::numeric_limits<std::size_t>::max() - array_delta) {
-      return std::unexpected(TooLarge("ephemeral relation memory accounting overflowed"));
-    }
-    const std::size_t additional = array_delta + record_bytes;
-    if (additional > memory_threshold.value() ||
-        memory_storage_bytes > memory_threshold.value() - additional) {
-      if (!spill_enabled) {
-        return std::unexpected(
-            TooLarge("ephemeral relation memory threshold exceeded in memory mode"));
-      }
-      auto spilled = MigrateToFile(false);
-      if (!spilled.has_value()) {
-        return std::unexpected(std::move(spilled.error()));
-      }
-      auto inserted = InsertFile(std::move(record), EphemeralInsertMode::kKeepExisting);
-      if (!inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-      if (*inserted != EphemeralInsertResult::kInserted) {
-        MarkFileFailure();
-        return std::unexpected(Internal("migrated ephemeral relation gained a duplicate key"));
-      }
-      ReleaseMemoryStorage();
-      return *inserted;
-    }
-
-    auto reserved = Account().Reserve(ByteCount{additional});
-    if (!reserved.has_value()) {
-      return std::unexpected(std::move(reserved.error()));
-    }
-    if (file_backed()) {
-      const auto released = Account().Release(ByteCount{additional});
-      if (!released.has_value()) {
-        std::terminate();
-      }
-      auto inserted = InsertFile(std::move(record), EphemeralInsertMode::kKeepExisting);
-      if (!inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-      if (*inserted != EphemeralInsertResult::kInserted) {
-        MarkFileFailure();
-        return std::unexpected(Internal("pressure-spilled relation gained a duplicate key"));
-      }
-      return *inserted;
-    }
-
-    try {
-      if (*next_capacity != record_capacity) {
-        // A fixed-capacity RAII array keeps allocation accounting exact.
-        // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-        auto grown = std::make_unique<ByteBuffer[]>(*next_capacity);
-        for (std::size_t current = 0; current < index; ++current) {
-          grown[current] = std::move(records[current]);
-        }
-        grown[index] = std::move(record);
-        for (std::size_t current = index; current < count; ++current) {
-          grown[current + 1U] = std::move(records[current]);
-        }
-        records = std::move(grown);
-        record_capacity = *next_capacity;
-      } else {
-        for (std::size_t current = count; current > index; --current) {
-          records[current] = std::move(records[current - 1U]);
-        }
-        records[index] = std::move(record);
-      }
-    } catch (const std::bad_alloc&) {
-      const auto released = Account().Release(ByteCount{additional});
-      if (!released.has_value()) {
-        std::terminate();
-      }
-      return std::unexpected(Error::OutOfMemory());
-    }
-    ++count;
-    memory_storage_bytes += additional;
-    return EphemeralInsertResult::kInserted;
-  }
-
   EphemeralRelationDescriptor descriptor;
-  // Statement state is heap-stable across StatementTemporaryStorage moves.
   temporary_storage_detail::StatementState* statement_state;
-  ByteCount memory_threshold;
-  bool spill_enabled;
-  // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-  std::unique_ptr<ByteBuffer[]> records;
-  std::size_t record_capacity = 0;
-  std::size_t memory_storage_bytes = 0;
-  std::optional<FileBackend> file;
+  bool physical_file_mode;
+  std::optional<BtreeBackend> btree;
   std::optional<RecordView> current_view;
-  std::size_t current_index = 0;
   std::size_t count = 0;
   EphemeralRelationState state = EphemeralRelationState::kWriting;
   std::optional<TemporaryMemoryAccount> memory_account;
@@ -675,9 +364,7 @@ Result<EphemeralRelation> EphemeralRelation::Create(const EphemeralRelationDescr
   }
   try {
     auto impl = std::make_unique<Impl>(descriptor, storage);
-    Result<TemporaryMemoryAccount> account = storage.file_spill_enabled()
-                                                 ? storage.RegisterMemoryOwner(*impl)
-                                                 : storage.RegisterMemoryOwner();
+    auto account = storage.RegisterMemoryOwner();
     if (!account.has_value()) {
       return std::unexpected(std::move(account.error()));
     }
@@ -734,53 +421,16 @@ Result<EphemeralInsertResult> EphemeralRelation::Insert(ByteBuffer record,
     return std::unexpected(std::move(error));
   }
 
-  if (impl_->descriptor.purpose == EphemeralRelationPurpose::kLookup && impl_->spill_enabled &&
-      !impl_->file_backed()) {
-    auto opened = impl_->MigrateToFile(true);
-    if (!opened.has_value()) {
-      Error error = std::move(opened.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-  }
-  if (impl_->file_backed()) {
-    auto inserted = impl_->InsertFile(std::move(record), mode);
-    if (!inserted.has_value()) {
-      Error error = std::move(inserted.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    return *inserted;
-  }
-
-  auto found = impl_->FindMemory(*view);
-  if (!found.has_value()) {
-    Error error = std::move(found.error());
+  auto opened = impl_->EnsureBtree();
+  if (!opened.has_value()) {
+    Error error = std::move(opened.error());
     Close();
     return std::unexpected(std::move(error));
   }
-  if (found->second) {
-    if (mode == EphemeralInsertMode::kKeepExisting) {
-      return EphemeralInsertResult::kDuplicate;
-    }
-    auto replaced = impl_->ReplaceMemory(found->first, std::move(record));
-    if (!replaced.has_value()) {
-      Error error = std::move(replaced.error());
-      if (error.code() != ErrorCode::kTooLarge ||
-          temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
-        Close();
-      }
-      return std::unexpected(std::move(error));
-    }
-    return *replaced;
-  }
-  auto inserted = impl_->InsertMemory(found->first, std::move(record));
+  auto inserted = impl_->InsertBtree(std::move(record), mode);
   if (!inserted.has_value()) {
     Error error = std::move(inserted.error());
-    if (error.code() != ErrorCode::kTooLarge ||
-        temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
-      Close();
-    }
+    Close();
     return std::unexpected(std::move(error));
   }
   return *inserted;
@@ -807,23 +457,17 @@ Result<bool> EphemeralRelation::Contains(ByteView key) {
     Close();
     return std::unexpected(std::move(error));
   }
-  if (impl_->file_backed()) {
-    auto contained = impl_->File().root.writer().ContainsEncoded(key);
-    if (!contained.has_value()) {
-      impl_->MarkFileFailure();
-      Error error = std::move(contained.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    return *contained;
+  if (!impl_->has_btree()) {
+    return false;
   }
-  auto found = impl_->FindMemory(*view);
-  if (!found.has_value()) {
-    Error error = std::move(found.error());
+  auto contained = impl_->Btree().root.writer().ContainsEncoded(key);
+  if (!contained.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(contained.error());
     Close();
     return std::unexpected(std::move(error));
   }
-  return found->second;
+  return *contained;
 }
 
 Result<bool> EphemeralRelation::Erase(ByteView key) {
@@ -847,49 +491,26 @@ Result<bool> EphemeralRelation::Erase(ByteView key) {
     Close();
     return std::unexpected(std::move(error));
   }
-  if (impl_->file_backed()) {
-    auto erased = impl_->File().root.writer().DeleteEncoded(key);
-    if (!erased.has_value()) {
-      impl_->MarkFileFailure();
-      Error error = std::move(erased.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    if (*erased) {
-      if (impl_->count == 0U) {
-        impl_->MarkFileFailure();
-        Error error = Internal("ephemeral relation record count underflowed");
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      --impl_->count;
-    }
-    return *erased;
+  if (!impl_->has_btree()) {
+    return false;
   }
-  auto found = impl_->FindMemory(*view);
-  if (!found.has_value()) {
-    Error error = std::move(found.error());
+  auto erased = impl_->Btree().root.writer().DeleteEncoded(key);
+  if (!erased.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(erased.error());
     Close();
     return std::unexpected(std::move(error));
   }
-  if (!found->second) {
-    return false;
+  if (*erased) {
+    if (impl_->count == 0U) {
+      impl_->MarkBtreeFailure();
+      Error error = Internal("ephemeral relation record count underflowed");
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    --impl_->count;
   }
-  const std::size_t removed_bytes = impl_->records[found->first].capacity().value();
-  for (std::size_t index = found->first; index + 1U < impl_->count; ++index) {
-    impl_->records[index] = std::move(impl_->records[index + 1U]);
-  }
-  impl_->records[impl_->count - 1U] = ByteBuffer{};
-  --impl_->count;
-  if (removed_bytes > impl_->memory_storage_bytes) {
-    std::terminate();
-  }
-  const auto released = impl_->Account().Release(ByteCount{removed_bytes});
-  if (!released.has_value()) {
-    std::terminate();
-  }
-  impl_->memory_storage_bytes -= removed_bytes;
-  return true;
+  return *erased;
 }
 
 Status EphemeralRelation::SealForLookup() {
@@ -928,51 +549,44 @@ Result<bool> EphemeralRelation::SeekPrefix(std::span<const SqlValue> key) {
     if (impl_->count == 0U) {
       return false;
     }
-    if (impl_->file_backed()) {
-      auto opened = impl_->OpenFileCursor();
-      if (!opened.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(opened.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      auto positioned = (*opened)->Seek(key, BtreeSeekMode::kGreaterOrEqual);
-      if (!positioned.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(positioned.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (!*positioned) {
-        impl_->ClearPosition();
-        return false;
-      }
-      auto comparison = impl_->CompareCurrentPrefix(key);
-      if (!comparison.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(comparison.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (*comparison != std::weak_ordering::equivalent) {
-        impl_->ClearPosition();
-        return false;
-      }
-    } else {
-      auto found = impl_->FindMemory(key);
-      if (!found.has_value()) {
-        Error error = std::move(found.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (!found->second) {
-        return false;
-      }
-      impl_->current_index = found->first;
+    if (!impl_->has_btree()) {
+      impl_->MarkStatementFailed();
+      Error error = Internal("nonempty ephemeral relation has no B-tree");
+      Close();
+      return std::unexpected(std::move(error));
     }
-    auto loaded = impl_->LoadCurrent();
+    auto opened = impl_->OpenBtreeCursor();
+    if (!opened.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(opened.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    auto positioned = (*opened)->Seek(key, BtreeSeekMode::kGreaterOrEqual);
+    if (!positioned.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(positioned.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (!*positioned) {
+      impl_->ClearPosition();
+      return false;
+    }
+    auto comparison = impl_->CompareCurrentPrefix(key);
+    if (!comparison.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(comparison.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (*comparison != std::weak_ordering::equivalent) {
+      impl_->ClearPosition();
+      return false;
+    }
+    auto loaded = impl_->LoadBtreeCurrent();
     if (!loaded.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(loaded.error());
       Close();
       return std::unexpected(std::move(error));
@@ -980,11 +594,11 @@ Result<bool> EphemeralRelation::SeekPrefix(std::span<const SqlValue> key) {
     impl_->state = EphemeralRelationState::kLookupPositioned;
     return true;
   } catch (const std::bad_alloc&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   }
@@ -1008,7 +622,7 @@ Result<bool> EphemeralRelation::NextPrefix(std::span<const SqlValue> key) {
   try {
     auto advanced = impl_->AdvancePosition();
     if (!advanced.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(advanced.error());
       Close();
       return std::unexpected(std::move(error));
@@ -1019,7 +633,7 @@ Result<bool> EphemeralRelation::NextPrefix(std::span<const SqlValue> key) {
     }
     auto comparison = impl_->CompareCurrentPrefix(key);
     if (!comparison.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(comparison.error());
       Close();
       return std::unexpected(std::move(error));
@@ -1029,20 +643,20 @@ Result<bool> EphemeralRelation::NextPrefix(std::span<const SqlValue> key) {
       impl_->state = EphemeralRelationState::kLookupReady;
       return false;
     }
-    auto loaded = impl_->LoadCurrent();
+    auto loaded = impl_->LoadBtreeCurrent();
     if (!loaded.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(loaded.error());
       Close();
       return std::unexpected(std::move(error));
     }
     return true;
   } catch (const std::bad_alloc&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   }
@@ -1079,67 +693,55 @@ Status EphemeralRelation::Rewind() {
     return std::unexpected(std::move(error));
   }
   impl_->ClearPosition();
-  if (impl_->file_backed()) {
-    try {
-      Impl::FileBackend& file = impl_->File();
-      auto opened = impl_->OpenFileCursor();
-      if (!opened.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(opened.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      auto positioned = (*opened)->First();
-      if (!positioned.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(positioned.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (!*positioned) {
-        if (impl_->count != 0U) {
-          impl_->MarkFileFailure();
-          Error error = Corruption("nonempty ephemeral relation has no first record");
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        file.cursor.reset();
-        impl_->state = EphemeralRelationState::kExhausted;
-        return {};
-      }
-      auto loaded = impl_->LoadFileCurrent();
-      if (!loaded.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(loaded.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      impl_->state = EphemeralRelationState::kPositioned;
-      return {};
-    } catch (const std::bad_alloc&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    } catch (const std::length_error&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    }
-  }
   if (impl_->count == 0U) {
     impl_->state = EphemeralRelationState::kExhausted;
     return {};
   }
-  auto loaded = impl_->LoadMemoryCurrent();
-  if (!loaded.has_value()) {
-    Error error = std::move(loaded.error());
+  if (!impl_->has_btree()) {
+    impl_->MarkStatementFailed();
+    Error error = Internal("nonempty ephemeral relation has no B-tree");
     Close();
     return std::unexpected(std::move(error));
   }
-  impl_->state = EphemeralRelationState::kPositioned;
-  return {};
+  try {
+    auto opened = impl_->OpenBtreeCursor();
+    if (!opened.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(opened.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    auto positioned = (*opened)->First();
+    if (!positioned.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(positioned.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (!*positioned) {
+      impl_->MarkBtreeFailure();
+      Error error = Corruption("nonempty ephemeral relation has no first record");
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    auto loaded = impl_->LoadBtreeCurrent();
+    if (!loaded.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(loaded.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    impl_->state = EphemeralRelationState::kPositioned;
+    return {};
+  } catch (const std::bad_alloc&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<RecordView> EphemeralRelation::current_record() const {
@@ -1169,7 +771,7 @@ Result<bool> EphemeralRelation::Next() {
   try {
     auto advanced = impl_->AdvancePosition();
     if (!advanced.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(advanced.error());
       Close();
       return std::unexpected(std::move(error));
@@ -1178,20 +780,20 @@ Result<bool> EphemeralRelation::Next() {
       impl_->state = EphemeralRelationState::kExhausted;
       return false;
     }
-    auto loaded = impl_->LoadCurrent();
+    auto loaded = impl_->LoadBtreeCurrent();
     if (!loaded.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(loaded.error());
       Close();
       return std::unexpected(std::move(error));
     }
     return true;
   } catch (const std::bad_alloc&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
-    impl_->MarkFileFailure();
+    impl_->MarkBtreeFailure();
     Close();
     return std::unexpected(Error::OutOfMemory());
   }
@@ -1208,16 +810,14 @@ Status EphemeralRelation::Reset() {
     return std::unexpected(std::move(error));
   }
   impl_->ClearPosition();
-  if (impl_->file_backed()) {
-    auto cleared = impl_->File().root.writer().Clear();
+  if (impl_->has_btree()) {
+    auto cleared = impl_->Btree().root.writer().Clear();
     if (!cleared.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(cleared.error());
       Close();
       return std::unexpected(std::move(error));
     }
-  } else {
-    impl_->ReleaseMemoryStorage();
   }
   impl_->count = 0;
   impl_->state = EphemeralRelationState::kWriting;

@@ -50,6 +50,7 @@ class StatementStorageAccess final {
  public:
   [[nodiscard]] static StatementState& State(StatementTemporaryStorage& storage) noexcept;
   [[nodiscard]] static bool Failed(const StatementState& state) noexcept;
+  static void MarkFailed(StatementState& state) noexcept;
 };
 
 }  // namespace temporary_storage_detail

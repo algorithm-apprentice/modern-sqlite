@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -29,6 +31,9 @@ std::atomic<std::size_t> allocation_index = 0;
 std::size_t failing_allocation = 0;
 std::size_t minimum_failing_size = std::numeric_limits<std::size_t>::max();
 bool inject_failure = false;
+
+constexpr std::string_view kPathlessTemporaryPrefix = "modern-sqlite-";
+constexpr std::size_t kMkstempSuffixLength = 6;
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
@@ -69,6 +74,62 @@ bool inject_failure = false;
     throw std::runtime_error{"unable to read session OOM fixture"};
   }
   return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+}
+
+class IsolatedTemporaryDirectory final {
+ public:
+  IsolatedTemporaryDirectory() {
+    if (const char* current = std::getenv("TMPDIR"); current != nullptr) {
+      previous_tmpdir_ = current;
+    }
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "modern-sqlite-session-oom-XXXXXX").string();
+    std::vector<char> mutable_pattern(pattern.begin(), pattern.end());
+    mutable_pattern.push_back('\0');
+    const char* created = ::mkdtemp(mutable_pattern.data());
+    if (created == nullptr) {
+      throw std::runtime_error{"unable to create isolated session OOM directory"};
+    }
+    path_ = created;
+    if (::setenv("TMPDIR", path_.c_str(), 1) != 0) {
+      std::error_code ignored;
+      std::filesystem::remove_all(path_, ignored);
+      throw std::runtime_error{"unable to select isolated session OOM directory"};
+    }
+  }
+
+  IsolatedTemporaryDirectory(const IsolatedTemporaryDirectory&) = delete;
+  IsolatedTemporaryDirectory& operator=(const IsolatedTemporaryDirectory&) = delete;
+  IsolatedTemporaryDirectory(IsolatedTemporaryDirectory&&) = delete;
+  IsolatedTemporaryDirectory& operator=(IsolatedTemporaryDirectory&&) = delete;
+
+  ~IsolatedTemporaryDirectory() {
+    if (previous_tmpdir_.has_value()) {
+      static_cast<void>(::setenv("TMPDIR", previous_tmpdir_->c_str(), 1));
+    } else {
+      static_cast<void>(::unsetenv("TMPDIR"));
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+ private:
+  std::optional<std::string> previous_tmpdir_;
+  std::filesystem::path path_;
+};
+
+[[nodiscard]] std::size_t CountPathlessTemporaryFiles(const std::filesystem::path& directory) {
+  std::size_t count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator{directory}) {
+    const std::string name = entry.path().filename().string();
+    if (entry.is_regular_file() && name.starts_with(kPathlessTemporaryPrefix) &&
+        name.size() == kPathlessTemporaryPrefix.size() + kMkstempSuffixLength) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 class TemporaryDatabase final {
@@ -562,8 +623,15 @@ int main(int argc, char** argv) try {
     }
     partition = static_cast<std::size_t>(number[0] - '0');
   }
+  const IsolatedTemporaryDirectory temporary_directory;
+  const std::size_t initial_pathless_temporary_files =
+      CountPathlessTemporaryFiles(temporary_directory.path());
   if (temporary_consumer != nullptr) {
-    return RunTemporaryConsumer(*temporary_consumer, partition);
+    const int result = RunTemporaryConsumer(*temporary_consumer, partition);
+    return result == 0 && CountPathlessTemporaryFiles(temporary_directory.path()) !=
+                              initial_pathless_temporary_files
+               ? 1
+               : result;
   }
   const std::size_t first_failure = partition.value_or(0U);
   const std::size_t failure_stride = partition.has_value() ? kAllocationPartitions : 1U;
@@ -1237,7 +1305,9 @@ int main(int argc, char** argv) try {
     }
   }
 
-  return 0;
+  return CountPathlessTemporaryFiles(temporary_directory.path()) == initial_pathless_temporary_files
+             ? 0
+             : 1;
 } catch (...) {
   inject_failure = false;
   return 1;

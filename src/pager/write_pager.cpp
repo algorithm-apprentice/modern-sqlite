@@ -655,6 +655,10 @@ Result<WritePagePin> Pager::AllocatePage() {
       }
       ++candidate;
     }
+    if (memory_ephemeral() &&
+        candidate > static_cast<std::uint32_t>(options_.cache_capacity_pages)) {
+      return std::unexpected(TooLarge("in-memory ephemeral Pager page limit exceeded"));
+    }
 
     std::optional<Error> setup_error;
     {
@@ -1084,6 +1088,9 @@ Status Pager::MaintainCachePressure() {
       state_ == PagerState::kWriterFinished || cache_ == nullptr) {
     return {};
   }
+  if (memory_ephemeral()) {
+    return {};
+  }
   while (true) {
     const PageCachePressure pressure = cache_->pressure();
     if (pressure.excess_pages == 0 || !pressure.writeback.has_value()) {
@@ -1290,6 +1297,9 @@ Status Pager::SpillPage(PageNumber page_number) {
   }
 
   if (storage_mode_ == StorageMode::kEphemeral) {
+    if (memory_ephemeral()) {
+      return std::unexpected(Internal("in-memory ephemeral Pager cannot spill a page"));
+    }
     auto offset = PageOffset(page_number, page_size());
     if (!offset.has_value()) {
       ReportWriteCoordinatorFailure(offset.error().code());

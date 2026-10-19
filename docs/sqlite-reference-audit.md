@@ -7,9 +7,9 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Eleven are reference-faithful,
+  90 production paths map to 36 mechanisms. Twelve are reference-faithful,
   fourteen are accepted architectural translations, one is an accepted
-  measured alternative, six require repair, and four remain unresolved
+  measured alternative, five require repair, and four remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -84,11 +84,11 @@ infrastructure rather than production mechanisms.
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Storage and transaction | 40 | 12 | 7 | 4 | 0 | 1 | 0 |
-| Runtime and temporary storage | 12 | 7 | 3 | 0 | 1 | 2 | 1 |
+| Runtime and temporary storage | 12 | 7 | 4 | 0 | 1 | 1 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 0 | 1 | 1 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 0 | 2 | 0 |
-| **Total** | **90** | **36** | **11** | **14** | **1** | **6** | **4** |
+| **Total** | **90** | **36** | **12** | **14** | **1** | **5** | **4** |
 
 ### Mechanism dispositions
 
@@ -112,7 +112,7 @@ infrastructure rather than production mechanisms.
 | `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `measured-alternative` |
 | `runtime-sorter` | Coallocated memory-mode records and one offset-linked file-mode bulk arena | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `reference-faithful` |
 | `runtime-topn` | Sorted linked-list memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `repair-required` |
-| `runtime-ephemeral-relation` | Sorted array memory mode and B-tree file mode | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `repair-required` |
+| `runtime-ephemeral-relation` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `reference-faithful` |
 | `binding-text-lexer` | UTF-8/source text and tokenizer | `utf.c` and `tokenize.c` | `reference-faithful` |
 | `binding-ast` | Immutable postorder syntax arena | Mutable `Expr`/`Select` ownership produced by `parse.y` | `architectural-translation` |
 | `binding-parser` | Handwritten recursive descent plus Pratt expressions | Lemon `parse.y`/`parse.c` | `unresolved` |
@@ -157,7 +157,7 @@ ordinal below, and its child ADR is created before production changes.
 | `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor; `vdbe.c:987-990,9482-9520` and `vdbeaux.c:2805-2859,3326-3510` statement-wide cursor cleanup. | VFS/Pager/B-tree and statement budgets; ADR-0058 budget/file/root/extent/poison tests, consumer semantics, wide-modifier matched evidence, and 32-positioned-root cache diagnostics. | `measured-alternative`; ADR-0115 and diagnostic commit `537dfe2`. Explicit-transaction rollback differences remain ledger 8. |
 | `runtime-sorter` — `implement-advanced-sql` | `vdbesort.c:1081-1177` mode setup, `:1944-2046` memory/file record admission, `:1725-1910` PMA spill, `:2517-2817` merge/rewind/next. | Temporary core/record/VFS; direct-insertion allocation, malformed/OOM, PMA, buffered-I/O, ordering, aggregate, fuzz, and cross-compiler evidence. | `reference-faithful`; ADR-0116 and implementation commits `704cf4a` and `60026ba` reproduce mode-specific record ownership, while `514143a` records the diagnostic allocation contract. |
 | `runtime-topn` — `implement-advanced-sql` | `select.c:742-903` `pushOntoSorter()` LIMIT queue; `vdbe.c:4685-4750,6484-6794` ephemeral open, largest/delete/insert iteration. | Temporary core and ephemeral B-tree; order/limit differential, lifecycle/OOM, memory/file benchmarks. | `repair-required`; ledger 7, child ADR pending after ledger 6. |
-| `runtime-ephemeral-relation` — `implement-advanced-sql` | `select.c:904-996,1198-1388,2983-3740` DISTINCT/compound destinations; `vdbe.c:4685-4750,5506-5568,6728-6848` ephemeral membership/insert/delete. | Temporary core, record comparator, B-tree; DISTINCT/compound differential, OOM, spill, baseline evidence. | `repair-required`; ledger 6, child ADR pending. Sorted-array memory insertion is the confirmed O(N^2) divergence. |
+| `runtime-ephemeral-relation` — `implement-advanced-sql` | `select.c:904-996,1198-1388,2983-3740` DISTINCT/compound destinations; `vdbe.c:4685-4750,5506-5568,6728-6848` ephemeral membership/insert/delete. | Temporary core, record comparator, B-tree; memory/file mechanism, page-limit, root-reuse, OOM, allocation, DISTINCT/compound, cross-compiler, sanitizer, fuzz, and fresh matched evidence. | `reference-faithful`; ADR-0117 and `f0cfe4d` use the canonical B-tree from first insertion and remove sorted-array admission. Commit `95139c9` closes POSIX temporary-path OOM cleanup, `3b37ce1` scopes historical/current aggregate ownership contracts, and `e2b191a` is the const-only quality correction. |
 | `binding-text-lexer` — `implement-text`, `implement-lexer` | `tokenize.c:216-265,600-744` contextual tokens/prepare loop plus `utf.c` byte classes. | Bytes/text; token streams, offsets, comments, NUL, fallback keywords, malformed inputs. | `reference-faithful`; no open mechanism. |
 | `binding-ast` — `implement-ast` | No source-identical ownership; `parse.y` semantic values and SQLite `Expr`/`Select` graphs define input semantics. | Text/results; immutable arena, reference, source-span, depth, destruction and OOM tests. | `architectural-translation`; explicit non-native infrastructure. |
 | `binding-parser` — `implement-parser` | `parse.y:1-170,268-340,396-478,600-979,1070-1525,1622-1637`; generated `parse.c:2473-2511,6116+`; `tokenize.c:600-744`. | Lexer/AST; broad grammar/error differential and deep/wide limits. | `unresolved`; ledger 14. ADR-0028 is the alternative identity; matched parse/prepare evidence is missing. |
@@ -178,8 +178,10 @@ ordinal below, and its child ADR is created before production changes.
 
 ### Current matched performance evidence
 
-All ratios below are aggregate wall ratios from the committed immutable
-baselines; values greater than one mean Modern is slower.
+Rows naming a baseline use aggregate wall ratios from committed immutable
+baselines. Rows labeled “after ADR” use the retained implementation evidence
+documented by that ADR rather than replacing the immutable baseline. Values
+greater than one mean Modern is slower.
 
 | Baseline | Largest material ratios | Source evidence |
 |---|---|---|
@@ -189,6 +191,7 @@ baselines; values greater than one mean Modern is slower.
 | ORDER BY | 7.68x file top-N; 6.44x memory top-N; 6.37x multi-spill | `benchmarks/order-by-baseline-v1/aggregate.json` |
 | ORDER BY after ADR-0116 | 4.30x integer memory; 2.15x payload memory; 1.95x multi-spill; 1.90x minimal spill | ADR-0116 implementation evidence |
 | DISTINCT/compound | 26.55x high-cardinality memory DISTINCT; 17.58x file UNION replacement; 12.90x file keyed relation | `benchmarks/distinct-compound-baseline-v1/aggregate.json` |
+| DISTINCT/compound after ADR-0117 | 17.24x DISTINCT ORDER/LIMIT; 16.18x file UNION replacement; 13.95x keyed UNION before file pressure; 10.18x VALUES UNION ALL; high-cardinality DISTINCT falls from 26.55x to 8.90x | ADR-0117 `f0cfe4d` implementation evidence |
 | Aggregate/grouping | 7.56x DISTINCT state; 6.91x sorted file grouping; 6.90x unique local ordering; 6.32x global functions | `benchmarks/aggregate-baseline-v1/aggregate.json` |
 | Aggregate after ADR-0116 | 6.12x wide file modifiers with 274,555 allocations; sorted file grouping remains 6.92x | ADR-0116 implementation evidence |
 | Index | 6.41x CREATE INDEX; 5.40x unselective covering read; 3.67x noncovering range; 2.84x ANALYZE | `benchmarks/index-baseline-v1/aggregate.json` |
@@ -205,8 +208,9 @@ than timing noise:
 - historical matched update scan issued 7,722 journal sync calls and remained
   6.97x slower; ADR-0114 preserves the 4,371 database writes, reduces journal
   syncs to 18, and records a fresh 1.83x wall ratio;
-- high-cardinality memory DISTINCT inserts into a sorted array and shifts the
-  suffix on every new key;
+- ADR-0117 moves high-cardinality memory DISTINCT from suffix-shifting sorted
+  arrays to the canonical ephemeral B-tree, reducing its wall ratio from
+  26.55x to 8.90x while keeping memory mode fileless;
 - ADR-0116 reduces the 65,536-row memory sorter from 131,182 to 65,655
   allocations and the file-spill sorters from about 402,700 to about 262,400
   through mode-specific coallocation and bulk ownership;
@@ -227,7 +231,7 @@ than timing noise:
 | 3 | `storage-pager` | **Complete** | ADR-0114 publishes and clears `NEED_SYNC`, preserves page-number sync state across moves, authorizes sync-safe pages from durable cohorts while newer cohorts remain dirty, and suppresses cached freed-leaf writes. |
 | 4 | `runtime-temporary-core` | **Complete** | ADR-0115 retains statement-shared relation/sorter arenas as a measured alternative with explicit file, memory, cache-pin, failure, reset, and matched evidence. |
 | 5 | `runtime-sorter` | **Complete** | ADR-0116 coallocates memory-mode metadata/payload, adds SQLite's offset-linked file-mode bulk arena, preallocates PMA metadata before I/O, and records focused allocation plus fresh ORDER BY/aggregate evidence. |
-| 6 | `runtime-ephemeral-relation` | Repair | Use one SQLite-style ephemeral B-tree in memory and file modes; remove sorted-array insertion. |
+| 6 | `runtime-ephemeral-relation` | **Complete** | ADR-0117 uses the canonical ephemeral B-tree in memory and file modes, removes sorted-array insertion, and records page-limit, OOM, ownership, and fresh DISTINCT/compound evidence. |
 | 7 | `runtime-topn` | Repair | Reuse that ephemeral B-tree for logarithmic ORDER BY LIMIT admission and deletion. |
 | 8 | `storage-transaction` | Repair | Publish `isMultiWrite`/`mayAbort` and open statement savepoints only when SQLite sets `usesStmtJournal`. |
 | 9 | `execution-optimizer` | Repair | Translate the bounded SQLite WhereLoop/path solver for currently admitted accesses and join barriers. |
@@ -871,7 +875,7 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its remaining seven repairs and four resolutions must
+blocking work ledger. Its remaining five repairs and four resolutions must
 close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as repairs proceed.
