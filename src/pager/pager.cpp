@@ -43,6 +43,10 @@ constexpr std::array<std::byte, 16> kDatabaseMagic{
   return Error::Create(ErrorCode::kCorruption, std::move(message));
 }
 
+[[nodiscard]] Error Internal(std::string message) {
+  return Error::Create(ErrorCode::kInternal, std::move(message));
+}
+
 [[nodiscard]] Error TooLarge(std::string message) {
   return Error::Create(ErrorCode::kTooLarge, std::move(message));
 }
@@ -228,6 +232,25 @@ Result<std::unique_ptr<Pager>> Pager::OpenEphemeral(Vfs& vfs, PagerOptions optio
   }
 }
 
+Result<std::unique_ptr<Pager>> Pager::OpenEphemeralMemory(Vfs& services, PagerOptions options) {
+  try {
+    if (!IsValidPageSize(options.empty_database_page_size)) {
+      return std::unexpected(
+          Misuse("empty-database page size must be a power of two from 512 through 65536"));
+    }
+    if (options.cache_capacity_pages == 0U) {
+      return std::unexpected(Misuse("in-memory ephemeral Pager requires a nonzero page limit"));
+    }
+    if (options.cache_capacity_pages > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(TooLarge("in-memory ephemeral Pager page limit is not representable"));
+    }
+    return std::make_unique<Pager>(ConstructionKey{}, services, std::string{},
+                                   std::unique_ptr<File>{}, options, StorageMode::kEphemeral);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
 Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
              PagerOptions options, StorageMode storage_mode,
              std::optional<FileProperties> file_properties,
@@ -244,7 +267,7 @@ Pager::Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> 
       journal_sector_size_(journal_sector_size),
       lifetime_token_(std::make_shared<pager_internal::PagerLifetime>(
           pager_internal::PagerLifetime{.pager = this})) {
-  assert(file_ != nullptr);
+  assert(file_ != nullptr || memory_ephemeral());
   assert((storage_mode_ == StorageMode::kRollbackJournal) == (rollback_journal_ != nullptr));
   assert(storage_mode_ != StorageMode::kEphemeral || path_.empty());
 }
@@ -604,6 +627,9 @@ Result<PageCache::Pin> Pager::AcquirePage(PageNumber page_number, bool exclusive
   }
   if (found->has_value()) {
     return std::move(found->value());
+  }
+  if (memory_ephemeral()) {
+    return std::unexpected(Internal("in-memory ephemeral page is absent from the cache"));
   }
 
   const std::uint64_t page_size_value = static_cast<std::uint64_t>(cache_->page_size().value());

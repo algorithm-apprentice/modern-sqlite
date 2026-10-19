@@ -245,6 +245,54 @@ TEST(EphemeralRelationApi, KeepsBorrowedStatementStateStableAcrossStorageMove) {
   relation.Close();
 }
 
+TEST(EphemeralRelation, UsesThresholdBoundedMemoryBtreeWithoutOpeningAFile) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{4096}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EphemeralRelation second = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(IntegerRow(2, 20), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(IntegerRow(1, 10), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(second.Insert(IntegerRow(3, 30), EphemeralInsertMode::kKeepExisting)));
+
+  EXPECT_FALSE(first.file_backed());
+  EXPECT_FALSE(second.file_backed());
+  EXPECT_EQ(0U, environment.vfs().pathless_open_count());
+  EXPECT_EQ(0U, environment.storage().live_file_count());
+  EXPECT_EQ(8U, environment.storage().relation_cache_capacity_pages());
+  EXPECT_GE(environment.storage().relation_cache_page_count(), 3U);
+  EXPECT_GE(environment.storage().relation_cache_allocated_pages(), 3U);
+
+  RequireStatus(first.Rewind());
+  EXPECT_EQ(1, Field(TakeValue(first.current_record()), 0).integer_value());
+  EXPECT_TRUE(TakeValue(first.Next()));
+  EXPECT_EQ(2, Field(TakeValue(first.current_record()), 0).integer_value());
+  EXPECT_FALSE(TakeValue(first.Next()));
+  EXPECT_TRUE(TakeValue(second.Contains(IntegerKey(3).view())));
+}
+
+TEST(EphemeralRelation, MemoryBtreeRequiresDatabaseAndRootPages) {
+  RelationEnvironment below{TemporaryStoreMode::kMemory, ByteCount{test::kWritePagerPageSize}};
+  EphemeralRelation rejected = TakeValue(below.storage().CreateEphemeralRelation(Descriptor()));
+  const auto failed = rejected.Insert(IntegerRow(1, 10), EphemeralInsertMode::kKeepExisting);
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+  EXPECT_FALSE(rejected.valid());
+  EXPECT_TRUE(below.storage().failed());
+  EXPECT_EQ(1U, below.storage().relation_cache_capacity_pages());
+  EXPECT_EQ(0U, below.vfs().pathless_open_count());
+
+  RelationEnvironment exact{TemporaryStoreMode::kMemory, ByteCount{2U * test::kWritePagerPageSize}};
+  EphemeralRelation accepted = TakeValue(exact.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(accepted.Insert(IntegerRow(1, 10), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(2U, exact.storage().relation_cache_capacity_pages());
+  EXPECT_EQ(2U, exact.storage().relation_cache_page_count());
+  EXPECT_EQ(0U, exact.vfs().pathless_open_count());
+}
+
 TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
@@ -588,19 +636,19 @@ TEST(EphemeralRelation, SharesOneLazyStatementArenaAcrossFileModeRelations) {
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U}),
                                    EphemeralInsertMode::kKeepExisting)));
-  EXPECT_FALSE(first.file_backed());
-  EXPECT_EQ(EphemeralInsertResult::kInserted,
-            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 3, .payload_size = 900U}),
-                                   EphemeralInsertMode::kKeepExisting)));
   EXPECT_TRUE(first.file_backed());
   EXPECT_TRUE(environment.vfs().pathless_file_present());
   EXPECT_EQ(1U, environment.vfs().pathless_open_count());
   EXPECT_EQ(1U, environment.storage().live_file_count());
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(BlobRow(BlobRowSpec{.key = 3, .payload_size = 900U}),
+                                   EphemeralInsertMode::kKeepExisting)));
+  EXPECT_TRUE(first.file_backed());
 
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U}),
                                     EphemeralInsertMode::kKeepExisting)));
-  EXPECT_FALSE(second.file_backed());
+  EXPECT_TRUE(second.file_backed());
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 4, .payload_size = 900U}),
                                     EphemeralInsertMode::kKeepExisting)));
@@ -639,6 +687,27 @@ TEST(EphemeralRelation, SharesOneLazyStatementArenaAcrossFileModeRelations) {
   EXPECT_EQ(peak_overhead, environment.storage().overhead_bytes());
   environment.ResetStorage();
   EXPECT_FALSE(environment.vfs().pathless_file_present());
+}
+
+TEST(EphemeralRelation, ReusesMemoryRootsWithFreshComparisonMetadata) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{2048}};
+  EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(first.Insert(TextBlobRow("A", 16U), EphemeralInsertMode::kKeepExisting)));
+  const std::size_t allocated_pages = environment.storage().relation_cache_allocated_pages();
+  const std::size_t peak_pages = environment.storage().relation_cache_peak_allocated_pages();
+  first.Close();
+
+  EphemeralRelationDescriptor descriptor = Descriptor();
+  descriptor.key_columns[0] = IndexColumnOrder{NoCaseCollation()};
+  EphemeralRelation reused = TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
+  EXPECT_EQ(EphemeralInsertResult::kInserted,
+            TakeValue(reused.Insert(TextBlobRow("A", 16U), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(EphemeralInsertResult::kDuplicate,
+            TakeValue(reused.Insert(TextBlobRow("a", 16U), EphemeralInsertMode::kKeepExisting)));
+  EXPECT_EQ(allocated_pages, environment.storage().relation_cache_allocated_pages());
+  EXPECT_EQ(peak_pages, environment.storage().relation_cache_peak_allocated_pages());
+  EXPECT_EQ(0U, environment.vfs().pathless_open_count());
 }
 
 TEST(EphemeralRelation, BoundsOneSharedCacheAcrossManyPositionedRoots) {
@@ -691,7 +760,7 @@ TEST(EphemeralRelation, BoundsOneSharedCacheAcrossManyPositionedRoots) {
   EXPECT_EQ(0U, environment.storage().relation_cache_pin_count());
 }
 
-TEST(EphemeralRelation, AccountsMemoryAndSpillsLargestOwnerUnderStatementPressure) {
+TEST(EphemeralRelation, FileModeMembershipUsesBtreeWithoutRetainedRecordOwners) {
   RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{512}};
   EphemeralRelation first = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   EphemeralRelation second = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
@@ -702,17 +771,20 @@ TEST(EphemeralRelation, AccountsMemoryAndSpillsLargestOwnerUnderStatementPressur
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 16U}),
                                     EphemeralInsertMode::kKeepExisting)));
-  EXPECT_GT(first.memory_usage(), second.memory_usage());
-  EXPECT_EQ(first.memory_usage().value() + second.memory_usage().value(),
-            environment.storage().retained_bytes().value());
+  EXPECT_TRUE(first.file_backed());
+  EXPECT_TRUE(second.file_backed());
+  EXPECT_EQ(ByteCount{0}, first.memory_usage());
+  EXPECT_EQ(ByteCount{0}, second.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(second.Insert(BlobRow(BlobRowSpec{.key = 3, .payload_size = 250U}),
                                     EphemeralInsertMode::kKeepExisting)));
   EXPECT_TRUE(first.file_backed());
-  EXPECT_FALSE(second.file_backed());
+  EXPECT_TRUE(second.file_backed());
   EXPECT_EQ(ByteCount{0}, first.memory_usage());
-  EXPECT_EQ(second.memory_usage(), environment.storage().retained_bytes());
+  EXPECT_EQ(ByteCount{0}, second.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
   EXPECT_EQ(1U, environment.storage().live_file_count());
 
   first.Close();
@@ -757,23 +829,27 @@ TEST(EphemeralRelation, TracksAnOversizedPositionedRecordAsAFileWorkingSet) {
   EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 }
 
-TEST(EphemeralRelation, MemoryModeRejectsOversizedRecordsWithoutLosingExistingRows) {
-  RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{128}};
+TEST(EphemeralRelation, MemoryModePageLimitPoisonsStatementWithoutOpeningAFile) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory, ByteCount{1024}};
   EphemeralRelation relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+  EphemeralRelation sibling =
       TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
   EXPECT_EQ(EphemeralInsertResult::kInserted,
             TakeValue(relation.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 16U}),
                                       EphemeralInsertMode::kKeepExisting)));
-  const ByteCount retained = relation.memory_usage();
 
   const auto too_large = relation.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U}),
                                          EphemeralInsertMode::kKeepExisting);
   ASSERT_FALSE(too_large.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, too_large.error().code());
-  EXPECT_TRUE(relation.valid());
-  EXPECT_EQ(1U, relation.record_count());
-  EXPECT_EQ(retained, relation.memory_usage());
-  EXPECT_EQ(retained, environment.storage().retained_bytes());
+  EXPECT_FALSE(relation.valid());
+  EXPECT_TRUE(environment.storage().failed());
+  const auto sibling_after_failure = sibling.Contains(IntegerKey(1).view());
+  ASSERT_FALSE(sibling_after_failure.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, sibling_after_failure.error().code());
+  EXPECT_FALSE(sibling.valid());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
   EXPECT_FALSE(environment.vfs().pathless_file_present());
 }
 

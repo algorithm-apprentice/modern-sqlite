@@ -135,7 +135,7 @@ int main() try {
     return 1;
   }
   const std::size_t memory_insert_allocations = allocation_count.load(std::memory_order_relaxed);
-  if (memory_insert_allocations == 0U || memory_insert_allocations > 4U) {
+  if (memory_insert_allocations == 0U || memory_insert_allocations > 32U) {
     return 1;
   }
 

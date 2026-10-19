@@ -160,6 +160,40 @@ template <typename T>
   };
 }
 
+[[nodiscard]] ScenarioOutcome RunOpenEphemeralMemory(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  Arm(failure);
+  auto opened = modern_sqlite::Pager::OpenEphemeralMemory(
+      vfs, modern_sqlite::PagerOptions{
+               .empty_database_page_size =
+                   modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize},
+               .cache_capacity_pages = 2,
+           });
+  const std::size_t allocations = Disarm();
+  const modern_sqlite::ErrorCode error = ErrorCodeOf(opened);
+  const bool succeeded = opened.has_value();
+  if (opened.has_value()) {
+    opened->reset();
+  }
+  bool reusable = !vfs.pathless_file_present();
+  if (!succeeded) {
+    auto retry = modern_sqlite::Pager::OpenEphemeralMemory(
+        vfs, modern_sqlite::PagerOptions{
+                 .empty_database_page_size =
+                     modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize},
+                 .cache_capacity_pages = 2,
+             });
+    reusable = reusable && retry.has_value();
+  }
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .invariant_holds = reusable,
+  };
+}
+
 [[nodiscard]] ScenarioOutcome RunBeginRead(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs;
@@ -246,6 +280,73 @@ template <typename T>
       .succeeded = error == modern_sqlite::ErrorCode::kGeneric,
       .error = error,
       .invariant_holds = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] ScenarioOutcome RunMemoryEphemeralBeginRead(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  auto opened = modern_sqlite::Pager::OpenEphemeralMemory(
+      vfs, modern_sqlite::PagerOptions{
+               .empty_database_page_size =
+                   modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize},
+               .cache_capacity_pages = 2,
+           });
+  if (!opened.has_value()) {
+    return {};
+  }
+  std::unique_ptr<modern_sqlite::Pager> pager = std::move(*opened);
+
+  Arm(failure);
+  const auto begun = pager->BeginRead();
+  const std::size_t allocations = Disarm();
+  bool retryable = begun.has_value();
+  if (!begun.has_value()) {
+    retryable =
+        pager->state() == modern_sqlite::PagerState::kOpen && pager->BeginRead().has_value();
+  }
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = begun.has_value(),
+      .error = ErrorCodeOf(begun),
+      .invariant_holds = retryable && !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] ScenarioOutcome RunMemoryEphemeralAllocatePage(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  auto opened = modern_sqlite::Pager::OpenEphemeralMemory(
+      vfs, modern_sqlite::PagerOptions{
+               .empty_database_page_size =
+                   modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize},
+               .cache_capacity_pages = 2,
+           });
+  if (!opened.has_value()) {
+    return {};
+  }
+  std::unique_ptr<modern_sqlite::Pager> pager = std::move(*opened);
+  if (!pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return {};
+  }
+
+  Arm(failure);
+  auto page = pager->AllocatePage();
+  const std::size_t allocations = Disarm();
+  const modern_sqlite::ErrorCode error = ErrorCodeOf(page);
+  bool retryable = page.has_value();
+  page = std::unexpected(
+      modern_sqlite::Error::Create(modern_sqlite::ErrorCode::kGeneric, "release test pin"));
+  if (!retryable) {
+    auto retried = pager->AllocatePage();
+    retryable =
+        retried.has_value() && retried->frame().page_number() == modern_sqlite::PageNumber{1};
+  }
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = error == modern_sqlite::ErrorCode::kGeneric,
+      .error = error,
+      .invariant_holds = retryable && !vfs.pathless_file_present(),
   };
 }
 
@@ -616,6 +717,9 @@ int main() try {
   if (!ExhaustAllocations(RunOpenEphemeral)) {
     return 15;
   }
+  if (!ExhaustAllocations(RunOpenEphemeralMemory)) {
+    return 18;
+  }
   if (!ExhaustAllocations(RunBeginRead)) {
     return 2;
   }
@@ -624,6 +728,12 @@ int main() try {
   }
   if (!ExhaustAllocations(RunEphemeralAllocatePage)) {
     return 17;
+  }
+  if (!ExhaustAllocations(RunMemoryEphemeralBeginRead)) {
+    return 19;
+  }
+  if (!ExhaustAllocations(RunMemoryEphemeralAllocatePage)) {
+    return 20;
   }
   if (!ExhaustAllocations(RunReadPage)) {
     return 3;

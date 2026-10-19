@@ -76,7 +76,7 @@ The mode reuses the existing ephemeral write state:
 - page writes require no rollback journal;
 - commit, rollback, and savepoints remain unavailable because the Pager is
   destroyed with the statement arena; and
-- cleanup discards the complete cache.
+- arena destruction discards the complete cache.
 
 Every allocated page remains dirty and resident. A cache miss for an existing
 memory page is an internal invariant failure; there is no backing file from

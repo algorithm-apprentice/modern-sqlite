@@ -190,6 +190,8 @@ class Pager final {
       Vfs& vfs, std::string_view path, WritablePagerOptions options = {});
   [[nodiscard]] static Result<std::unique_ptr<Pager>> OpenEphemeral(Vfs& vfs,
                                                                     PagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<Pager>> OpenEphemeralMemory(
+      Vfs& services, PagerOptions options = {});
 
   Pager(ConstructionKey, Vfs& vfs, std::string path, std::unique_ptr<File> file,
         PagerOptions options, StorageMode storage_mode,
@@ -291,6 +293,9 @@ class Pager final {
   [[nodiscard]] Status StoredError() const;
   void AdvanceWriteTransactionGeneration() noexcept;
   void ResetWriteState() noexcept;
+  [[nodiscard]] bool memory_ephemeral() const noexcept {
+    return storage_mode_ == StorageMode::kEphemeral && file_ == nullptr;
+  }
 
   Vfs* vfs_;
   std::string path_;
