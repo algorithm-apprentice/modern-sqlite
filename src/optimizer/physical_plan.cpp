@@ -26,6 +26,76 @@ namespace modern_sqlite {
 namespace {
 
 constexpr std::uint64_t kDefaultEstimatedRows = 1U << 20U;
+constexpr std::uint64_t kMinimumDefaultIndexRows = 1'000;
+using LogEst = std::int32_t;
+constexpr LogEst kLogEstScale = 10;
+constexpr LogEst kTableScanCostBias = 16;
+constexpr LogEst kIndexScanCostBase = 1;
+constexpr LogEst kIndexWidthCostScale = 15;
+constexpr LogEst kRowIdShortcutCost = 33;
+constexpr LogEst kUniqueShortcutCost = 39;
+constexpr LogEst kShortcutOutput = 1;
+constexpr LogEst kRangeReduction = 20;
+constexpr LogEst kMinimumRangeOutput = 10;
+constexpr std::size_t kShortcutIndexTermLimit = 3;
+
+[[nodiscard]] constexpr LogEst ToLogEst(std::uint64_t value) noexcept {
+  constexpr std::array<LogEst, 8> kFraction{0, 2, 3, 5, 6, 7, 8, 9};
+  LogEst exponent = 4 * kLogEstScale;
+  if (value < kFraction.size()) {
+    if (value < 2U) {
+      return 0;
+    }
+    while (value < kFraction.size()) {
+      exponent -= kLogEstScale;
+      value <<= 1U;
+    }
+  } else {
+    const auto shift = static_cast<int>(std::bit_width(value)) - 4;
+    exponent += shift * kLogEstScale;
+    value >>= shift;
+  }
+  return kFraction[value & 7U] + exponent - kLogEstScale;
+}
+
+[[nodiscard]] constexpr LogEst AddLogEst(LogEst left, LogEst right) noexcept {
+  constexpr std::array<LogEst, 32> kCorrection{
+      10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4,
+      4,  4,  4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2,
+  };
+  if (left < right) {
+    std::swap(left, right);
+  }
+  const LogEst difference = left - right;
+  if (difference > 49) {
+    return left;
+  }
+  if (difference >= static_cast<LogEst>(kCorrection.size())) {
+    return left + 1;
+  }
+  return left + kCorrection[static_cast<std::size_t>(difference)];
+}
+
+[[nodiscard]] constexpr LogEst LogEstLogarithm(LogEst value) noexcept {
+  return value <= kLogEstScale ? 0 : ToLogEst(static_cast<std::uint64_t>(value)) - 33;
+}
+
+[[nodiscard]] constexpr std::uint64_t LogEstToRows(LogEst value) noexcept {
+  if (value <= 0) {
+    return 1;
+  }
+  std::uint64_t fraction = static_cast<std::uint64_t>(value % kLogEstScale);
+  const LogEst exponent = value / kLogEstScale;
+  if (fraction >= 5U) {
+    fraction -= 2U;
+  } else if (fraction >= 1U) {
+    --fraction;
+  }
+  if (exponent > 60) {
+    return static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  }
+  return exponent >= 3 ? (fraction + 8U) << (exponent - 3) : (fraction + 8U) >> (3 - exponent);
+}
 
 struct SourceInfo {
   bool single_row = false;
@@ -79,6 +149,7 @@ using ReadAccessPayload =
 struct ReadAccessCandidate {
   AccessPathCandidate published{};
   ReadAccessPayload payload{};
+  bool single_row_shortcut = false;
 };
 
 [[nodiscard]] std::uint64_t DerivedTableRowSize(const CatalogTable& table) noexcept;
@@ -813,13 +884,22 @@ template <typename Bound>
 
   const TableId table_id = source.table.value_or(TableId{});
   const CatalogTable& table = bound_select.catalog()->table(table_id);
+  std::uint64_t estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows);
+  if (estimated_rows < kMinimumDefaultIndexRows &&
+      std::ranges::any_of(
+          bound_select.catalog()->table_indexes(table_id),
+          [&](IndexId index) {
+            return !bound_select.catalog()->index(index).statistics.has_stat1;
+          })) {
+    estimated_rows = kMinimumDefaultIndexRows;
+  }
   return SourceInfo{
       .single_row = false,
       .id = source.id,
       .source_kind = BoundSourceKind::kCatalogTable,
       .table = table_id,
       .root_page = table.root_page,
-      .estimated_rows = table.statistics.estimated_rows.value_or(kDefaultEstimatedRows),
+      .estimated_rows = estimated_rows,
       .estimated_row_size = table.statistics.average_row_size.value_or(DerivedTableRowSize(table)),
       .rowid_eligible = !table.without_rowid,
   };
@@ -1468,8 +1548,8 @@ struct RequiredSourceValues {
   return literal != nullptr && literal->value.type() == SqlValueType::kNull;
 }
 
-[[nodiscard]] std::uint64_t DefaultPrefixRows(std::size_t equality_count) noexcept {
-  constexpr std::array<std::uint64_t, 6> kDefaults{10, 9, 8, 7, 6, 5};
+[[nodiscard]] LogEst DefaultPrefixLogEst(std::size_t equality_count) noexcept {
+  constexpr std::array<LogEst, 6> kDefaults{33, 32, 30, 28, 26, 23};
   return kDefaults[std::min(equality_count, kDefaults.size()) - 1U];
 }
 
@@ -1481,82 +1561,87 @@ struct RequiredSourceValues {
   return table_rows;
 }
 
-[[nodiscard]] std::uint64_t EstimateEqualityPrefixOutput(
+[[nodiscard]] LogEst EstimateEqualityPrefixLogEst(
     const BoundQueryView& bound_select, std::span<const PhysicalIndexEquality> equalities,
     std::uint64_t input_rows, std::span<const std::uint64_t> rows_per_prefix = {}) noexcept {
-  std::uint64_t estimate = input_rows;
+  LogEst estimate = ToLogEst(input_rows);
+  LogEst previous_prefix = estimate;
   for (std::size_t equality = 0; equality < equalities.size(); ++equality) {
     const std::size_t prefix = equality + 1U;
-    const std::uint64_t incoming = estimate;
-    const bool supplied = prefix < rows_per_prefix.size();
-    estimate = supplied ? rows_per_prefix[prefix] : std::min(DefaultPrefixRows(prefix), estimate);
-    if (!supplied && !equalities[equality].reject_null &&
+    const LogEst next_prefix = prefix < rows_per_prefix.size() ? ToLogEst(rows_per_prefix[prefix])
+                                                               : DefaultPrefixLogEst(prefix);
+    estimate += next_prefix - previous_prefix;
+    previous_prefix = next_prefix;
+    if (!equalities[equality].reject_null &&
         IsNullLiteral(bound_select, equalities[equality].key)) {
-      estimate = std::min(SaturatingMultiply(estimate, 2), incoming);
+      estimate += kLogEstScale;
     }
   }
   return estimate;
 }
 
-[[nodiscard]] std::uint64_t EstimateIndexOutput(const BoundQueryView& bound_select,
-                                                const CatalogIndex& index,
-                                                const PhysicalIndexScanNode& node,
-                                                std::uint64_t index_rows) noexcept {
+[[nodiscard]] std::uint64_t EstimateEqualityPrefixOutput(
+    const BoundQueryView& bound_select, std::span<const PhysicalIndexEquality> equalities,
+    std::uint64_t input_rows, std::span<const std::uint64_t> rows_per_prefix = {}) noexcept {
+  return LogEstToRows(
+      EstimateEqualityPrefixLogEst(bound_select, equalities, input_rows, rows_per_prefix));
+}
+
+[[nodiscard]] LogEst EstimateRangeOutputLogEst(LogEst input, std::uint32_t bound_count) noexcept {
+  const LogEst bounds = static_cast<LogEst>(bound_count);
+  const LogEst reduction = (bounds + static_cast<LogEst>(bound_count == 2U)) * kRangeReduction;
+  return std::min(input - bounds, std::max(input - reduction, kMinimumRangeOutput));
+}
+
+[[nodiscard]] LogEst EstimateIndexOutputLogEst(const BoundQueryView& bound_select,
+                                               const CatalogIndex& index,
+                                               const PhysicalIndexScanNode& node,
+                                               std::uint64_t index_rows) noexcept {
   const std::span<const std::uint64_t> prefixes =
       index.statistics.has_stat1 ? std::span<const std::uint64_t>{index.statistics.rows_per_prefix}
                                  : std::span<const std::uint64_t>{};
-  std::uint64_t estimate =
-      EstimateEqualityPrefixOutput(bound_select, node.equalities, index_rows, prefixes);
+  LogEst estimate =
+      EstimateEqualityPrefixLogEst(bound_select, node.equalities, index_rows, prefixes);
   if (node.equalities.size() == index.key_term_count && index.unique) {
     const bool only_ordinary_equalities = std::ranges::all_of(
         node.equalities,
         [](const PhysicalIndexEquality& equality) { return equality.reject_null; });
     if (only_ordinary_equalities || index.unique_not_null) {
-      estimate = std::min<std::uint64_t>(index_rows, 1);
+      estimate = std::min<LogEst>(estimate, 0);
     }
   }
 
   if (node.range.has_value()) {
-    const std::uint64_t divisor =
-        node.range->lower.has_value() && node.range->upper.has_value() ? 64U : 4U;
-    if (estimate != 0U) {
-      estimate = std::max<std::uint64_t>(estimate / divisor, 1U);
-    }
+    const auto bounds = static_cast<std::uint32_t>(node.range->lower.has_value()) +
+                        static_cast<std::uint32_t>(node.range->upper.has_value());
+    estimate = EstimateRangeOutputLogEst(estimate, bounds);
   }
   return estimate;
 }
 
-[[nodiscard]] AccessPathCost ScanCost(std::uint64_t rows, std::uint64_t row_size) noexcept {
+[[nodiscard]] AccessPathCost ScanCost(std::uint64_t rows) noexcept {
+  const LogEst output = ToLogEst(rows);
   return AccessPathCost{
-      .estimated_input_rows = rows,
-      .estimated_output_rows = rows,
-      .work_units = SaturatingMultiply(rows, row_size),
+      .run_log_est = output + kTableScanCostBias,
+      .output_log_est = output,
   };
 }
 
-[[nodiscard]] AccessPathCost RowIdCost(std::uint64_t rows) noexcept {
+[[nodiscard]] AccessPathCost RowIdCost(std::uint64_t rows, bool shortcut = false) noexcept {
   return AccessPathCost{
-      .estimated_input_rows = rows,
-      .estimated_output_rows = std::min<std::uint64_t>(rows, 1U),
-      .work_units = static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(rows, 1U))),
+      .run_log_est = shortcut ? kRowIdShortcutCost
+                              : AddLogEst(LogEstLogarithm(ToLogEst(rows)), kTableScanCostBias),
+      .output_log_est = shortcut ? kShortcutOutput : 0,
   };
 }
 
 [[nodiscard]] AccessPathCost RowIdRangeCost(const SourceInfo& source,
                                             std::uint32_t bound_count) noexcept {
-  const std::uint64_t rows = source.estimated_rows;
-  if (rows == 0U) {
-    return {};
-  }
-  const std::uint64_t output_rows =
-      std::max<std::uint64_t>(rows / (bound_count == 2U ? 64U : 4U), 1U);
-  const std::uint64_t seek_work =
-      static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(rows, 1U)));
+  const LogEst rows = ToLogEst(source.estimated_rows);
+  const LogEst output = EstimateRangeOutputLogEst(rows, bound_count);
   return AccessPathCost{
-      .estimated_input_rows = rows,
-      .estimated_output_rows = output_rows,
-      .work_units =
-          SaturatingAdd(seek_work, SaturatingMultiply(output_rows, source.estimated_row_size)),
+      .run_log_est = AddLogEst(LogEstLogarithm(rows), output + kTableScanCostBias),
+      .output_log_est = output,
   };
 }
 
@@ -1611,8 +1696,7 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   }
   const SourceInfo info = ResolveTableSource(bound_select, *source);
   if (!info.rowid_eligible ||
-      RowIdCost(info.estimated_rows).work_units >=
-          ScanCost(info.estimated_rows, info.estimated_row_size).work_units) {
+      RowIdCost(info.estimated_rows).run_log_est >= ScanCost(info.estimated_rows).run_log_est) {
     return std::optional<RowIdCandidatePlan>{};
   }
   const std::vector<ReadPredicateTerm> predicates =
@@ -1828,34 +1912,47 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   return candidate;
 }
 
+[[nodiscard]] bool IsUniqueLookupShortcut(const BoundQueryView& bound_select,
+                                          const PhysicalIndexScanNode& node) noexcept {
+  const CatalogIndex& index = bound_select.catalog()->index(node.index);
+  return index.unique && index.key_term_count <= kShortcutIndexTermLimit &&
+         node.equalities.size() == index.key_term_count &&
+         std::ranges::all_of(node.equalities, [&](const PhysicalIndexEquality& equality) {
+           return equality.reject_null ||
+                  (index.unique_not_null && !IsNullLiteral(bound_select, equality.key));
+         });
+}
+
 [[nodiscard]] AccessPathCandidate PublishIndexCandidate(const BoundQueryView& bound_select,
                                                         const SourceInfo& source,
-                                                        const IndexCandidatePlan& plan) noexcept {
+                                                        const IndexCandidatePlan& plan,
+                                                        bool allow_shortcut = false) noexcept {
   const CatalogSnapshot& catalog = *bound_select.catalog();
   const CatalogIndex& index = catalog.index(plan.node.index);
   const std::uint64_t index_rows = IndexCardinality(index, source.estimated_rows);
   const std::uint64_t row_size =
       index.statistics.average_row_size.value_or(DerivedIndexRowSize(catalog, index));
-  const std::uint64_t output_rows = EstimateIndexOutput(bound_select, index, plan.node, index_rows);
+  LogEst output = EstimateIndexOutputLogEst(bound_select, index, plan.node, index_rows);
   const bool constrained = !plan.node.equalities.empty() || plan.node.range.has_value();
-  const std::uint64_t seek_work =
-      constrained
-          ? static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(index_rows, 1U)))
-          : 0U;
-  std::uint64_t scan_work = SaturatingMultiply(output_rows, row_size);
+  const LogEst table_width = std::max<LogEst>(ToLogEst(source.estimated_row_size), 1);
+  LogEst run =
+      output + kIndexScanCostBase + (kIndexWidthCostScale * ToLogEst(row_size)) / table_width;
+  if (constrained) {
+    run = AddLogEst(LogEstLogarithm(ToLogEst(index_rows)), run);
+  }
   if (!plan.node.covering) {
-    const std::uint64_t table_seek = static_cast<std::uint64_t>(
-        std::bit_width(std::max<std::uint64_t>(source.estimated_rows, 1U)));
-    const std::uint64_t table_lookup = SaturatingAdd(table_seek, source.estimated_row_size);
-    scan_work = SaturatingAdd(scan_work, SaturatingMultiply(output_rows, table_lookup));
+    run = AddLogEst(run, output + kTableScanCostBias);
+  }
+  if (allow_shortcut && IsUniqueLookupShortcut(bound_select, plan.node)) {
+    run = kUniqueShortcutCost;
+    output = kShortcutOutput;
   }
   return AccessPathCandidate{
       .kind = PhysicalAccessKind::kIndexScan,
       .cost =
           AccessPathCost{
-              .estimated_input_rows = index_rows,
-              .estimated_output_rows = output_rows,
-              .work_units = SaturatingAdd(seek_work, scan_work),
+              .run_log_est = run,
+              .output_log_est = output,
           },
       .index = plan.node.index,
       .covering = plan.node.covering,
@@ -1868,34 +1965,11 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
   };
 }
 
-[[nodiscard]] bool CandidateCoversRows(const AccessPathCandidate& candidate) noexcept {
-  return candidate.kind != PhysicalAccessKind::kIndexScan || candidate.covering;
-}
-
 [[nodiscard]] bool PreferCandidate(const AccessPathCandidate& candidate,
                                    const AccessPathCandidate& selected) noexcept {
-  if (candidate.cost.work_units != selected.cost.work_units) {
-    return candidate.cost.work_units < selected.cost.work_units;
-  }
-  if (candidate.cost.estimated_output_rows != selected.cost.estimated_output_rows) {
-    return candidate.cost.estimated_output_rows < selected.cost.estimated_output_rows;
-  }
-  if (CandidateCoversRows(candidate) != CandidateCoversRows(selected)) {
-    return CandidateCoversRows(candidate);
-  }
-  const std::uint32_t candidate_prefix =
-      candidate.equality_term_count + static_cast<std::uint32_t>(candidate.range_bound_count > 0U);
-  const std::uint32_t selected_prefix =
-      selected.equality_term_count + static_cast<std::uint32_t>(selected.range_bound_count > 0U);
-  if (candidate_prefix != selected_prefix) {
-    return candidate_prefix > selected_prefix;
-  }
-  if (candidate.kind == PhysicalAccessKind::kRowIdLookup &&
-      selected.kind != PhysicalAccessKind::kRowIdLookup) {
-    return true;
-  }
-  return candidate.kind == PhysicalAccessKind::kRowIdRange &&
-         selected.kind == PhysicalAccessKind::kTableScan;
+  return candidate.cost.run_log_est < selected.cost.run_log_est ||
+         (candidate.cost.run_log_est == selected.cost.run_log_est &&
+          candidate.cost.output_log_est < selected.cost.output_log_est);
 }
 
 struct NonjoinedCoreAccessAnalysis {
@@ -1933,12 +2007,7 @@ struct NonjoinedCoreAccessAnalysis {
         .published =
             AccessPathCandidate{
                 .kind = PhysicalAccessKind::kSingleRow,
-                .cost =
-                    AccessPathCost{
-                        .estimated_input_rows = 1,
-                        .estimated_output_rows = 1,
-                        .work_units = 1,
-                    },
+                .cost = AccessPathCost{},
             },
     });
     return analysis;
@@ -1954,7 +2023,7 @@ struct NonjoinedCoreAccessAnalysis {
       .published =
           AccessPathCandidate{
               .kind = PhysicalAccessKind::kTableScan,
-              .cost = ScanCost(analysis.source.estimated_rows, analysis.source.estimated_row_size),
+              .cost = ScanCost(analysis.source.estimated_rows),
           },
   });
   for (std::size_t term = 0; term < analysis.predicates.terms.size(); ++term) {
@@ -1967,7 +2036,7 @@ struct NonjoinedCoreAccessAnalysis {
         .published =
             AccessPathCandidate{
                 .kind = PhysicalAccessKind::kRowIdLookup,
-                .cost = RowIdCost(analysis.source.estimated_rows),
+                .cost = RowIdCost(analysis.source.estimated_rows, true),
             },
         .payload =
             RowIdCandidatePlan{
@@ -1975,6 +2044,7 @@ struct NonjoinedCoreAccessAnalysis {
                 .selected_term = term,
                 .constraint = analysis.predicates.terms[term],
             },
+        .single_row_shortcut = true,
     });
     break;
   }
@@ -2002,9 +2072,11 @@ struct NonjoinedCoreAccessAnalysis {
       if (!candidate.has_value()) {
         continue;
       }
+      const bool shortcut = IsUniqueLookupShortcut(bound_select, candidate->node);
       analysis.access_candidates.push_back(ReadAccessCandidate{
-          .published = PublishIndexCandidate(bound_select, analysis.source, *candidate),
+          .published = PublishIndexCandidate(bound_select, analysis.source, *candidate, true),
           .payload = std::move(*candidate),
+          .single_row_shortcut = shortcut,
       });
     }
   }
@@ -2017,7 +2089,8 @@ struct NonjoinedCoreAccessAnalysis {
   for (std::size_t candidate = 1; candidate < analysis.access_candidates.size(); ++candidate) {
     const auto* index =
         std::get_if<IndexCandidatePlan>(&analysis.access_candidates[candidate].payload);
-    if (index != nullptr && !allow_secondary_index_selection) {
+    if (index != nullptr && !allow_secondary_index_selection &&
+        !analysis.access_candidates[candidate].single_row_shortcut) {
       continue;
     }
     const bool constrained_index =
@@ -2025,6 +2098,10 @@ struct NonjoinedCoreAccessAnalysis {
     const bool normal_eligible =
         index == nullptr || ((!has_constrained_rowid || constrained_index) &&
                              (index->node.covering || constrained_index));
+    if (normal_eligible && analysis.access_candidates[candidate].single_row_shortcut) {
+      analysis.selected_access = candidate;
+      break;
+    }
     if (normal_eligible &&
         PreferCandidate(analysis.access_candidates[candidate].published,
                         analysis.access_candidates[analysis.selected_access].published)) {
@@ -2142,7 +2219,7 @@ struct NonjoinedCoreAccessAnalysis {
       .published =
           AccessPathCandidate{
               .kind = PhysicalAccessKind::kTableScan,
-              .cost = ScanCost(info.estimated_rows, info.estimated_row_size),
+              .cost = ScanCost(info.estimated_rows),
           },
   };
   for (const IndexId index : indexes) {
@@ -2256,7 +2333,7 @@ struct NonjoinedCoreAccessAnalysis {
   const std::uint64_t matches =
       EstimateEqualityPrefixOutput(bound_select, automatic.equalities, info.estimated_rows);
   const std::uint64_t source_work =
-      ScanCost(info.estimated_rows, info.estimated_row_size).work_units;
+      SaturatingMultiply(info.estimated_rows, info.estimated_row_size);
   const std::uint64_t build_work =
       SaturatingMultiply(SaturatingMultiply(info.estimated_rows, levels), width);
   const std::uint64_t probe_work =
@@ -2316,12 +2393,12 @@ struct NonjoinedCoreAccessAnalysis {
                 .origin = candidate.constraint.origin,
             },
     };
-    output_rows = RowIdCost(info.estimated_rows).estimated_output_rows;
+    output_rows = LogEstToRows(RowIdCost(info.estimated_rows).output_log_est);
   } else if (auto index = JoinedIndexScan(bound_select, scan.core_index, source->id);
              index.has_value()) {
     const CatalogIndex& definition = bound_select.catalog()->index(index->index);
-    output_rows = EstimateIndexOutput(bound_select, definition, *index,
-                                      IndexCardinality(definition, info.estimated_rows));
+    output_rows = LogEstToRows(EstimateIndexOutputLogEst(
+        bound_select, definition, *index, IndexCardinality(definition, info.estimated_rows)));
     selected = std::move(*index);
   } else if (auto automatic = JoinedAutomaticIndex(bound_select, scan.core_index, *core, *source,
                                                    info, repetitions, options);
@@ -2978,8 +3055,11 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   }
   std::optional<std::size_t> selected_ordered;
   std::optional<AggregateMinMaxChoice> min_max;
+  const bool shortcut = plan.access_candidates[normal_access].single_row_shortcut;
+  const std::size_t first_candidate = shortcut ? normal_access : 0U;
+  const std::size_t candidate_end = shortcut ? normal_access + 1U : plan.access_candidates.size();
   if (aggregate.group_by.empty()) {
-    for (std::size_t candidate = 0; candidate < plan.access_candidates.size(); ++candidate) {
+    for (std::size_t candidate = first_candidate; candidate < candidate_end; ++candidate) {
       const std::optional<AggregateMinMaxChoice> choice = AnalyzeMinMaxCandidate(
           bound_select, plan.source, aggregate, plan.access_candidates[candidate]);
       if (!choice.has_value()) {
@@ -3004,7 +3084,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
     }
   } else {
     std::optional<AggregateGroupingChoice> grouping;
-    for (std::size_t candidate = 0; candidate < plan.access_candidates.size(); ++candidate) {
+    for (std::size_t candidate = first_candidate; candidate < candidate_end; ++candidate) {
       std::optional<AggregateGroupingChoice> choice = AnalyzeGroupingCandidate(
           bound_select, plan.source, aggregate, plan.access_candidates[candidate]);
       if (!choice.has_value()) {
@@ -3103,11 +3183,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
     return {};
   }
   if (std::holds_alternative<PhysicalSingleRowNode>(leaf.payload)) {
-    constexpr AccessPathCost kSingleRowCost{
-        .estimated_input_rows = 1,
-        .estimated_output_rows = 1,
-        .work_units = 1,
-    };
+    constexpr AccessPathCost kSingleRowCost{};
     if (candidates.size() != 1U || selected_candidate_index != 0U ||
         !matches(0, PhysicalAccessKind::kSingleRow, kSingleRowCost)) {
       return std::unexpected{InvariantFailure("single-row access candidate is invalid")};
@@ -3115,8 +3191,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
     return {};
   }
   if (candidates.empty() || selected_candidate_index >= candidates.size() ||
-      !matches(0, PhysicalAccessKind::kTableScan,
-               ScanCost(source.estimated_rows, source.estimated_row_size))) {
+      !matches(0, PhysicalAccessKind::kTableScan, ScanCost(source.estimated_rows))) {
     return std::unexpected{InvariantFailure("table-scan access candidate is invalid")};
   }
 
@@ -3124,7 +3199,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   if (candidate_index < candidates.size() &&
       candidates[candidate_index].kind == PhysicalAccessKind::kRowIdLookup) {
     if (!source.rowid_eligible ||
-        candidates[candidate_index].cost != RowIdCost(source.estimated_rows) ||
+        candidates[candidate_index].cost != RowIdCost(source.estimated_rows, true) ||
         candidates[candidate_index].index.has_value()) {
       return std::unexpected{InvariantFailure("rowid access candidates are invalid")};
     }
@@ -3173,7 +3248,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   }
   if (std::holds_alternative<PhysicalRowIdLookupNode>(leaf.payload)) {
     if (selected.kind != PhysicalAccessKind::kRowIdLookup ||
-        selected.cost != RowIdCost(source.estimated_rows)) {
+        selected.cost != RowIdCost(source.estimated_rows, true)) {
       return std::unexpected{InvariantFailure("selected rowid candidate is invalid")};
     }
     return {};

@@ -54,9 +54,9 @@ struct OptimizerOptions {
 [[nodiscard]] std::string_view PhysicalAccessKindName(PhysicalAccessKind kind) noexcept;
 
 struct AccessPathCost {
-  std::uint64_t estimated_input_rows = 0;
-  std::uint64_t estimated_output_rows = 0;
-  std::uint64_t work_units = 0;
+  std::int32_t setup_log_est = 0;
+  std::int32_t run_log_est = 0;
+  std::int32_t output_log_est = 0;
 
   constexpr auto operator<=>(const AccessPathCost&) const noexcept = default;
 };

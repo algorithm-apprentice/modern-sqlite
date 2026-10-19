@@ -1289,6 +1289,38 @@ TEST_F(ReadLoweringAggregateIntegration, UsesRowIdAccessInDemandOneCompoundArms)
   EXPECT_EQ(SqlValueType::kNull, point_scalar[0][0].type());
 }
 
+TEST_F(ReadLoweringAggregateIntegration, UsesUniqueShortcutsAcrossOrdinaryCompoundCores) {
+  for (const std::string_view sql :
+       {"SELECT DISTINCT id FROM items WHERE name=(SELECT name FROM items WHERE id=1)",
+        "SELECT DISTINCT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=1)",
+        "SELECT DISTINCT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=1) "
+        "LIMIT 1",
+        "SELECT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=1) "
+        "UNION SELECT 99,NULL LIMIT +1",
+        "SELECT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=1) "
+        "UNION ALL SELECT 99,NULL ORDER BY 1 LIMIT 1"}) {
+    SCOPED_TRACE(sql);
+    const auto rows = Execute(sql);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+  }
+  for (const std::string_view sql :
+       {"SELECT DISTINCT id,score FROM items WHERE name='missing'",
+        "SELECT DISTINCT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=99)",
+        "SELECT DISTINCT id,score FROM items WHERE name=(SELECT name FROM items WHERE id=1) "
+        "AND id<0"}) {
+    SCOPED_TRACE(sql);
+    EXPECT_TRUE(Execute(sql).empty());
+  }
+
+  const auto compound = Execute(
+      "SELECT id FROM items WHERE name=(SELECT name FROM items WHERE id=1) "
+      "UNION ALL SELECT count() FROM items WHERE id=99");
+  ASSERT_EQ(2U, compound.size());
+  EXPECT_EQ(1, compound[0][0].integer_value());
+  EXPECT_EQ(0, compound[1][0].integer_value());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, AppliesSqliteRowIdRangeKeyConversions) {
   const auto ids = [&](std::string_view sql, SqlValue key) {
     std::array<SqlValue, 1> parameters{std::move(key)};

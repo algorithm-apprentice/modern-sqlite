@@ -21,6 +21,7 @@ The reference is the local SQLite 3.54.0 snapshot in `project/manifest.json`.
 |---|---|
 | LogEst conversion/addition and logarithmic seek estimate | `util.c:2055-2130`; `where.c:700-702` |
 | Schema-width and default prefix estimates | `build.c:2305-2328,4631-4673` |
+| Load STAT1 before applying missing-index defaults | `analyze.c:1942-2008` |
 | Term prerequisites, likelihood, ON ownership | `whereexpr.c:75-84,1154-1240`; `where.c:832-853` |
 | Compatible column/affinity/collation term scanning | `where.c:351-521` |
 | Access-term consumption and outer residual readiness | `wherecode.c:419-438,1494-1516,2678-2733,2854-2872` |
@@ -110,7 +111,8 @@ otherwise remain in force. New enumerators use unprefixed names.
 
 Use one ordered two-commit implementation batch under ADR-0106:
 
-1. Translate native costs, estimates, and single-source shortcut/selection.
+1. Translate LogEst primitives, default/STAT1 costs, and single-source
+   shortcut/selection.
 2. Translate candidate prerequisites/pruning and bounded path solving, then
    consume the selected sequence in canonical lowering.
 
@@ -138,3 +140,21 @@ controls, without replacing historical baselines or relaxing budgets.
 
 Ledger 9 remains open until both slices and their integrated gates close.
 No later repair or SQL feature begins during this batch.
+
+The first slice's tiny-table joined-scan regression failed before production
+changes. Source-verified follow-ups also failed for advanced/aggregate
+shortcut precedence and missing-index STAT1 defaults. The corrected slice
+passes all 78 optimizer cases and the complete 1,447-batched-plus-92-isolated
+fast-local tier.
+
+Admitting native unique shortcuts reuses canonical index descriptors, one
+shared access-register workspace, traversal primitives, and cursor cleanup
+inside the existing streaming source producer. Existing DISTINCT and
+compound consumers use that producer; focused coverage includes covering and
+noncovering hits, misses, NULL keys, residual rejection, LIMIT, materialized
+and ordered compounds, and aggregate siblings. No second source executor is
+introduced. Candidate-dependent likelihood, residual adjustments, pruning,
+and path selection still belong to the second slice.
+
+GPT-5.6 Sol approved the first implementation slice and its directly coupled
+lowering corrections with no significant unresolved issue before commit.

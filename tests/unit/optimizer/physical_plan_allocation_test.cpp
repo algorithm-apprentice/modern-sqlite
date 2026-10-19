@@ -322,7 +322,7 @@ int main() try {
     return 1;
   }
   checksum += *published->selected_candidate_index();
-  checksum += published->selected_candidate()->cost.work_units;
+  checksum += static_cast<std::uint64_t>(published->selected_candidate()->cost.run_log_est);
   for (std::uint32_t index = 0; index < published->nodes().size(); ++index) {
     const PhysicalNode& node = published->node(PhysicalNodeId{index});
     checksum += static_cast<std::uint64_t>(PhysicalNodeKindOf(node));
@@ -341,7 +341,7 @@ int main() try {
     return 1;
   }
   checksum += *compound->selected_candidate_index();
-  checksum += compound->selected_candidate()->cost.work_units;
+  checksum += static_cast<std::uint64_t>(compound->selected_candidate()->cost.run_log_est);
   checksum += compound->core_access_plans().size();
   for (std::uint32_t index = 0; index < compound->nodes().size(); ++index) {
     const PhysicalNode& node = compound->node(PhysicalNodeId{index});

@@ -168,7 +168,8 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
   return *std::move(created);
 }
 
-[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog() {
+[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog(
+    std::optional<std::uint64_t> estimated_rows = std::nullopt) {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 31, .generation = 17},
@@ -197,6 +198,11 @@ static_assert(!std::is_convertible_v<PhysicalNodeId, BoundExpressionId>);
               },
           },
       .rowid_alias = ColumnId{0},
+      .statistics =
+          TableStatistics{
+              .has_stat1 = estimated_rows.has_value(),
+              .estimated_rows = estimated_rows,
+          },
   });
   input.indexes.push_back(CatalogIndexInput{
       .definition = SchemaDefinitionId{1},
@@ -1112,6 +1118,46 @@ TEST(PhysicalPlan, SelectsSourceOwnedRowidSeeksForAlreadyPositionedJoinPrefixes)
     const auto& key = std::get<BoundColumnExpression>(bound.expression(lookup->key).payload);
     EXPECT_EQ(BoundSourceId{0}, bound.source_columns()[key.column.value()].source);
   }
+}
+
+TEST(PhysicalPlan, UsesNativeTinyJoinScanAndSingleSourceRowidShortcut) {
+  const auto catalog = TestCatalog();
+  const PhysicalPlan joined =
+      OptimizeOrThrow("SELECT a.id,b.id FROM Tiny a LEFT JOIN Tiny b ON b.id=a.id", catalog);
+  ASSERT_GE(joined.nodes().size(), 2U);
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(joined.nodes()[1].payload));
+
+  const PhysicalPlan single = OptimizeOrThrow("SELECT id FROM Tiny WHERE rowid=?", catalog);
+  ASSERT_NE(nullptr, single.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, single.selected_candidate()->kind);
+}
+
+TEST(PhysicalPlan, PreservesNativeShortcutsAcrossAdvancedAndAggregatePlanning) {
+  const PhysicalPlan distinct =
+      OptimizeOrThrow("SELECT DISTINCT Code FROM Items WHERE Code=?", IndexedCatalog());
+  ASSERT_NE(nullptr, distinct.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, distinct.selected_candidate()->kind);
+  EXPECT_EQ(IndexId{3}, distinct.selected_candidate()->index);
+
+  for (const std::string_view sql : {"SELECT min(id) FROM Tiny WHERE rowid=?",
+                                     "SELECT id,count() FROM Tiny WHERE rowid=? GROUP BY id"}) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan aggregate = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_NE(nullptr, aggregate.selected_candidate());
+    EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, aggregate.selected_candidate()->kind);
+  }
+}
+
+TEST(PhysicalPlan, AppliesNativeTableFloorForIndexesWithoutStatistics) {
+  const PhysicalPlan plan =
+      OptimizeOrThrow("SELECT id,Name FROM Items WHERE Name=?", IndexedMutationCatalog(1));
+  ASSERT_NE(nullptr, plan.selected_candidate());
+  EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.selected_candidate()->kind);
+  EXPECT_EQ(IndexId{0}, plan.selected_candidate()->index);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 115, .output_log_est = 99}), plan.candidates()[0].cost);
+  EXPECT_EQ(
+      std::optional<std::uint64_t>{1},
+      plan.logical_plan().bound_select().catalog()->table(TableId{0}).statistics.estimated_rows);
 }
 
 TEST(PhysicalPlan, SelectsAutomaticCoveringEqualityWithCompleteSourceMetadata) {
@@ -2588,9 +2634,7 @@ TEST(PhysicalPlan, BuildsConstantRowAndMovesRetainedLogicalPlan) {
             std::get<PhysicalProjectionNode>(plan.nodes()[1].payload).logical_projection);
   ASSERT_EQ(1U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kSingleRow, plan.selected_candidate()->kind);
-  EXPECT_EQ(
-      (AccessPathCost{.estimated_input_rows = 1, .estimated_output_rows = 1, .work_units = 1}),
-      plan.selected_candidate()->cost);
+  EXPECT_EQ(AccessPathCost{}, plan.selected_candidate()->cost);
   EXPECT_EQ("SCAN CONSTANT ROW", ExplainPhysicalPlan(plan));
   EXPECT_EQ(identity, plan.logical_plan().bound_select().catalog());
 
@@ -2623,8 +2667,7 @@ TEST(PhysicalPlan, ChoosesFullScanWithExplicitCostAndResidualFilter) {
   EXPECT_EQ(0U, *plan.selected_candidate_index());
   ASSERT_NE(nullptr, plan.selected_candidate());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.selected_candidate()->kind);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 100, .estimated_output_rows = 100, .work_units = 2400}),
+  EXPECT_EQ((AccessPathCost{.run_log_est = 82, .output_log_est = 66}),
             plan.selected_candidate()->cost);
   EXPECT_EQ("SCAN \"Items\"", ExplainPhysicalPlan(plan));
 }
@@ -2644,9 +2687,7 @@ TEST(PhysicalPlan, ChoosesRowIdLookupAndPublishesBothCandidates) {
   ASSERT_EQ(2U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, plan.candidates()[1].kind);
-  EXPECT_EQ(
-      (AccessPathCost{.estimated_input_rows = 100, .estimated_output_rows = 1, .work_units = 7}),
-      plan.candidates()[1].cost);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 33, .output_log_est = 1}), plan.candidates()[1].cost);
   ASSERT_TRUE(plan.selected_candidate_index().has_value());
   EXPECT_EQ(1U, *plan.selected_candidate_index());
   ASSERT_NE(nullptr, plan.selected_candidate());
@@ -2672,8 +2713,8 @@ TEST(PhysicalPlan, RecognizesCompatibleRowIdSpellingsAndTieBreaksLookup) {
 
   const PhysicalPlan tiny = OptimizeOrThrow("SELECT id FROM Tiny WHERE rowid=?", catalog);
   ASSERT_EQ(2U, tiny.candidates().size());
-  EXPECT_EQ(8U, tiny.candidates()[0].cost.work_units);
-  EXPECT_EQ(1U, tiny.candidates()[1].cost.work_units);
+  EXPECT_EQ(16, tiny.candidates()[0].cost.run_log_est);
+  EXPECT_EQ(33, tiny.candidates()[1].cost.run_log_est);
   EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, tiny.selected_candidate()->kind);
 }
 
@@ -2750,19 +2791,22 @@ TEST(PhysicalPlan, NormalizesAndPublishesRowIdRangeBounds) {
   EXPECT_FALSE(range.lower->inclusive);
   EXPECT_TRUE(range.upper->inclusive);
   EXPECT_EQ(2U, bounded.selected_candidate()->range_bound_count);
-  EXPECT_LT(bounded.selected_candidate()->cost.estimated_output_rows,
-            bounded.candidates()[0].cost.estimated_output_rows);
-  EXPECT_LT(bounded.selected_candidate()->cost.work_units, bounded.candidates()[0].cost.work_units);
+  EXPECT_EQ(10, bounded.selected_candidate()->cost.output_log_est);
+  EXPECT_LT(bounded.selected_candidate()->cost.output_log_est,
+            bounded.candidates()[0].cost.output_log_est);
+  EXPECT_LT(bounded.selected_candidate()->cost.run_log_est,
+            bounded.candidates()[0].cost.run_log_est);
   EXPECT_EQ("SEARCH \"Items\" USING INTEGER PRIMARY KEY (rowid>? AND rowid<=?)",
             ExplainPhysicalPlan(bounded));
 
   const PhysicalPlan zero_estimate =
       OptimizeOrThrow("SELECT Name FROM Items WHERE id<1", TestCatalog("Items", 0));
   ASSERT_EQ(2U, zero_estimate.candidates().size());
-  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[0].cost);
-  EXPECT_EQ(AccessPathCost{}, zero_estimate.candidates()[1].cost);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 16}), zero_estimate.candidates()[0].cost);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 19, .output_log_est = -1}),
+            zero_estimate.candidates()[1].cost);
   ASSERT_NE(nullptr, zero_estimate.selected_candidate());
-  EXPECT_EQ(PhysicalAccessKind::kRowIdRange, zero_estimate.selected_candidate()->kind);
+  EXPECT_EQ(PhysicalAccessKind::kTableScan, zero_estimate.selected_candidate()->kind);
 }
 
 TEST(PhysicalPlan, KeepsLaterRowIdBoundsResidualAndRejectsAccessBarriers) {
@@ -3014,23 +3058,13 @@ TEST(PhysicalPlan, SelectsCoveringIndexRangesWithStat1Costs) {
 
   ASSERT_EQ(4U, plan.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, plan.candidates()[0].kind);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 4096,
-                .estimated_output_rows = 4096,
-                .work_units = 2'097'152,
-            }),
-            plan.candidates()[0].cost);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 136, .output_log_est = 120}), plan.candidates()[0].cost);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, plan.candidates()[1].kind);
   EXPECT_EQ(IndexId{0}, plan.candidates()[1].index);
   EXPECT_TRUE(plan.candidates()[1].covering);
   EXPECT_EQ(1U, plan.candidates()[1].equality_term_count);
   EXPECT_EQ(2U, plan.candidates()[1].range_bound_count);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 4096,
-                .estimated_output_rows = 1,
-                .work_units = 41,
-            }),
-            plan.candidates()[1].cost);
+  EXPECT_EQ((AccessPathCost{.run_log_est = 40, .output_log_est = 10}), plan.candidates()[1].cost);
   ASSERT_TRUE(plan.selected_candidate_index().has_value());
   EXPECT_EQ(1U, *plan.selected_candidate_index());
 
@@ -3080,11 +3114,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   ASSERT_EQ(4U, full.candidates().size());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, full.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, full.selected_candidate()->index);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 4096,
-                .estimated_output_rows = 4096,
-                .work_units = 114'688,
-            }),
+  EXPECT_EQ((AccessPathCost{.run_log_est = 129, .output_log_est = 120}),
             full.selected_candidate()->cost);
   EXPECT_EQ("SCAN \"Items\" USING COVERING INDEX \"items_category_score\"",
             ExplainPhysicalPlan(full));
@@ -3092,8 +3122,8 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   const PhysicalPlan unique = OptimizeOrThrow("SELECT Code FROM Items WHERE Code IS ?1", catalog);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, unique.selected_candidate()->kind);
   EXPECT_EQ(IndexId{3}, unique.selected_candidate()->index);
-  EXPECT_EQ(1U, unique.selected_candidate()->cost.estimated_output_rows);
-  EXPECT_EQ(37U, unique.selected_candidate()->cost.work_units);
+  EXPECT_EQ(1, unique.selected_candidate()->cost.output_log_est);
+  EXPECT_EQ(39, unique.selected_candidate()->cost.run_log_est);
   const auto& unique_node = std::get<PhysicalIndexScanNode>(unique.nodes()[0].payload);
   ASSERT_EQ(1U, unique_node.equalities.size());
   EXPECT_FALSE(unique_node.equalities[0].reject_null);
@@ -3106,8 +3136,8 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   const PhysicalPlan unselective = OptimizeOrThrow("SELECT id FROM Items WHERE Flag=?1", catalog);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, unselective.selected_candidate()->kind);
   EXPECT_EQ(IndexId{2}, unselective.selected_candidate()->index);
-  EXPECT_EQ(4096U, unselective.selected_candidate()->cost.estimated_output_rows);
-  EXPECT_EQ(32'781U, unselective.selected_candidate()->cost.work_units);
+  EXPECT_EQ(120, unselective.selected_candidate()->cost.output_log_est);
+  EXPECT_EQ(126, unselective.selected_candidate()->cost.run_log_est);
 
   const PhysicalPlan selective_noncovering =
       OptimizeOrThrow("SELECT Payload FROM Items WHERE Category=?1", catalog);
@@ -3115,11 +3145,7 @@ TEST(PhysicalPlan, CostsCoveringAndNoncoveringIndexes) {
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, selective_noncovering.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, selective_noncovering.selected_candidate()->index);
   EXPECT_FALSE(selective_noncovering.selected_candidate()->covering);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 4096,
-                .estimated_output_rows = 16,
-                .work_units = 8861,
-            }),
+  EXPECT_EQ((AccessPathCost{.run_log_est = 65, .output_log_est = 40}),
             selective_noncovering.selected_candidate()->cost);
   const auto& selective_node =
       std::get<PhysicalIndexScanNode>(selective_noncovering.nodes()[0].payload);
@@ -3159,21 +3185,21 @@ TEST(PhysicalPlan, AppliesDefaultNullAndRangeEstimates) {
       OptimizeOrThrow("SELECT id, Category FROM Items WHERE Category IS NULL", catalog);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, collated_null.selected_candidate()->kind);
   EXPECT_EQ(IndexId{0}, collated_null.selected_candidate()->index);
-  EXPECT_EQ(16U, collated_null.selected_candidate()->cost.estimated_output_rows);
+  EXPECT_EQ(50, collated_null.selected_candidate()->cost.output_log_est);
 
   const PhysicalPlan null_equality =
       OptimizeOrThrow("SELECT id, Score FROM Items WHERE Score IS NULL", catalog);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, null_equality.selected_candidate()->kind);
   EXPECT_EQ(IndexId{1}, null_equality.selected_candidate()->index);
-  EXPECT_EQ(20U, null_equality.selected_candidate()->cost.estimated_output_rows);
-  EXPECT_EQ(173U, null_equality.selected_candidate()->cost.work_units);
+  EXPECT_EQ(43, null_equality.selected_candidate()->cost.output_log_est);
+  EXPECT_EQ(54, null_equality.selected_candidate()->cost.run_log_est);
 
   const PhysicalPlan two_sided_range =
       OptimizeOrThrow("SELECT id, Score FROM Items WHERE Score>=?1 AND Score<?2", catalog);
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, two_sided_range.selected_candidate()->kind);
   EXPECT_EQ(IndexId{1}, two_sided_range.selected_candidate()->index);
-  EXPECT_EQ(64U, two_sided_range.selected_candidate()->cost.estimated_output_rows);
-  EXPECT_EQ(525U, two_sided_range.selected_candidate()->cost.work_units);
+  EXPECT_EQ(60, two_sided_range.selected_candidate()->cost.output_log_est);
+  EXPECT_EQ(68, two_sided_range.selected_candidate()->cost.run_log_est);
 }
 
 TEST(PhysicalPlan, KeepsIneligibleConstraintsAsCoveringScanResiduals) {
@@ -3241,7 +3267,7 @@ TEST(PhysicalPlan, SelectsOnlyIndexesWhoseCollationsAreRegistered) {
   const PhysicalPlan constrained = OptimizeOrThrow("SELECT id FROM Custom WHERE Value=?1", catalog,
                                                    CustomCollationEnvironment());
   EXPECT_EQ(PhysicalAccessKind::kIndexScan, constrained.selected_candidate()->kind);
-  EXPECT_EQ(27U, constrained.selected_candidate()->cost.work_units);
+  EXPECT_EQ(31, constrained.selected_candidate()->cost.run_log_est);
 }
 
 TEST(PhysicalPlan, PreservesPriorGuardsWhenPredicateBecomesEmpty) {
@@ -3338,11 +3364,7 @@ TEST(PhysicalPlan, SupportsSchemaRowIdAndCanonicalExplainEscaping) {
   EXPECT_EQ(BoundSourceKind::kSchemaTable, lookup.source_kind);
   EXPECT_FALSE(lookup.table.has_value());
   EXPECT_EQ(RootPageId{1}, lookup.root_page);
-  EXPECT_EQ((AccessPathCost{
-                .estimated_input_rows = 1U << 20U,
-                .estimated_output_rows = 1,
-                .work_units = 21,
-            }),
+  EXPECT_EQ((AccessPathCost{.run_log_est = 33, .output_log_est = 1}),
             schema.selected_candidate()->cost);
   EXPECT_EQ("SEARCH \"sqlite_schema\" USING INTEGER PRIMARY KEY (rowid=?)",
             ExplainPhysicalPlan(schema));
