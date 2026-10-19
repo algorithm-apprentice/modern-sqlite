@@ -20,6 +20,16 @@ _FILE_SPILL_ALLOCATION_LIMITS = {
     "libc++": 270_000,
     "libstdc++": 400_000,
 }
+_TOP_N_ALLOCATION_LIMITS = {
+    "libc++": {
+        "order-topn-memory": 80_000,
+        "order-topn-file": 550_000,
+    },
+    "libstdc++": {
+        "order-topn-memory": 250_000,
+        "order-topn-file": 550_000,
+    },
+}
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -69,6 +79,9 @@ class OrderByBenchmarkCliTest(unittest.TestCase):
                 standard_library
             ],
         }
+        cls.modern_allocation_limits.update(
+            _TOP_N_ALLOCATION_LIMITS[standard_library]
+        )
         cls.fixture = (
             cls.root
             / pathlib.PurePosixPath(cls.workloads["fixtures"][0]["path"])
@@ -155,6 +168,19 @@ class OrderByBenchmarkCliTest(unittest.TestCase):
                     if engine == "modern" and case_id == "order-topn-file":
                         self.assertGreater(
                             report["counters"]["modern"]["pages_written"],
+                            0,
+                        )
+                    if engine == "modern" and case_id == "order-topn-memory":
+                        self.assertEqual(
+                            0,
+                            report["counters"]["modern"]["pages_written"],
+                        )
+                    if engine == "modern" and case_id in (
+                        "order-topn-memory",
+                        "order-topn-file",
+                    ):
+                        self.assertGreater(
+                            report["counters"]["modern"]["btree_comparisons"],
                             0,
                         )
                     if engine == "modern" and case_id == order_by_performance.CASE_IDS[0]:
