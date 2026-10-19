@@ -343,6 +343,72 @@ algorithms. Their gaps remain ledger 6 and 7.
 - vectorized VM encoding; and
 - allocator integration beyond the statement budget.
 
+## Implementation evidence
+
+Design commit `21567a8`, core implementation commit `704cf4a`, geometric
+multi-owner growth correction `60026ba`, diagnostic-contract commit
+`514143a`, and instrumentation-threshold correction `5cae1a4` implement this
+decision.
+
+Memory temp-store owns one `[Entry][record bytes]` allocation per admitted
+record. File temp-store owns one offset-linked `ByteBuffer` arena, validates
+each record once at admission, and rebinds the private validated layout after
+relocation without reparsing. The VM inserts value spans directly. Detached
+`PmaRun` shells now exist before sorting, extent allocation, or file I/O, and
+exact accounting transfers only after complete PMA publication.
+
+Focused coverage includes:
+
+- exact one-allocation memory admission and logarithmic file-arena growth for
+  65,536 direct records;
+- geometric growth after crossing a multi-owner fair share;
+- stable wide records through arena relocation;
+- threshold crossing, requester exclusion, self-spill, exact-headroom retry,
+  and conditional published-run merge;
+- tiny metadata budgets and detached-node OOM before current-run, direct-run,
+  and merge-output I/O;
+- failed growth preserving the published prefix for retry;
+- repeated page-sized PMAs, fan-in merges, buffered I/O, corruption, reset,
+  close, and statement-wide cleanup; and
+- dependent automatic-index, aggregate, session, and VM spill/failure
+  integration.
+
+The native diagnostic CLI enforces 70,000 allocations for
+`order-integer-memory` and 270,000 for each file-spill case. Fresh exact-input
+evidence preserves every result, digest, workload, deadline, and guard:
+
+| Workload | Prior allocations | New allocations | Prior wall ratio | New wall ratio |
+|---|---:|---:|---:|---:|
+| integer ORDER BY, memory | 131,182 | 65,655 | 4.166037 | 4.302567 |
+| payload ORDER BY, memory | 337,169 | 262,254 | 2.116717 | 2.153920 |
+| minimal spill ORDER BY | 402,726 | 262,325 | 6.204441 | 1.904770 |
+| multi-spill ORDER BY | 402,735 | 262,459 | 6.371117 | 1.954315 |
+| wide aggregate modifiers, file | 545,693 | 274,555 | 6.321198 | 6.123345 |
+| sorted grouping, file | 200,940 | 69,904 | 6.908375 | 6.921006 |
+
+The wide modifier case retains two shared files, a 2,097,152-byte retained
+peak, a 2,101,248-byte working-set peak, and the
+`c9abc9b4135a16a2` digest while reducing sorter spill writes from 282 to 278.
+The fresh ORDER BY and aggregate artifacts are retained as
+`sorter-allocation-order-baseline-v1` and
+`sorter-allocation-aggregate-baseline-v1`.
+
+Fast-local passes 1,421 batched and 92 isolated tests. Isolated Debug,
+Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,554 tests;
+instrumentation passes 1,571. Twenty-seven shared checks reconcile 121
+configured instances, and 58 native compatibility/performance contracts pass.
+Four fresh 20,000-run fuzz domains complete with seed 102. Full production
+clang-tidy, pinned formatting, graph, engineering discipline, and whitespace
+checks pass.
+
+GPT-5.6 Sol review found that the first pressure implementation merged every
+published run after self-spill. The corrected path merges only when the exact
+pending cell still cannot fit. Fresh aggregate evidence then exposed
+exact-size growth beyond the initial fair share; the final policy retains
+conservative sparse allocation while restoring geometric growth from free
+statement headroom. Focused regressions and follow-up review close both
+findings.
+
 ## References
 
 - ADR-0054: Spill-Capable Stable Record Sorter
