@@ -285,7 +285,7 @@ Add one standalone allocation executable. For 65,536 small direct records:
 - file mode permits only geometric arena growth plus bounded sorter/setup
   allocations before PMA I/O.
 
-Extend the native ordering diagnostic contract:
+Extend the native ordering diagnostic CLI contract:
 
 - `order-integer-memory` allocations must be below 70,000; and
 - `order-minimal-spill-file` allocations must not exceed 270,000; and

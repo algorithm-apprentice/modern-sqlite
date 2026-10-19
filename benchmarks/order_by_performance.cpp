@@ -3181,10 +3181,6 @@ struct DiagnosticRun {
 };
 
 #if MODERN_SQLITE_ORDER_BY_PERFORMANCE_DIAGNOSTICS
-constexpr std::uint64_t kOrderIntegerMemoryAllocationLimit = 70'000U;
-constexpr std::uint64_t kOrderMinimalSpillAllocationLimit = 270'000U;
-constexpr std::uint64_t kOrderMultiSpillAllocationLimit = 270'000U;
-
 [[nodiscard]] ModernCounterValues ReadModernCounters(
     const modern_sqlite::instrumentation::CounterCollection& counters) {
   ModernCounterValues result;
@@ -3193,24 +3189,6 @@ constexpr std::uint64_t kOrderMultiSpillAllocationLimit = 270'000U;
         counters.Value(static_cast<modern_sqlite::instrumentation::Counter>(index));
   }
   return result;
-}
-
-void RequireOrderAllocationContract(const WorkloadDefinition& definition,
-                                    const ModernCounterValues& counters) {
-  const std::uint64_t allocations =
-      counters
-          .values[static_cast<std::size_t>(modern_sqlite::instrumentation::Counter::kAllocations)];
-  std::optional<std::uint64_t> limit;
-  if (definition.id == "order-integer-memory") {
-    limit = kOrderIntegerMemoryAllocationLimit;
-  } else if (definition.id == "order-minimal-spill-file") {
-    limit = kOrderMinimalSpillAllocationLimit;
-  } else if (definition.id == "order-multi-spill-file") {
-    limit = kOrderMultiSpillAllocationLimit;
-  }
-  if (limit.has_value() && allocations > *limit) {
-    throw BenchmarkMismatch{"Modern SQLite ORDER BY allocation contract failed"};
-  }
 }
 
 [[nodiscard]] DiagnosticRun RunModernDiagnostic(const std::filesystem::path& path,
@@ -3235,7 +3213,6 @@ void RequireOrderAllocationContract(const WorkloadDefinition& definition,
   RequireWork("diagnostic", diagnostic, definition.diagnostic);
   RequireWork("post-verification", engine.Verify(definition), definition.verification);
   ModernCounterValues values = ReadModernCounters(counters);
-  RequireOrderAllocationContract(definition, values);
   const auto pages_written =
       values
           .values[static_cast<std::size_t>(modern_sqlite::instrumentation::Counter::kPagesWritten)];

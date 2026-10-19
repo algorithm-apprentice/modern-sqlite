@@ -16,6 +16,11 @@ from tools import read_performance
 
 
 _COMMAND_LINE_ARGUMENTS: argparse.Namespace | None = None
+_MODERN_ALLOCATION_LIMITS = {
+    "order-integer-memory": 70_000,
+    "order-minimal-spill-file": 270_000,
+    "order-multi-spill-file": 270_000,
+}
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -119,6 +124,11 @@ class OrderByBenchmarkCliTest(unittest.TestCase):
                         sqlite_spill_bytes[case_id] = report["counters"]["sqlite"][
                             "temp_bytes_spilled"
                         ]
+                    if engine == "modern" and case_id in _MODERN_ALLOCATION_LIMITS:
+                        self.assertLessEqual(
+                            report["counters"]["modern"]["allocations"],
+                            _MODERN_ALLOCATION_LIMITS[case_id],
+                        )
                     if engine == "modern" and case_id == "order-topn-file":
                         self.assertGreater(
                             report["counters"]["modern"]["pages_written"],
