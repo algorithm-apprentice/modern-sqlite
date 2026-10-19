@@ -104,16 +104,20 @@ tail, current pointer, or accounting value changes.
 File temp-store mode owns one `ByteBuffer` bulk arena per logical sorter.
 
 The first accepted in-memory record first guarantees the exact aligned cell
-size, then opportunistically grows toward:
+size, then takes at most one geometric doubling step toward:
 
 ```text
 min(sorter page size, fairness threshold, available statement headroom)
 ```
 
-bytes. Later admission first reserves the exact growth required for the
-pending cell, then opportunistically doubles within the fairness threshold and
-remaining headroom. Failure to reserve optional growth is not an insertion
-failure.
+bytes. For optional arena growth, the fairness threshold is the current
+statement budget divided by the number of registered memory owners, capped by
+the per-sorter threshold. Exact admission may exceed that fair share; the
+share only prevents one arena from opportunistically consuming memory needed
+by sibling owners. Later admission first reserves the exact growth required
+for the pending cell, then opportunistically doubles within the fairness
+threshold and remaining headroom. Failure to reserve optional growth is not
+an insertion failure.
 
 Each record is encoded as:
 
@@ -125,9 +129,10 @@ Offsets use an all-ones sentinel for end-of-list. Headers are encoded through
 the canonical coding helpers and require no aligned typed object inside byte
 storage. The validated layout records the header offsets and field count
 produced by the one admission-time `RecordView::Parse()`. A narrow record-codec
-contract reconstructs a trusted `RecordView` over relocated bytes in O(1)
-after checking the encoded size. Reallocation copies only the published
-prefix and cannot invalidate links or force full-record reparsing.
+internal contract reconstructs a trusted `RecordView` over relocated bytes in
+O(1) after checking the encoded size. The validated-layout access is not part
+of the installed public API. Reallocation copies only the published prefix
+and cannot invalidate links or force full-record reparsing.
 
 The arena records three separate quantities:
 
@@ -154,8 +159,8 @@ Merging rewrites only next-offset fields. It performs no allocation and never
 moves payload bytes.
 
 `Rewind()` retains the sorted bulk arena until reset/close. `current_record()`
-parses the current payload, and `Next()` follows the stored offset. This
-matches SQLite's retained `aMemory` lifetime.
+rebinds the validated current payload, and `Next()` follows the stored offset.
+This matches SQLite's retained `aMemory` lifetime.
 
 ### 5. Spill the canonical owner without an intermediate record
 
@@ -281,11 +286,13 @@ Add one standalone allocation executable. For 65,536 small direct records:
 Extend the native ordering diagnostic contract:
 
 - `order-integer-memory` allocations must be below 70,000; and
-- file ordering allocations must remain below a source-derived bound recorded
-  after the focused allocation test.
+- `order-minimal-spill-file` allocations must not exceed 270,000; and
+- `order-multi-spill-file` allocations must not exceed 270,000.
 
-The current 131,182 and approximately 402,700 counts are the expected red
-baseline.
+The red baseline was 131,182 allocations for memory ordering and approximately
+402,700 for file ordering. The source-derived green measurements are 65,655,
+262,325, and 262,459 respectively; the fixed limits retain bounded diagnostic
+headroom without weakening the allocation-shape contract.
 
 ### 8. Qualify dependent behavior without absorbing later repairs
 

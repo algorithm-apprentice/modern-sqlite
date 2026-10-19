@@ -11,6 +11,7 @@
 #include <string_view>
 #include <utility>
 
+#include "../format/record_codec_internal.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
@@ -147,6 +148,7 @@ struct SorterArena;
 
 class SorterExtentLease final {
  public:
+  SorterExtentLease() noexcept = default;
   SorterExtentLease(const SorterExtentLease&) = delete;
   SorterExtentLease& operator=(const SorterExtentLease&) = delete;
   SorterExtentLease(SorterExtentLease&& other) noexcept
@@ -415,7 +417,8 @@ struct StatementState {
     --owner_count;
   }
 
-  [[nodiscard]] Status Reserve(MemoryRegistration& registration, std::size_t amount) {
+  [[nodiscard]] Status Reserve(MemoryRegistration& registration, std::size_t amount,
+                               const MemoryRegistration* excluded = nullptr) {
     if (registration.state != this) {
       return std::unexpected(Misuse("temporary memory account is detached"));
     }
@@ -438,7 +441,7 @@ struct StatementState {
       std::size_t selected_reclaimable = 0;
       for (MemoryRegistration* candidate = owners; candidate != nullptr;
            candidate = candidate->next) {
-        if (candidate->target == nullptr || candidate->spilling) {
+        if (candidate->target == nullptr || candidate->spilling || candidate == excluded) {
           continue;
         }
         const std::size_t reclaimable = candidate->target->reclaimable_bytes().value();
@@ -831,6 +834,18 @@ Status TemporaryMemoryAccount::Reserve(ByteCount amount) {
   return registration_->state->Reserve(*registration_, amount.value());
 }
 
+Status TemporaryMemoryAccount::ReserveExcludingSelf(ByteCount amount) {
+  if (registration_ == nullptr || registration_->state == nullptr) {
+    return std::unexpected(Misuse("temporary memory account is invalid"));
+  }
+  const bool was_spilling = registration_->spilling;
+  registration_->spilling = true;
+  Status reserved =
+      registration_->state->Reserve(*registration_, amount.value(), registration_.get());
+  registration_->spilling = was_spilling;
+  return reserved;
+}
+
 Status TemporaryMemoryAccount::ReserveWorkingSet(ByteCount amount) {
   if (!valid()) {
     return std::unexpected(Misuse("temporary memory account is invalid"));
@@ -1041,22 +1056,116 @@ Result<TemporaryFileLease> StatementTemporaryStorage::AcquireFileLease() {
 }
 
 struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
-  struct Entry {
-    Entry(ByteBuffer owned_record, RecordView record_view, std::size_t owned_bytes) noexcept
-        : record(std::move(owned_record)), view(record_view), memory_bytes(owned_bytes) {}
+  struct EntryAllocation {
+    std::size_t record_size;
+    std::size_t memory_bytes;
+  };
 
-    ByteBuffer record;
+  struct Entry {
+    Entry(RecordView record_view, EntryAllocation allocation) noexcept
+        : view(record_view),
+          record_size(allocation.record_size),
+          memory_bytes(allocation.memory_bytes) {}
+
+    [[nodiscard]] static Result<std::unique_ptr<Entry>> Create(ByteView encoded,
+                                                               RecordCodecOptions options) {
+      return Allocate(encoded.size(), options, [encoded](MutableByteView destination) -> Status {
+        std::ranges::copy(encoded, destination.begin());
+        return {};
+      });
+    }
+
+    [[nodiscard]] static Result<std::unique_ptr<Entry>> Create(std::span<const SqlValue> values,
+                                                               std::size_t record_size,
+                                                               RecordCodecOptions options) {
+      return Allocate(record_size, options,
+                      [values, options](MutableByteView destination) -> Status {
+                        auto encoded = EncodeRecordInto(values, destination, options);
+                        if (!encoded.has_value()) {
+                          return std::unexpected(std::move(encoded.error()));
+                        }
+                        return {};
+                      });
+    }
+
+    [[nodiscard]] ByteView encoded() const noexcept {
+      return ByteView{reinterpret_cast<const std::byte*>(this + 1), record_size};
+    }
+
+    static void operator delete(void* storage) noexcept { ::operator delete(storage); }
+    static void operator delete(void* storage, std::size_t) noexcept { ::operator delete(storage); }
+
+   private:
+    template <typename Encoder>
+    [[nodiscard]] static Result<std::unique_ptr<Entry>> Allocate(std::size_t record_size,
+                                                                 RecordCodecOptions options,
+                                                                 Encoder&& encode) {
+      if (record_size > std::numeric_limits<std::size_t>::max() - sizeof(Entry)) {
+        return std::unexpected(TooLarge("sorter record allocation size overflows"));
+      }
+      const std::size_t allocation_size = sizeof(Entry) + record_size;
+      void* storage = nullptr;
+      try {
+        storage = ::operator new(allocation_size);
+      } catch (const std::bad_alloc&) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      const MutableByteView destination{
+          static_cast<std::byte*>(storage) + sizeof(Entry),
+          record_size,
+      };
+      auto encoded = std::forward<Encoder>(encode)(destination);
+      if (!encoded.has_value()) {
+        ::operator delete(storage);
+        return std::unexpected(std::move(encoded.error()));
+      }
+      auto parsed = RecordView::Parse(destination, options);
+      if (!parsed.has_value()) {
+        ::operator delete(storage);
+        return std::unexpected(std::move(parsed.error()));
+      }
+      Entry* entry = std::construct_at(static_cast<Entry*>(storage), *parsed,
+                                       EntryAllocation{
+                                           .record_size = record_size,
+                                           .memory_bytes = allocation_size,
+                                       });
+      return std::unique_ptr<Entry>{entry};
+    }
+
+   public:
     RecordView view;
+    std::size_t record_size;
     std::size_t memory_bytes;
     std::unique_ptr<Entry> next;
   };
 
   using Run = std::unique_ptr<Entry>;
 
+  static constexpr std::uint64_t kNoBulkOffset = std::numeric_limits<std::uint64_t>::max();
+  static constexpr std::size_t kBulkHeaderSize = 5U * sizeof(std::uint64_t);
+  static constexpr std::size_t kBulkAlignment = 8U;
+
+  enum class BulkHeaderField : std::uint8_t {
+    Next = 0,
+    RecordSize = 1,
+    HeaderOffset = 2,
+    HeaderEnd = 3,
+    FieldCount = 4,
+  };
+
+  [[nodiscard]] static Result<std::size_t> BulkCellSize(std::size_t record_size) {
+    if (record_size > std::numeric_limits<std::size_t>::max() - kBulkHeaderSize) {
+      return std::unexpected(TooLarge("sorter bulk record size overflows"));
+    }
+    const std::size_t unaligned = kBulkHeaderSize + record_size;
+    if (unaligned > std::numeric_limits<std::size_t>::max() - (kBulkAlignment - 1U)) {
+      return std::unexpected(TooLarge("sorter bulk alignment overflows"));
+    }
+    return (unaligned + kBulkAlignment - 1U) & ~(kBulkAlignment - 1U);
+  }
+
   struct PmaRun {
-    PmaRun(temporary_storage_detail::SorterExtentLease owned_extent,
-           std::uint64_t run_ordinal) noexcept
-        : extent(std::move(owned_extent)), ordinal(run_ordinal) {}
+    explicit PmaRun(std::uint64_t run_ordinal) noexcept : ordinal(run_ordinal) {}
 
     temporary_storage_detail::SorterExtentLease extent;
     std::uint64_t ordinal;
@@ -1064,6 +1173,59 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
   };
 
   static_assert(sizeof(PmaRun) <= sizeof(Entry));
+
+  struct BulkGrowth {
+    std::size_t required_size;
+    std::size_t preferred_size;
+  };
+
+  struct DetachedPmaRun {
+    DetachedPmaRun(TemporaryMemoryAccount& owned_account, std::unique_ptr<PmaRun> owned_run,
+                   std::size_t owned_reserved_bytes) noexcept
+        : account(&owned_account),
+          run(std::move(owned_run)),
+          reserved_bytes(owned_reserved_bytes) {}
+
+    DetachedPmaRun(const DetachedPmaRun&) = delete;
+    DetachedPmaRun& operator=(const DetachedPmaRun&) = delete;
+    DetachedPmaRun(DetachedPmaRun&& other) noexcept
+        : account(std::exchange(other.account, nullptr)),
+          run(std::move(other.run)),
+          reserved_bytes(std::exchange(other.reserved_bytes, 0U)) {}
+    DetachedPmaRun& operator=(DetachedPmaRun&& other) noexcept {
+      if (this != &other) {
+        Release();
+        account = std::exchange(other.account, nullptr);
+        run = std::move(other.run);
+        reserved_bytes = std::exchange(other.reserved_bytes, 0U);
+      }
+      return *this;
+    }
+
+    ~DetachedPmaRun() { Release(); }
+
+    void Release() noexcept {
+      run.reset();
+      if (account != nullptr && reserved_bytes != 0U) {
+        const auto released = account->Release(ByteCount{reserved_bytes});
+        if (!released.has_value()) {
+          std::terminate();
+        }
+      }
+      account = nullptr;
+      reserved_bytes = 0;
+    }
+
+    [[nodiscard]] std::unique_ptr<PmaRun> Commit() noexcept {
+      account = nullptr;
+      reserved_bytes = 0;
+      return std::move(run);
+    }
+
+    TemporaryMemoryAccount* account;
+    std::unique_ptr<PmaRun> run;
+    std::size_t reserved_bytes;
+  };
 
   enum class PmaMemoryUse : std::uint8_t {
     Drain,
@@ -1572,11 +1734,336 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     return *memory_account;
   }
 
+  [[nodiscard]] bool UsesBulkArena() const noexcept { return statement_state->file_spill; }
+
+  [[nodiscard]] static std::size_t BulkFieldOffset(BulkHeaderField field) noexcept {
+    return static_cast<std::size_t>(field) * sizeof(std::uint64_t);
+  }
+
+  [[nodiscard]] std::uint64_t LoadBulkField(std::uint64_t offset,
+                                            BulkHeaderField field) const noexcept {
+    if (offset > std::numeric_limits<std::size_t>::max()) {
+      std::terminate();
+    }
+    const std::size_t start = static_cast<std::size_t>(offset) + BulkFieldOffset(field);
+    if (start > bulk_used || sizeof(std::uint64_t) > bulk_used - start) {
+      std::terminate();
+    }
+    return LoadBigEndian<std::uint64_t>(std::span<const std::byte, sizeof(std::uint64_t)>{
+        bulk_memory.view().data() + start,
+        sizeof(std::uint64_t),
+    });
+  }
+
+  void StoreBulkField(MutableByteView bytes, std::uint64_t offset, BulkHeaderField field,
+                      std::uint64_t value) const noexcept {
+    if (offset > std::numeric_limits<std::size_t>::max()) {
+      std::terminate();
+    }
+    const std::size_t start = static_cast<std::size_t>(offset) + BulkFieldOffset(field);
+    if (start > bytes.size() || sizeof(std::uint64_t) > bytes.size() - start) {
+      std::terminate();
+    }
+    StoreBigEndian<std::uint64_t>(
+        std::span<std::byte, sizeof(std::uint64_t)>{
+            bytes.data() + start,
+            sizeof(std::uint64_t),
+        },
+        value);
+  }
+
+  void StoreBulkField(std::uint64_t offset, BulkHeaderField field, std::uint64_t value) noexcept {
+    StoreBulkField(bulk_memory.mutable_view(), offset, field, value);
+  }
+
+  [[nodiscard]] ByteView BulkRecord(std::uint64_t offset) const noexcept {
+    const std::uint64_t size = LoadBulkField(offset, BulkHeaderField::RecordSize);
+    if (size > std::numeric_limits<std::size_t>::max()) {
+      std::terminate();
+    }
+    const std::size_t start = static_cast<std::size_t>(offset) + kBulkHeaderSize;
+    const auto record_size = static_cast<std::size_t>(size);
+    if (start > bulk_used || record_size > bulk_used - start) {
+      std::terminate();
+    }
+    return bulk_memory.view().subspan(start, record_size);
+  }
+
+  [[nodiscard]] RecordView BulkView(std::uint64_t offset) const noexcept {
+    const ByteView encoded = BulkRecord(offset);
+    const std::uint64_t header_offset = LoadBulkField(offset, BulkHeaderField::HeaderOffset);
+    const std::uint64_t header_end = LoadBulkField(offset, BulkHeaderField::HeaderEnd);
+    const std::uint64_t field_count = LoadBulkField(offset, BulkHeaderField::FieldCount);
+    if (header_offset > std::numeric_limits<std::size_t>::max() ||
+        header_end > std::numeric_limits<std::size_t>::max() ||
+        field_count > std::numeric_limits<std::size_t>::max()) {
+      std::terminate();
+    }
+    auto rebound = record_codec_detail::ValidatedRecordAccess::Rebind(
+        encoded, record_codec_detail::ValidatedRecordLayout{
+                     .encoded_size = encoded.size(),
+                     .header_offset = static_cast<std::size_t>(header_offset),
+                     .header_end = static_cast<std::size_t>(header_end),
+                     .field_count = static_cast<std::size_t>(field_count),
+                 });
+    if (!rebound.has_value()) {
+      std::terminate();
+    }
+    return *rebound;
+  }
+
+  [[nodiscard]] std::uint64_t BulkNext(std::uint64_t offset) const noexcept {
+    return LoadBulkField(offset, BulkHeaderField::Next);
+  }
+
+  void SetBulkNext(std::uint64_t offset, std::uint64_t next) noexcept {
+    StoreBulkField(offset, BulkHeaderField::Next, next);
+  }
+
+  void ReleaseAccountBytes(std::size_t amount) noexcept {
+    if (amount == 0U) {
+      return;
+    }
+    const auto released = Account().Release(ByteCount{amount});
+    if (!released.has_value()) {
+      std::terminate();
+    }
+  }
+
+  [[nodiscard]] Result<DetachedPmaRun> PreparePmaRun(ByteCount transferable_bytes,
+                                                     std::uint64_t ordinal) {
+    const std::size_t reserved_bytes = transferable_bytes.value() < sizeof(PmaRun)
+                                           ? sizeof(PmaRun) - transferable_bytes.value()
+                                           : 0U;
+    if (reserved_bytes != 0U) {
+      auto reserved = Account().ReserveExcludingSelf(ByteCount{reserved_bytes});
+      if (!reserved.has_value()) {
+        return std::unexpected(std::move(reserved.error()));
+      }
+    }
+
+    std::unique_ptr<PmaRun> run;
+    try {
+      run = std::make_unique<PmaRun>(ordinal);
+    } catch (const std::bad_alloc&) {
+      ReleaseAccountBytes(reserved_bytes);
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      ReleaseAccountBytes(reserved_bytes);
+      return std::unexpected(Error::OutOfMemory());
+    }
+    return DetachedPmaRun{Account(), std::move(run), reserved_bytes};
+  }
+
+  [[nodiscard]] std::size_t BulkFairnessThreshold() const noexcept {
+    if (statement_state->owner_count == 0U) {
+      std::terminate();
+    }
+    return std::max<std::size_t>(1U, statement_state->budget / statement_state->owner_count);
+  }
+
+  [[nodiscard]] Status ReplaceBulkBuffer(BulkGrowth growth) {
+    const std::size_t old_charge = bulk_charged_bytes;
+    const std::size_t exact_charge = std::max(growth.required_size, old_charge);
+    std::size_t reserved_bytes = exact_charge - old_charge;
+    if (reserved_bytes != 0U) {
+      auto reserved = Account().ReserveExcludingSelf(ByteCount{reserved_bytes});
+      if (!reserved.has_value()) {
+        return reserved;
+      }
+    }
+
+    const std::size_t retained = statement_state->retained;
+    const std::size_t headroom =
+        retained < statement_state->budget ? statement_state->budget - retained : 0U;
+    const std::size_t optional_limit = std::max(exact_charge, growth.preferred_size);
+    const std::size_t target_charge =
+        std::min(optional_limit, exact_charge > std::numeric_limits<std::size_t>::max() - headroom
+                                     ? std::numeric_limits<std::size_t>::max()
+                                     : exact_charge + headroom);
+    if (target_charge > exact_charge) {
+      const std::size_t optional_bytes = target_charge - exact_charge;
+      auto optional = Account().ReserveExcludingSelf(ByteCount{optional_bytes});
+      if (optional.has_value()) {
+        reserved_bytes += optional_bytes;
+      } else if (optional.error().code() != ErrorCode::kTooLarge) {
+        Error error = std::move(optional.error());
+        ReleaseAccountBytes(reserved_bytes);
+        return std::unexpected(std::move(error));
+      }
+    }
+
+    const std::size_t requested_size = old_charge + reserved_bytes;
+    ByteBuffer replacement;
+    try {
+      replacement = ByteBuffer{ByteCount{requested_size}};
+    } catch (const std::bad_alloc&) {
+      ReleaseAccountBytes(reserved_bytes);
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      ReleaseAccountBytes(reserved_bytes);
+      return std::unexpected(Error::OutOfMemory());
+    }
+
+    const std::size_t actual_charge = replacement.capacity().value();
+    const std::size_t projected_charge = old_charge + reserved_bytes;
+    if (actual_charge > projected_charge) {
+      const std::size_t additional = actual_charge - projected_charge;
+      auto reconciled = Account().ReserveExcludingSelf(ByteCount{additional});
+      if (!reconciled.has_value()) {
+        replacement = ByteBuffer{};
+        ReleaseAccountBytes(reserved_bytes);
+        return reconciled;
+      }
+      reserved_bytes += additional;
+    } else if (actual_charge < projected_charge) {
+      const std::size_t excess = projected_charge - actual_charge;
+      ReleaseAccountBytes(excess);
+      reserved_bytes -= excess;
+    }
+
+    if (bulk_used != 0U) {
+      std::ranges::copy(bulk_memory.view().first(bulk_used), replacement.mutable_view().begin());
+    }
+    bulk_memory = std::move(replacement);
+    bulk_charged_bytes = actual_charge;
+    entry_memory_bytes = actual_charge;
+    return {};
+  }
+
+  [[nodiscard]] Status EnsureBulkCapacity(std::size_t required) {
+    if (required <= bulk_memory.size().value()) {
+      return {};
+    }
+    if (required > memory_threshold.value()) {
+      return std::unexpected(TooLarge("sorter bulk record exceeds the memory threshold"));
+    }
+
+    const std::size_t page_size = statement_state->SorterPageSize().value();
+    std::size_t requested = required;
+    if (bulk_memory.empty()) {
+      const std::size_t geometric_target =
+          required > memory_threshold.value() - required ? memory_threshold.value() : required * 2U;
+      const std::size_t initial_target = std::min(
+          {page_size, memory_threshold.value(), BulkFairnessThreshold(), geometric_target});
+      requested = std::max(required, initial_target);
+    } else {
+      const std::size_t current_size = bulk_memory.size().value();
+      const std::size_t doubled = current_size > memory_threshold.value() - current_size
+                                      ? memory_threshold.value()
+                                      : current_size * 2U;
+      requested =
+          std::max(required, std::min(doubled, std::max(required, BulkFairnessThreshold())));
+    }
+    return ReplaceBulkBuffer(BulkGrowth{
+        .required_size = required,
+        .preferred_size = requested,
+    });
+  }
+
+  [[nodiscard]] Status PublishBulkRecord(ByteView encoded,
+                                         record_codec_detail::ValidatedRecordLayout layout) {
+    auto cell_size = BulkCellSize(encoded.size());
+    if (!cell_size.has_value()) {
+      return std::unexpected(std::move(cell_size.error()));
+    }
+    if (*cell_size > std::numeric_limits<std::size_t>::max() - bulk_used) {
+      return std::unexpected(TooLarge("sorter bulk arena size overflows"));
+    }
+    const std::size_t required = bulk_used + *cell_size;
+    auto capacity = EnsureBulkCapacity(required);
+    if (!capacity.has_value()) {
+      return capacity;
+    }
+
+    const std::uint64_t offset = bulk_used;
+    const MutableByteView arena = bulk_memory.mutable_view();
+    StoreBulkField(arena, offset, BulkHeaderField::Next, kNoBulkOffset);
+    StoreBulkField(arena, offset, BulkHeaderField::RecordSize, encoded.size());
+    StoreBulkField(arena, offset, BulkHeaderField::HeaderOffset, layout.header_offset);
+    StoreBulkField(arena, offset, BulkHeaderField::HeaderEnd, layout.header_end);
+    StoreBulkField(arena, offset, BulkHeaderField::FieldCount, layout.field_count);
+    std::ranges::copy(encoded, arena.subspan(bulk_used + kBulkHeaderSize).begin());
+    if (bulk_tail == kNoBulkOffset) {
+      bulk_head = offset;
+    } else {
+      SetBulkNext(bulk_tail, offset);
+    }
+    bulk_tail = offset;
+    bulk_used = required;
+    ++count;
+    return {};
+  }
+
+  [[nodiscard]] Status InsertBulk(std::span<const SqlValue> values, std::size_t record_size) {
+    auto cell_size = BulkCellSize(record_size);
+    if (!cell_size.has_value()) {
+      return std::unexpected(std::move(cell_size.error()));
+    }
+    if (*cell_size > memory_threshold.value()) {
+      return std::unexpected(TooLarge("sorter bulk record exceeds the memory threshold"));
+    }
+    if (*cell_size > std::numeric_limits<std::size_t>::max() - bulk_used) {
+      return std::unexpected(TooLarge("sorter bulk arena size overflows"));
+    }
+    const std::size_t required = bulk_used + *cell_size;
+    auto capacity = EnsureBulkCapacity(required);
+    if (!capacity.has_value()) {
+      return capacity;
+    }
+    const std::uint64_t offset = bulk_used;
+    const MutableByteView arena = bulk_memory.mutable_view();
+    const MutableByteView destination = arena.subspan(bulk_used + kBulkHeaderSize, record_size);
+    auto encoded = EncodeRecordInto(values, destination, descriptor.record_options);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    auto parsed = RecordView::Parse(destination, descriptor.record_options);
+    if (!parsed.has_value()) {
+      return std::unexpected(std::move(parsed.error()));
+    }
+    if (parsed->field_count() != descriptor.field_count) {
+      return std::unexpected(Misuse("sorter record field count does not match the descriptor"));
+    }
+    StoreBulkField(arena, offset, BulkHeaderField::Next, kNoBulkOffset);
+    StoreBulkField(arena, offset, BulkHeaderField::RecordSize, record_size);
+    const record_codec_detail::ValidatedRecordLayout layout =
+        record_codec_detail::ValidatedRecordAccess::Capture(*parsed);
+    StoreBulkField(arena, offset, BulkHeaderField::HeaderOffset, layout.header_offset);
+    StoreBulkField(arena, offset, BulkHeaderField::HeaderEnd, layout.header_end);
+    StoreBulkField(arena, offset, BulkHeaderField::FieldCount, layout.field_count);
+    if (bulk_tail == kNoBulkOffset) {
+      bulk_head = offset;
+    } else {
+      SetBulkNext(bulk_tail, offset);
+    }
+    bulk_tail = offset;
+    bulk_used = required;
+    ++count;
+    return {};
+  }
+
+  void AppendMemoryEntry(std::unique_ptr<Entry> entry) noexcept {
+    Entry* const inserted = entry.get();
+    if (tail == nullptr) {
+      head = std::move(entry);
+    } else {
+      tail->next = std::move(entry);
+    }
+    tail = inserted;
+    ++count;
+    entry_memory_bytes += inserted->memory_bytes;
+  }
+
   [[nodiscard]] Result<void> CheckStorage() const {
     if (statement_state->failed) {
       return std::unexpected(Misuse("statement temporary storage is failed"));
     }
     return {};
+  }
+
+  [[nodiscard]] bool HasActiveRun() const noexcept {
+    return UsesBulkArena() ? bulk_head != kNoBulkOffset : head != nullptr;
   }
 
   void MarkFailed() noexcept { statement_state->failed = true; }
@@ -1585,7 +2072,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (state != RecordSorterState::kWriting) {
       return ByteCount{0};
     }
-    if (head != nullptr) {
+    if (HasActiveRun()) {
       return ByteCount{entry_memory_bytes > sizeof(PmaRun) ? entry_memory_bytes - sizeof(PmaRun)
                                                            : 0U};
     }
@@ -1598,7 +2085,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (state != RecordSorterState::kWriting) {
       return std::unexpected(Misuse("temporary sorter cannot spill outside the writing state"));
     }
-    if (head != nullptr) {
+    if (HasActiveRun()) {
       return SpillCurrentRun();
     }
     if (run_count > 1U) {
@@ -1607,7 +2094,33 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     return {};
   }
 
+  [[nodiscard]] Status ReclaimForBulkAdmission(std::size_t pending_cell_size) {
+    if (HasActiveRun()) {
+      auto spilled_run = SpillCurrentRun();
+      if (!spilled_run.has_value()) {
+        return std::unexpected(std::move(spilled_run.error()));
+      }
+    }
+    const bool exact_cell_fits =
+        statement_state->retained <= statement_state->budget &&
+        pending_cell_size <= statement_state->budget - statement_state->retained;
+    if (!exact_cell_fits && run_count > 1U) {
+      return BuildMergeLevels(1U);
+    }
+    return {};
+  }
+
   void DestroyListWithoutAccounting() noexcept {
+    if (UsesBulkArena()) {
+      bulk_memory = ByteBuffer{};
+      bulk_used = 0;
+      bulk_charged_bytes = 0;
+      bulk_head = kNoBulkOffset;
+      bulk_tail = kNoBulkOffset;
+      bulk_current = kNoBulkOffset;
+      entry_memory_bytes = 0;
+      return;
+    }
     while (head != nullptr) {
       Run next = std::move(head->next);
       head.reset();
@@ -1682,7 +2195,77 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     return merged;
   }
 
+  [[nodiscard]] std::uint64_t MergeBulkRuns(std::uint64_t left, std::uint64_t right) noexcept {
+    std::uint64_t merged = kNoBulkOffset;
+    std::uint64_t tail_offset = kNoBulkOffset;
+    while (left != kNoBulkOffset && right != kNoBulkOffset) {
+      const RecordView left_view = BulkView(left);
+      const RecordView right_view = BulkView(right);
+      const auto comparison = CompareRecordPrefixes(left_view, right_view, descriptor.key_columns);
+      if (!comparison.has_value()) {
+        std::terminate();
+      }
+      std::uint64_t selected = kNoBulkOffset;
+      if (*comparison != std::weak_ordering::greater) {
+        selected = left;
+        left = BulkNext(left);
+      } else {
+        selected = right;
+        right = BulkNext(right);
+      }
+      SetBulkNext(selected, kNoBulkOffset);
+      if (merged == kNoBulkOffset) {
+        merged = selected;
+      } else {
+        SetBulkNext(tail_offset, selected);
+      }
+      tail_offset = selected;
+    }
+    const std::uint64_t remainder = left != kNoBulkOffset ? left : right;
+    if (merged == kNoBulkOffset) {
+      return remainder;
+    }
+    SetBulkNext(tail_offset, remainder);
+    return merged;
+  }
+
+  void SortBulk() noexcept {
+    std::array<std::uint64_t, kMergeRunCount> sort_runs{};
+    sort_runs.fill(kNoBulkOffset);
+    while (bulk_head != kNoBulkOffset) {
+      std::uint64_t run = bulk_head;
+      bulk_head = BulkNext(run);
+      SetBulkNext(run, kNoBulkOffset);
+
+      std::size_t level = 0;
+      while (sort_runs[level] != kNoBulkOffset) {
+        run = MergeBulkRuns(sort_runs[level], run);
+        sort_runs[level] = kNoBulkOffset;
+        ++level;
+        if (level == sort_runs.size()) {
+          std::terminate();
+        }
+      }
+      sort_runs[level] = run;
+    }
+
+    std::uint64_t sorted = kNoBulkOffset;
+    for (std::uint64_t& run : sort_runs) {
+      if (run == kNoBulkOffset) {
+        continue;
+      }
+      sorted = sorted == kNoBulkOffset ? run : MergeBulkRuns(run, sorted);
+      run = kNoBulkOffset;
+    }
+    bulk_head = sorted;
+    bulk_tail = kNoBulkOffset;
+  }
+
   void Sort() noexcept {
+    if (UsesBulkArena()) {
+      SortBulk();
+      return;
+    }
     std::array<Run, kMergeRunCount> sort_runs;
     while (head != nullptr) {
       Run run = std::move(head);
@@ -1730,8 +2313,21 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
 
   [[nodiscard]] Result<std::uint64_t> CurrentRunStorageSize() const {
     std::uint64_t total = 0;
+    if (UsesBulkArena()) {
+      for (std::uint64_t offset = bulk_head; offset != kNoBulkOffset; offset = BulkNext(offset)) {
+        auto size = RecordStorageSize(BulkRecord(offset));
+        if (!size.has_value()) {
+          return std::unexpected(std::move(size.error()));
+        }
+        if (*size > std::numeric_limits<std::uint64_t>::max() - total) {
+          return std::unexpected(TooLarge("PMA run size overflows"));
+        }
+        total += *size;
+      }
+      return total;
+    }
     for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
-      auto size = RecordStorageSize(entry->record.view());
+      auto size = RecordStorageSize(entry->encoded());
       if (!size.has_value()) {
         return std::unexpected(std::move(size.error()));
       }
@@ -1755,31 +2351,56 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
   }
 
   [[nodiscard]] Result<void> SpillCurrentRun() {
-    if (head == nullptr) {
+    if (!HasActiveRun()) {
       return std::unexpected(Misuse("cannot spill an empty sorter run"));
     }
     if (next_run_ordinal == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(TooLarge("temporary sorter run ordinal is exhausted"));
     }
-    Sort();
     auto size = CurrentRunStorageSize();
     if (!size.has_value()) {
       return std::unexpected(std::move(size.error()));
     }
+    auto prepared = PreparePmaRun(ByteCount{entry_memory_bytes}, next_run_ordinal);
+    if (!prepared.has_value() && prepared.error().code() == ErrorCode::kTooLarge &&
+        run_count > 1U) {
+      auto merged = BuildMergeLevels(1U);
+      if (!merged.has_value()) {
+        return std::unexpected(std::move(merged.error()));
+      }
+      prepared = PreparePmaRun(ByteCount{entry_memory_bytes}, next_run_ordinal);
+    }
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
+
+    Sort();
     auto extent = statement_state->AllocateSorterExtent(*size, sorter_ordinal, next_run_ordinal);
     if (!extent.has_value()) {
       return std::unexpected(std::move(extent.error()));
     }
-    auto writer = PmaWriter::Create(*extent, Account(), statement_state->SorterPageSize());
+    prepared->run->extent = std::move(*extent);
+    auto writer =
+        PmaWriter::Create(prepared->run->extent, Account(), statement_state->SorterPageSize());
     if (!writer.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(writer.error()));
     }
-    for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
-      auto written = writer->WriteRecord(entry->record.view());
-      if (!written.has_value()) {
-        MarkFailed();
-        return std::unexpected(std::move(written.error()));
+    if (UsesBulkArena()) {
+      for (std::uint64_t offset = bulk_head; offset != kNoBulkOffset; offset = BulkNext(offset)) {
+        auto written = writer->WriteRecord(BulkRecord(offset));
+        if (!written.has_value()) {
+          MarkFailed();
+          return std::unexpected(std::move(written.error()));
+        }
+      }
+    } else {
+      for (const Entry* entry = head.get(); entry != nullptr; entry = entry->next.get()) {
+        auto written = writer->WriteRecord(entry->encoded());
+        if (!written.has_value()) {
+          MarkFailed();
+          return std::unexpected(std::move(written.error()));
+        }
       }
     }
     auto finished = writer->Finish();
@@ -1787,18 +2408,15 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       MarkFailed();
       return std::unexpected(std::move(finished.error()));
     }
-    std::unique_ptr<PmaRun> run;
-    try {
-      run = std::make_unique<PmaRun>(std::move(*extent), next_run_ordinal);
-    } catch (const std::bad_alloc&) {
-      MarkFailed();
-      return std::unexpected(Error::OutOfMemory());
+    if (prepared->reserved_bytes > std::numeric_limits<std::size_t>::max() - entry_memory_bytes) {
+      std::terminate();
     }
-    if (entry_memory_bytes < sizeof(PmaRun)) {
-      MarkFailed();
-      return std::unexpected(Internal("sorter run metadata exceeds its reclaimed entries"));
+    const std::size_t retained_owner_bytes = entry_memory_bytes + prepared->reserved_bytes;
+    if (retained_owner_bytes < sizeof(PmaRun)) {
+      std::terminate();
     }
-    const std::size_t released_bytes = entry_memory_bytes - sizeof(PmaRun);
+    std::unique_ptr<PmaRun> run = prepared->Commit();
+    const std::size_t released_bytes = retained_owner_bytes - sizeof(PmaRun);
     AppendRun(std::move(run));
     ++next_run_ordinal;
     DestroyListWithoutAccounting();
@@ -1817,6 +2435,19 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (next_run_ordinal == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(TooLarge("temporary sorter run ordinal is exhausted"));
     }
+    auto prepared = PreparePmaRun(ByteCount{0}, next_run_ordinal);
+    if (!prepared.has_value() && prepared.error().code() == ErrorCode::kTooLarge &&
+        run_count > 1U) {
+      auto merged = BuildMergeLevels(1U);
+      if (!merged.has_value()) {
+        return std::unexpected(std::move(merged.error()));
+      }
+      prepared = PreparePmaRun(ByteCount{0}, next_run_ordinal);
+    }
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
+
     auto size = RecordStorageSize(record.view());
     if (!size.has_value()) {
       return std::unexpected(std::move(size.error()));
@@ -1825,7 +2456,9 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     if (!extent.has_value()) {
       return std::unexpected(std::move(extent.error()));
     }
-    auto writer = PmaWriter::Create(*extent, Account(), statement_state->SorterPageSize());
+    prepared->run->extent = std::move(*extent);
+    auto writer =
+        PmaWriter::Create(prepared->run->extent, Account(), statement_state->SorterPageSize());
     if (!writer.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(writer.error()));
@@ -1840,17 +2473,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       MarkFailed();
       return std::unexpected(std::move(finished.error()));
     }
-    std::unique_ptr<PmaRun> run;
-    try {
-      run = std::make_unique<PmaRun>(std::move(*extent), next_run_ordinal);
-    } catch (const std::bad_alloc&) {
-      MarkFailed();
-      return std::unexpected(Error::OutOfMemory());
-    }
-    auto reserved = Account().Reserve(ByteCount{sizeof(PmaRun)});
-    if (!reserved.has_value()) {
-      return std::unexpected(std::move(reserved.error()));
-    }
+    std::unique_ptr<PmaRun> run = prepared->Commit();
     AppendRun(std::move(run));
     run_memory_bytes += sizeof(PmaRun);
     ++next_run_ordinal;
@@ -1867,12 +2490,18 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       }
       size += run->extent.size();
     }
+    auto prepared = PreparePmaRun(ByteCount{sizeof(PmaRun)}, group.front()->ordinal);
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
     auto output =
         statement_state->AllocateSorterExtent(size, sorter_ordinal, group.front()->ordinal);
     if (!output.has_value()) {
       return std::unexpected(std::move(output.error()));
     }
-    auto writer = PmaWriter::Create(*output, Account(), statement_state->SorterPageSize());
+    prepared->run->extent = std::move(*output);
+    auto writer =
+        PmaWriter::Create(prepared->run->extent, Account(), statement_state->SorterPageSize());
     if (!writer.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(writer.error()));
@@ -1900,12 +2529,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       MarkFailed();
       return std::unexpected(std::move(finished.error()));
     }
-    try {
-      return std::make_unique<PmaRun>(std::move(*output), group.front()->ordinal);
-    } catch (const std::bad_alloc&) {
-      MarkFailed();
-      return std::unexpected(Error::OutOfMemory());
-    }
+    return prepared->Commit();
   }
 
   [[nodiscard]] Result<void> BuildMergeLevels(std::size_t target_run_count = kMergeFanIn) {
@@ -1996,6 +2620,12 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
   Run head;
   Entry* tail = nullptr;
   Entry* current = nullptr;
+  ByteBuffer bulk_memory;
+  std::size_t bulk_used = 0;
+  std::size_t bulk_charged_bytes = 0;
+  std::uint64_t bulk_head = kNoBulkOffset;
+  std::uint64_t bulk_tail = kNoBulkOffset;
+  std::uint64_t bulk_current = kNoBulkOffset;
   std::size_t count = 0;
   std::size_t entry_memory_bytes = 0;
   std::unique_ptr<PmaRun> runs;
@@ -2084,6 +2714,119 @@ std::size_t RecordSorter::merge_level_count() const noexcept {
   return impl_ == nullptr ? 0U : impl_->merge_levels;
 }
 
+Status RecordSorter::Insert(std::span<const SqlValue> values) {
+  if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
+    return std::unexpected(Misuse("records can only be inserted while the sorter is writing"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  if (values.size() != impl_->descriptor.field_count) {
+    return std::unexpected(Misuse("sorter record field count does not match the descriptor"));
+  }
+  if (impl_->count == std::numeric_limits<std::size_t>::max()) {
+    return std::unexpected(TooLarge("sorter record count is exhausted"));
+  }
+  auto record_size = EncodedRecordSize(values, impl_->descriptor.record_options);
+  if (!record_size.has_value()) {
+    return std::unexpected(std::move(record_size.error()));
+  }
+
+  if (impl_->UsesBulkArena()) {
+    auto cell_size = Impl::BulkCellSize(record_size->value());
+    if (!cell_size.has_value()) {
+      return std::unexpected(std::move(cell_size.error()));
+    }
+    if (*cell_size > impl_->memory_threshold.value()) {
+      if (impl_->HasActiveRun()) {
+        auto current_spill = impl_->SpillCurrentRun();
+        if (!current_spill.has_value()) {
+          Error error = std::move(current_spill.error());
+          Close();
+          return std::unexpected(std::move(error));
+        }
+      }
+      auto encoded = EncodeRecord(values, impl_->descriptor.record_options);
+      if (!encoded.has_value()) {
+        return std::unexpected(std::move(encoded.error()));
+      }
+      auto spilled = impl_->SpillDirect(std::move(*encoded));
+      if (!spilled.has_value()) {
+        Error error = std::move(spilled.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      return {};
+    }
+    if (impl_->bulk_used > impl_->memory_threshold.value() - *cell_size) {
+      auto current_spill = impl_->SpillCurrentRun();
+      if (!current_spill.has_value()) {
+        Error error = std::move(current_spill.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+    }
+    auto inserted = impl_->InsertBulk(values, record_size->value());
+    if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
+      auto reclaimed = impl_->ReclaimForBulkAdmission(*cell_size);
+      if (!reclaimed.has_value()) {
+        Error error = std::move(reclaimed.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      inserted = impl_->InsertBulk(values, record_size->value());
+    }
+    if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
+      auto encoded = EncodeRecord(values, impl_->descriptor.record_options);
+      if (!encoded.has_value()) {
+        return std::unexpected(std::move(encoded.error()));
+      }
+      auto spilled = impl_->SpillDirect(std::move(*encoded));
+      if (!spilled.has_value()) {
+        Error error = std::move(spilled.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      return {};
+    }
+    if (!inserted.has_value()) {
+      Error error = std::move(inserted.error());
+      if (impl_->statement_state->failed) {
+        Close();
+      }
+      return std::unexpected(std::move(error));
+    }
+    return {};
+  }
+
+  if (record_size->value() > std::numeric_limits<std::size_t>::max() - sizeof(Impl::Entry)) {
+    return std::unexpected(TooLarge("sorter record memory accounting overflowed"));
+  }
+  const std::size_t entry_bytes = record_size->value() + sizeof(Impl::Entry);
+  if (entry_bytes > impl_->memory_threshold.value() ||
+      impl_->entry_memory_bytes > impl_->memory_threshold.value() - entry_bytes) {
+    return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
+  }
+  auto reserved = impl_->Account().Reserve(ByteCount{entry_bytes});
+  if (!reserved.has_value()) {
+    return std::unexpected(std::move(reserved.error()));
+  }
+  auto entry = Impl::Entry::Create(values, record_size->value(), impl_->descriptor.record_options);
+  if (!entry.has_value()) {
+    impl_->ReleaseAccountBytes(entry_bytes);
+    Error error = std::move(entry.error());
+    if (error.code() == ErrorCode::kOutOfMemory) {
+      Close();
+    }
+    return std::unexpected(std::move(error));
+  }
+  impl_->AppendMemoryEntry(std::move(*entry));
+  return {};
+}
+
 Status RecordSorter::Insert(ByteBuffer record) {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("records can only be inserted while the sorter is writing"));
@@ -2101,20 +2844,34 @@ Status RecordSorter::Insert(ByteBuffer record) {
   if (view->field_count() != impl_->descriptor.field_count) {
     return std::unexpected(Misuse("sorter record field count does not match the descriptor"));
   }
-
-  const std::size_t record_bytes = record.capacity().value();
-  if (record_bytes > std::numeric_limits<std::size_t>::max() - sizeof(Impl::Entry)) {
-    return std::unexpected(TooLarge("sorter record memory accounting overflowed"));
-  }
-  const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
   if (impl_->count == std::numeric_limits<std::size_t>::max()) {
     return std::unexpected(TooLarge("sorter record count is exhausted"));
   }
-  if (entry_bytes > impl_->memory_threshold.value()) {
-    if (!impl_->statement_state->file_spill) {
-      return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
+  const std::size_t record_bytes = record.size().value();
+
+  if (impl_->UsesBulkArena()) {
+    auto cell_size = Impl::BulkCellSize(record_bytes);
+    if (!cell_size.has_value()) {
+      return std::unexpected(std::move(cell_size.error()));
     }
-    if (impl_->head != nullptr) {
+    if (*cell_size > impl_->memory_threshold.value()) {
+      if (impl_->HasActiveRun()) {
+        auto current_spill = impl_->SpillCurrentRun();
+        if (!current_spill.has_value()) {
+          Error error = std::move(current_spill.error());
+          Close();
+          return std::unexpected(std::move(error));
+        }
+      }
+      auto spilled = impl_->SpillDirect(std::move(record));
+      if (!spilled.has_value()) {
+        Error error = std::move(spilled.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      return {};
+    }
+    if (impl_->bulk_used > impl_->memory_threshold.value() - *cell_size) {
       auto current_spill = impl_->SpillCurrentRun();
       if (!current_spill.has_value()) {
         Error error = std::move(current_spill.error());
@@ -2122,67 +2879,60 @@ Status RecordSorter::Insert(ByteBuffer record) {
         return std::unexpected(std::move(error));
       }
     }
-    auto spilled = impl_->SpillDirect(std::move(record));
-    if (!spilled.has_value()) {
-      Error error = std::move(spilled.error());
-      Close();
+    auto inserted = impl_->PublishBulkRecord(
+        record.view(), record_codec_detail::ValidatedRecordAccess::Capture(*view));
+    if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
+      auto reclaimed = impl_->ReclaimForBulkAdmission(*cell_size);
+      if (!reclaimed.has_value()) {
+        Error error = std::move(reclaimed.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      inserted = impl_->PublishBulkRecord(
+          record.view(), record_codec_detail::ValidatedRecordAccess::Capture(*view));
+    }
+    if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
+      auto spilled = impl_->SpillDirect(std::move(record));
+      if (!spilled.has_value()) {
+        Error error = std::move(spilled.error());
+        Close();
+        return std::unexpected(std::move(error));
+      }
+      return {};
+    }
+    if (!inserted.has_value()) {
+      Error error = std::move(inserted.error());
+      if (impl_->statement_state->failed) {
+        Close();
+      }
       return std::unexpected(std::move(error));
     }
     return {};
   }
-  const bool exceeds_threshold =
-      entry_bytes > impl_->memory_threshold.value() ||
-      impl_->entry_memory_bytes > impl_->memory_threshold.value() - entry_bytes;
-  if (exceeds_threshold && impl_->head != nullptr) {
-    if (!impl_->statement_state->file_spill) {
-      return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
-    }
-    auto spilled = impl_->SpillCurrentRun();
-    if (!spilled.has_value()) {
-      Error error = std::move(spilled.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-  } else if (exceeds_threshold && !impl_->statement_state->file_spill) {
+
+  if (record_bytes > std::numeric_limits<std::size_t>::max() - sizeof(Impl::Entry)) {
+    return std::unexpected(TooLarge("sorter record memory accounting overflowed"));
+  }
+  const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
+  if (entry_bytes > impl_->memory_threshold.value() ||
+      impl_->entry_memory_bytes > impl_->memory_threshold.value() - entry_bytes) {
     return std::unexpected(TooLarge("sorter memory threshold exceeded in memory mode"));
   }
   auto reserved = impl_->Account().Reserve(ByteCount{entry_bytes});
   if (!reserved.has_value()) {
-    Error error = std::move(reserved.error());
-    if (impl_->statement_state->failed) {
+    return std::unexpected(std::move(reserved.error()));
+  }
+  auto entry = Impl::Entry::Create(record.view(), impl_->descriptor.record_options);
+  if (!entry.has_value()) {
+    impl_->ReleaseAccountBytes(entry_bytes);
+    Error error = std::move(entry.error());
+    if (error.code() == ErrorCode::kOutOfMemory) {
       Close();
     }
     return std::unexpected(std::move(error));
   }
-  try {
-    auto entry = std::make_unique<Impl::Entry>(std::move(record), *view, entry_bytes);
-    Impl::Entry* const inserted = entry.get();
-    if (impl_->tail == nullptr) {
-      impl_->head = std::move(entry);
-    } else {
-      impl_->tail->next = std::move(entry);
-    }
-    impl_->tail = inserted;
-    ++impl_->count;
-    impl_->entry_memory_bytes += entry_bytes;
-    return {};
-  } catch (const std::bad_alloc&) {
-    const auto released = impl_->Account().Release(ByteCount{entry_bytes});
-    if (!released.has_value()) {
-      std::terminate();
-    }
-    Error error = Error::OutOfMemory();
-    Close();
-    return std::unexpected(std::move(error));
-  } catch (const std::length_error&) {
-    const auto released = impl_->Account().Release(ByteCount{entry_bytes});
-    if (!released.has_value()) {
-      std::terminate();
-    }
-    Error error = Error::OutOfMemory();
-    Close();
-    return std::unexpected(std::move(error));
-  }
+  impl_->AppendMemoryEntry(std::move(*entry));
+  return {};
 }
 
 Status RecordSorter::Rewind() {
@@ -2197,13 +2947,19 @@ Status RecordSorter::Rewind() {
   }
   if (impl_->runs == nullptr) {
     impl_->Sort();
-    impl_->current = impl_->head.get();
-    impl_->state =
-        impl_->current == nullptr ? RecordSorterState::kExhausted : RecordSorterState::kPositioned;
+    if (impl_->UsesBulkArena()) {
+      impl_->bulk_current = impl_->bulk_head;
+      impl_->state = impl_->bulk_current == Impl::kNoBulkOffset ? RecordSorterState::kExhausted
+                                                                : RecordSorterState::kPositioned;
+    } else {
+      impl_->current = impl_->head.get();
+      impl_->state = impl_->current == nullptr ? RecordSorterState::kExhausted
+                                               : RecordSorterState::kPositioned;
+    }
     return {};
   }
 
-  if (impl_->head != nullptr) {
+  if (impl_->HasActiveRun()) {
     auto spilled = impl_->SpillCurrentRun();
     if (!spilled.has_value()) {
       Error error = std::move(spilled.error());
@@ -2252,6 +3008,12 @@ Result<RecordView> RecordSorter::current_record() const {
   if (impl_->merge != nullptr) {
     return impl_->merge->current();
   }
+  if (impl_->UsesBulkArena()) {
+    if (impl_->bulk_current == Impl::kNoBulkOffset) {
+      return std::unexpected(Misuse("sorter has no current record"));
+    }
+    return impl_->BulkView(impl_->bulk_current);
+  }
   if (impl_->current == nullptr) {
     return std::unexpected(Misuse("sorter has no current record"));
   }
@@ -2281,7 +3043,15 @@ Result<bool> RecordSorter::Next() {
     return *advanced;
   }
   if (impl_->current == nullptr) {
-    return std::unexpected(Misuse("sorter next requires a current record"));
+    if (!impl_->UsesBulkArena() || impl_->bulk_current == Impl::kNoBulkOffset) {
+      return std::unexpected(Misuse("sorter next requires a current record"));
+    }
+    impl_->bulk_current = impl_->BulkNext(impl_->bulk_current);
+    if (impl_->bulk_current == Impl::kNoBulkOffset) {
+      impl_->state = RecordSorterState::kExhausted;
+      return false;
+    }
+    return true;
   }
   impl_->current = impl_->current->next.get();
   if (impl_->current == nullptr) {

@@ -1765,7 +1765,7 @@ TEST(ReadSession, ReportsInsufficientJoinedConsumerWorkingSetWithoutLeakingFiles
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kFile,
-              .sorter_memory_threshold = ByteCount{2048},
+              .sorter_memory_threshold = ByteCount{1024},
           },
   };
   ReadSession session = TakeValue(
@@ -2067,7 +2067,7 @@ TEST(ReadSession, ExecutesAndResetsAggregateDistinctAndCompoundCores) {
 
 TEST(ReadSession, IntegratesAggregateMetadataRebindingAndTemporaryModes) {
   constexpr ByteCount kMemoryBudget{64U * 1024U};
-  constexpr ByteCount kFileBudget{4096};
+  constexpr ByteCount kFileBudget{2048};
   const ReadSessionOptions memory_options{
       .temporary_storage =
           TemporaryStorageOptions{
@@ -2099,7 +2099,7 @@ TEST(ReadSession, IntegratesAggregateMetadataRebindingAndTemporaryModes) {
 }
 
 TEST(ReadSession, CleansAggregateTemporaryFilesAfterInjectedFailure) {
-  constexpr ByteCount kFileBudget{4096};
+  constexpr ByteCount kFileBudget{2048};
   const auto state = std::make_shared<TemporaryFileState>();
   const ReadSessionOptions options{
       .temporary_storage =
@@ -3066,7 +3066,7 @@ TEST(ReadSession, CapturesActualSharedSorterSpillWrites) {
 #endif
 
 TEST(ReadSession, CleansSpilledAggregateCompoundFilesOnEarlyStop) {
-  constexpr ByteCount kFileBudget{4096};
+  constexpr ByteCount kFileBudget{2048};
   const auto state = std::make_shared<TemporaryFileState>();
   const ReadSessionOptions options{
       .temporary_storage =
@@ -3095,7 +3095,7 @@ TEST(ReadSession, CleansSpilledAggregateCompoundFilesOnEarlyStop) {
 }
 
 TEST(ReadSession, RecoversAggregateCompoundAfterInjectedSpillFailure) {
-  constexpr ByteCount kFileBudget{4096};
+  constexpr ByteCount kFileBudget{2048};
   const auto state = std::make_shared<TemporaryFileState>();
   const ReadSessionOptions options{
       .temporary_storage =

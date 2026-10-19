@@ -151,14 +151,14 @@ struct Outcome {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{2048},
+                                                    .sorter_memory_threshold = ByteCount{1024},
                                                 }));
   std::optional<StatementTemporaryStorage> storage;
   storage.emplace(TakeValue(factory.CreateStatementStorage()));
   RecordSorter sorter = TakeValue(storage->CreateRecordSorter(Descriptor()));
-  constexpr std::int64_t kRecordCount = 256;
+  constexpr std::int64_t kRecordCount = 20;
   for (std::int64_t key = kRecordCount; key > 0; --key) {
-    if (!sorter.Insert(EncodedBlobRecord(key, 64U)).has_value()) {
+    if (!sorter.Insert(EncodedBlobRecord(key, 1100U)).has_value()) {
       return {};
     }
   }
@@ -209,6 +209,174 @@ template <typename Runner>
     }
   }
   return true;
+}
+
+[[nodiscard]] bool DetachedRunAllocationPrecedesIo() {
+  using namespace modern_sqlite;
+
+  {
+    test::WritePagerFixedVfs vfs;
+    const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+    const TemporaryStorageFactory factory =
+        TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                  TemporaryStorageOptions{
+                                                      .mode = TemporaryStoreMode::kFile,
+                                                      .sorter_memory_threshold = ByteCount{128},
+                                                  }));
+    StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+    RecordSorter sorter = TakeValue(storage.CreateRecordSorter(Descriptor()));
+    ByteBuffer record = EncodedBlobRecord(1);
+
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0;
+    inject_failure = true;
+    const Status rejected = sorter.Insert(std::move(record));
+    inject_failure = false;
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        sorter.valid() || vfs.pathless_open_count() != 0U || vfs.total_subjournal_writes() != 0U ||
+        storage.retained_bytes() != ByteCount{0}) {
+      return false;
+    }
+  }
+
+  {
+    test::WritePagerFixedVfs vfs;
+    const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+    const TemporaryStorageFactory factory =
+        TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                  TemporaryStorageOptions{
+                                                      .mode = TemporaryStoreMode::kFile,
+                                                      .sorter_memory_threshold = ByteCount{128},
+                                                  }));
+    StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+    RecordSorter sorter = TakeValue(storage.CreateRecordSorter(Descriptor()));
+    if (!sorter.Insert(EncodedRecord(1)).has_value() ||
+        !sorter.Insert(EncodedRecord(2)).has_value()) {
+      return false;
+    }
+    ByteBuffer record = EncodedRecord(3);
+
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0;
+    inject_failure = true;
+    const Status rejected = sorter.Insert(std::move(record));
+    inject_failure = false;
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        sorter.valid() || vfs.pathless_open_count() != 0U || vfs.total_subjournal_writes() != 0U ||
+        storage.retained_bytes() != ByteCount{0}) {
+      return false;
+    }
+  }
+
+  {
+    test::WritePagerFixedVfs vfs;
+    const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+    const TemporaryStorageFactory factory =
+        TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                  TemporaryStorageOptions{
+                                                      .mode = TemporaryStoreMode::kFile,
+                                                      .sorter_memory_threshold = ByteCount{1024},
+                                                  }));
+    std::optional<StatementTemporaryStorage> storage;
+    storage.emplace(TakeValue(factory.CreateStatementStorage()));
+    RecordSorter sorter = TakeValue(storage->CreateRecordSorter(Descriptor()));
+    for (std::int64_t key = 20; key > 0; --key) {
+      if (!sorter.Insert(EncodedBlobRecord(key, 1100U)).has_value()) {
+        return false;
+      }
+    }
+    if (sorter.spilled_run_count() <= 16U) {
+      return false;
+    }
+    const std::size_t opens_before = vfs.pathless_open_count();
+    const std::size_t writes_before = vfs.total_subjournal_writes();
+    const std::vector<std::byte> bytes_before(vfs.pathless_file_bytes().begin(),
+                                              vfs.pathless_file_bytes().end());
+
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0;
+    inject_failure = true;
+    const Status rejected = sorter.Rewind();
+    inject_failure = false;
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        sorter.valid() || storage->failed() || vfs.pathless_open_count() != opens_before ||
+        vfs.total_subjournal_writes() != writes_before ||
+        !std::ranges::equal(bytes_before, vfs.pathless_file_bytes())) {
+      return false;
+    }
+    storage.reset();
+    if (vfs.pathless_file_present()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+[[nodiscard]] bool BulkGrowthFailurePreservesPublishedPrefix() {
+  using namespace modern_sqlite;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  if (!pager->BeginRead().has_value()) {
+    return false;
+  }
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kFile,
+                                                    .sorter_memory_threshold = ByteCount{4096},
+                                                }));
+  StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
+  RecordSorter sorter = TakeValue(storage.CreateRecordSorter(Descriptor()));
+  const auto values = [](std::int64_t key) {
+    return std::array<SqlValue, 2>{
+        SqlValue::Integer(key),
+        SqlValue::Integer(key),
+    };
+  };
+
+  allocation_index.store(0, std::memory_order_relaxed);
+  failing_allocation = 0;
+  inject_failure = true;
+  const std::array<SqlValue, 2> first = values(1);
+  const Status first_failure = sorter.Insert(first);
+  inject_failure = false;
+  if (first_failure.has_value() || first_failure.error().code() != ErrorCode::kOutOfMemory ||
+      !sorter.valid() || sorter.record_count() != 0U || sorter.memory_usage() != ByteCount{0} ||
+      vfs.pathless_open_count() != 0U) {
+    return false;
+  }
+  if (!sorter.Insert(first).has_value()) {
+    return false;
+  }
+
+  std::size_t accepted = 1;
+  bool observed_growth_failure = false;
+  for (std::int64_t key = 2; key < 64; ++key) {
+    const std::array<SqlValue, 2> record = values(key);
+    const ByteCount usage_before = sorter.memory_usage();
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0;
+    inject_failure = true;
+    const Status inserted = sorter.Insert(record);
+    inject_failure = false;
+    if (inserted.has_value()) {
+      ++accepted;
+      continue;
+    }
+    if (inserted.error().code() != ErrorCode::kOutOfMemory || !sorter.valid() ||
+        sorter.record_count() != accepted || sorter.memory_usage() != usage_before ||
+        vfs.pathless_open_count() != 0U) {
+      return false;
+    }
+    if (!sorter.Insert(record).has_value() || sorter.memory_usage() <= usage_before) {
+      return false;
+    }
+    ++accepted;
+    observed_growth_failure = true;
+    break;
+  }
+  return observed_growth_failure;
 }
 
 }  // namespace
@@ -266,11 +434,14 @@ int main() try {
   }
 
   RecordSorter sorter = TakeValue(storage.CreateRecordSorter(descriptor));
-  ByteBuffer failed_record = EncodedRecord(5);
+  const std::array<SqlValue, 2> failed_record{
+      SqlValue::Integer(5),
+      SqlValue::Integer(5),
+  };
   allocation_index.store(0, std::memory_order_relaxed);
   failing_allocation = 0;
   inject_failure = true;
-  const Status failed_insert = sorter.Insert(std::move(failed_record));
+  const Status failed_insert = sorter.Insert(failed_record);
   inject_failure = false;
   if (failed_insert.has_value() || failed_insert.error().code() != ErrorCode::kOutOfMemory ||
       sorter.valid() || sorter.record_count() != 0U || sorter.memory_usage() != ByteCount{0}) {
@@ -317,7 +488,7 @@ int main() try {
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
                                                     .mode = TemporaryStoreMode::kFile,
-                                                    .sorter_memory_threshold = ByteCount{256},
+                                                    .sorter_memory_threshold = ByteCount{128},
                                                 }));
   std::optional<StatementTemporaryStorage> file_storage;
   const auto build_spilled_sorter = [&]() {
@@ -375,6 +546,12 @@ int main() try {
   }
   if (!ExhaustAllocations(RunFileMerge)) {
     return 4;
+  }
+  if (!DetachedRunAllocationPrecedesIo()) {
+    return 5;
+  }
+  if (!BulkGrowthFailurePreservesPublishedPrefix()) {
+    return 6;
   }
   return 0;
 } catch (...) {

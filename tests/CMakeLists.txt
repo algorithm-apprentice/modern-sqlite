@@ -154,6 +154,31 @@ set_tests_properties(
 )
 
 add_executable(
+  modern_sqlite_record_sorter_allocation_test
+  unit/temporary_storage/record_sorter_allocation_test.cpp
+)
+target_include_directories(
+  modern_sqlite_record_sorter_allocation_test
+  PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  modern_sqlite_record_sorter_allocation_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_record_sorter_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_record_sorter_allocation_test)
+add_test(
+  NAME temporary_storage.record_sorter_allocation
+  COMMAND modern_sqlite_record_sorter_allocation_test
+)
+set_tests_properties(
+  temporary_storage.record_sorter_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
+)
+
+add_executable(
   modern_sqlite_bounded_top_n_oom_test
   unit/temporary_storage/bounded_top_n_oom_test.cpp
 )
