@@ -3047,7 +3047,7 @@ TEST(ReadSession, CapturesActualSharedSorterSpillWrites) {
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kFile,
-              .sorter_memory_threshold = ByteCount{4096},
+              .sorter_memory_threshold = ByteCount{2048},
           },
   };
   ReadSession session =
