@@ -1,6 +1,7 @@
 #ifndef MODERN_SQLITE_TEMPORARY_STORAGE_TEMPORARY_STORAGE_INTERNAL_HPP_
 #define MODERN_SQLITE_TEMPORARY_STORAGE_TEMPORARY_STORAGE_INTERNAL_HPP_
 
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -52,6 +53,15 @@ class StatementStorageAccess final {
   [[nodiscard]] static bool Failed(const StatementState& state) noexcept;
   static void MarkFailed(StatementState& state) noexcept;
 };
+
+class BoundedTopNAccess final {
+ public:
+  static void SetNextSequence(BoundedTopN& top_n, std::uint64_t sequence) noexcept;
+  [[nodiscard]] static Pager& PagerFor(BoundedTopN& top_n) noexcept;
+  [[nodiscard]] static PageNumber RootPage(const BoundedTopN& top_n) noexcept;
+};
+
+[[nodiscard]] Result<std::int64_t> CheckedTopNSequence(std::uint64_t sequence);
 
 }  // namespace temporary_storage_detail
 }  // namespace modern_sqlite

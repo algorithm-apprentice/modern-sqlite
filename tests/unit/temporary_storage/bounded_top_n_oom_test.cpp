@@ -53,6 +53,12 @@ template <typename T>
   return std::move(*result);
 }
 
+void RequireStatus(modern_sqlite::Status status) {
+  if (!status.has_value()) {
+    throw std::runtime_error(status.error().ToString());
+  }
+}
+
 [[nodiscard]] modern_sqlite::RecordSorterDescriptor Descriptor() {
   using namespace modern_sqlite;
   return RecordSorterDescriptor{
@@ -119,6 +125,48 @@ template <typename Runner>
                                                     .mode = TemporaryStoreMode::kFile,
                                                     .sorter_memory_threshold = ByteCount{256},
                                                 }));
+  std::optional<StatementTemporaryStorage> storage;
+  storage.emplace(TakeValue(factory.CreateStatementStorage()));
+  const RecordSorterDescriptor descriptor = Descriptor();
+  allocation_index.store(0, std::memory_order_relaxed);
+  if (failure.has_value()) {
+    failing_allocation = *failure;
+    inject_failure = true;
+  }
+  Result<BoundedTopN> created = storage->CreateTopN(descriptor, 4);
+  inject_failure = false;
+  const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+  const bool succeeded = created.has_value();
+  const ErrorCode error = succeeded ? ErrorCode::kGeneric : created.error().code();
+  if (created.has_value()) {
+    created->Close();
+  }
+  storage.reset();
+  return FileOutcome{
+      .allocations = allocations,
+      .succeeded = succeeded,
+      .error = error,
+      .cleaned = !vfs.pathless_file_present(),
+  };
+}
+
+[[nodiscard]] FileOutcome RunMemoryCreate(std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  inject_failure = false;
+  test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<Pager> pager =
+      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
+                            PagerOptions{
+                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                                .cache_capacity_pages = 64,
+                            }));
+  const TemporaryStorageFactory factory =
+      TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
+                                                TemporaryStorageOptions{
+                                                    .mode = TemporaryStoreMode::kMemory,
+                                                    .sorter_memory_threshold = ByteCount{1U << 20U},
+                                                }));
+  RequireStatus(pager->BeginRead());
   std::optional<StatementTemporaryStorage> storage;
   storage.emplace(TakeValue(factory.CreateStatementStorage()));
   const RecordSorterDescriptor descriptor = Descriptor();
@@ -360,6 +408,7 @@ int main() try {
 
   test::WritePagerFixedVfs vfs;
   const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  RequireStatus(pager->BeginRead());
   const TemporaryStorageFactory factory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -369,24 +418,8 @@ int main() try {
   StatementTemporaryStorage storage = TakeValue(factory.CreateStatementStorage());
   const RecordSorterDescriptor descriptor = Descriptor();
 
-  allocation_index.store(0, std::memory_order_relaxed);
-  const Result<BoundedTopN> baseline = storage.CreateTopN(descriptor, 32);
-  if (!baseline.has_value()) {
+  if (!ExhaustFileAllocations(RunMemoryCreate)) {
     return 1;
-  }
-  const std::size_t create_allocations = allocation_index.load(std::memory_order_relaxed);
-  if (create_allocations == 0U || create_allocations > 4U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < create_allocations; ++failure) {
-    allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    const Result<BoundedTopN> rejected = storage.CreateTopN(descriptor, 32);
-    inject_failure = false;
-    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory) {
-      return 1;
-    }
   }
 
   BoundedTopN insertion = TakeValue(storage.CreateTopN(descriptor, 1));
@@ -416,11 +449,10 @@ int main() try {
       return 1;
     }
   }
-  fail_all_allocations = true;
   if (!iteration.Rewind().has_value()) {
-    fail_all_allocations = false;
     return 1;
   }
+  fail_all_allocations = true;
   for (std::int64_t expected = 1; expected <= 32; ++expected) {
     const Result<RecordView> current = iteration.current_record();
     if (!current.has_value() || current->field(0)->integer_value().value_or(-1) != expected) {
@@ -448,7 +480,8 @@ int main() try {
   if (!ExhaustFileAllocations(RunFileFullCheck)) {
     return 5;
   }
-  if (!ExhaustFileAllocations(RunFileNext)) {
+  const FileOutcome next = RunFileNext(std::nullopt);
+  if (!next.succeeded || !next.cleaned || next.allocations != 0U) {
     return 6;
   }
   return 0;

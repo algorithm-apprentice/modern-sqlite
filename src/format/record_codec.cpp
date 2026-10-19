@@ -841,21 +841,22 @@ Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions 
   }
 }
 
-Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const RecordView& right,
-                                                 std::span<const IndexColumnOrder> columns) {
+namespace {
+
+[[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixFields(
+    RecordCursor left_cursor, std::size_t left_field_count, RecordCursor right_cursor,
+    std::size_t right_field_count, std::span<const IndexColumnOrder> columns) {
   auto valid_columns = ValidateComparisonColumns(columns);
   if (!valid_columns.has_value()) {
     return std::unexpected(std::move(valid_columns.error()));
   }
-  if (left.field_count() < columns.size()) {
+  if (left_field_count < columns.size()) {
     return std::unexpected(Corruption("left record has fewer fields than comparison prefix"));
   }
-  if (right.field_count() < columns.size()) {
+  if (right_field_count < columns.size()) {
     return std::unexpected(Corruption("right record has fewer fields than comparison prefix"));
   }
 
-  RecordCursor left_cursor = left.cursor();
-  RecordCursor right_cursor = right.cursor();
   for (const IndexColumnOrder& column : columns) {
     const std::optional<RecordFieldView> left_field = left_cursor.Next();
     const std::optional<RecordFieldView> right_field = right_cursor.Next();
@@ -868,6 +869,27 @@ Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const R
     }
   }
   return std::weak_ordering::equivalent;
+}
+
+}  // namespace
+
+Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const RecordView& right,
+                                                 std::span<const IndexColumnOrder> columns) {
+  return CompareRecordPrefixFields(left.cursor(), left.field_count(), right.cursor(),
+                                   right.field_count(), columns);
+}
+
+Result<std::weak_ordering> CompareRecordPrefixes(const RecordPrefixView& left,
+                                                 const RecordView& right,
+                                                 std::span<const IndexColumnOrder> columns) {
+  if (left.complete_field_count() < columns.size()) {
+    return std::unexpected(Corruption("left record has fewer fields than comparison prefix"));
+  }
+  if (left.field_count() < columns.size()) {
+    return std::unexpected(Misuse("left record prefix does not contain all comparison fields"));
+  }
+  return CompareRecordPrefixFields(left.cursor(), left.field_count(), right.cursor(),
+                                   right.field_count(), columns);
 }
 
 Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,

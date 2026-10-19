@@ -369,6 +369,9 @@ TEST(RecordPrefixViewTest, PreservesComparisonSemanticsAndStoredWidthErrors) {
   const auto unavailable = CompareIndexRecord(*prefix, longer, columns);
   ASSERT_FALSE(unavailable.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, unavailable.error().code());
+  const auto unavailable_record = CompareRecordPrefixes(*prefix, *complete, columns);
+  ASSERT_FALSE(unavailable_record.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, unavailable_record.error().code());
   const ByteBuffer one_field = Bytes({0x02, 0x09});
   const auto shorter = RecordPrefixView::Parse(one_field.view(), one_field.size(), 2);
   ASSERT_TRUE(shorter.has_value());

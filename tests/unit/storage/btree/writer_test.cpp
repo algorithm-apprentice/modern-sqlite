@@ -560,6 +560,65 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
   EXPECT_FALSE(TakeValue(cursor.Next()));
 }
 
+TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 64,
+           }));
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    EXPECT_FALSE(TakeValue(index.DeleteLast()));
+    for (std::int64_t key = 0; key < 256; ++key) {
+      ByteBuffer payload{ByteCount{key % 17 == 0 ? 700U : 32U}};
+      std::ranges::fill(payload.mutable_view(),
+                        static_cast<std::byte>(static_cast<std::uint8_t>(key)));
+      const ByteBuffer record = TakeValue(EncodeRecord(std::array{
+          SqlValue::Integer(key),
+          SqlValue::Integer(key),
+          SqlValue::Blob(std::move(payload)),
+      }));
+      RequireStatus(index.InsertEncoded(record.view()));
+    }
+
+    {
+      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+      ASSERT_TRUE(TakeValue(cursor.Last()));
+      const ByteBuffer smaller = TakeValue(EncodeRecord(std::array{SqlValue::Integer(254)}));
+      const ByteBuffer equal = TakeValue(EncodeRecord(std::array{SqlValue::Integer(255)}));
+      EXPECT_EQ(std::weak_ordering::greater,
+                TakeValue(cursor.CompareCurrentRecordPrefix(
+                    TakeValue(RecordView::Parse(smaller.view())), 1U)));
+      EXPECT_EQ(std::weak_ordering::equivalent,
+                TakeValue(cursor.CompareCurrentRecordPrefix(
+                    TakeValue(RecordView::Parse(equal.view())), 1U)));
+    }
+
+    for (std::int64_t key = 255; key >= 128; --key) {
+      SCOPED_TRACE(key);
+      EXPECT_TRUE(TakeValue(index.DeleteLast()));
+    }
+  }
+
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  ASSERT_TRUE(TakeValue(cursor.Last()));
+  const ByteBuffer last = TakeValue(cursor.CopyPayload());
+  const RecordView record = TakeValue(RecordView::Parse(last.view()));
+  EXPECT_EQ(127, TakeValue(record.field(0U)).integer_value());
+}
+
 TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
   for (const std::size_t size : {200U, 1'400U}) {
     const OverflowFixture fixture = MakeOverflowFixture(BtreePageType::kLeafIndex, size);

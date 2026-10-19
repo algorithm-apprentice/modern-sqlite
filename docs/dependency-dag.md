@@ -214,6 +214,9 @@ ADR-0113 follows with SQLite's chunked in-memory statement journal, 64 KiB
 spill policy, atomic spill fallback, memory-only temp-store mode, and a
 version-2 truthful write-performance baseline. Main-journal durability and
 Pager sync authorization remain unchanged.
+ADR-0118 follows the repaired ephemeral relation with SQLite's bounded
+ORDER BY LIMIT B-tree in both temporary modes, positioned maximum deletion,
+borrowed key-prefix comparison, and lazy OFFSET drain.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

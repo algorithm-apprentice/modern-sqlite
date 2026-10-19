@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -19,7 +20,9 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
+#include "src/temporary_storage/temporary_storage_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
@@ -51,7 +54,9 @@ class TopNEnvironment final {
                                                                .mode = TemporaryStoreMode::kMemory,
                                                                .sorter_memory_threshold = threshold,
                                                            }))),
-        storage_(std::in_place, TakeValue(factory_.CreateStatementStorage())) {}
+        storage_(std::in_place, TakeValue(factory_.CreateStatementStorage())) {
+    RequireStatus(pager_->BeginRead());
+  }
 
   [[nodiscard]] StatementTemporaryStorage& storage() noexcept {
     if (!storage_.has_value()) {
@@ -59,6 +64,7 @@ class TopNEnvironment final {
     }
     return *storage_;
   }
+  [[nodiscard]] test::WritePagerFixedVfs& vfs() noexcept { return vfs_; }
 
  private:
   test::WritePagerFixedVfs vfs_;
@@ -112,6 +118,27 @@ class FileTopNEnvironment final {
   };
 }
 
+[[nodiscard]] RecordSorterDescriptor DescendingNoCaseDescriptor() {
+  return RecordSorterDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                               IndexNullPlacement::kLast},
+          },
+  };
+}
+
+[[nodiscard]] RecordSorterDescriptor WideDescriptor(std::size_t key_field_count) {
+  return RecordSorterDescriptor{
+      .field_count = key_field_count,
+      .key_field_count = key_field_count,
+      .key_columns =
+          std::vector<IndexColumnOrder>(key_field_count, IndexColumnOrder{BinaryCollation()}),
+  };
+}
+
 [[nodiscard]] EphemeralRelationDescriptor RelationDescriptor() {
   return EphemeralRelationDescriptor{
       .field_count = 2,
@@ -135,6 +162,19 @@ class FileTopNEnvironment final {
 [[nodiscard]] ByteBuffer Row(std::int64_t key, std::int64_t payload) {
   const std::array<SqlValue, 2> values{
       SqlValue::Integer(key),
+      SqlValue::Integer(payload),
+  };
+  return Encode(values);
+}
+
+[[nodiscard]] ByteBuffer TextKey(std::size_t size, char fill) {
+  const std::array<SqlValue, 1> values{SqlValue::Text(std::string(size, fill))};
+  return Encode(values);
+}
+
+[[nodiscard]] ByteBuffer TextRow(std::size_t size, char fill, std::int64_t payload) {
+  const std::array<SqlValue, 2> values{
+      SqlValue::Text(std::string(size, fill)),
       SqlValue::Integer(payload),
   };
   return Encode(values);
@@ -211,6 +251,104 @@ TEST(BoundedTopNApi, PublishesMoveOnlyLifecycleAndAdmissionResults) {
   EXPECT_FALSE(moved.valid());
 }
 
+TEST(BoundedTopNApi, ChecksSequenceExhaustionBeforeSignedConversion) {
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::max(),
+            TakeValue(temporary_storage_detail::CheckedTopNSequence(
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))));
+  const auto exhausted = temporary_storage_detail::CheckedTopNSequence(
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1U);
+  ASSERT_FALSE(exhausted.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, exhausted.error().code());
+}
+
+TEST(BoundedTopN, SequenceExhaustionPreservesTheFullQueueBeforeClosing) {
+  TopNEnvironment environment{ByteCount{4U << 10U}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  BoundedTopN sibling = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(top_n.Insert(Row(2, 20)));
+
+  Pager& relation_pager = temporary_storage_detail::BoundedTopNAccess::PagerFor(top_n);
+  const PageNumber root_page = temporary_storage_detail::BoundedTopNAccess::RootPage(top_n);
+  temporary_storage_detail::BoundedTopNAccess::SetNextSequence(
+      top_n, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1U);
+  const auto exhausted = top_n.CheckCandidate(Key(1));
+  ASSERT_FALSE(exhausted.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, exhausted.error().code());
+  EXPECT_FALSE(top_n.valid());
+  EXPECT_FALSE(environment.storage().failed());
+
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(relation_pager, root_page, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const ByteBuffer wrapper = TakeValue(cursor.CopyPayload());
+  const RecordView wrapper_view = TakeValue(RecordView::Parse(wrapper.view()));
+  EXPECT_EQ(2, TakeValue(wrapper_view.field(0U)).integer_value());
+  EXPECT_FALSE(TakeValue(cursor.Next()));
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(sibling.CheckCandidate(Key(3))));
+}
+
+TEST(BoundedTopN, UsesMemoryBtreeWithoutOpeningAFileOrRetainingRows) {
+  TopNEnvironment environment;
+  EXPECT_EQ(0U, environment.storage().relation_cache_allocated_pages());
+
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 2));
+  EXPECT_EQ(0U, environment.vfs().pathless_open_count());
+  EXPECT_GE(environment.storage().relation_cache_allocated_pages(), 2U);
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(top_n.Insert(Row(2, 20)));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
+}
+
+TEST(BoundedTopN, KeepsZeroBoundRootAndFileLazyInBothModes) {
+  {
+    TopNEnvironment environment;
+    BoundedTopN zero = TakeValue(environment.storage().CreateTopN(Descriptor(), 0));
+    EXPECT_EQ(0U, environment.storage().relation_cache_allocated_pages());
+    EXPECT_EQ(0U, environment.vfs().pathless_open_count());
+    EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(zero.CheckCandidate(Key(1))));
+    RequireStatus(zero.Rewind());
+    EXPECT_EQ(BoundedTopNState::kExhausted, zero.state());
+  }
+  {
+    FileTopNEnvironment environment;
+    BoundedTopN zero = TakeValue(environment.storage().CreateTopN(Descriptor(), 0));
+    EXPECT_EQ(0U, environment.vfs().pathless_open_count());
+    EXPECT_EQ(0U, environment.storage().live_file_count());
+    EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(zero.CheckCandidate(Key(1))));
+  }
+}
+
+TEST(BoundedTopN, ReservesQueueSuffixFieldsForPositiveBounds) {
+  {
+    TopNEnvironment accepted;
+    BoundedTopN top_n =
+        TakeValue(accepted.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 2U), 1));
+    EXPECT_TRUE(top_n.valid());
+  }
+  {
+    TopNEnvironment rejected;
+    const auto top_n =
+        rejected.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 1U), 1);
+    ASSERT_FALSE(top_n.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, top_n.error().code());
+    EXPECT_EQ(0U, rejected.storage().relation_cache_allocated_pages());
+  }
+  {
+    TopNEnvironment zero;
+    BoundedTopN top_n =
+        TakeValue(zero.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 1U), 0));
+    EXPECT_TRUE(top_n.valid());
+    EXPECT_EQ(0U, zero.storage().relation_cache_allocated_pages());
+  }
+}
+
 TEST(BoundedTopN, AdmitsCompetitiveKeysAndEvictsLargestBeforePayloadInsertion) {
   TopNEnvironment environment;
   BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 2));
@@ -277,19 +415,26 @@ TEST(BoundedTopN, EnforcesPendingCandidateAndLifecycleRules) {
   EXPECT_FALSE(top_n.Reset().has_value());
 }
 
-TEST(BoundedTopN, EnforcesMemoryThresholdWithoutPublishingPartialRows) {
-  TopNEnvironment environment{ByteCount{1}};
-  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
-  const auto checked = top_n.CheckCandidate(Key(1));
-  ASSERT_FALSE(checked.has_value());
-  EXPECT_EQ(ErrorCode::kTooLarge, checked.error().code());
-  EXPECT_TRUE(top_n.valid());
-  EXPECT_EQ(0U, top_n.record_count());
-  EXPECT_FALSE(top_n.has_pending_candidate());
+TEST(BoundedTopN, MemoryBtreeRequiresDatabaseAndRootPages) {
+  TopNEnvironment insufficient{ByteCount{test::kWritePagerPageSize}};
+  const auto rejected = insufficient.storage().CreateTopN(Descriptor(), 1);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_TRUE(insufficient.storage().failed());
+  EXPECT_EQ(0U, insufficient.vfs().pathless_open_count());
+
+  TopNEnvironment exact{ByteCount{2U * test::kWritePagerPageSize}};
+  auto created = exact.storage().CreateTopN(Descriptor(), 1);
+  ASSERT_TRUE(created.has_value()) << created.error().ToString();
+  BoundedTopN top_n = std::move(*created);
+  EXPECT_EQ(2U, exact.storage().relation_cache_allocated_pages());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  const Status inserted = top_n.Insert(Row(1, 10));
+  ASSERT_TRUE(inserted.has_value()) << inserted.error().ToString();
 }
 
-TEST(BoundedTopN, AccountsPendingCandidatesAndRetainedMemoryRows) {
-  TopNEnvironment environment{ByteCount{512}};
+TEST(BoundedTopN, AccountsPendingCandidatesButNotRetainedBtreeRows) {
+  TopNEnvironment environment{ByteCount{2U << 10U}};
   BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
 
   ByteBuffer first_key = Key(2);
@@ -298,11 +443,9 @@ TEST(BoundedTopN, AccountsPendingCandidatesAndRetainedMemoryRows) {
   EXPECT_EQ(first_key_bytes, top_n.memory_usage());
   EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
 
-  ByteBuffer first_row = Row(2, 20);
-  const ByteCount first_row_bytes = first_row.capacity();
-  RequireStatus(top_n.Insert(std::move(first_row)));
-  EXPECT_GT(top_n.memory_usage(), first_row_bytes);
-  EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
+  RequireStatus(top_n.Insert(Row(2, 20)));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 
   ByteBuffer replacement_key = Key(1);
   const ByteCount replacement_key_bytes = replacement_key.capacity();
@@ -312,32 +455,78 @@ TEST(BoundedTopN, AccountsPendingCandidatesAndRetainedMemoryRows) {
   EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
   RequireStatus(top_n.Insert(Row(1, 10)));
   EXPECT_EQ(1U, top_n.record_count());
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+
+  RequireStatus(top_n.Rewind());
+  EXPECT_EQ(1, IntegerField(TakeValue(top_n.current_record()), 0));
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
 
   RequireStatus(top_n.Reset());
   EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
   EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 }
 
-TEST(BoundedTopN, EnforcesOneStatementBudgetAcrossMemoryTopNs) {
-  TopNEnvironment environment{ByteCount{256}};
+TEST(BoundedTopN, EnforcesOneStatementBudgetAcrossPendingMemoryKeys) {
+  TopNEnvironment environment{ByteCount{4U << 10U}};
   BoundedTopN first = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
   BoundedTopN second = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
 
-  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(first.CheckCandidate(Key(1))));
-  RequireStatus(
-      first.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 120U, .fill = std::byte{0x11}})));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(first.CheckCandidate(TextKey(3'000U, 'a'))));
   const ByteCount first_bytes = first.memory_usage();
-  EXPECT_GT(first_bytes, ByteCount{0});
+  EXPECT_GE(first_bytes, ByteCount{3'000U});
 
-  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(second.CheckCandidate(Key(2))));
-  const auto rejected =
-      second.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 120U, .fill = std::byte{0x22}}));
+  const auto rejected = second.CheckCandidate(TextKey(3'000U, 'b'));
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
-  EXPECT_FALSE(second.valid());
+  EXPECT_TRUE(second.valid());
   EXPECT_TRUE(first.valid());
-  EXPECT_EQ(1U, first.record_count());
   EXPECT_EQ(first_bytes, environment.storage().retained_bytes());
+}
+
+TEST(BoundedTopN, FullCandidateBudgetFailurePreservesTheLargestRecord) {
+  TopNEnvironment environment{ByteCount{4U << 10U}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(TextKey(16U, 'z'))));
+  RequireStatus(top_n.Insert(TextRow(16U, 'z', 10)));
+
+  const auto rejected = top_n.CheckCandidate(TextKey(5'000U, 'a'));
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_TRUE(top_n.valid());
+  EXPECT_EQ(1U, top_n.record_count());
+  EXPECT_FALSE(top_n.has_pending_candidate());
+
+  RequireStatus(top_n.Rewind());
+  const RecordFieldView key = TakeValue(TakeValue(top_n.current_record()).field(0U));
+  ASSERT_TRUE(key.text_value().has_value());
+  EXPECT_EQ(std::string(16U, 'z'), key.text_value()->bytes());
+}
+
+TEST(BoundedTopN, AbandonedEvictionPoisonsSiblingsButResetRecoversTheRoot) {
+  {
+    TopNEnvironment environment{ByteCount{4U << 10U}};
+    BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+    BoundedTopN sibling = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+    EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+    RequireStatus(top_n.Insert(Row(2, 20)));
+    EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+    top_n.Close();
+    EXPECT_TRUE(environment.storage().failed());
+    const auto rejected = sibling.CheckCandidate(Key(3));
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+    EXPECT_FALSE(sibling.valid());
+  }
+
+  TopNEnvironment environment{ByteCount{4U << 10U}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  BoundedTopN sibling = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(top_n.Insert(Row(2, 20)));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(top_n.Reset());
+  EXPECT_FALSE(environment.storage().failed());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(sibling.CheckCandidate(Key(3))));
 }
 
 TEST(BoundedTopN, AccountsPendingAndOversizedFileDrainWorkingSets) {
@@ -357,6 +546,9 @@ TEST(BoundedTopN, AccountsPendingAndOversizedFileDrainWorkingSets) {
   EXPECT_EQ(ByteCount{0}, environment.storage().retained_bytes());
 
   RequireStatus(top_n.Rewind());
+  EXPECT_EQ(ByteCount{0}, top_n.memory_usage());
+  const RecordView current = TakeValue(top_n.current_record());
+  EXPECT_EQ(1, IntegerField(current, 0));
   EXPECT_GT(top_n.memory_usage(), environment.storage().memory_budget());
   EXPECT_EQ(top_n.memory_usage(), environment.storage().retained_bytes());
   EXPECT_FALSE(TakeValue(top_n.Next()));
@@ -376,9 +568,10 @@ TEST(BoundedTopN, PreservesPressureSpillFailureBeforeWorkingSetFallback) {
   target.Attach(occupied);
   RequireStatus(occupied.Reserve(environment.storage().memory_budget()));
 
-  const Status rewound = top_n.Rewind();
-  ASSERT_FALSE(rewound.has_value());
-  EXPECT_EQ(ErrorCode::kTooLarge, rewound.error().code());
+  RequireStatus(top_n.Rewind());
+  const auto current = top_n.current_record();
+  ASSERT_FALSE(current.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, current.error().code()) << current.error().ToString();
   EXPECT_EQ(1U, target.calls());
   EXPECT_TRUE(environment.storage().failed());
   EXPECT_FALSE(top_n.valid());
@@ -463,6 +656,31 @@ TEST(BoundedTopN, SharesAndReusesTheRelationArenaAcrossCapabilityTypes) {
   EXPECT_EQ(1U, environment.vfs().pathless_open_count());
   reused.Close();
   EXPECT_EQ(overhead, environment.storage().overhead_bytes());
+}
+
+TEST(BoundedTopN, ReusesMemoryRootsWithFreshOrderingMetadata) {
+  TopNEnvironment environment{ByteCount{4U << 10U}};
+  {
+    BoundedTopN first = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+    EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(first.CheckCandidate(Key(1))));
+    RequireStatus(first.Insert(Row(1, 10)));
+  }
+  const std::size_t allocated_pages = environment.storage().relation_cache_allocated_pages();
+
+  BoundedTopN reused = TakeValue(environment.storage().CreateTopN(DescendingNoCaseDescriptor(), 2));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(reused.CheckCandidate(TextKey(5U, 'a'))));
+  RequireStatus(reused.Insert(TextRow(5U, 'a', 10)));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(reused.CheckCandidate(TextKey(4U, 'B'))));
+  RequireStatus(reused.Insert(TextRow(4U, 'B', 20)));
+  RequireStatus(reused.Rewind());
+  const RecordFieldView first = TakeValue(TakeValue(reused.current_record()).field(0U));
+  ASSERT_TRUE(first.text_value().has_value());
+  EXPECT_EQ("BBBB", first.text_value()->bytes());
+  EXPECT_TRUE(TakeValue(reused.Next()));
+  const RecordFieldView second = TakeValue(TakeValue(reused.current_record()).field(0U));
+  ASSERT_TRUE(second.text_value().has_value());
+  EXPECT_EQ("aaaaa", second.text_value()->bytes());
+  EXPECT_EQ(allocated_pages, environment.storage().relation_cache_allocated_pages());
 }
 
 TEST(BoundedTopN, FileModeSpillsStableRowsAndClearsTheEphemeralTreeOnReset) {
@@ -571,14 +789,39 @@ TEST(BoundedTopN, FileModePropagatesFailuresAndDefersSharedFileCleanup) {
                             .fill = static_cast<std::byte>(static_cast<std::uint8_t>(key))})));
   }
   read_failure.vfs().FailPathlessReadAfter(0, ErrorCode::kIo);
-  const Status failed_rewind = reading.Rewind();
-  ASSERT_FALSE(failed_rewind.has_value());
-  EXPECT_EQ(ErrorCode::kIo, failed_rewind.error().code());
+  RequireStatus(reading.Rewind());
+  const auto failed_current = reading.current_record();
+  ASSERT_FALSE(failed_current.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed_current.error().code());
   EXPECT_FALSE(reading.valid());
   EXPECT_TRUE(read_failure.storage().failed());
   EXPECT_TRUE(read_failure.vfs().pathless_file_present());
   read_failure.ResetStorage();
   EXPECT_FALSE(read_failure.vfs().pathless_file_present());
+}
+
+TEST(BoundedTopN, PostEvictionInsertFailurePoisonsTheSharedArena) {
+  FileTopNEnvironment environment{ByteCount{128}};
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  BoundedTopN sibling = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
+  RequireStatus(
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 2, .payload_size = 900U, .fill = std::byte{0x22}})));
+
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  EXPECT_EQ(0U, top_n.record_count());
+  environment.vfs().FailPathlessWriteAfter(0U, ErrorCode::kIo);
+  const Status failed =
+      top_n.Insert(BlobRow(BlobRowSpec{.key = 1, .payload_size = 900U, .fill = std::byte{0x11}}));
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_FALSE(top_n.valid());
+  EXPECT_TRUE(environment.storage().failed());
+
+  const auto sibling_result = sibling.CheckCandidate(Key(3));
+  ASSERT_FALSE(sibling_result.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, sibling_result.error().code());
+  EXPECT_FALSE(sibling.valid());
 }
 
 }  // namespace

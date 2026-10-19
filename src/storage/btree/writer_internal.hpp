@@ -384,6 +384,7 @@ class WritableCursor final {
                                          RecordCodecOptions options,
                                          std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Result<bool> DeleteLastIndex(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
@@ -421,6 +422,7 @@ class WritableCursor final {
                                            BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status Descend(std::size_t child_index, const BtreePageView& parent);
   [[nodiscard]] Status DescendLeftmost();
+  [[nodiscard]] Status DescendRightmost();
   void InvalidatePosition() noexcept;
   void ReleaseDescendants() noexcept;
   void EnterFault() noexcept;
