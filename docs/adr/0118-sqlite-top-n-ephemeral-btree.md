@@ -387,8 +387,9 @@ Run:
 
 ## Implementation evidence
 
-Design commit `2b9e60c`, core implementation commit `cda0505`, and diagnostic
-contract commit `edd6ef0` implement this decision.
+Design commit `2b9e60c`, core implementation commit `cda0505`, diagnostic
+contract commit `edd6ef0`, and queue-boundary correction `f1f3c36` implement
+this decision.
 
 Positive-bound top-N capabilities now acquire one relation-arena index root in
 both temporary modes. Memory mode uses the fileless Pager and opens no VFS
@@ -416,6 +417,10 @@ Focused coverage includes:
 - page-one/root capacity below and at the minimum;
 - accepted, rejected, evicted, and stable equivalent candidates;
 - full-queue pending-budget and sequence preflight before victim deletion;
+- positive-bound maximum-field validation reserving sequence and packed-record
+  suffix fields before root allocation;
+- valid incomplete record prefixes reporting misuse while structurally short
+  complete records remain corruption;
 - direct last deletion through root splits, overflow records, and repeated
   rebalancing;
 - pending-after-eviction abandonment, post-eviction insertion failure,
@@ -460,9 +465,9 @@ artifact is core-implementation evidence rather than a committed baseline
 replacement or final-head timing artifact; the later commit changes only the
 diagnostic test contract.
 
-Fast-local passes 1,435 batched and 92 isolated tests. Isolated Debug,
-Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,569 tests;
-instrumentation passes 1,586. Twenty-seven shared checks reconcile 121
+Fast-local passes 1,436 batched and 92 isolated tests. Isolated Debug,
+Release, ASan/UBSan, and genuine GCC 16 Debug/Release each pass 1,570 tests;
+instrumentation passes 1,587. Twenty-seven shared checks reconcile 121
 configured instances, and 58 native compatibility/performance contracts
 pass. Four fresh 20,000-run fuzz domains complete with seed 102. Full
 production clang-tidy, pinned formatting, graph, engineering discipline, and
@@ -474,7 +479,10 @@ unchanged public const `current_record()` contract, and corrected native
 opcode mapping. Implementation review required an end-to-end sequence
 exhaustion regression that reads the retired root and proves the victim was
 not deleted. Diagnostic review added the explicit zero-write memory contract.
-All findings are closed in the reviewed implementation.
+Final exact-tree review found that positive-bound queue records did not reserve
+their two suffix fields and that valid short borrowed prefixes were
+misclassified as corruption. `f1f3c36` adds both boundary checks and their
+regressions. All findings are closed in the reviewed implementation.
 
 ## References
 
