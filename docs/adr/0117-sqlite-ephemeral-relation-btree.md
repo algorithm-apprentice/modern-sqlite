@@ -250,6 +250,12 @@ The high-cardinality memory case must materially improve. Timing evidence
 does not replace the focused diagnostic that memory mode uses the canonical
 B-tree and opens no file.
 
+Current-head aggregate diagnostics require zero retained-owner bytes for
+relation-only DISTINCT state and unique ordered DISTINCT state. The immutable
+aggregate baseline v1 keeps its original positive retained-owner expectation
+under an explicit v1 validation scope because those artifacts predate this
+repair. Neither contract accepts both mechanisms for the same source scope.
+
 Run:
 
 - Pager memory-mode unit/OOM/allocation tests;

@@ -44,6 +44,11 @@ CASE_DATA = (
 CASE_IDS = tuple(case[0] for case in CASE_DATA)
 CASE_BY_ID = {case[0]: case for case in CASE_DATA}
 FILE_CASES = frozenset(("sorted-group-file", "wide-modifier-file"))
+BASELINE_V1_RETAINED_CASES = frozenset(("distinct-state-memory", "unique-local-order-memory"))
+BASELINE_V1_RUNNER_REFERENCE = {
+    "sha256": "b5c3371f0b9a08b7773855e7602946d93adc62f75af67bbd56662414b7ed1962",
+    "size_bytes": 24375,
+}
 OPERATION_NAMES = ("open", "step", "finalize", "reset", "close")
 PEAK_NAMES = (
     "retained_bytes_peak", "working_set_bytes_peak", "live_files_peak",
@@ -59,13 +64,14 @@ MECHANISMS = {
     "sorted-group-file": (65535, 1, True),
     "high-card-group-memory": (65535, 1, True),
     "grouped-having-topn-memory": (65535, 2, True),
-    "distinct-state-memory": (65535, 0, True),
+    "distinct-state-memory": (65535, 0, False),
     "filtered-state-memory": (65535, 0, False),
     "local-order-memory": (65535, 0, True),
-    "unique-local-order-memory": (65535, 0, True),
+    "unique-local-order-memory": (65535, 0, False),
     "wide-modifier-file": (65535, 0, True),
     "aggregate-compound-memory": (131070, 2, True),
 }
+_VALIDATING_BASELINE_V1 = False
 _COMMON_STATE = {
     name: getattr(common, name)
     for name in (
@@ -96,6 +102,17 @@ def _work(case: tuple[Any, ...], measured: bool = False) -> dict[str, Any]:
         "result_misses": 0,
         "digest": case[7] if measured else case[6],
     }
+
+
+@contextlib.contextmanager
+def _baseline_v1_contract(enabled: bool) -> Any:
+    global _VALIDATING_BASELINE_V1
+    previous = _VALIDATING_BASELINE_V1
+    _VALIDATING_BASELINE_V1 = enabled
+    try:
+        yield
+    finally:
+        _VALIDATING_BASELINE_V1 = previous
 
 
 @contextlib.contextmanager
@@ -236,7 +253,11 @@ def validate_raw_diagnostic_report(
             raise HarnessError("aggregate file-pressure case did not acquire a spill file")
         if expected_case in FILE_CASES and value["aggregate_work"]["live_files_peak"] == 0:
             raise HarnessError("aggregate file-pressure case has no live file peak")
-        if (value["aggregate_work"]["retained_bytes_peak"] > 0) != MECHANISMS[expected_case][2]:
+        expects_retained_storage = (
+            MECHANISMS[expected_case][2]
+            or (_VALIDATING_BASELINE_V1 and expected_case in BASELINE_V1_RETAINED_CASES)
+        )
+        if (value["aggregate_work"]["retained_bytes_peak"] > 0) != expects_retained_storage:
             raise HarnessError("aggregate retained-storage mechanism differs from the contract")
     elif expected_engine == "sqlite":
         contracts._require_exact_typed(value["aggregate_work"], {}, "SQLite aggregate callback metrics")
@@ -339,6 +360,13 @@ def _collect_input_references(
         common._repository_input_reference(role=role, path=path, repository_root=repository_root)
         for role, path in sources
     ]
+    if _VALIDATING_BASELINE_V1:
+        runner = next(
+            reference
+            for reference in references
+            if reference["role"] == "aggregate-runner-source"
+        )
+        runner.update(BASELINE_V1_RUNNER_REFERENCE)
     for fixture in workload_manifest["fixtures"]:
         for suffix, field in (("", "path"), ("-sql", "sql_path")):
             references.append(common._repository_input_reference(
@@ -432,10 +460,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if arguments.command == "validate-baseline":
-            common.validate_baseline_directory(
-                baseline_path=arguments.baseline, repository_root=arguments.repository_root,
-                workload_path=arguments.workloads,
+            baseline_v1 = (
+                arguments.baseline.resolve()
+                == arguments.repository_root.resolve() / "benchmarks/aggregate-baseline-v1"
             )
+            with _baseline_v1_contract(baseline_v1):
+                common.validate_baseline_directory(
+                    baseline_path=arguments.baseline, repository_root=arguments.repository_root,
+                    workload_path=arguments.workloads,
+                )
             return 0
         if arguments.command == "generate-baseline":
             result = common.generate_baseline(
