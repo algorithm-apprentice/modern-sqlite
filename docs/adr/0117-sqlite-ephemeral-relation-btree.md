@@ -186,6 +186,19 @@ scope:
 Do not offer relation-local retry after a failed root creation, insertion,
 replacement, delete, clear, cursor read, or page-limit transition.
 
+Opening the supporting file must also retain typed OOM cleanup across every
+supported standard library. The POSIX VFS resolves an existing opened path
+with dynamically sized `realpath()` storage and preserves the existing trusted
+`TMPDIR`, `TMP`, `TEMP`, `TEMPDIR`, then `/tmp` temporary-directory search,
+including rejection of the first selected variable when it is empty. The VFS
+stages the selected template in an owned string before `mkstemp()` and installs
+non-allocating descriptor and unlink guards immediately after file creation.
+It does not use allocation-bearing `std::filesystem::path` canonicalization or
+path mutation in these open operations. This keeps allocation failure inside
+the existing typed Pager boundary, without depending on a standard-library
+path implementation's partial-construction cleanup or leaving an orphaned
+temporary file.
+
 Expected pre-mutation validation errors remain nonmutating:
 
 - invalid descriptor;

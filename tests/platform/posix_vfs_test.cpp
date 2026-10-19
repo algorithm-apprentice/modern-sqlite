@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -45,6 +46,12 @@ constexpr off_t kSharedMemoryLockBase = 120;
 constexpr int kLockAcquired = 0;
 constexpr int kLockBusy = 1;
 constexpr int kLockProbeError = 2;
+constexpr std::array<const char*, 4> kTemporaryDirectoryEnvironmentVariables{
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TEMPDIR",
+};
 
 class TemporaryDirectory final {
  public:
@@ -103,6 +110,37 @@ class UmaskGuard final {
   mode_t previous_;
 };
 
+class EnvironmentSnapshot final {
+ public:
+  EnvironmentSnapshot() {
+    for (std::size_t index = 0; index < kTemporaryDirectoryEnvironmentVariables.size(); ++index) {
+      const char* value = std::getenv(kTemporaryDirectoryEnvironmentVariables[index]);
+      if (value != nullptr) {
+        values_[index] = value;
+      }
+    }
+  }
+
+  EnvironmentSnapshot(const EnvironmentSnapshot&) = delete;
+  EnvironmentSnapshot& operator=(const EnvironmentSnapshot&) = delete;
+  EnvironmentSnapshot(EnvironmentSnapshot&&) = delete;
+  EnvironmentSnapshot& operator=(EnvironmentSnapshot&&) = delete;
+
+  ~EnvironmentSnapshot() {
+    for (std::size_t index = 0; index < kTemporaryDirectoryEnvironmentVariables.size(); ++index) {
+      const char* name = kTemporaryDirectoryEnvironmentVariables[index];
+      if (values_[index].has_value()) {
+        static_cast<void>(::setenv(name, values_[index]->c_str(), 1));
+      } else {
+        static_cast<void>(::unsetenv(name));
+      }
+    }
+  }
+
+ private:
+  std::array<std::optional<std::string>, kTemporaryDirectoryEnvironmentVariables.size()> values_;
+};
+
 [[nodiscard]] FileOpenOptions CreateMainDatabaseOptions() {
   return FileOpenOptions{
       .kind = FileKind::kMainDatabase,
@@ -123,6 +161,16 @@ class UmaskGuard final {
   return FileOpenOptions{
       .kind = FileKind::kMainDatabase,
       .access = FileAccessMode::kReadOnly,
+  };
+}
+
+[[nodiscard]] FileOpenOptions CreateTemporaryDatabaseOptions() {
+  return FileOpenOptions{
+      .kind = FileKind::kTemporaryDatabase,
+      .access = FileAccessMode::kReadWrite,
+      .create = true,
+      .exclusive_create = true,
+      .delete_on_close = true,
   };
 }
 
@@ -414,13 +462,7 @@ TEST(PosixVfs, HonorsExclusiveCreateSymlinkPolicyAndDeleteOnClose) {
   ASSERT_TRUE(followed_symlink.has_value());
 
   const std::string named_temporary_path = directory.Path("named.tmp");
-  const FileOpenOptions temporary_options{
-      .kind = FileKind::kTemporaryDatabase,
-      .access = FileAccessMode::kReadWrite,
-      .create = true,
-      .exclusive_create = true,
-      .delete_on_close = true,
-  };
+  const FileOpenOptions temporary_options = CreateTemporaryDatabaseOptions();
   auto named_temporary = vfs.Open(named_temporary_path, temporary_options);
   ASSERT_TRUE(named_temporary.has_value());
   const auto named_exists = vfs.Access(named_temporary_path, FileAccessQuery::kExists);
@@ -433,6 +475,30 @@ TEST(PosixVfs, HonorsExclusiveCreateSymlinkPolicyAndDeleteOnClose) {
   auto pathless_temporary = vfs.Open(std::nullopt, temporary_options);
   ASSERT_TRUE(pathless_temporary.has_value());
   EXPECT_TRUE(pathless_temporary->file->WriteAt(View(payload), FileOffset{0}).has_value());
+}
+
+TEST(PosixVfs, HonorsTemporaryDirectoryEnvironmentVariables) {
+  const TemporaryDirectory directory;
+  const EnvironmentSnapshot environment;
+  for (const char* name : kTemporaryDirectoryEnvironmentVariables) {
+    ASSERT_EQ(0, ::unsetenv(name));
+  }
+
+  PosixVfs vfs;
+  const std::string missing_directory = directory.Path("missing");
+  for (const char* name : kTemporaryDirectoryEnvironmentVariables) {
+    ASSERT_EQ(0, ::setenv(name, missing_directory.c_str(), 1));
+    const auto opened = vfs.Open(std::nullopt, CreateTemporaryDatabaseOptions());
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(ErrorCode::kCannotOpen, opened.error().code());
+    ASSERT_EQ(0, ::unsetenv(name));
+
+    ASSERT_EQ(0, ::setenv(name, "", 1));
+    const auto empty = vfs.Open(std::nullopt, CreateTemporaryDatabaseOptions());
+    ASSERT_FALSE(empty.has_value());
+    EXPECT_EQ(ErrorCode::kCannotOpen, empty.error().code());
+    ASSERT_EQ(0, ::unsetenv(name));
+  }
 }
 
 TEST(PosixVfs, TreatsEmptyRegularFilesAsAbsentForExistenceOnly) {
