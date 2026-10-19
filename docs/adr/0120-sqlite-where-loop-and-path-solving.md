@@ -158,3 +158,35 @@ and path selection still belong to the second slice.
 
 GPT-5.6 Sol approved the first implementation slice and its directly coupled
 lowering corrections with no significant unresolved issue before commit.
+
+## Native key and term-consumption closure
+
+Status: Accepted amendment for the second slice after GPT-5.6 Sol review.
+
+Native `where.c:3300-3327,4115` admits a supported key expression when its
+dependencies exclude the accessed source and its outer-join/affinity rules
+permit the constraint. It does not impose Modern's value/arithmetic-only
+join-key classes or reject a function merely because it is volatile.
+Translate that rule through the existing bound-expression emitter; do not
+add path-dependent custom key-shape barriers to the N-best solver.
+
+Together, translate `wherecode.c:419-438` consumption for exact rowid and
+stored/automatic constraints, including WHERE constraints. A selected term
+is coded only when its complete prerequisites are ready, its access occurs
+no later than the term's evaluation phase, and outer-join rules permit it.
+Track original conjunct occurrences and ON ownership, not expression IDs
+alone. Transitive constraints that cannot discharge the original term keep
+that residual. Publish the resulting predicate schedule once; no key-result
+cache or second evaluator is introduced.
+
+This supersedes the retained key-shape and blanket
+stored/automatic/WHERE recheck limits above and in ADR-0081/0085-0087/0107.
+It does not add SQL syntax or unimplemented access kinds. Native EXPLAIN and
+focused callback-count controls precede implementation.
+
+The pinned native library executes the three volatile rowid-ON, rowid-WHERE,
+and stored-index-ON controls with three key calls each; the unchanged Modern
+baseline executes nine. Native coalesce and correlated query-value keys also
+use the existing access mechanism. Evidence remains in session artifacts.
+Publish joined `source_order` and bounded-search status through the existing
+`PhysicalCoreAccessPlan`, not a parallel query-plan container.
