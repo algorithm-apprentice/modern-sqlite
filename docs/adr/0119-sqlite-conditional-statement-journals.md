@@ -151,6 +151,32 @@ Immutable programs gain two effect bits, and failed statement completion
 receives its actual error class. Existing transaction, Pager, journal, B-tree,
 and cleanup owners remain canonical.
 
+## Evidence
+
+Design `1614805` and implementation `5b304be` translate this mechanism.
+Focused regressions first reproduced journal-free FULL and setup-OOM
+completion failures, then passed with the native admission/error rules.
+Review also closed missing catalog/OOM cause propagation before qualification.
+
+The retained exact-core comparison is
+`conditional-journal-write-before-v2` versus
+`conditional-journal-write-after-awake-v2`; immutable v2 is unchanged.
+
+| Explicit batch INSERT | Prior wall ratio | New wall ratio | Prior allocations | New allocations |
+|---|---:|---:|---:|---:|
+| engine-default | 5.303962 | 4.927977 | 743,188 | 677,649 |
+| matched-durable | 5.834854 | 4.966247 | 1,106,646 | 677,649 |
+
+Both profiles preserve results, final database digests, workloads, durability,
+and guards. A sleep-contaminated capture was rejected, not used as evidence.
+The remaining matched scan ratios are 2.819651x DELETE and 1.837035x UPDATE.
+
+Fast-local passes 1,443 batched plus 92 isolated cases. Debug, Release,
+ASan/UBSan, and GCC 16 Debug/Release each pass 1,577 isolated cases;
+instrumentation passes 1,594. Shared checks execute 27 cases covering 161
+configured instances; native contracts pass 58 cases. Four 20,000-run
+seed-102 fuzz domains, clang-tidy, formatting, graph, and discipline pass.
+
 ## References
 
 - ADR-0047: Reference-Faithful Single-Database Transaction Coordination

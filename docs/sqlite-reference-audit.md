@@ -7,9 +7,9 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Thirteen are reference-faithful,
+  90 production paths map to 36 mechanisms. Fourteen are reference-faithful,
   fourteen are accepted architectural translations, one is an accepted
-  measured alternative, four require repair, and four remain unresolved
+  measured alternative, three require repair, and four remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -83,12 +83,12 @@ infrastructure rather than production mechanisms.
 
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Storage and transaction | 40 | 12 | 7 | 4 | 0 | 1 | 0 |
+| Storage and transaction | 40 | 12 | 8 | 4 | 0 | 0 | 0 |
 | Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 0 | 1 | 1 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 0 | 2 | 0 |
-| **Total** | **90** | **36** | **13** | **14** | **1** | **4** | **4** |
+| **Total** | **90** | **36** | **14** | **14** | **1** | **3** | **4** |
 
 ### Mechanism dispositions
 
@@ -105,7 +105,7 @@ infrastructure rather than production mechanisms.
 | `storage-btree-read` | Typed page views and read cursors | `btree.c` page/cursor mechanisms | `reference-faithful` |
 | `storage-btree-write` | Writable cursor, bounded page owner, `CellArray`, and balancing | `btree.c` allocation, cell editing, balancing, insert, delete, and root lifecycle | `architectural-translation` |
 | `storage-diagnostics` | Offline ownership and corruption workspace | `btree.c` integrity mechanisms | `architectural-translation` |
-| `storage-transaction` | Transaction coordinator and anonymous savepoints | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `repair-required` |
+| `storage-transaction` | Compiler-gated anonymous savepoints and error-class-aware completion | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `reference-faithful` |
 | `runtime-values` | SQL values, affinity, numeric scanners, and exact comparison | `vdbemem.c` and SQLite floating conversion | `reference-faithful` |
 | `runtime-collation` | BINARY, NOCASE, RTRIM, and custom descriptors | SQLite collation registry and comparators | `reference-faithful` |
 | `runtime-functions` | Scalar and aggregate state registry | `func.c` plus `vdbe.c` function/AggStep invocation | `unresolved` |
@@ -150,7 +150,7 @@ ordinal below, and its child ADR is created before production changes.
 | `storage-btree-read` — `implement-btree-page`, `implement-btree-read` | `btree.c:1205-2294` page/cell geometry, `:5155-5473` payload, `:5486-6520` cursor open/seek/traversal. | Pager/record/collation; goldens, malformed/fuzz, signed rowid/index seek, OOM and SQLite-created traversal. | `reference-faithful`; no open valid-file finding. |
 | `storage-btree-write` — `implement-btree-write` | `btree.c:3540-3573,6546-7290,7320-9300,9441-10060,10098-10480` database/root, allocation/free, cell edit/balance, insert, delete, and root lifecycle. | Writable Pager and read B-tree; model, crash, OOM/allocation, bidirectional integrity. | `architectural-translation`; algorithm is preserved through typed owners, and ADR-0114 closes freed-page write suppression. |
 | `storage-diagnostics` — `implement-storage-diagnostics` | `btree.c:10694-11310` integrity ownership/reachability plus format decoders above. | Read Pager/B-tree/record; whole-file corruption, freelist, overflow, pointer-map, stable output tests. | `architectural-translation`; offline workspace is outside point hot paths. |
-| `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; lifecycle, crash, changes/rowid/autocommit, retry, savepoint evidence. | `repair-required`; ledger 8, child ADR pending. ADR-0047 explicitly deferred precise admission. |
+| `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; compiler effects, scoped ANALYZE, lifecycle, crash, OOM, changes/rowid/autocommit, named savepoints, and matched write evidence. | `reference-faithful`; ADR-0119 and `5b304be` translate conditional admission and native error completion while retaining canonical epochs, savepoints, and terminal cleanup. |
 | `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
 | `runtime-collation` — `implement-collation` | `main.c:1082-1135` RTRIM/NOCASE, `main.c:2907-2965,3577-3586,3812-3868` registration/BINARY built-ins. | SQL values/text; allocation-free ordering, custom callback, record/index integration tests. | `reference-faithful`; UTF-16 adapters remain unimplemented scope. |
 | `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:1870-2340,3399-3550` aggregate/scalar states; `vdbe.c:7982-8180,9034-9098` AggStep/final/function invocation. | Values/collation/VM; full semantic, overflow, callback, reset and aggregate differential matrices. | `unresolved`; ledger 13. Profile must attribute the 6.32x global-functions gap before a child ADR. |
@@ -188,6 +188,7 @@ greater than one mean Modern is slower.
 | Read | 1.53x fit scan; 1.49x pressure scan | `benchmarks/read-baseline-v1/aggregate.json` |
 | Write | 8.52x matched delete scan; 6.97x matched update scan; 5.56x matched explicit batch insert | `benchmarks/write-baseline-v2/aggregate.json` |
 | Write after ADR-0114 | 5.73x matched explicit batch insert; 2.79x matched delete scan; 1.83x matched update scan | ADR-0114 implementation evidence |
+| Write after ADR-0119 | 4.97x matched explicit batch insert; 2.82x matched delete scan; 1.84x matched update scan | ADR-0119 `5b304be` implementation evidence |
 | ORDER BY | 7.68x file top-N; 6.44x memory top-N; 6.37x multi-spill | `benchmarks/order-by-baseline-v1/aggregate.json` |
 | ORDER BY after ADR-0116 | 4.30x integer memory; 2.15x payload memory; 1.95x multi-spill; 1.90x minimal spill | ADR-0116 implementation evidence |
 | ORDER BY after ADR-0118 | 7.80x file top-N; 5.89x memory top-N; file allocations fall from 624,675 to 488,132 | ADR-0118 `cda0505` implementation evidence |
@@ -237,7 +238,7 @@ than timing noise:
 | 5 | `runtime-sorter` | **Complete** | ADR-0116 coallocates memory-mode metadata/payload, adds SQLite's offset-linked file-mode bulk arena, preallocates PMA metadata before I/O, and records focused allocation plus fresh ORDER BY/aggregate evidence. |
 | 6 | `runtime-ephemeral-relation` | **Complete** | ADR-0117 uses the canonical ephemeral B-tree in memory and file modes, removes sorted-array insertion, and records page-limit, OOM, ownership, and fresh DISTINCT/compound evidence. |
 | 7 | `runtime-topn` | **Complete** | ADR-0118 reuses the ephemeral B-tree for logarithmic ORDER BY LIMIT admission, positioned maximum deletion, lazy OFFSET drain, cross-library allocation contracts, and fresh matched evidence. |
-| 8 | `storage-transaction` | Repair | Proposed ADR-0119 publishes compiler multi-write/ABORT effects and opens anonymous statement savepoints only when required, with native error-class-aware completion. |
+| 8 | `storage-transaction` | **Complete** | ADR-0119 translates compiler multi-write/ABORT effects, conditional anonymous savepoints, and error-class-aware completion; matched batch-INSERT allocations fall from 1,106,646 to 677,649. |
 | 9 | `execution-optimizer` | Repair | Translate the bounded SQLite WhereLoop/path solver for currently admitted accesses and join barriers. |
 | 10 | `write-create-index` | Repair | Reuse the repaired sorter and add ordered bulk index construction with adjacent UNIQUE checks. |
 | 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
@@ -879,7 +880,7 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its remaining four repairs and four resolutions must
+blocking work ledger. Its remaining three repairs and four resolutions must
 close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as repairs proceed.
