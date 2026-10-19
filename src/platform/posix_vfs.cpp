@@ -603,8 +603,8 @@ struct SharedMemoryState {
 [[nodiscard]] Result<std::string> CanonicalExistingPath(std::string_view path) {
   const std::string owned_path{path};
   errno = 0;
-  std::unique_ptr<char, decltype(&std::free)> canonical{::realpath(owned_path.c_str(), nullptr),
-                                                        &std::free};
+  const std::unique_ptr<char, decltype(&std::free)> canonical{
+      ::realpath(owned_path.c_str(), nullptr), &std::free};
   if (canonical == nullptr) {
     return std::unexpected(SystemError(ErrorCode::kCannotOpen, "realpath", path, errno));
   }
