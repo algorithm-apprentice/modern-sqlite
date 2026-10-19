@@ -239,7 +239,7 @@ than timing noise:
 | 6 | `runtime-ephemeral-relation` | **Complete** | ADR-0117 uses the canonical ephemeral B-tree in memory and file modes, removes sorted-array insertion, and records page-limit, OOM, ownership, and fresh DISTINCT/compound evidence. |
 | 7 | `runtime-topn` | **Complete** | ADR-0118 reuses the ephemeral B-tree for logarithmic ORDER BY LIMIT admission, positioned maximum deletion, lazy OFFSET drain, cross-library allocation contracts, and fresh matched evidence. |
 | 8 | `storage-transaction` | **Complete** | ADR-0119 translates compiler multi-write/ABORT effects, conditional anonymous savepoints, and error-class-aware completion; matched batch-INSERT allocations fall from 1,106,646 to 677,649. |
-| 9 | `execution-optimizer` | Repair | Translate the bounded SQLite WhereLoop/path solver for currently admitted accesses and join barriers. |
+| 9 | `execution-optimizer` | Repair | ADR-0120 translates native LogEst costs and bounded WhereLoop/path solving for currently admitted accesses and join barriers; implementation and qualification remain pending. |
 | 10 | `write-create-index` | Repair | Reuse the repaired sorter and add ordered bulk index construction with adjacent UNIQUE checks. |
 | 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
 | 12 | `execution-vm` | Resolve | Profile same-work covering-index, aggregate, and sorter controls; repair compact dispatch/register/cursor mechanisms if confirmed. |
