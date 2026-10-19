@@ -130,6 +130,15 @@ class FileTopNEnvironment final {
   };
 }
 
+[[nodiscard]] RecordSorterDescriptor WideDescriptor(std::size_t key_field_count) {
+  return RecordSorterDescriptor{
+      .field_count = key_field_count,
+      .key_field_count = key_field_count,
+      .key_columns =
+          std::vector<IndexColumnOrder>(key_field_count, IndexColumnOrder{BinaryCollation()}),
+  };
+}
+
 [[nodiscard]] EphemeralRelationDescriptor RelationDescriptor() {
   return EphemeralRelationDescriptor{
       .field_count = 2,
@@ -313,6 +322,30 @@ TEST(BoundedTopN, KeepsZeroBoundRootAndFileLazyInBothModes) {
     EXPECT_EQ(0U, environment.vfs().pathless_open_count());
     EXPECT_EQ(0U, environment.storage().live_file_count());
     EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(zero.CheckCandidate(Key(1))));
+  }
+}
+
+TEST(BoundedTopN, ReservesQueueSuffixFieldsForPositiveBounds) {
+  {
+    TopNEnvironment accepted;
+    BoundedTopN top_n =
+        TakeValue(accepted.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 2U), 1));
+    EXPECT_TRUE(top_n.valid());
+  }
+  {
+    TopNEnvironment rejected;
+    const auto top_n =
+        rejected.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 1U), 1);
+    ASSERT_FALSE(top_n.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, top_n.error().code());
+    EXPECT_EQ(0U, rejected.storage().relation_cache_allocated_pages());
+  }
+  {
+    TopNEnvironment zero;
+    BoundedTopN top_n =
+        TakeValue(zero.storage().CreateTopN(WideDescriptor(kMaximumRecordFieldCount - 1U), 0));
+    EXPECT_TRUE(top_n.valid());
+    EXPECT_EQ(0U, zero.storage().relation_cache_allocated_pages());
   }
 }
 

@@ -27,6 +27,8 @@ constexpr std::size_t kMinimumPmaPageCount = 250;
 constexpr std::size_t kMaximumPmaSize = 1U << 29U;
 constexpr std::size_t kMergeRunCount = std::numeric_limits<std::size_t>::digits + 1U;
 constexpr std::size_t kMergeFanIn = 16;
+constexpr std::size_t kTopNQueueSuffixFieldCount = 2;
+constexpr std::size_t kTopNPackedRecordFieldOffset = 1;
 
 [[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
   try {
@@ -3340,7 +3342,7 @@ struct BoundedTopN::Impl {
     if (!wrapper.has_value()) {
       return std::unexpected(std::move(wrapper.error()));
     }
-    if (wrapper->field_count() != descriptor.key_field_count + 2U) {
+    if (wrapper->field_count() != descriptor.key_field_count + kTopNQueueSuffixFieldCount) {
       return std::unexpected(Corruption("top-N queue record has an invalid field count"));
     }
     auto sequence = wrapper->field(descriptor.key_field_count);
@@ -3351,7 +3353,7 @@ struct BoundedTopN::Impl {
     if (!sequence_value.has_value() || *sequence_value < 0) {
       return std::unexpected(Corruption("top-N queue sequence is not a nonnegative integer"));
     }
-    auto packed = wrapper->field(descriptor.key_field_count + 1U);
+    auto packed = wrapper->field(descriptor.key_field_count + kTopNPackedRecordFieldOffset);
     if (!packed.has_value()) {
       return std::unexpected(std::move(packed.error()));
     }
@@ -3445,6 +3447,10 @@ Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor
   if (!validated.has_value()) {
     return std::unexpected(std::move(validated.error()));
   }
+  if (bound != 0U &&
+      descriptor.key_field_count > kMaximumRecordFieldCount - kTopNQueueSuffixFieldCount) {
+    return std::unexpected(Misuse("top-N comparison key leaves no queue payload fields"));
+  }
   try {
     temporary_storage_detail::StatementState& state =
         temporary_storage_detail::StatementStorageAccess::State(storage);
@@ -3464,7 +3470,7 @@ Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor
         return std::unexpected(std::move(root.error()));
       }
       impl->btree.emplace(std::move(*root), std::move(columns));
-      impl->btree->queue_fields.reserve(descriptor.key_field_count + 2U);
+      impl->btree->queue_fields.reserve(descriptor.key_field_count + kTopNQueueSuffixFieldCount);
     }
     return BoundedTopN{std::move(impl)};
   } catch (const std::bad_alloc&) {

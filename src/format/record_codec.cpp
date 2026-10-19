@@ -882,7 +882,13 @@ Result<std::weak_ordering> CompareRecordPrefixes(const RecordView& left, const R
 Result<std::weak_ordering> CompareRecordPrefixes(const RecordPrefixView& left,
                                                  const RecordView& right,
                                                  std::span<const IndexColumnOrder> columns) {
-  return CompareRecordPrefixFields(left.cursor(), left.complete_field_count(), right.cursor(),
+  if (left.complete_field_count() < columns.size()) {
+    return std::unexpected(Corruption("left record has fewer fields than comparison prefix"));
+  }
+  if (left.field_count() < columns.size()) {
+    return std::unexpected(Misuse("left record prefix does not contain all comparison fields"));
+  }
+  return CompareRecordPrefixFields(left.cursor(), left.field_count(), right.cursor(),
                                    right.field_count(), columns);
 }
 
