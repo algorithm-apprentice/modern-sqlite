@@ -217,6 +217,9 @@ Pager sync authorization remain unchanged.
 ADR-0118 follows the repaired ephemeral relation with SQLite's bounded
 ORDER BY LIMIT B-tree in both temporary modes, positioned maximum deletion,
 borrowed key-prefix comparison, and lazy OFFSET drain.
+ADR-0119 follows with compiler-owned multi-write/ABORT effects, conditional
+anonymous statement-savepoint admission, and error-class-aware completion
+through the existing transaction coordinator.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

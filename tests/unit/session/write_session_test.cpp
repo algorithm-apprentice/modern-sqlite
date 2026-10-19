@@ -356,6 +356,52 @@ TEST(WriteSession, ExecutesWritablePipelineAndPublishesConnectionState) {
   EXPECT_EQ(1U, session.changes());
 }
 
+TEST(WriteSession, JournalFreeFullErrorRollsBackTheExplicitTransaction) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,Name TEXT)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'prior')");
+  ExecuteDone(session, "INSERT INTO Items VALUES(9223372036854775807,'maximum')");
+  fixture.vfs->SetRandomByte(std::byte{0});
+
+  WriteStatement insert = PrepareOne(session, "INSERT INTO Items(Name) VALUES('full')");
+  const auto failed = insert.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kFull, failed.error().code());
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM Items").empty());
+}
+
+TEST(WriteSession, ConditionalJournalsPreserveOuterWorkAfterOrdinaryAbort) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY,n INTEGER)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,1)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,-9223372036854775808)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO Items VALUES(3,3)");
+
+  for (const std::string_view sql :
+       {"INSERT INTO Items VALUES(1,99)", "UPDATE Items SET n=abs(n)+10 WHERE id=2",
+        "UPDATE Items SET n=abs(n)+10"}) {
+    SCOPED_TRACE(sql);
+    WriteStatement statement = PrepareOne(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_FALSE(session.autocommit());
+    EXPECT_EQ(0U, session.changes());
+    const auto reset = statement.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failed.error().code(), reset.error().code());
+    const auto rows = QueryRows(session, "SELECT id,n FROM Items ORDER BY id");
+    ASSERT_EQ(3U, rows.size());
+    EXPECT_EQ(1, rows[0][1].integer_value());
+    EXPECT_EQ(3, rows[2][1].integer_value());
+  }
+  ExecuteDone(session, "COMMIT");
+}
+
 TEST(WriteSession, MapsTransactionsSavepointsAndRollbackVisibility) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

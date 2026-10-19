@@ -500,6 +500,7 @@ template <typename T>
   clone.statement_kind = input.statement_kind;
   clone.transaction_access = input.transaction_access;
   clone.rollback_mode = input.rollback_mode;
+  clone.write_effects = input.write_effects;
   clone.mutation_result = input.mutation_result;
   clone.register_count = input.register_count;
   clone.parameter_count = input.parameter_count;
@@ -695,6 +696,7 @@ template <typename T>
   if ((is_select && input.transaction_access != ProgramTransactionAccess::kRead) ||
       (!is_select && input.transaction_access != ProgramTransactionAccess::kWrite) ||
       (is_select && input.rollback_mode != ProgramRollbackMode::kTransaction) ||
+      (is_select && (input.write_effects.multi_write || input.write_effects.may_abort)) ||
       (is_select && !input.write_cursors.empty()) ||
       (!is_select && !input.result_columns.empty()) || !mutation_results_valid) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidExecutionMetadata));
@@ -4143,17 +4145,27 @@ ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label las
 
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
     ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
-    ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result) {
+    ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result,
+    ProgramWriteEffects write_effects) {
   if (auto usable = CheckUsable(); !usable) {
     return usable;
   }
   input_.statement_kind = statement_kind;
   input_.transaction_access = transaction_access;
   input_.rollback_mode = rollback_mode;
+  input_.write_effects = write_effects;
   input_.mutation_result = mutation_result;
   if (transaction_access == ProgramTransactionAccess::kWrite) {
     input_.requires_database_snapshot = true;
   }
+  return {};
+}
+
+ProgramResult<void> ProgramBuilder::MarkMayAbort() {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  input_.write_effects.may_abort = true;
   return {};
 }
 

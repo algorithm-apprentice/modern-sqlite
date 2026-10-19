@@ -224,7 +224,8 @@ void RequireStatus(Status status) {
   return *std::move(created);
 }
 
-[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog(bool name_not_null = false) {
+[[nodiscard]] CatalogSnapshotPtr IndexedMutationCatalog(bool name_not_null = false,
+                                                        bool has_stat1 = false) {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 0, .generation = 17},
@@ -259,6 +260,20 @@ void RequireStatus(Status status) {
           },
       .rowid_alias = ColumnId{0},
   });
+  if (has_stat1) {
+    input.definitions.push_back(ParseTree("CREATE TABLE sqlite_stat1(tbl,idx,stat)"));
+    input.tables.push_back(CatalogTableInput{
+        .definition = SchemaDefinitionId{4},
+        .name = "sqlite_stat1",
+        .root_page = RootPageId{6},
+        .columns =
+            {
+                CatalogColumnInput{.name = "tbl"},
+                CatalogColumnInput{.name = "idx"},
+                CatalogColumnInput{.name = "stat"},
+            },
+    });
+  }
   input.indexes.push_back(CatalogIndexInput{
       .definition = SchemaDefinitionId{1},
       .name = "items_name",
@@ -6815,6 +6830,46 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
                 InstructionKind::kHalt,
             }),
             InstructionKinds(*lowered));
+}
+
+TEST(MutationLowering, PublishesSQLiteStatementJournalEffects) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  struct Case {
+    std::string_view sql;
+    ProgramWriteEffects effects;
+  };
+  const std::array cases{
+      Case{"INSERT INTO Items VALUES(1,'x',2)", {false, true}},
+      Case{"UPDATE Items SET Name='x' WHERE id=1", {false, true}},
+      Case{"UPDATE Items SET Score=2", {true, false}},
+      Case{"UPDATE Items SET Score=abs(Score)", {true, true}},
+      Case{"UPDATE Items SET id=id+1", {true, true}},
+      Case{"DELETE FROM Items WHERE id=1", {false, false}},
+      Case{"DELETE FROM Items WHERE Score>1", {true, false}},
+      Case{"DELETE FROM Items WHERE abs(Score)>1", {true, true}},
+      Case{"CREATE TABLE Added(id INTEGER)", {true, true}},
+      Case{"CREATE TABLE IF NOT EXISTS Items(id INTEGER)", {false, false}},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const BytecodeProgram program = LowerMutationOrThrow(test_case.sql, catalog);
+    EXPECT_EQ(test_case.effects, program.write_effects());
+    EXPECT_EQ(test_case.effects.multi_write && test_case.effects.may_abort,
+              program.uses_statement_journal());
+  }
+}
+
+TEST(AnalyzeLowering, DistinguishesDatabaseAndScopedCleanupEffects) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog(false, true);
+  for (const std::string_view sql : {"ANALYZE", "ANALYZE Items", "ANALYZE items_name"}) {
+    SCOPED_TRACE(sql);
+    const BytecodeProgram program = LowerMutationOrThrow(sql, catalog);
+    EXPECT_TRUE(program.write_effects().may_abort);
+    EXPECT_EQ(sql != "ANALYZE", program.write_effects().multi_write);
+    EXPECT_EQ(sql != "ANALYZE", program.uses_statement_journal());
+  }
+  const BytecodeProgram creating = LowerMutationOrThrow("ANALYZE", IndexedMutationCatalog());
+  EXPECT_TRUE(creating.uses_statement_journal());
 }
 
 TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {

@@ -234,7 +234,7 @@ struct WriteSession::State final {
     if (!reload) {
       auto required = CatalogRequiresReload(*pager, *catalog);
       if (!required.has_value()) {
-        auto rolled_back = statement->Rollback();
+        auto rolled_back = statement->Rollback(required.error().code());
         return !rolled_back.has_value()
                    ? Status{std::unexpected(CombineErrors(required.error(), rolled_back.error(),
                                                           "catalog probe rollback"))}
@@ -253,7 +253,7 @@ struct WriteSession::State final {
       }
       auto loaded = LoadCatalog(*pager, CatalogLoadOptions{.generation = *next});
       if (!loaded.has_value()) {
-        auto rolled_back = statement->Rollback();
+        auto rolled_back = statement->Rollback(loaded.error().code());
         return !rolled_back.has_value()
                    ? Status{std::unexpected(CombineErrors(loaded.error(), rolled_back.error(),
                                                           "catalog load rollback"))}
@@ -433,11 +433,11 @@ struct WriteStatement::Impl final {
     pending_changes.reset();
   }
 
-  [[nodiscard]] Status RollbackActiveStatement() {
+  [[nodiscard]] Status RollbackActiveStatement(std::optional<ErrorCode> cause = std::nullopt) {
     if (!active_statement.has_value()) {
       return {};
     }
-    Status rolled_back = active_statement->Rollback();
+    Status rolled_back = active_statement->Rollback(cause);
     if (!rolled_back.has_value()) {
       return rolled_back;
     }
@@ -452,7 +452,7 @@ struct WriteStatement::Impl final {
         error = CombineErrors(error, detached.error(), "VM execution-context cleanup");
       }
     }
-    auto rolled_back = RollbackActiveStatement();
+    auto rolled_back = RollbackActiveStatement(error.code());
     if (!rolled_back.has_value()) {
       error = CombineErrors(error, rolled_back.error(), "statement rollback");
     }
@@ -569,6 +569,7 @@ struct WriteStatement::Impl final {
           .access = access,
           .rollback = access == StatementAccess::kRead ? StatementRollbackMode::kStatement
                                                        : ToRollbackMode(program.rollback_mode()),
+          .uses_statement_journal = program.uses_statement_journal(),
       });
       if (!statement.has_value()) {
         return Fail(std::move(statement.error()));
@@ -724,7 +725,8 @@ struct WriteStatement::Impl final {
         [[maybe_unused]] const Status reset = execution->vm.Reset();
       }
       if (active_statement.has_value()) {
-        [[maybe_unused]] const Status rolled_back = active_statement->Rollback();
+        [[maybe_unused]] const Status rolled_back =
+            active_statement->Rollback(ErrorCode::kOutOfMemory);
         active_statement.reset();
       }
       last_error = Error::OutOfMemory();

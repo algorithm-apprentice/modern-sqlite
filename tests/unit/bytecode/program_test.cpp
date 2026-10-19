@@ -2480,6 +2480,7 @@ TEST(BytecodeProgramTest, PublishesExecutionAndWriteMetadata) {
   input.statement_kind = ProgramStatementKind::kUpdate;
   input.transaction_access = ProgramTransactionAccess::kWrite;
   input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.write_effects = {.multi_write = true, .may_abort = true};
   input.mutation_result = MutationResultMetadata{
       .publishes_changes = true,
       .publishes_last_insert_rowid = false,
@@ -2517,6 +2518,8 @@ TEST(BytecodeProgramTest, PublishesExecutionAndWriteMetadata) {
   EXPECT_EQ(ProgramStatementKind::kUpdate, program.statement_kind());
   EXPECT_EQ(ProgramTransactionAccess::kWrite, program.transaction_access());
   EXPECT_EQ(ProgramRollbackMode::kStatement, program.rollback_mode());
+  EXPECT_EQ(input.write_effects, program.write_effects());
+  EXPECT_TRUE(program.uses_statement_journal());
   EXPECT_TRUE(program.requires_database_snapshot());
   EXPECT_TRUE(program.mutation_result().publishes_changes);
   ASSERT_EQ(1U, program.write_cursors().size());
@@ -2762,8 +2765,12 @@ TEST(BytecodeProgramTest, BuilderPublishesWriteExecutionMetadata) {
                                         MutationResultMetadata{
                                             .publishes_changes = true,
                                             .publishes_last_insert_rowid = true,
+                                        },
+                                        ProgramWriteEffects{
+                                            .multi_write = true,
                                         })
                   .has_value());
+  ASSERT_TRUE(builder.MarkMayAbort().has_value());
   auto cursor = builder.AddWriteCursor(WriteCursorDescriptor{
       .root_page = RootPageNumber(2),
       .columns =

@@ -3,6 +3,15 @@
 - Status: Accepted
 - Date: 2026-10-07
 
+## Amendment: conditional statement journals
+
+ADR-0119 supersedes conservative anonymous-savepoint admission in Decision 6.
+Compiled write effects determine whether a statement journal is required;
+the rollback policy and primary error class independently determine failed
+statement completion. Direct coordinator callers retain conservative
+admission by default. Managed writer epochs, named savepoints, terminal
+cleanup, and durable transaction ordering remain unchanged.
+
 ## Context
 
 ADR-0040 through ADR-0042 provide SQLite-compatible rollback-journal,

@@ -577,6 +577,86 @@ TEST(TransactionCoordinator, RollsBackOneStatementInsideExplicitTransaction) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(TransactionCoordinator, JournalFreeWritesKeepEpochsAndNamedSavepoints) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = MakeTransactionFixture(vfs);
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  RequireStatus(coordinator.Begin());
+  const TransactionStatementOptions options{
+      .access = StatementAccess::kWrite,
+      .uses_statement_journal = false,
+  };
+  const std::array payload{std::byte{0x62}};
+  TransactionStatement first = TakeValue(coordinator.BeginStatement(options));
+  TableBtreeWriter stale = TakeValue(first.writer()->OpenTableBtree(PageNumber{1}));
+  RequireStatus(stale.Insert(2, payload));
+  RequireStatus(first.Succeed());
+  EXPECT_EQ(0U, coordinator.work_counters().pager_savepoint_creates);
+  const auto escaped = stale.Insert(3, payload);
+  ASSERT_FALSE(escaped.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, escaped.error().code());
+
+  RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+  TransactionStatement second = TakeValue(coordinator.BeginStatement(options));
+  TableBtreeWriter table = TakeValue(second.writer()->OpenTableBtree(PageNumber{1}));
+  RequireStatus(table.Insert(3, payload));
+  RequireStatus(second.Succeed());
+  EXPECT_EQ(1U, coordinator.work_counters().pager_savepoint_creates);
+  EXPECT_EQ(1U, coordinator.work_counters().btree_writer_opens);
+  RequireStatus(coordinator.RollbackTo(Utf8View{"kept"}));
+  RequireStatus(coordinator.Rollback());
+  EXPECT_TRUE(std::ranges::equal(fixture.view(), vfs.database_bytes()));
+}
+
+TEST(TransactionCoordinator, SelectsNativeErrorCompletionFromJournalAdmission) {
+  for (const bool journal : {false, true}) {
+    for (const ErrorCode cause : {ErrorCode::kConstraint, ErrorCode::kIo, ErrorCode::kInterrupted,
+                                  ErrorCode::kOutOfMemory, ErrorCode::kFull}) {
+      SCOPED_TRACE(journal);
+      SCOPED_TRACE(static_cast<int>(cause));
+      test::WritePagerFixedVfs vfs{false};
+      const ByteBuffer fixture = MakeTransactionFixture(vfs);
+      TransactionCoordinator coordinator = OpenCoordinator(vfs);
+      RequireStatus(coordinator.Begin());
+      TransactionStatement statement =
+          TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+              .access = StatementAccess::kWrite,
+              .uses_statement_journal = journal,
+          }));
+      const bool full_rollback =
+          cause == ErrorCode::kIo || cause == ErrorCode::kInterrupted ||
+          (!journal && (cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull));
+      RequireStatus(statement.Rollback(cause));
+      EXPECT_EQ(full_rollback, coordinator.autocommit());
+      EXPECT_FALSE(statement.valid());
+      EXPECT_EQ(journal ? 1U : 0U, coordinator.work_counters().pager_savepoint_creates);
+      if (!coordinator.autocommit()) {
+        RequireStatus(coordinator.Rollback());
+      }
+      EXPECT_TRUE(std::ranges::equal(fixture.view(), vfs.database_bytes()));
+    }
+  }
+}
+
+TEST(TransactionCoordinator, ReadResourceErrorsRetireTheOuterWriteTransaction) {
+  for (const ErrorCode cause : {ErrorCode::kGeneric, ErrorCode::kInterrupted,
+                                ErrorCode::kOutOfMemory, ErrorCode::kIo, ErrorCode::kFull}) {
+    SCOPED_TRACE(static_cast<int>(cause));
+    test::WritePagerFixedVfs vfs{false};
+    const ByteBuffer fixture = MakeTransactionFixture(vfs);
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    TransactionStatement statement = TakeValue(coordinator.BeginStatement());
+    RequireStatus(statement.Rollback(cause));
+    EXPECT_EQ(cause != ErrorCode::kGeneric && cause != ErrorCode::kInterrupted,
+              coordinator.autocommit());
+    if (!coordinator.autocommit()) {
+      RequireStatus(coordinator.Rollback());
+    }
+    EXPECT_TRUE(std::ranges::equal(fixture.view(), vfs.database_bytes()));
+  }
+}
+
 TEST(TransactionCoordinator, TransactionModeStatementRollbackEndsOuterTransaction) {
   test::WritePagerFixedVfs vfs{false};
   {
