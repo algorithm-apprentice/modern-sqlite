@@ -1043,6 +1043,23 @@ Result<bool> IndexBtreeWriter::DeleteEncoded(ByteView record) {
   return true;
 }
 
+Result<bool> IndexBtreeWriter::DeleteLast() {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  auto valid = core_->ValidateRoot(
+      root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  btree_internal::MutationPageOwner owner{core_->pager()};
+  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  if (!cursor.has_value()) {
+    return std::unexpected(std::move(cursor.error()));
+  }
+  return cursor->DeleteLastIndex(core_->workspace());
+}
+
 Result<std::uint64_t> IndexBtreeWriter::Clear() {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));

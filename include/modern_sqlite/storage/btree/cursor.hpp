@@ -101,6 +101,9 @@ class IndexBtreeCursor final {
   [[nodiscard]] Result<bool> Previous();
   [[nodiscard]] Result<bool> Seek(std::span<const SqlValue> key, BtreeSeekMode mode);
   [[nodiscard]] Result<std::weak_ordering> CompareCurrent(std::span<const SqlValue> key);
+  // Returns the ordering of the current stored record relative to the encoded key prefix.
+  [[nodiscard]] Result<std::weak_ordering> CompareCurrentRecordPrefix(const RecordView& key,
+                                                                      std::size_t key_field_count);
 
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);

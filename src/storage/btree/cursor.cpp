@@ -919,19 +919,12 @@ struct IndexBtreeCursor::Impl {
        RecordCodecOptions codec_options) noexcept
       : core(std::move(cursor_core)), columns(std::move(column_orders)), options(codec_options) {}
 
-  [[nodiscard]] Result<std::weak_ordering> CompareCell(const BtreeCellView& cell,
-                                                       std::span<const SqlValue> key,
-                                                       EqualPrefixResult equal_prefix_result,
-                                                       ByteBuffer& scratch) {
+  template <typename Compare>
+  [[nodiscard]] Result<std::weak_ordering> CompareCellPrefix(const BtreeCellView& cell,
+                                                             std::size_t requested_fields,
+                                                             Compare&& compare,
+                                                             ByteBuffer& scratch) {
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
-    const auto compare = [this, key,
-                          equal_prefix_result](const auto& record) -> Result<std::weak_ordering> {
-      auto comparison = CompareIndexRecord(record, key, columns, equal_prefix_result);
-      if (!comparison.has_value()) {
-        return std::unexpected(std::move(comparison.error()));
-      }
-      return comparison->ordering;
-    };
     if (cell.local_payload().size() == cell.payload_size().value()) {
       auto record = RecordView::Parse(cell.local_payload(), options);
       if (!record.has_value()) {
@@ -970,8 +963,8 @@ struct IndexBtreeCursor::Impl {
       complete_chain_read = true;
       header = scratch.view().first(header_size->value());
     }
-    auto prefix_size =
-        RecordPrefixView::RequiredPrefixSize(header, cell.payload_size(), key.size(), options);
+    auto prefix_size = RecordPrefixView::RequiredPrefixSize(header, cell.payload_size(),
+                                                            requested_fields, options);
     header = {};
     if (!prefix_size.has_value()) {
       return fail_after_chain_validation(std::move(prefix_size.error()));
@@ -994,11 +987,38 @@ struct IndexBtreeCursor::Impl {
       }
       encoded = scratch.view().first(prefix_size->value());
     }
-    auto record = RecordPrefixView::Parse(encoded, cell.payload_size(), key.size(), options);
+    auto record = RecordPrefixView::Parse(encoded, cell.payload_size(), requested_fields, options);
     if (!record.has_value()) {
       return std::unexpected(std::move(record.error()));
     }
     return compare(*record);
+  }
+
+  [[nodiscard]] Result<std::weak_ordering> CompareCell(const BtreeCellView& cell,
+                                                       std::span<const SqlValue> key,
+                                                       EqualPrefixResult equal_prefix_result,
+                                                       ByteBuffer& scratch) {
+    const auto compare = [this, key,
+                          equal_prefix_result](const auto& record) -> Result<std::weak_ordering> {
+      auto comparison = CompareIndexRecord(record, key, columns, equal_prefix_result);
+      if (!comparison.has_value()) {
+        return std::unexpected(std::move(comparison.error()));
+      }
+      return comparison->ordering;
+    };
+    return CompareCellPrefix(cell, key.size(), compare, scratch);
+  }
+
+  [[nodiscard]] Result<std::weak_ordering> CompareCellRecordPrefix(const BtreeCellView& cell,
+                                                                   const RecordView& key,
+                                                                   std::size_t key_field_count,
+                                                                   ByteBuffer& scratch) {
+    const auto compare = [this, &key,
+                          key_field_count](const auto& record) -> Result<std::weak_ordering> {
+      return CompareRecordPrefixes(
+          record, key, std::span<const IndexColumnOrder>{columns}.first(key_field_count));
+    };
+    return CompareCellPrefix(cell, key_field_count, compare, scratch);
   }
 
   [[nodiscard]] Status ReadComparisonPrefix(const BtreeCellView& cell, ByteCount size,
@@ -1255,6 +1275,23 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlV
   }
   ByteBuffer scratch;
   return impl_->CompareCell(*cell, key, EqualPrefixResult::kEquivalent, scratch);
+}
+
+Result<std::weak_ordering> IndexBtreeCursor::CompareCurrentRecordPrefix(
+    const RecordView& key, std::size_t key_field_count) {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  if (key_field_count == 0U || key_field_count > key.field_count() ||
+      key_field_count > impl_->columns.size()) {
+    return std::unexpected(Misuse("encoded index comparison prefix is invalid"));
+  }
+  auto cell = impl_->core.CurrentCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  ByteBuffer scratch;
+  return impl_->CompareCellRecordPrefix(*cell, key, key_field_count, scratch);
 }
 
 Result<BtreePayloadView> IndexBtreeCursor::payload() const {

@@ -33,6 +33,7 @@ struct MemoryRegistration;
 struct StatementState;
 class StatementStorageAccess;
 class RelationArenaAccess;
+class BoundedTopNAccess;
 }  // namespace temporary_storage_detail
 
 enum class TemporaryStoreMode : std::uint8_t {
@@ -325,6 +326,7 @@ class BoundedTopN final {
 
  private:
   friend class StatementTemporaryStorage;
+  friend class temporary_storage_detail::BoundedTopNAccess;
 
   struct Impl;
 
@@ -333,7 +335,7 @@ class BoundedTopN final {
                                                   std::size_t bound,
                                                   StatementTemporaryStorage& storage);
 
-  std::unique_ptr<Impl> impl_;
+  mutable std::unique_ptr<Impl> impl_;
 };
 
 // Borrows the VFS and pager. Both must outlive the factory, statement storage,

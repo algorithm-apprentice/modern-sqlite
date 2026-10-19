@@ -3118,38 +3118,57 @@ Result<RecordSorter> StatementTemporaryStorage::CreateRecordSorter(
   return RecordSorter::Create(descriptor, *this);
 }
 
+Result<std::int64_t> temporary_storage_detail::CheckedTopNSequence(std::uint64_t sequence) {
+  if (sequence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return std::unexpected(TooLarge("top-N sequence is exhausted"));
+  }
+  return static_cast<std::int64_t>(sequence);
+}
+
 struct BoundedTopN::Impl {
-  struct Entry {
-    Entry(ByteBuffer owned_record, RecordView record_view, std::size_t owned_bytes) noexcept
-        : record(std::move(owned_record)), view(record_view), memory_bytes(owned_bytes) {}
-
-    ByteBuffer record;
-    RecordView view;
-    std::size_t memory_bytes;
-    std::unique_ptr<Entry> next;
-  };
-
-  struct FileBackend {
-    FileBackend(temporary_storage_detail::RelationRootLease owned_root,
-                std::vector<IndexColumnOrder> key_columns) noexcept
+  struct BtreeBackend {
+    BtreeBackend(temporary_storage_detail::RelationRootLease owned_root,
+                 std::vector<IndexColumnOrder> key_columns) noexcept
         : root(std::move(owned_root)), columns(std::move(key_columns)) {}
 
     temporary_storage_detail::RelationRootLease root;
     std::vector<IndexColumnOrder> columns;
     std::optional<IndexBtreeCursor> cursor;
+    bool cursor_at_largest = false;
     ByteBuffer current_wrapper;
     std::optional<RecordView> current_record;
     std::size_t current_bytes = 0;
     std::uint64_t next_sequence = 0;
+    std::vector<SqlValue> queue_fields;
+
+    [[nodiscard]] IndexBtreeCursor& Cursor() noexcept {
+      if (!cursor.has_value()) {
+        std::terminate();
+      }
+      return *cursor;
+    }
+
+    [[nodiscard]] RecordView CurrentRecord() const noexcept {
+      if (!current_record.has_value()) {
+        std::terminate();
+      }
+      return *current_record;
+    }
   };
 
   Impl(RecordSorterDescriptor owned_descriptor, std::size_t retained_limit,
-       temporary_storage_detail::StatementState& owning_state) noexcept
+       temporary_storage_detail::StatementState& owning_state, bool file_mode) noexcept
       : descriptor(std::move(owned_descriptor)),
         maximum_records(retained_limit),
-        statement_state(&owning_state) {}
+        statement_state(&owning_state),
+        physical_file_mode(file_mode) {}
 
-  ~Impl() { Clear(); }
+  ~Impl() {
+    if (pending_after_eviction && btree.has_value()) {
+      btree->root.MarkStatementFailed();
+    }
+    ClearTransient();
+  }
 
   [[nodiscard]] TemporaryMemoryAccount& Account() noexcept {
     if (!memory_account.has_value()) {
@@ -3172,15 +3191,18 @@ struct BoundedTopN::Impl {
     return {};
   }
 
-  void MarkFileFailure() noexcept {
-    if (file.has_value()) {
-      file->root.MarkStatementFailed();
+  void MarkBtreeFailure() noexcept {
+    if (btree.has_value()) {
+      btree->root.MarkStatementFailed();
+    } else {
+      temporary_storage_detail::StatementStorageAccess::MarkFailed(*statement_state);
     }
   }
 
   void ClearPending() noexcept {
     pending_view.reset();
     pending_record.reset();
+    pending_sequence.reset();
     const std::size_t released_bytes = pending_bytes;
     pending_bytes = 0;
     if (released_bytes != 0U) {
@@ -3191,11 +3213,11 @@ struct BoundedTopN::Impl {
     }
   }
 
-  void ClearFileCurrent() noexcept {
-    if (!file.has_value()) {
+  void ClearCurrent() noexcept {
+    if (!btree.has_value()) {
       return;
     }
-    FileBackend& backend = File();
+    BtreeBackend& backend = Btree();
     backend.current_record.reset();
     backend.current_wrapper = ByteBuffer{};
     const std::size_t released_bytes = backend.current_bytes;
@@ -3208,22 +3230,14 @@ struct BoundedTopN::Impl {
     }
   }
 
-  void Clear() noexcept {
-    while (head != nullptr) {
-      std::unique_ptr<Entry> next = std::move(head->next);
-      head.reset();
-      head = std::move(next);
-    }
-    current = nullptr;
-    pending_view.reset();
-    pending_record.reset();
-    pending_bytes = 0;
+  void ClearTransient() noexcept {
+    ClearCurrent();
+    ClearPending();
     count = 0;
-    if (file.has_value()) {
-      file->cursor.reset();
-      file->current_record.reset();
-      file->current_wrapper = ByteBuffer{};
-      file->current_bytes = 0;
+    if (btree.has_value()) {
+      btree->cursor.reset();
+      btree->cursor_at_largest = false;
+      btree->queue_fields.clear();
     }
     if (memory_account.has_value()) {
       const ByteCount retained = memory_account->retained_bytes();
@@ -3236,20 +3250,18 @@ struct BoundedTopN::Impl {
     }
   }
 
-  [[nodiscard]] bool file_backed() const noexcept { return file.has_value(); }
-
-  [[nodiscard]] FileBackend& File() noexcept {
-    if (!file.has_value()) {
+  [[nodiscard]] BtreeBackend& Btree() noexcept {
+    if (!btree.has_value()) {
       std::terminate();
     }
-    return *file;
+    return *btree;
   }
 
-  [[nodiscard]] const FileBackend& File() const noexcept {
-    if (!file.has_value()) {
+  [[nodiscard]] const BtreeBackend& Btree() const noexcept {
+    if (!btree.has_value()) {
       std::terminate();
     }
-    return *file;
+    return *btree;
   }
 
   [[nodiscard]] RecordView PendingView() const noexcept {
@@ -3259,67 +3271,72 @@ struct BoundedTopN::Impl {
     return *pending_view;
   }
 
-  [[nodiscard]] std::weak_ordering Compare(const RecordView& left,
-                                           const RecordView& right) const noexcept {
-    const auto comparison = CompareRecordPrefixes(left, right, descriptor.key_columns);
-    if (!comparison.has_value()) {
+  [[nodiscard]] std::int64_t PendingSequence() const noexcept {
+    if (!pending_sequence.has_value()) {
       std::terminate();
     }
-    return *comparison;
+    return *pending_sequence;
   }
 
-  [[nodiscard]] Entry* Largest() const noexcept {
-    Entry* result = head.get();
-    if (result == nullptr) {
-      return nullptr;
+  [[nodiscard]] Result<void> EnsureCursor() {
+    if (!btree.has_value()) {
+      return std::unexpected(Internal("top-N B-tree is unavailable"));
     }
-    while (result->next != nullptr) {
-      result = result->next.get();
+    BtreeBackend& backend = Btree();
+    if (backend.cursor.has_value()) {
+      return {};
     }
-    return result;
+    auto cursor =
+        IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(), backend.columns);
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    backend.cursor.emplace(std::move(*cursor));
+    return {};
   }
 
-  [[nodiscard]] std::size_t RemoveLargest() noexcept {
-    std::unique_ptr<Entry>* link = &head;
-    while ((*link)->next != nullptr) {
-      link = &((*link)->next);
+  [[nodiscard]] Result<std::int64_t> NextSequence() const {
+    if (!btree.has_value()) {
+      return std::unexpected(Internal("top-N B-tree is unavailable"));
     }
-    std::unique_ptr<Entry> removed = std::move(*link);
-    const std::size_t removed_bytes = removed->memory_bytes;
-    --count;
-    return removed_bytes;
+    return temporary_storage_detail::CheckedTopNSequence(Btree().next_sequence);
   }
 
-  void InsertSorted(std::unique_ptr<Entry> entry) noexcept {
-    std::unique_ptr<Entry>* link = &head;
-    while (*link != nullptr && Compare((*link)->view, entry->view) != std::weak_ordering::greater) {
-      link = &((*link)->next);
+  [[nodiscard]] Result<void> LoadCurrent() {
+    if (!btree.has_value() || !Btree().cursor.has_value()) {
+      return std::unexpected(Internal("top-N B-tree cursor is unavailable"));
     }
-    entry->next = std::move(*link);
-    *link = std::move(entry);
-  }
-
-  [[nodiscard]] Result<void> LoadFileCurrent() {
-    if (!file.has_value() || !file->cursor.has_value()) {
-      return std::unexpected(Internal("file-backed top-N cursor is unavailable"));
+    BtreeBackend& backend = Btree();
+    if (backend.current_record.has_value()) {
+      return {};
     }
-    auto copied = file->cursor->CopyPayload();
-    if (!copied.has_value()) {
-      return std::unexpected(std::move(copied.error()));
+    auto payload = backend.Cursor().payload();
+    if (!payload.has_value()) {
+      return std::unexpected(std::move(payload.error()));
     }
-    const std::size_t copied_bytes = copied->capacity().value();
-    auto reserved = Account().Reserve(ByteCount{copied_bytes});
-    if (!reserved.has_value() && reserved.error().code() == ErrorCode::kTooLarge &&
-        !temporary_storage_detail::StatementStorageAccess::Failed(*statement_state)) {
-      reserved = Account().ReserveWorkingSet(ByteCount{copied_bytes});
+    ByteView wrapper_bytes;
+    if (payload->is_fully_local()) {
+      wrapper_bytes = payload->local_bytes();
+    } else {
+      auto copied = backend.Cursor().CopyPayload();
+      if (!copied.has_value()) {
+        return std::unexpected(std::move(copied.error()));
+      }
+      const std::size_t copied_bytes = copied->capacity().value();
+      auto reserved = Account().Reserve(ByteCount{copied_bytes});
+      if (!reserved.has_value() && physical_file_mode &&
+          reserved.error().code() == ErrorCode::kTooLarge &&
+          !temporary_storage_detail::StatementStorageAccess::Failed(*statement_state)) {
+        reserved = Account().ReserveWorkingSet(ByteCount{copied_bytes});
+      }
+      if (!reserved.has_value()) {
+        return std::unexpected(std::move(reserved.error()));
+      }
+      backend.current_wrapper = std::move(*copied);
+      backend.current_bytes = copied_bytes;
+      wrapper_bytes = backend.current_wrapper.view();
     }
-    if (!reserved.has_value()) {
-      return std::unexpected(std::move(reserved.error()));
-    }
-    FileBackend& backend = File();
-    backend.current_wrapper = std::move(*copied);
-    backend.current_bytes = copied_bytes;
-    auto wrapper = RecordView::Parse(backend.current_wrapper.view(), descriptor.record_options);
+    auto wrapper = RecordView::Parse(wrapper_bytes, descriptor.record_options);
     if (!wrapper.has_value()) {
       return std::unexpected(std::move(wrapper.error()));
     }
@@ -3360,38 +3377,19 @@ struct BoundedTopN::Impl {
     return {};
   }
 
-  [[nodiscard]] Result<ByteBuffer> CopyLargestFileRecord() {
-    if (!file.has_value()) {
-      return std::unexpected(Internal("file-backed top-N relation is unavailable"));
-    }
-    FileBackend& backend = File();
-    auto cursor =
-        IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(), backend.columns);
-    if (!cursor.has_value()) {
-      return std::unexpected(std::move(cursor.error()));
-    }
-    auto positioned = cursor->Last();
-    if (!positioned.has_value()) {
-      return std::unexpected(std::move(positioned.error()));
-    }
-    if (!*positioned) {
-      return std::unexpected(Internal("full file-backed top-N relation is empty"));
-    }
-    return cursor->CopyPayload();
-  }
-
   RecordSorterDescriptor descriptor;
   std::size_t maximum_records;
   temporary_storage_detail::StatementState* statement_state;
+  bool physical_file_mode;
   std::optional<TemporaryMemoryAccount> memory_account;
-  std::unique_ptr<Entry> head;
-  Entry* current = nullptr;
   std::optional<ByteBuffer> pending_record;
   std::optional<RecordView> pending_view;
+  std::optional<std::int64_t> pending_sequence;
   std::size_t pending_bytes = 0;
   std::size_t count = 0;
   BoundedTopNState state = BoundedTopNState::kWriting;
-  std::optional<FileBackend> file;
+  bool pending_after_eviction = false;
+  std::optional<BtreeBackend> btree;
 };
 
 std::string_view BoundedTopNStateName(BoundedTopNState state) noexcept {
@@ -3418,6 +3416,29 @@ BoundedTopN& BoundedTopN::operator=(BoundedTopN&&) noexcept = default;
 
 BoundedTopN::~BoundedTopN() = default;
 
+void temporary_storage_detail::BoundedTopNAccess::SetNextSequence(BoundedTopN& top_n,
+                                                                  std::uint64_t sequence) noexcept {
+  if (top_n.impl_ == nullptr || !top_n.impl_->btree.has_value()) {
+    std::terminate();
+  }
+  top_n.impl_->Btree().next_sequence = sequence;
+}
+
+Pager& temporary_storage_detail::BoundedTopNAccess::PagerFor(BoundedTopN& top_n) noexcept {
+  if (top_n.impl_ == nullptr || !top_n.impl_->btree.has_value()) {
+    std::terminate();
+  }
+  return top_n.impl_->Btree().root.pager();
+}
+
+PageNumber temporary_storage_detail::BoundedTopNAccess::RootPage(
+    const BoundedTopN& top_n) noexcept {
+  if (top_n.impl_ == nullptr || !top_n.impl_->btree.has_value()) {
+    std::terminate();
+  }
+  return top_n.impl_->Btree().root.root_page();
+}
+
 Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor, std::size_t bound,
                                         StatementTemporaryStorage& storage) {
   auto validated = ValidateRecordSorterDescriptor(descriptor);
@@ -3427,21 +3448,23 @@ Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor
   try {
     temporary_storage_detail::StatementState& state =
         temporary_storage_detail::StatementStorageAccess::State(storage);
-    auto impl = std::make_unique<Impl>(descriptor, bound, state);
+    auto impl = std::make_unique<Impl>(descriptor, bound, state, storage.file_spill_enabled());
     auto account = storage.RegisterMemoryOwner();
     if (!account.has_value()) {
       return std::unexpected(std::move(account.error()));
     }
     impl->memory_account.emplace(std::move(*account));
-    if (storage.file_spill_enabled()) {
+    if (bound != 0U) {
       std::vector<IndexColumnOrder> columns = descriptor.key_columns;
       columns.emplace_back(BinaryCollation(), IndexSortDirection::kAscending,
                            IndexNullPlacement::kFirst);
       auto root = temporary_storage_detail::RelationArenaAccess::Acquire(state, columns);
       if (!root.has_value()) {
+        temporary_storage_detail::StatementStorageAccess::MarkFailed(state);
         return std::unexpected(std::move(root.error()));
       }
-      impl->file.emplace(std::move(*root), std::move(columns));
+      impl->btree.emplace(std::move(*root), std::move(columns));
+      impl->btree->queue_fields.reserve(descriptor.key_field_count + 2U);
     }
     return BoundedTopN{std::move(impl)};
   } catch (const std::bad_alloc&) {
@@ -3496,109 +3519,79 @@ Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
 
   const bool full = impl_->count == impl_->maximum_records;
   const std::size_t key_bytes = key.capacity().value();
-  if (impl_->file_backed()) {
-    Impl::FileBackend& file = impl_->File();
-    try {
-      std::optional<ByteBuffer> largest_record;
-      if (full) {
-        auto copied = impl_->CopyLargestFileRecord();
-        if (!copied.has_value()) {
-          impl_->MarkFileFailure();
-          Error error = std::move(copied.error());
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        largest_record.emplace(std::move(*copied));
-        auto largest = RecordView::Parse(largest_record->view(), impl_->descriptor.record_options);
-        if (!largest.has_value()) {
-          impl_->MarkFileFailure();
-          Error error = std::move(largest.error());
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        auto comparison = CompareRecordPrefixes(*view, *largest, impl_->descriptor.key_columns);
-        if (!comparison.has_value()) {
-          impl_->MarkFileFailure();
-          Error error = std::move(comparison.error());
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        if (*comparison != std::weak_ordering::less) {
-          return TopNCheckResult::kRejected;
-        }
-      }
-      auto reserved = impl_->Account().Reserve(ByteCount{key_bytes});
-      if (!reserved.has_value()) {
-        Error error = std::move(reserved.error());
-        if (temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
-          Close();
-        }
+  if (full) {
+    auto cursor = impl_->EnsureCursor();
+    if (!cursor.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(cursor.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (!impl_->Btree().cursor_at_largest) {
+      auto positioned = impl_->Btree().Cursor().Last();
+      if (!positioned.has_value()) {
+        impl_->MarkBtreeFailure();
+        Error error = std::move(positioned.error());
+        Close();
         return std::unexpected(std::move(error));
       }
-      if (full) {
-        if (!largest_record.has_value()) {
-          std::terminate();
-        }
-        auto deleted = file.root.writer().DeleteEncoded(largest_record->view());
-        if (!deleted.has_value()) {
-          impl_->MarkFileFailure();
-          Error error = std::move(deleted.error());
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        if (!*deleted) {
-          impl_->MarkFileFailure();
-          Error error = Internal("largest file-backed top-N record disappeared");
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        --impl_->count;
-      }
-    } catch (const std::bad_alloc&) {
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    } catch (const std::length_error&) {
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    }
-  } else {
-    std::size_t removed_bytes = 0;
-    if (full) {
-      const Impl::Entry* largest = impl_->Largest();
-      if (largest == nullptr) {
-        std::terminate();
-      }
-      if (impl_->Compare(*view, largest->view) != std::weak_ordering::less) {
-        return TopNCheckResult::kRejected;
-      }
-      removed_bytes = largest->memory_bytes;
-    }
-    const std::size_t additional_bytes = key_bytes > removed_bytes ? key_bytes - removed_bytes : 0U;
-    auto reserved = impl_->Account().Reserve(ByteCount{additional_bytes});
-    if (!reserved.has_value()) {
-      Error error = std::move(reserved.error());
-      if (temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
+      if (!*positioned) {
+        impl_->MarkBtreeFailure();
+        Error error = Internal("full top-N B-tree is empty");
         Close();
+        return std::unexpected(std::move(error));
       }
+      impl_->Btree().cursor_at_largest = true;
+    }
+    auto comparison = impl_->Btree().Cursor().CompareCurrentRecordPrefix(
+        *view, impl_->descriptor.key_field_count);
+    if (!comparison.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(comparison.error());
+      Close();
       return std::unexpected(std::move(error));
     }
-    if (full) {
-      const std::size_t actual_removed = impl_->RemoveLargest();
-      if (actual_removed != removed_bytes) {
-        std::terminate();
-      }
+    if (*comparison != std::weak_ordering::greater) {
+      return TopNCheckResult::kRejected;
     }
-    if (removed_bytes > key_bytes) {
-      const auto released = impl_->Account().Release(ByteCount{removed_bytes - key_bytes});
-      if (!released.has_value()) {
-        std::terminate();
-      }
+  }
+
+  auto sequence = impl_->NextSequence();
+  if (!sequence.has_value()) {
+    Error error = std::move(sequence.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  auto reserved = impl_->Account().Reserve(ByteCount{key_bytes});
+  if (!reserved.has_value()) {
+    Error error = std::move(reserved.error());
+    if (temporary_storage_detail::StatementStorageAccess::Failed(*impl_->statement_state)) {
+      Close();
     }
+    return std::unexpected(std::move(error));
+  }
+  if (full) {
+    impl_->Btree().cursor.reset();
+    impl_->Btree().cursor_at_largest = false;
+    auto deleted = impl_->Btree().root.writer().DeleteLast();
+    if (!deleted.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(deleted.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    if (!*deleted) {
+      impl_->MarkBtreeFailure();
+      Error error = Internal("largest top-N B-tree record disappeared");
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    --impl_->count;
+    impl_->pending_after_eviction = true;
   }
   impl_->pending_record.emplace(std::move(key));
   impl_->pending_view = *view;
+  impl_->pending_sequence = *sequence;
   impl_->pending_bytes = key_bytes;
   impl_->state = BoundedTopNState::kCandidatePending;
   return TopNCheckResult::kAccepted;
@@ -3631,86 +3624,44 @@ Status BoundedTopN::Insert(ByteBuffer record) {
     return std::unexpected(Misuse("top-N record key does not match the pending candidate"));
   }
 
-  if (impl_->file_backed()) {
-    Impl::FileBackend& file = impl_->File();
-    if (file.next_sequence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-      Error error = TooLarge("top-N sequence is exhausted");
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    try {
-      std::vector<SqlValue> fields;
-      fields.reserve(impl_->descriptor.key_field_count + 2U);
-      RecordCursor cursor = pending_view.cursor();
-      for (std::size_t index = 0; index < impl_->descriptor.key_field_count; ++index) {
-        const std::optional<RecordFieldView> field = cursor.Next();
-        if (!field.has_value()) {
-          Error error = Corruption("top-N pending key ended before its descriptor");
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        fields.push_back(field->ToOwned());
-      }
-      fields.push_back(SqlValue::Integer(static_cast<std::int64_t>(file.next_sequence)));
-      fields.push_back(SqlValue::Blob(std::move(record)));
-      auto queue_record = EncodeRecord(fields, impl_->descriptor.record_options);
-      if (!queue_record.has_value()) {
-        Error error = std::move(queue_record.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      auto inserted = file.root.writer().InsertEncoded(queue_record->view());
-      if (!inserted.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(inserted.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      ++file.next_sequence;
-      ++impl_->count;
-      impl_->ClearPending();
-      impl_->state = BoundedTopNState::kWriting;
-      return {};
-    } catch (const std::bad_alloc&) {
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    } catch (const std::length_error&) {
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    }
-  }
-
-  const std::size_t record_bytes = record.capacity().value();
-  if (record_bytes > std::numeric_limits<std::size_t>::max() - sizeof(Impl::Entry)) {
-    Error error = TooLarge("top-N record memory accounting overflowed");
+  if (!impl_->btree.has_value() || !impl_->pending_sequence.has_value()) {
+    Error error = Internal("top-N pending B-tree state is incomplete");
     Close();
     return std::unexpected(std::move(error));
   }
-  const std::size_t entry_bytes = record_bytes + sizeof(Impl::Entry);
-  const std::size_t additional_bytes =
-      entry_bytes > impl_->pending_bytes ? entry_bytes - impl_->pending_bytes : 0U;
-  auto reserved = impl_->Account().Reserve(ByteCount{additional_bytes});
-  if (!reserved.has_value()) {
-    Error error = std::move(reserved.error());
-    Close();
-    return std::unexpected(std::move(error));
-  }
-
+  Impl::BtreeBackend& backend = impl_->Btree();
   try {
-    auto entry = std::make_unique<Impl::Entry>(std::move(record), *view, entry_bytes);
-    impl_->InsertSorted(std::move(entry));
-    if (impl_->pending_bytes > entry_bytes) {
-      const auto released = impl_->Account().Release(ByteCount{impl_->pending_bytes - entry_bytes});
-      if (!released.has_value()) {
-        std::terminate();
+    backend.queue_fields.clear();
+    RecordCursor cursor = pending_view.cursor();
+    for (std::size_t index = 0; index < impl_->descriptor.key_field_count; ++index) {
+      const std::optional<RecordFieldView> field = cursor.Next();
+      if (!field.has_value()) {
+        Error error = Corruption("top-N pending key ended before its descriptor");
+        Close();
+        return std::unexpected(std::move(error));
       }
+      backend.queue_fields.push_back(field->ToOwned());
     }
+    backend.queue_fields.push_back(SqlValue::Integer(impl_->PendingSequence()));
+    backend.queue_fields.push_back(SqlValue::Blob(std::move(record)));
+    auto queue_record = EncodeRecord(backend.queue_fields, impl_->descriptor.record_options);
+    if (!queue_record.has_value()) {
+      Error error = std::move(queue_record.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    backend.queue_fields.clear();
+    auto inserted = backend.root.writer().InsertEncoded(queue_record->view());
+    if (!inserted.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(inserted.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    ++backend.next_sequence;
     ++impl_->count;
-    impl_->pending_view.reset();
-    impl_->pending_record.reset();
-    impl_->pending_bytes = 0;
+    impl_->pending_after_eviction = false;
+    impl_->ClearPending();
     impl_->state = BoundedTopNState::kWriting;
     return {};
   } catch (const std::bad_alloc&) {
@@ -3734,59 +3685,37 @@ Status BoundedTopN::Rewind() {
     Close();
     return std::unexpected(std::move(error));
   }
-  if (impl_->file_backed()) {
-    Impl::FileBackend& file = impl_->File();
-    try {
-      auto cursor = IndexBtreeCursor::Open(file.root.pager(), file.root.root_page(), file.columns);
-      if (!cursor.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(cursor.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      file.cursor.emplace(std::move(*cursor));
-      auto positioned = file.cursor->First();
-      if (!positioned.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(positioned.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (!*positioned) {
-        if (impl_->count != 0U) {
-          impl_->MarkFileFailure();
-          Error error = Corruption("nonempty file-backed top-N relation has no first record");
-          Close();
-          return std::unexpected(std::move(error));
-        }
-        file.cursor.reset();
-        impl_->state = BoundedTopNState::kExhausted;
-        return {};
-      }
-      auto loaded = impl_->LoadFileCurrent();
-      if (!loaded.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(loaded.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      impl_->state = BoundedTopNState::kPositioned;
-      return {};
-    } catch (const std::bad_alloc&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    } catch (const std::length_error&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
+  impl_->ClearCurrent();
+  if (impl_->count == 0U) {
+    if (impl_->btree.has_value()) {
+      impl_->Btree().cursor.reset();
+      impl_->Btree().cursor_at_largest = false;
     }
+    impl_->state = BoundedTopNState::kExhausted;
+    return {};
   }
-  impl_->current = impl_->head.get();
-  impl_->state =
-      impl_->current == nullptr ? BoundedTopNState::kExhausted : BoundedTopNState::kPositioned;
+  auto cursor = impl_->EnsureCursor();
+  if (!cursor.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(cursor.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  auto positioned = impl_->Btree().Cursor().First();
+  if (!positioned.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(positioned.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  if (!*positioned) {
+    impl_->MarkBtreeFailure();
+    Error error = Corruption("nonempty top-N B-tree has no first record");
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  impl_->Btree().cursor_at_largest = false;
+  impl_->state = BoundedTopNState::kPositioned;
   return {};
 }
 
@@ -3798,17 +3727,14 @@ Result<RecordView> BoundedTopN::current_record() const {
   if (!usable.has_value()) {
     return std::unexpected(std::move(usable.error()));
   }
-  if (impl_->file_backed()) {
-    const Impl::FileBackend& file = impl_->File();
-    if (!file.current_record.has_value()) {
-      return std::unexpected(Misuse("file-backed top-N has no current record"));
-    }
-    return *file.current_record;
+  auto loaded = impl_->LoadCurrent();
+  if (!loaded.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(loaded.error());
+    impl_.reset();
+    return std::unexpected(std::move(error));
   }
-  if (impl_->current == nullptr) {
-    return std::unexpected(Misuse("top-N has no current record"));
-  }
-  return impl_->current->view;
+  return impl_->Btree().CurrentRecord();
 }
 
 Result<bool> BoundedTopN::Next() {
@@ -3821,53 +3747,24 @@ Result<bool> BoundedTopN::Next() {
     Close();
     return std::unexpected(std::move(error));
   }
-  if (impl_->file_backed()) {
-    Impl::FileBackend& file = impl_->File();
-    try {
-      if (!file.cursor.has_value()) {
-        Error error = Internal("file-backed top-N cursor is unavailable");
-        impl_->MarkFileFailure();
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      impl_->ClearFileCurrent();
-      auto advanced = file.cursor->Next();
-      if (!advanced.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(advanced.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      if (!*advanced) {
-        file.cursor.reset();
-        impl_->state = BoundedTopNState::kExhausted;
-        return false;
-      }
-      auto loaded = impl_->LoadFileCurrent();
-      if (!loaded.has_value()) {
-        impl_->MarkFileFailure();
-        Error error = std::move(loaded.error());
-        Close();
-        return std::unexpected(std::move(error));
-      }
-      return true;
-    } catch (const std::bad_alloc&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    } catch (const std::length_error&) {
-      impl_->MarkFileFailure();
-      Error error = Error::OutOfMemory();
-      Close();
-      return std::unexpected(std::move(error));
-    }
+  Impl::BtreeBackend& backend = impl_->Btree();
+  if (!backend.cursor.has_value()) {
+    Error error = Internal("top-N B-tree cursor is unavailable");
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(std::move(error));
   }
-  if (impl_->current == nullptr) {
-    return std::unexpected(Misuse("top-N next requires a current record"));
+  impl_->ClearCurrent();
+  auto advanced = backend.cursor->Next();
+  if (!advanced.has_value()) {
+    impl_->MarkBtreeFailure();
+    Error error = std::move(advanced.error());
+    Close();
+    return std::unexpected(std::move(error));
   }
-  impl_->current = impl_->current->next.get();
-  if (impl_->current == nullptr) {
+  if (!*advanced) {
+    backend.cursor.reset();
+    backend.cursor_at_largest = false;
     impl_->state = BoundedTopNState::kExhausted;
     return false;
   }
@@ -3884,20 +3781,33 @@ Status BoundedTopN::Reset() {
     Close();
     return std::unexpected(std::move(error));
   }
-  if (impl_->file_backed()) {
-    Impl::FileBackend& file = impl_->File();
-    file.cursor.reset();
-    impl_->ClearFileCurrent();
-    auto cleared = file.root.writer().Clear();
+  if (impl_->btree.has_value()) {
+    Impl::BtreeBackend& backend = impl_->Btree();
+    impl_->ClearCurrent();
+    backend.cursor.reset();
+    backend.cursor_at_largest = false;
+    impl_->ClearPending();
+    auto cleared = backend.root.writer().Clear();
     if (!cleared.has_value()) {
-      impl_->MarkFileFailure();
+      impl_->MarkBtreeFailure();
       Error error = std::move(cleared.error());
       Close();
       return std::unexpected(std::move(error));
     }
-    file.next_sequence = 0;
+    backend.next_sequence = 0;
+    backend.queue_fields.clear();
   }
-  impl_->Clear();
+  impl_->pending_after_eviction = false;
+  impl_->count = 0;
+  if (impl_->memory_account.has_value()) {
+    const ByteCount retained = impl_->memory_account->retained_bytes();
+    if (retained.value() != 0U) {
+      const auto released = impl_->memory_account->Release(retained);
+      if (!released.has_value()) {
+        std::terminate();
+      }
+    }
+  }
   impl_->state = BoundedTopNState::kWriting;
   return {};
 }

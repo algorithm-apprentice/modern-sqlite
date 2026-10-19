@@ -4857,6 +4857,37 @@ Status WritableCursor::DeleteIndexRecord(ByteView record, std::span<const IndexC
   return DeleteIndexAt(*seek, workspace);
 }
 
+Result<bool> WritableCursor::DeleteLastIndex(BtreeWriteWorkspace& workspace) {
+  if (table_) {
+    return std::unexpected(Misuse("last index deletion requires an index B-tree cursor"));
+  }
+  auto reset = ResetToRoot();
+  if (!reset.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(reset.error()));
+  }
+  if (state_ == WritableCursorState::kInvalid) {
+    return false;
+  }
+  auto descended = DescendRightmost();
+  if (!descended.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(descended.error()));
+  }
+  auto deleted = DeleteIndexAt(
+      IndexSeekResult{
+          .insertion_index = current_index_,
+          .comparison = 0,
+          .exact = true,
+          .tree_depth = frame_count_,
+      },
+      workspace);
+  if (!deleted.has_value()) {
+    return std::unexpected(std::move(deleted.error()));
+  }
+  return true;
+}
+
 Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWorkspace& workspace) {
   const std::size_t original_depth = frame_count_;
   const std::size_t original_index = seek.insertion_index;
@@ -5294,6 +5325,28 @@ Status WritableCursor::DescendLeftmost() {
       return {};
     }
     auto descended = Descend(0U, *page);
+    if (!descended.has_value()) {
+      return descended;
+    }
+  }
+}
+
+Status WritableCursor::DescendRightmost() {
+  while (true) {
+    auto page = CurrentPage();
+    if (!page.has_value()) {
+      return std::unexpected(std::move(page.error()));
+    }
+    if (page->is_leaf()) {
+      if (page->cell_count() == 0U) {
+        return std::unexpected(Corruption("nonempty index cursor reached an empty leaf"));
+      }
+      current_index_ = page->cell_count() - 1U;
+      frames_[frame_count_ - 1U].child_index = current_index_;
+      state_ = WritableCursorState::kValid;
+      return {};
+    }
+    auto descended = Descend(page->cell_count(), *page);
     if (!descended.has_value()) {
       return descended;
     }

@@ -159,6 +159,7 @@ class IndexBtreeWriter final {
   [[nodiscard]] Status ReplaceEncoded(ByteView record);
   [[nodiscard]] Result<bool> Delete(std::span<const SqlValue> values);
   [[nodiscard]] Result<bool> DeleteEncoded(ByteView record);
+  [[nodiscard]] Result<bool> DeleteLast();
   [[nodiscard]] Result<std::uint64_t> Clear();
   [[nodiscard]] Status Drop();
 
