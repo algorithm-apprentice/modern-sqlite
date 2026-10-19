@@ -237,7 +237,7 @@ than timing noise:
 | 5 | `runtime-sorter` | **Complete** | ADR-0116 coallocates memory-mode metadata/payload, adds SQLite's offset-linked file-mode bulk arena, preallocates PMA metadata before I/O, and records focused allocation plus fresh ORDER BY/aggregate evidence. |
 | 6 | `runtime-ephemeral-relation` | **Complete** | ADR-0117 uses the canonical ephemeral B-tree in memory and file modes, removes sorted-array insertion, and records page-limit, OOM, ownership, and fresh DISTINCT/compound evidence. |
 | 7 | `runtime-topn` | **Complete** | ADR-0118 reuses the ephemeral B-tree for logarithmic ORDER BY LIMIT admission, positioned maximum deletion, lazy OFFSET drain, cross-library allocation contracts, and fresh matched evidence. |
-| 8 | `storage-transaction` | Repair | Publish `isMultiWrite`/`mayAbort` and open statement savepoints only when SQLite sets `usesStmtJournal`. |
+| 8 | `storage-transaction` | Repair | Proposed ADR-0119 publishes compiler multi-write/ABORT effects and opens anonymous statement savepoints only when required, with native error-class-aware completion. |
 | 9 | `execution-optimizer` | Repair | Translate the bounded SQLite WhereLoop/path solver for currently admitted accesses and join barriers. |
 | 10 | `write-create-index` | Repair | Reuse the repaired sorter and add ordered bulk index construction with adjacent UNIQUE checks. |
 | 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
