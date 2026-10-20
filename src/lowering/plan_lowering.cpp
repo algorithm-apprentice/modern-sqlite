@@ -9558,10 +9558,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     for (std::size_t index = 0; index < bound_analyze_->indexes().size(); ++index) {
       const BoundAnalyzeIndex& metadata = bound_analyze_->indexes()[index];
+      const Stat1IndexPolicy policy = metadata.primary_without_rowid
+                                          ? Stat1IndexPolicy::PrimaryWithoutRowid
+                                      : metadata.unique_not_null ? Stat1IndexPolicy::UniqueNotNull
+                                      : metadata.unique          ? Stat1IndexPolicy::UniqueNullable
+                                                                 : Stat1IndexPolicy::Ordinary;
       if (auto computed = Append(ComputeIndexStat1Instruction{
               .cursor = analyze_index_cursors_[index],
               .key_term_count = metadata.key_term_count,
               .emit_empty = metadata.partial,
+              .policy = policy,
               .output = RegisterId{2},
           });
           !computed.has_value()) {

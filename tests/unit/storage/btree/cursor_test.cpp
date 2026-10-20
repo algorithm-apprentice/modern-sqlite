@@ -462,6 +462,93 @@ TEST_F(BtreeCursorCompatibilityTest, TraversesMultiLevelTableInBothDirections) {
   EXPECT_EQ(CollectTableReverse(cursor), reversed);
 }
 
+TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePageWalk) {
+  const auto expected = ReadExpectedRowids("table-rowids.txt");
+  const auto count = static_cast<std::uint64_t>(expected.size());
+  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  ASSERT_TRUE(TakeValue(table.First()));
+  EXPECT_EQ(count, TakeValue(table.CountEntries()));
+  EXPECT_FALSE(table.valid());
+  EXPECT_EQ(count, TakeValue(table.CountEntries()));
+  EXPECT_EQ(expected, CollectTableForward(table));
+
+  const auto columns = BinaryIndexColumns();
+  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  ASSERT_TRUE(TakeValue(index.First()));
+  EXPECT_EQ(count, TakeValue(index.CountEntries()));
+  EXPECT_FALSE(index.valid());
+  EXPECT_EQ(expected.size(), CollectIndexForward(index).size());
+}
+
+TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCallerScratchOnly) {
+  const auto columns = BinaryIndexColumns();
+  IndexBtreeCursor local = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  ASSERT_TRUE(TakeValue(local.First()));
+  const auto local_payload = TakeValue(local.payload());
+  ASSERT_TRUE(local_payload.is_fully_local());
+  ByteBuffer scratch;
+  const auto prefix = TakeValue(local.ReadRecordPrefix(1, scratch, local_payload.size()));
+  EXPECT_EQ(1U, prefix.field_count());
+  EXPECT_EQ(2U, prefix.complete_field_count());
+  EXPECT_EQ(local_payload.local_bytes().data(), prefix.encoded().data());
+  EXPECT_TRUE(scratch.empty());
+  const auto zero = local.ReadRecordPrefix(0, scratch, local_payload.size());
+  ASSERT_FALSE(zero.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, zero.error().code());
+  const auto limited = local.ReadRecordPrefix(1, scratch, ByteCount{0});
+  ASSERT_FALSE(limited.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, limited.error().code());
+  RequireStatus(local.ClearPosition());
+  const auto unpositioned = local.ReadRecordPrefix(1, scratch, local_payload.size());
+  ASSERT_FALSE(unpositioned.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, unpositioned.error().code());
+
+  IndexBtreeCursor overflow = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{102}, columns));
+  ASSERT_TRUE(TakeValue(overflow.First()));
+  const auto overflow_payload = TakeValue(overflow.payload());
+  ASSERT_FALSE(overflow_payload.is_fully_local());
+  const auto complete = TakeValue(overflow.ReadRecordPrefix(2, scratch, overflow_payload.size()));
+  EXPECT_EQ(2U, complete.field_count());
+  EXPECT_EQ(2U, complete.complete_field_count());
+  EXPECT_EQ(scratch.view().data(), complete.encoded().data());
+  EXPECT_EQ(overflow_payload.size().value(), complete.encoded().size());
+  const ByteBuffer expected = TakeValue(overflow.CopyPayload());
+  EXPECT_TRUE(std::ranges::equal(expected.view(), complete.encoded()));
+  const auto* storage = scratch.view().data();
+  const auto shorter = TakeValue(overflow.ReadRecordPrefix(1, scratch, overflow_payload.size()));
+  EXPECT_EQ(storage, scratch.view().data());
+  EXPECT_LE(shorter.encoded().size(), scratch.size().value());
+  EXPECT_EQ(1U, shorter.field_count());
+  EXPECT_EQ(2U, shorter.complete_field_count());
+}
+
+TEST(BtreeCursor, CountsWithoutReadingOverflowPayloadAndRecoversPageIoFailures) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = ByteBuffer::CopyOf(ReadBytes(FixtureDatabasePath()));
+  vfs.LoadDatabase(fixture.view());
+  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 256U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    const auto columns = BinaryIndexColumns();
+    auto cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{102}, columns));
+    vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
+    const auto failed = cursor.CountEntries();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_FALSE(cursor.valid());
+    EXPECT_EQ(166U, TakeValue(cursor.CountEntries()));
+    vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
+    EXPECT_EQ(166U, TakeValue(cursor.CountEntries()));
+    EXPECT_FALSE(cursor.valid());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    const auto payload = cursor.CopyPayload();
+    ASSERT_FALSE(payload.has_value());
+    EXPECT_EQ(ErrorCode::kIo, payload.error().code());
+  }
+  RequireStatus(pager->EndRead());
+}
+
 TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrRevivingCursors) {
   TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
   ASSERT_TRUE(TakeValue(table.First()));
@@ -492,6 +579,14 @@ TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrReviving
   ASSERT_FALSE(invalid_index.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, invalid_table.error().code());
   EXPECT_EQ(ErrorCode::kMisuse, invalid_index.error().code());
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const auto invalid_table_count = table.CountEntries();
+  const auto invalid_index_count = index.CountEntries();
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  ASSERT_FALSE(invalid_table_count.has_value());
+  ASSERT_FALSE(invalid_index_count.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_table_count.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_index_count.error().code());
   RequireStatus(moved_table.ClearPosition());
   RequireStatus(moved_index.ClearPosition());
 }
@@ -833,6 +928,40 @@ TEST_F(BtreePrefixComparisonTest, DoesNotCopyUncomparedOverflowCoveringFields) {
       }
     });
   }
+}
+
+TEST_F(BtreePrefixComparisonTest, BorrowsPrefixWithoutCopyingUnrequestedOverflowFields) {
+  const std::array fields{
+      SqlValue::Integer(7),
+      SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
+  };
+  const PageNumber root = CreateIndex(fields);
+  auto cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const auto payload = TakeValue(cursor.payload());
+  ASSERT_FALSE(payload.is_fully_local());
+  ByteBuffer scratch;
+  const auto read_prefix = [&] {
+    const auto prefix = TakeValue(cursor.ReadRecordPrefix(1, scratch, payload.size()));
+    EXPECT_EQ(1U, prefix.field_count());
+    EXPECT_EQ(2U, prefix.complete_field_count());
+    auto record_cursor = prefix.cursor();
+    const auto field = record_cursor.Next();
+    ASSERT_TRUE(field.has_value());
+    EXPECT_EQ(7, field->integer_value());
+  };
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    read_prefix();
+  }
+  EXPECT_EQ(0U, work.Value(instrumentation::Counter::kBytesCopied));
+  EXPECT_EQ(0U, work.Value(instrumentation::Counter::kBtreeComparisons));
+#else
+  read_prefix();
+#endif
+  EXPECT_TRUE(scratch.empty());
 }
 
 TEST_F(BtreePrefixComparisonTest, BoundsCopiedBytesWhenTheCompleteHeaderIsNotLocal) {
@@ -1211,6 +1340,7 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
     std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, empty.path().string()));
     RequireStatus(pager->BeginRead());
     TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    EXPECT_EQ(0U, TakeValue(cursor.CountEntries()));
     EXPECT_FALSE(TakeValue(cursor.First()));
     EXPECT_FALSE(cursor.valid());
 
@@ -1228,6 +1358,9 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
     const auto changed = cursor.First();
     ASSERT_FALSE(changed.has_value());
     EXPECT_EQ(ErrorCode::kSchemaChanged, changed.error().code());
+    const auto changed_count = cursor.CountEntries();
+    ASSERT_FALSE(changed_count.has_value());
+    EXPECT_EQ(ErrorCode::kSchemaChanged, changed_count.error().code());
     RequireStatus(pager->EndRead());
   }
 
@@ -1238,6 +1371,8 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
     RequireStatus(pager->BeginRead());
     {
       TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+      EXPECT_EQ(1U, TakeValue(cursor.CountEntries()));
+      EXPECT_FALSE(cursor.valid());
       ASSERT_TRUE(TakeValue(cursor.First()));
       EXPECT_EQ(7, TakeValue(cursor.rowid()));
       ASSERT_TRUE(TakeValue(cursor.Seek(7, BtreeSeekMode::kEqual)));
@@ -1266,6 +1401,10 @@ TEST(BtreeCursor, RejectsInvalidChildLinksEmptyChildrenAndExcessiveDepth) {
       const auto first = cursor.First();
       ASSERT_FALSE(first.has_value());
       EXPECT_EQ(ErrorCode::kCorruption, first.error().code());
+      EXPECT_FALSE(cursor.valid());
+      const auto count = cursor.CountEntries();
+      ASSERT_FALSE(count.has_value());
+      EXPECT_EQ(ErrorCode::kCorruption, count.error().code());
       EXPECT_FALSE(cursor.valid());
     }
     RequireStatus(pager->EndRead());

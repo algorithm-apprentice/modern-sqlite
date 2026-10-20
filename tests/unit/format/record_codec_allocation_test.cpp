@@ -132,6 +132,65 @@ void Deallocate(void* memory) noexcept {
   return success;
 }
 
+[[nodiscard]] bool CheckReusableFieldCopies(std::span<const modern_sqlite::SqlValue> values) {
+  using namespace modern_sqlite;
+  const auto encoded = EncodeRecord(values);
+  if (!encoded.has_value()) {
+    return false;
+  }
+  const auto record = RecordView::Parse(encoded->view());
+  if (!record.has_value()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    const auto field = record->field(index);
+    if (!field.has_value()) {
+      return false;
+    }
+    const bool bytes = field->type() == SqlValueType::kText || field->type() == SqlValueType::kBlob;
+    ByteBuffer storage{ByteCount{1}};
+    const auto* original_address = storage.view().data();
+    const std::size_t live_before = live_allocations.load(std::memory_order_relaxed);
+    allocation_index.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto rejected = field->CopyTo(storage);
+    fail_allocations.store(false, std::memory_order_relaxed);
+    if (bytes ? rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory
+              : !rejected.has_value()) {
+      return false;
+    }
+    if (storage.view().data() != original_address || storage.size() != ByteCount{1} ||
+        live_allocations.load(std::memory_order_relaxed) != live_before) {
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto copied = field->CopyTo(storage);
+    if (!copied.has_value() ||
+        allocation_index.load(std::memory_order_relaxed) != static_cast<std::size_t>(bytes)) {
+      return false;
+    }
+    const auto* retained_address = storage.view().data();
+    allocation_index.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    bool valid = true;
+    for (std::size_t iteration = 0; iteration < 1024U; ++iteration) {
+      const auto reused = field->CopyTo(storage);
+      if (!reused.has_value() ||
+          CompareRecordFields(*field, *reused, BinaryCollation()) !=
+              std::weak_ordering::equivalent ||
+          retained_address != storage.view().data()) {
+        valid = false;
+        break;
+      }
+    }
+    fail_allocations.store(false, std::memory_order_relaxed);
+    if (!valid || allocation_index.load(std::memory_order_relaxed) != 0U) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -226,7 +285,8 @@ int main() try {
   };
   const bool field_failure = ReportsTypedFieldRangeFailure(*left);
   const bool decode_failures = ExhaustDecodeFailures(owned_values);
-  return field_failure && decode_failures ? 0 : 1;
+  const bool retained_fields = CheckReusableFieldCopies(owned_values);
+  return field_failure && decode_failures && retained_fields ? 0 : 1;
 } catch (...) {
   fail_allocations.store(false, std::memory_order_relaxed);
   failing_allocation.reset();

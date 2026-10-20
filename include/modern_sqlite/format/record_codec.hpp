@@ -62,6 +62,8 @@ class RecordFieldView final {
   [[nodiscard]] std::optional<Utf8View> text_value() const noexcept;
   [[nodiscard]] std::optional<ByteView> blob_value() const noexcept;
   [[nodiscard]] SqlValue ToOwned() const;
+  // Reuses caller storage; returned byte views borrow it until modification or move.
+  [[nodiscard]] Result<RecordFieldView> CopyTo(ByteBuffer& storage) const;
 
  private:
   friend class RecordCursor;
@@ -74,6 +76,10 @@ class RecordFieldView final {
   using Storage = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView>;
   Storage storage_;
 };
+
+[[nodiscard]] std::weak_ordering CompareRecordFields(const RecordFieldView& left,
+                                                     const RecordFieldView& right,
+                                                     const Collation& collation);
 
 class RecordCursor final {
  public:

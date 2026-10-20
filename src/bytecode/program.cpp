@@ -181,6 +181,17 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] bool IsValid(Stat1IndexPolicy policy) noexcept {
+  switch (policy) {
+    case Stat1IndexPolicy::Ordinary:
+    case Stat1IndexPolicy::UniqueNullable:
+    case Stat1IndexPolicy::UniqueNotNull:
+    case Stat1IndexPolicy::PrimaryWithoutRowid:
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] bool IsValid(ProgramTransactionAccess access) noexcept {
   switch (access) {
     case ProgramTransactionAccess::kRead:
@@ -1629,6 +1640,9 @@ struct InstructionOwnership {
           } else if constexpr (std::is_same_v<Operation, ComputeIndexStat1Instruction>) {
             if (input.statement_kind != ProgramStatementKind::kAnalyze) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
+            }
+            if (!IsValid(operation.policy)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
             }
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
