@@ -382,9 +382,16 @@ struct RuntimeCursor {
   bool null_row = false;
 };
 
+struct RuntimeIndexRefill {
+  IndexBtreeAppendCursor cursor;
+  ByteBuffer previous_record{};
+  std::size_t previous_size = 0;
+};
+
 struct RuntimeWriteCursor {
   std::optional<TableBtreeWriter> table;
   std::optional<IndexBtreeWriter> index;
+  std::optional<RuntimeIndexRefill> index_refill;
 };
 
 }  // namespace
@@ -769,13 +776,17 @@ struct Vm::Impl {
         .key_field_count = descriptor.key_field_count,
     };
     runtime.key_columns.reserve(descriptor.key_columns.size());
+    const bool legacy_index = descriptor.index_refill_cursor.has_value() &&
+                              record_options_.schema_format != DatabaseSchemaFormat::kFour;
     for (const OrderingColumnMetadata& column : descriptor.key_columns) {
       runtime.key_columns.emplace_back(
           CollationFor(column.collation),
-          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
-                                                         : IndexSortDirection::kAscending,
-          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
-                                                                : IndexNullPlacement::kFirst);
+          !legacy_index && column.order == BytecodeSortOrder::kDescending
+              ? IndexSortDirection::kDescending
+              : IndexSortDirection::kAscending,
+          !legacy_index && column.null_placement == BytecodeNullPlacement::kLast
+              ? IndexNullPlacement::kLast
+              : IndexNullPlacement::kFirst);
     }
     runtime.record_options = record_options_;
     return runtime;
@@ -1454,6 +1465,7 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
                                        const CloseWriteCursorInstruction& operation) {
     RuntimeWriteCursor& runtime = WriteCursor(operation.cursor);
+    runtime.index_refill.reset();
     runtime.table.reset();
     runtime.index.reset();
     return std::nullopt;
@@ -1658,6 +1670,96 @@ struct Vm::Impl {
     Status inserted = runtime.index->Insert(values);
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const InsertSorterIndexInstruction& operation) {
+    std::optional<RecordSorter>& sorter = sorters_[operation.sorter.value()];
+    const OrderingRecordDescriptor& ordering = program_->sorter(operation.sorter);
+    if (!sorter.has_value() || !ordering.index_refill_cursor.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "index refill sorter is not open"));
+    }
+    RuntimeWriteCursor& runtime = WriteCursor(*ordering.index_refill_cursor);
+    if (!runtime.index_refill.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "index append cursor is not open"));
+    }
+    auto current = sorter->current_record();
+    if (!current.has_value()) {
+      return std::unexpected(std::move(current.error()));
+    }
+    RuntimeIndexRefill& refill = *runtime.index_refill;
+    const WriteCursorDescriptor& descriptor = program_->write_cursor(*ordering.index_refill_cursor);
+    auto rowid_field = current->field(descriptor.key_term_count);
+    if (!rowid_field.has_value()) {
+      return std::unexpected(std::move(rowid_field.error()));
+    }
+    const std::optional<std::int64_t> rowid = rowid_field->integer_value();
+    if (refill.previous_size != 0U) {
+      auto previous = RecordView::Parse(refill.previous_record.view().first(refill.previous_size),
+                                        record_options_);
+      if (!previous.has_value()) {
+        return std::unexpected(std::move(previous.error()));
+      }
+      auto compared = sorter->CompareCurrent(*previous);
+      if (!compared.has_value()) {
+        return std::unexpected(std::move(compared.error()));
+      }
+      if (*compared == std::weak_ordering::equivalent) {
+        if (descriptor.unique) {
+          bool contains_null = false;
+          RecordCursor fields = current->cursor();
+          for (std::uint32_t term = 0; term < descriptor.key_term_count; ++term) {
+            const std::optional<RecordFieldView> field = fields.Next();
+            if (!field.has_value()) {
+              return std::unexpected(
+                  VmError(ErrorCode::kCorruption, "index refill key field is missing"));
+            }
+            contains_null = contains_null || field->type() == SqlValueType::kNull;
+          }
+          if (!contains_null) {
+            return std::unexpected(VmError(ErrorCode::kConstraint, "UNIQUE constraint failed"));
+          }
+        }
+        auto previous_rowid = previous->field(descriptor.key_term_count);
+        if (!previous_rowid.has_value()) {
+          return std::unexpected(std::move(previous_rowid.error()));
+        }
+        const std::optional<std::int64_t> previous_integer = previous_rowid->integer_value();
+        if (!rowid.has_value() || !previous_integer.has_value() || *rowid <= *previous_integer) {
+          return std::unexpected(
+              VmError(ErrorCode::kMisuse, "index refill physical keys are not increasing"));
+        }
+      } else if (*compared == std::weak_ordering::less) {
+        return std::unexpected(
+            VmError(ErrorCode::kMisuse, "index refill logical keys are not increasing"));
+      }
+    }
+    if (!rowid.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "index refill rowid is not an integer"));
+    }
+    const ByteView encoded = current->encoded();
+    if (encoded.size() > limits_.maximum_value_bytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "index refill record exceeds the VM value limit"));
+    }
+    if (refill.previous_record.size().value() < encoded.size()) {
+      refill.previous_record = ByteBuffer{ByteCount{encoded.size()}};
+    }
+    if (!CopyBytes(refill.previous_record.mutable_view(), encoded).has_value()) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "index refill record buffer is too small"));
+    }
+    refill.previous_size = encoded.size();
+    auto record = RecordView::Parse(refill.previous_record.view().first(refill.previous_size),
+                                    record_options_);
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    auto appended = refill.cursor.AppendSorted(*record);
+    if (!appended.has_value()) {
+      return std::unexpected(std::move(appended.error()));
     }
     return std::nullopt;
   }
@@ -2573,6 +2675,19 @@ struct Vm::Impl {
     if (!runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
     }
+    const auto target = program_->sorter(operation.sorter).index_refill_cursor;
+    if (target.has_value()) {
+      RuntimeWriteCursor& index = WriteCursor(*target);
+      if (!index.index.has_value() || index.index_refill.has_value()) {
+        return std::unexpected(
+            VmError(ErrorCode::kMisuse, "index refill requires an unused index writer"));
+      }
+      auto cursor = index.index->OpenAppendCursor();
+      if (!cursor.has_value()) {
+        return std::unexpected(std::move(cursor.error()));
+      }
+      index.index_refill.emplace(RuntimeIndexRefill{.cursor = std::move(*cursor)});
+    }
     auto rewound = runtime->Rewind();
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
@@ -3216,6 +3331,7 @@ struct Vm::Impl {
       cursor.storage = std::monostate{};
     }
     for (RuntimeWriteCursor& cursor : write_cursors_) {
+      cursor.index_refill.reset();
       cursor.table.reset();
       cursor.index.reset();
     }

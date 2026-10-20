@@ -528,6 +528,39 @@ TEST(BytecodeProgramTest, MergesPhysicalAndPublishedNullRowsWithoutWeakeningUnpo
   };
 }
 
+[[nodiscard]] ProgramInput IndexRefillProgramInput() {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kCreateIndex;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.write_effects = ProgramWriteEffects{.multi_write = true, .may_abort = true};
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(7));
+  input.constants.push_back(SqlValue::Integer(1));
+  WriteCursorDescriptor index = IndexWriteCursorDescriptor();
+  index.root_page = RootPageNumber(0);
+  index.pending_root = true;
+  input.write_cursors.push_back(std::move(index));
+  OrderingRecordDescriptor sorter = OrderingDescriptor();
+  sorter.index_refill_cursor = WriteCursor(0);
+  input.sorters.push_back(std::move(sorter));
+  input.instructions = {
+      CreateIndexRootInstruction{.cursor = WriteCursor(0), .output = Reg(0)},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      InsertSorterInstruction{.sorter = Sorter(0), .first_value = Reg(0), .value_count = 2},
+      RewindSorterInstruction{.sorter = Sorter(0), .empty_target = Address(8)},
+      InsertSorterIndexInstruction{.sorter = Sorter(0)},
+      NextSorterInstruction{.sorter = Sorter(0), .next_target = Address(6)},
+      CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+      CloseSorterInstruction{.sorter = Sorter(0)},
+      HaltInstruction{},
+  };
+  return input;
+}
+
 [[nodiscard]] ProgramInput PrivateCapabilitySubroutineInput(
     std::span<const Instruction> body, std::span<const Instruction> caller_body = {}) {
   ProgramInput input;
@@ -1768,6 +1801,104 @@ TEST(BytecodeProgramTest, VerifiesTypedAnalyzeInstructions) {
   std::get<ClearStat1Instruction>(input.instructions[2]).scope =
       static_cast<Stat1ClearScope>(255);  // NOLINT
   EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+}
+
+TEST(BytecodeProgramTest, VerifiesSorterBackedIndexRefillAssociationAndAppendPhase) {
+  const ProgramInput input = IndexRefillProgramInput();
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(std::optional{WriteCursor(0)}, program->sorter(Sorter(0)).index_refill_cursor);
+  EXPECT_EQ("insert_sorter_index", InstructionKindName(InstructionKindOf(input.instructions[6])));
+  EXPECT_TRUE(program->write_effects().multi_write);
+  EXPECT_TRUE(program->write_effects().may_abort);
+}
+
+TEST(BytecodeProgramTest, RejectsRefillAssociationsOutsideOneMatchingPendingIndex) {
+  const auto rejects = [](const auto& mutate) {
+    ProgramInput input = IndexRefillProgramInput();
+    mutate(input);
+    EXPECT_EQ(ProgramErrorCode::kInvalidOrderingDescriptor, VerifyError(input));
+  };
+  rejects([](ProgramInput& input) { input.sorters[0].index_refill_cursor = WriteCursor(1); });
+  rejects([](ProgramInput& input) {
+    input.write_cursors[0].pending_root = false;
+    input.write_cursors[0].root_page = RootPageNumber(3);
+  });
+  rejects([](ProgramInput& input) { input.sorters[0].field_count = 3; });
+  rejects([](ProgramInput& input) {
+    input.symbols.emplace_back("NOCASE");
+    input.sorters[0].key_columns[0].collation = Symbol(1);
+  });
+  rejects([](ProgramInput& input) {
+    input.sorters[0].key_columns[0].order = BytecodeSortOrder::kDescending;
+    input.sorters[0].key_columns[0].null_placement = BytecodeNullPlacement::kLast;
+  });
+  rejects([](ProgramInput& input) {
+    input.sorters[0].key_columns[0].null_placement = BytecodeNullPlacement::kLast;
+  });
+  rejects([](ProgramInput& input) {
+    input.write_cursors[0].index_columns.back().order = BytecodeSortOrder::kDescending;
+  });
+  rejects([](ProgramInput& input) { input.sorters.push_back(input.sorters[0]); });
+  rejects([](ProgramInput& input) { input.top_ns.push_back(input.sorters[0]); });
+  rejects([](ProgramInput& input) { input.relations.push_back(input.sorters[0]); });
+  rejects([](ProgramInput& input) {
+    input.sorters[0].key_field_count = input.sorters[0].field_count;
+    input.sorters[0].key_columns.push_back(input.sorters[0].key_columns[0]);
+    input.record_comparisons.push_back(std::move(input.sorters[0]));
+    input.sorters.clear();
+  });
+  rejects([](ProgramInput& input) { input.statement_kind = ProgramStatementKind::kAnalyze; });
+  rejects([](ProgramInput& input) { input.write_effects.multi_write = false; });
+  rejects([](ProgramInput& input) { input.write_effects.may_abort = false; });
+}
+
+TEST(BytecodeProgramTest, RejectsIndexRefillSorterAndWriterPhaseViolations) {
+  const auto rejects = [](ProgramErrorCode expected, const auto& mutate) {
+    ProgramInput input = IndexRefillProgramInput();
+    mutate(input);
+    EXPECT_EQ(expected, VerifyError(input));
+  };
+  rejects(ProgramErrorCode::kInvalidOrderingDescriptor,
+          [](ProgramInput& input) { input.sorters[0].index_refill_cursor.reset(); });
+  rejects(ProgramErrorCode::kCursorNotOpen, [](ProgramInput& input) {
+    input.instructions[0] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)};
+  });
+  rejects(ProgramErrorCode::kCapabilityNotPositioned, [](ProgramInput& input) {
+    input.instructions[5] = InsertSorterIndexInstruction{.sorter = Sorter(0)};
+  });
+  rejects(ProgramErrorCode::kCursorStateConflict, [](ProgramInput& input) {
+    input.instructions[6] =
+        InsertIndexInstruction{.cursor = WriteCursor(0), .first_value = Reg(0), .value_count = 2};
+  });
+  rejects(ProgramErrorCode::kCursorStateConflict, [](ProgramInput& input) {
+    input.instructions[6] =
+        CheckUniqueIndexInstruction{.cursor = WriteCursor(0), .first_key = Reg(0), .key_count = 1};
+  });
+  rejects(ProgramErrorCode::kCursorStateConflict, [](ProgramInput& input) {
+    input.instructions[6] = ResetSorterInstruction{.sorter = Sorter(0)};
+  });
+  rejects(ProgramErrorCode::kCursorStateConflict, [](ProgramInput& input) {
+    input.instructions[6] = CloseWriteCursorInstruction{.cursor = WriteCursor(0)};
+    input.instructions[7] = InsertSorterIndexInstruction{.sorter = Sorter(0)};
+  });
+}
+
+TEST(BytecodeProgramTest, RejectsPrivateSorterRefillOfAnOuterIndexWriter) {
+  ProgramInput input = IndexRefillProgramInput();
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(3), .end = Address(8), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      CreateIndexRootInstruction{.cursor = WriteCursor(0), .output = Reg(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      HaltInstruction{},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      RewindSorterInstruction{.sorter = Sorter(0), .empty_target = Address(6)},
+      NextSorterInstruction{.sorter = Sorter(0), .next_target = Address(5)},
+      CloseSorterInstruction{.sorter = Sorter(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, VerifyError(input));
 }
 
 TEST(BytecodeProgramTest, VerifiesTypedSorterLifecycleAndDataflow) {

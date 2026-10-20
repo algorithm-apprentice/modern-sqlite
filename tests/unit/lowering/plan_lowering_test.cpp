@@ -792,18 +792,25 @@ struct MutationOutcome {
 [[nodiscard]] Result<MutationOutcome> ExecuteMutationProgram(
     const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
     std::span<const SqlValue> parameters = {}, VmEnvironment environment = VmEnvironment::Core()) {
-  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to open lowering write-test pager"};
+  }
+  Pager& execution_pager = *pager;
+  TransactionCoordinator coordinator = TakeValue(TransactionCoordinator::Open(std::move(pager)));
   const StatementRollbackMode rollback = program.rollback_mode() == ProgramRollbackMode::kStatement
                                              ? StatementRollbackMode::kStatement
                                              : StatementRollbackMode::kTransaction;
   TransactionStatement statement = TakeValue(coordinator.BeginStatement(
       TransactionStatementOptions{.access = StatementAccess::kWrite, .rollback = rollback}));
+  const TemporaryStorageFactory temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, execution_pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   Vm vm = TakeValue(Vm::Create(program, environment));
   for (std::size_t index = 0; index < parameters.size(); ++index) {
     RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
   }
   RequireStatus(vm.AttachExecutionContext(
-      VmExecutionContext{*statement.writer(), program.schema_version().generation}));
+      VmExecutionContext{*statement.writer(), program.schema_version().generation, temporary}));
   Result<VmStep> stepped = vm.Step();
   if (!stepped.has_value()) {
     const Error error = std::move(stepped.error());
@@ -8349,6 +8356,31 @@ TEST(CreateTableLowering, WritesLoadableCanonicalSchema) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(CreateIndexLowering, SortsLogicalKeysBeforePopulation) {
+  const BytecodeProgram program = LowerMutationOrThrow(
+      "CREATE UNIQUE INDEX items_name_score ON Items(Name COLLATE NOCASE DESC,Score)",
+      CreateIndexCatalog());
+  ASSERT_EQ(1U, program.sorters().size());
+  const OrderingRecordDescriptor& sorter = program.sorters()[0];
+  EXPECT_EQ(std::optional{WriteCursorId{1}}, sorter.index_refill_cursor);
+  EXPECT_EQ(3U, sorter.field_count);
+  EXPECT_EQ(2U, sorter.key_field_count);
+  ASSERT_EQ(2U, sorter.key_columns.size());
+  EXPECT_EQ("NOCASE", program.symbol(sorter.key_columns[0].collation));
+  EXPECT_EQ(BytecodeSortOrder::kDescending, sorter.key_columns[0].order);
+  EXPECT_EQ(BytecodeNullPlacement::kLast, sorter.key_columns[0].null_placement);
+  EXPECT_EQ("BINARY", program.symbol(sorter.key_columns[1].collation));
+  EXPECT_EQ(BytecodeSortOrder::kAscending, sorter.key_columns[1].order);
+  EXPECT_TRUE(program.write_effects().multi_write);
+  EXPECT_TRUE(program.write_effects().may_abort);
+  const auto kinds = InstructionKinds(program);
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kOpenSorter));
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kInsertSorter));
+  EXPECT_EQ(1, std::ranges::count(kinds, InstructionKind::kRewindSorter));
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kInsertIndex));
+  EXPECT_EQ(0, std::ranges::count(kinds, InstructionKind::kCheckUniqueIndex));
+}
+
 TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
   const CatalogSnapshotPtr catalog = CreateIndexCatalog();
   const BytecodeProgram program = LowerMutationOrThrow(
@@ -8377,7 +8409,7 @@ TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
                     std::ranges::count(kinds, InstructionKind::kRealStorageAffinity)));
   const auto create_root = std::ranges::find(kinds, InstructionKind::kCreateIndexRoot);
   const auto schema_insert = std::ranges::find(kinds, InstructionKind::kInsertTable);
-  const auto index_insert = std::ranges::find(kinds, InstructionKind::kInsertIndex);
+  const auto index_insert = std::ranges::find(kinds, InstructionKind::InsertSorterIndex);
   const auto cookie = std::ranges::find(kinds, InstructionKind::kIncrementSchemaCookie);
   ASSERT_NE(kinds.end(), create_root);
   ASSERT_NE(kinds.end(), schema_insert);
@@ -8394,6 +8426,7 @@ TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
   EXPECT_EQ(0U, no_op.register_count());
   EXPECT_TRUE(no_op.cursors().empty());
   EXPECT_TRUE(no_op.write_cursors().empty());
+  EXPECT_TRUE(no_op.sorters().empty());
   EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(no_op));
 }
 

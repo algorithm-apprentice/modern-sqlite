@@ -4944,7 +4944,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .pending_root = true,
         .storage = WriteCursorStorageKind::kIndex,
     };
+    OrderingRecordDescriptor sorter_descriptor{
+        .field_count = static_cast<std::uint32_t>(terms.size() + 1U),
+        .key_field_count = static_cast<std::uint32_t>(terms.size()),
+        .key_columns = {},
+    };
     index_descriptor.index_columns.reserve(terms.size() + 1U);
+    sorter_descriptor.key_columns.reserve(terms.size());
     for (const BoundCreateIndexTerm& term : terms) {
       auto collation = SymbolForName(term.collation_name);
       if (!collation.has_value()) {
@@ -4954,6 +4960,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .collation = *collation,
           .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
                                                         : BytecodeSortOrder::kAscending,
+      });
+      sorter_descriptor.key_columns.push_back(OrderingColumnMetadata{
+          .collation = *collation,
+          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                        : BytecodeSortOrder::kAscending,
+          .null_placement = term.order == SortOrder::kDescending ? BytecodeNullPlacement::kLast
+                                                                 : BytecodeNullPlacement::kFirst,
       });
     }
     auto binary = SymbolForName("BINARY");
@@ -4971,6 +4984,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(index_cursor.error()));
     }
     create_index_write_cursor_ = *index_cursor;
+    sorter_descriptor.index_refill_cursor = *index_cursor;
+    auto sorter =
+        ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(sorter_descriptor)),
+                             "unable to add the CREATE INDEX sorter");
+    if (!sorter.has_value()) {
+      return std::unexpected(std::move(sorter.error()));
+    }
+    create_index_sorter_ = *sorter;
     return {};
   }
 
@@ -9259,8 +9280,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitCreateIndex() {
     if (!create_index_table_cursor_.has_value() || !schema_write_cursor_.has_value() ||
-        !create_index_write_cursor_.has_value() || bound_create_index_->index_name().empty() ||
-        bound_create_index_->table_name().empty() || bound_create_index_->canonical_sql().empty()) {
+        !create_index_write_cursor_.has_value() || !create_index_sorter_.has_value() ||
+        bound_create_index_->index_name().empty() || bound_create_index_->table_name().empty() ||
+        bound_create_index_->canonical_sql().empty()) {
       return std::unexpected(InternalFailure("CREATE INDEX lowering resources are incomplete"));
     }
     const std::span<const BoundCreateIndexTerm> terms = bound_create_index_->terms();
@@ -9270,6 +9292,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     constexpr RegisterId kFirstKey{8};
     const CursorId table_cursor = AssumeValue(create_index_table_cursor_);
     const WriteCursorId index_cursor = AssumeValue(create_index_write_cursor_);
+    const SorterId sorter = AssumeValue(create_index_sorter_);
 
     if (auto root = Append(CreateIndexRootInstruction{
             .cursor = index_cursor,
@@ -9285,6 +9308,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return schema;
     }
 
+    if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
+      return opened;
+    }
     if (auto opened = Append(OpenReadCursorInstruction{.cursor = table_cursor});
         !opened.has_value()) {
       return opened;
@@ -9325,19 +9351,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !read.has_value()) {
       return read;
     }
-    if (bound_create_index_->unique()) {
-      if (auto checked = Append(CheckUniqueIndexInstruction{
-              .cursor = index_cursor,
-              .first_key = kFirstKey,
-              .key_count = key_count,
-              .ignored_rowid = std::nullopt,
-          });
-          !checked.has_value()) {
-        return checked;
-      }
-    }
-    if (auto inserted = Append(InsertIndexInstruction{
-            .cursor = index_cursor,
+    if (auto inserted = Append(InsertSorterInstruction{
+            .sorter = sorter,
             .first_value = kFirstKey,
             .value_count = key_count + 1U,
         });
@@ -9352,11 +9367,42 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*exhausted); !bound.has_value()) {
       return bound;
     }
+    auto complete = CreateLabel();
+    auto drain = CreateLabel();
+    if (!complete.has_value()) {
+      return std::unexpected(std::move(complete.error()));
+    }
+    if (!drain.has_value()) {
+      return std::unexpected(std::move(drain.error()));
+    }
+    auto sorted = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(sorter, *complete),
+                                       "unable to emit CREATE INDEX sorter rewind");
+    if (!sorted.has_value()) {
+      return std::unexpected(std::move(sorted.error()));
+    }
+    if (auto bound = BindLabel(*drain); !bound.has_value()) {
+      return bound;
+    }
+    if (auto inserted = Append(InsertSorterIndexInstruction{.sorter = sorter});
+        !inserted.has_value()) {
+      return inserted;
+    }
+    auto advanced = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(sorter, *drain),
+                                         "unable to emit CREATE INDEX sorter advance");
+    if (!advanced.has_value()) {
+      return std::unexpected(std::move(advanced.error()));
+    }
+    if (auto bound = BindLabel(*complete); !bound.has_value()) {
+      return bound;
+    }
     if (auto closed = Append(CloseCursorInstruction{.cursor = table_cursor}); !closed.has_value()) {
       return closed;
     }
     if (auto closed = Append(CloseWriteCursorInstruction{.cursor = index_cursor});
         !closed.has_value()) {
+      return closed;
+    }
+    if (auto closed = Append(CloseSorterInstruction{.sorter = sorter}); !closed.has_value()) {
       return closed;
     }
     if (auto cookie = Append(IncrementSchemaCookieInstruction{.output = kSchemaCookie});
@@ -15952,6 +15998,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<CursorId> create_index_table_cursor_;
   std::optional<WriteCursorId> schema_write_cursor_;
   std::optional<WriteCursorId> create_index_write_cursor_;
+  std::optional<SorterId> create_index_sorter_;
   std::optional<WriteCursorId> stat1_write_cursor_;
   std::vector<CursorId> analyze_index_cursors_;
   std::vector<CursorId> analyze_table_cursors_;

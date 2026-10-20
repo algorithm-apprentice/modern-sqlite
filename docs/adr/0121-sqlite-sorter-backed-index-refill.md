@@ -177,5 +177,26 @@ Exhaustive allocation failure includes retained-cursor creation and twelve
 overflow appends, with exact original-image rollback after every failure.
 All 76 affected storage cases pass in Debug, GNU Debug, and ASan/UBSan; the
 complete fast tier passes 1,467 ordinary and 92 isolated cases. Production
-quality, format, discipline, and graph checks pass. Sorter-backed VM/lowering
-integration has not begun.
+quality, format, discipline, and graph checks pass. This accepted slice was
+committed as `d7ced2e` before sorter-backed VM/lowering integration began.
+
+## Sorter-backed refill slice evidence
+
+The focused producer test first fails at tree
+`815e40fb9627668a9680e16a537d984ac5e927fc`: CREATE INDEX has no shared sorter.
+The translated pipeline passes all 108 affected verifier, write-VM, and
+CREATE INDEX cases, plus the complete fast tier of 1,477 ordinary and 92
+isolated cases. Existing raw REAL/default and UNIQUE rollback tests remain.
+Direct bytecode controls cover strict rowid ties, nullable UNIQUE keys,
+constraint precedence, encoded value limits, large-to-short buffer reuse,
+actual PMA spill/read/write failures, and legacy physical DESC suppression
+without changing query ordering. The existing VM OOM runner exhausts creation
+and every Step allocation through sorter admission, buffer growth, and
+overflow append, restoring the exact original image after each failure.
+
+The fixed sorter association also participates in the existing private
+resource-ownership check, just as a borrowed relation cursor does. Its focused
+control first reports the later cursor-open error rather than the required
+cross-scope ownership error; propagating the association through the same
+ownership check makes the control pass. No second ownership table or
+comparison-column owner is added: refill uses `RecordSorter::CompareCurrent()`.
