@@ -123,3 +123,4 @@ their corresponding implementation begins.
 118. [ADR-0118: SQLite Top-N Ephemeral B-Tree](0118-sqlite-top-n-ephemeral-btree.md)
 119. [ADR-0119: SQLite Conditional Statement Journals](0119-sqlite-conditional-statement-journals.md)
 120. [ADR-0120: SQLite WhereLoop and Path Solving](0120-sqlite-where-loop-and-path-solving.md)
+121. [ADR-0121: SQLite Sorter-Backed Index Refill](0121-sqlite-sorter-backed-index-refill.md)
