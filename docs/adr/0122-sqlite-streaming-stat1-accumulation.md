@@ -148,8 +148,8 @@ and index counts allocate zero; an overflow prefix allocates once and reuses
 caller scratch without further allocation. Exhaustive allocation failures
 remain typed and leak-free. Deterministic read failures prove that page
 counting does not read overflow payloads, and existing full-chain comparison
-failure/format precedence remains unchanged. Retained-field and STAT1 VM
-integration slices have not begun.
+failure/format precedence remains unchanged. At this slice boundary, the
+retained-field and STAT1 VM integration slices had not begun.
 
 ## Retained-field prerequisite slice evidence
 
@@ -161,4 +161,20 @@ only logical bytes across large-to-small, scalar, empty TEXT/BLOB and embedded
 NUL transitions, outlive the source record, and preserve exact mixed numeric
 and collation semantics. Allocation failure leaves old storage intact; cold
 byte retention allocates once and 1,024 warm copies/comparisons allocate zero.
-STAT1 VM integration has not begun.
+At this slice boundary, STAT1 VM integration had not begun.
+
+## STAT1 integration slice evidence
+
+The focused nullable UNIQUE DESC control first returns `3 2` instead of
+native `3 1`. The translated policy, count prepass and accumulator pass that
+control, the ASC `3 2` counterpart and the zero-compared-field UNIQUE NOT NULL
+case. A fixed custom-collation trace proves that equivalent leading spelling
+survives later-field changes and that native UNIQUE/primary compared widths
+omit the final key comparison. All 14 affected cases pass in Debug, genuine
+GNU 16 and ASan/UBSan. The extended existing VM injector sweeps every Step
+allocation across retained TEXT growth and overflow prefixes; each failure
+and the whole-record value limit release pins and preserve the original
+database bytes. The original 37-allocation lowering contract is unchanged.
+A complete default development build precedes the passing 1,490 ordinary plus
+92 isolated fast cases. Integrated native, matched performance and final-head
+closing gates remain outstanding.

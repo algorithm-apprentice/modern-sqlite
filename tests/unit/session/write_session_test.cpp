@@ -781,6 +781,40 @@ TEST(WriteSession, NormalizesNearUniqueAnalyzeEstimate) {
   EXPECT_EQ("11 1", Text(rows[0][0]));
 }
 
+TEST(WriteSession, UsesNativeUniqueDescendingNullTailAnalyzeShortcut) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(Value INTEGER)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(NULL)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(NULL)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  ExecuteDone(session, "CREATE UNIQUE INDEX items_value ON Items(Value DESC)");
+  ExecuteDone(session, "ANALYZE items_value");
+  const auto rows = QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_value'");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("3 1", Text(rows[0][0]));
+  ExecuteDone(session, "CREATE UNIQUE INDEX items_value_asc ON Items(Value)");
+  ExecuteDone(session, "ANALYZE items_value_asc");
+  const auto ascending =
+      QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_value_asc'");
+  ASSERT_EQ(1U, ascending.size());
+  EXPECT_EQ("3 2", Text(ascending[0][0]));
+}
+
+TEST(WriteSession, AnalyzesSingleUniqueNotNullKeyWithoutPreviousFields) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(Value INTEGER NOT NULL)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(3)");
+  ExecuteDone(session, "CREATE UNIQUE INDEX items_value ON Items(Value)");
+  ExecuteDone(session, "ANALYZE items_value");
+  const auto rows = QueryRows(session, "SELECT stat FROM sqlite_stat1 WHERE idx='items_value'");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("3 1", Text(rows[0][0]));
+}
+
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

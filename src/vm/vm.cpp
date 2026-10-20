@@ -394,6 +394,107 @@ struct RuntimeWriteCursor {
   std::optional<RuntimeIndexRefill> index_refill;
 };
 
+struct Stat1PreviousField {
+  ByteBuffer storage{};
+  RecordFieldView value{};
+};
+
+struct Stat1Accumulator {
+  explicit Stat1Accumulator(std::size_t physical_columns) : distinct_less(physical_columns, 0U) {}
+
+  [[nodiscard]] Status Push(std::size_t first_changed) {
+    if (first_changed >= distinct_less.size()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "ANALYZE change boundary is invalid"));
+    }
+    if (rows == std::numeric_limits<std::uint64_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE row count is exhausted"));
+    }
+    if (rows != 0U) {
+      for (std::size_t field = first_changed; field < distinct_less.size(); ++field) {
+        if (distinct_less[field] == std::numeric_limits<std::uint64_t>::max()) {
+          return std::unexpected(
+              VmError(ErrorCode::kTooLarge, "ANALYZE distinct count is exhausted"));
+        }
+        ++distinct_less[field];
+      }
+    }
+    ++rows;
+    return {};
+  }
+
+  [[nodiscard]] Result<SqlValue> ResultText(std::size_t key_count, bool emit_empty,
+                                            std::size_t maximum_bytes) const {
+    if (rows == 0U && !emit_empty) {
+      return SqlValue{};
+    }
+    constexpr std::size_t kMaximumStat1NumberBytes = 22;
+    if (rows == 0U) {
+      if (key_count > (maximum_bytes > 0U ? (maximum_bytes - 1U) / 2U : 0U) ||
+          maximum_bytes == 0U) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "ANALYZE stat text exceeds the VM limit"));
+      }
+    } else if (maximum_bytes < kMaximumStat1NumberBytes ||
+               key_count + 1U > maximum_bytes / kMaximumStat1NumberBytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "ANALYZE stat text exceeds the VM limit"));
+    }
+    std::string stat = std::to_string(rows);
+    for (std::size_t field = 0; field < key_count; ++field) {
+      const std::uint64_t distinct = distinct_less[field] + 1U;
+      std::uint64_t estimate = rows / distinct + static_cast<std::uint64_t>(rows % distinct != 0U);
+      if (estimate == 2U &&
+          rows <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) &&
+          distinct <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        constexpr std::int64_t kNearUniqueRowScale = 10;
+        constexpr std::int64_t kNearUniqueDistinctScale = 11;
+        auto left = CheckedMultiply(static_cast<std::int64_t>(rows), kNearUniqueRowScale);
+        auto right = CheckedMultiply(static_cast<std::int64_t>(distinct), kNearUniqueDistinctScale);
+        if (!left.has_value() || !right.has_value()) {
+          return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE normalization overflow"));
+        }
+        if (*left <= *right) {
+          estimate = 1U;
+        }
+      }
+      stat.push_back(' ');
+      stat.append(std::to_string(estimate));
+    }
+    return SqlValue::Text(std::move(stat));
+  }
+
+  std::uint64_t rows = 0;
+  std::vector<std::uint64_t> distinct_less;
+};
+
+[[nodiscard]] Result<std::size_t> RetainStat1ChangedSuffix(
+    const RecordPrefixView& record, std::span<Stat1PreviousField> previous,
+    std::span<const IndexColumnOrder> columns, bool first_row) {
+  if (record.field_count() < previous.size() || columns.size() < previous.size()) {
+    return std::unexpected(VmError(ErrorCode::kCorruption, "ANALYZE index row has too few fields"));
+  }
+  std::size_t first_changed = first_row ? 0U : previous.size();
+  RecordCursor current = record.cursor();
+  for (std::size_t field = 0; field < previous.size(); ++field) {
+    const auto value = current.Next();
+    if (!value.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kCorruption, "ANALYZE index field is missing"));
+    }
+    if (first_changed == previous.size() &&
+        CompareRecordFields(previous[field].value, *value, columns[field].collation()) ==
+            std::weak_ordering::equivalent) {
+      continue;
+    }
+    first_changed = std::min(first_changed, field);
+    auto retained = value->CopyTo(previous[field].storage);
+    if (!retained.has_value()) {
+      return std::unexpected(std::move(retained.error()));
+    }
+    previous[field].value = *retained;
+  }
+  return first_changed;
+}
+
 }  // namespace
 
 struct Vm::Impl {
@@ -2097,76 +2198,58 @@ struct Vm::Impl {
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
+    // Native unlimited STAT1 still performs Count before stat_init and Rewind.
+    auto counted = cursor->CountEntries();
+    if (!counted.has_value()) {
+      return std::unexpected(std::move(counted.error()));
+    }
+    const std::size_t key_count = operation.key_term_count;
+    const std::size_t physical_columns = operation.policy == Stat1IndexPolicy::PrimaryWithoutRowid
+                                             ? key_count
+                                             : descriptor.index_columns.size();
+    const std::size_t tested_columns =
+        operation.policy == Stat1IndexPolicy::UniqueNotNull ||
+                operation.policy == Stat1IndexPolicy::PrimaryWithoutRowid
+            ? key_count - 1U
+            : physical_columns - 1U;
+    Stat1Accumulator state{physical_columns};
     auto has_row = cursor->First();
     if (!has_row.has_value()) {
       return std::unexpected(std::move(has_row.error()));
     }
-    if (!*has_row) {
-      if (!operation.emit_empty) {
-        return SetRegister(operation.output, SqlValue{});
-      }
-      if (operation.key_term_count >
-          (limits_.maximum_value_bytes > 0U ? (limits_.maximum_value_bytes - 1U) / 2U : 0U)) {
-        return std::unexpected(
-            VmError(ErrorCode::kTooLarge, "ANALYZE stat text exceeds the VM limit"));
-      }
-      std::string stat{"0"};
-      for (std::uint32_t term = 0; term < operation.key_term_count; ++term) {
-        stat.append(" 0");
-      }
-      return SetRegister(operation.output, SqlValue::Text(std::move(stat)));
-    }
-    const std::size_t key_count = operation.key_term_count;
-    if (key_count > limits_.maximum_value_bytes / (sizeof(std::uint64_t) + 2U * sizeof(SqlValue))) {
+    if (*has_row &&
+        key_count > limits_.maximum_value_bytes / (sizeof(std::uint64_t) + 2U * sizeof(SqlValue))) {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "ANALYZE prefix state exceeds the VM limit"));
     }
-    std::vector<std::uint64_t> distinct(key_count, 0U);
-    std::vector<SqlValue> previous;
-    previous.reserve(key_count);
-    std::uint64_t rows = 0;
+    std::vector<Stat1PreviousField> previous(*has_row ? tested_columns : 0U);
+    ByteBuffer scratch;
     while (*has_row) {
-      if (rows == std::numeric_limits<std::uint64_t>::max()) {
-        return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE row count is exhausted"));
-      }
-      ++rows;
-      auto payload = cursor->CopyPayload();
-      if (!payload.has_value()) {
-        return std::unexpected(std::move(payload.error()));
-      }
-      if (payload->size().value() > limits_.maximum_value_bytes) {
-        return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE index row is too large"));
-      }
-      auto fields = DecodeRecord(payload->view(), record_options_);
-      if (!fields.has_value()) {
-        return std::unexpected(std::move(fields.error()));
-      }
-      if (fields->size() < key_count) {
-        return std::unexpected(
-            VmError(ErrorCode::kCorruption, "ANALYZE index row has too few fields"));
-      }
-      std::size_t first_difference = 0;
-      if (previous.empty()) {
-        first_difference = 0;
-      } else {
-        while (
-            first_difference < key_count &&
-            CompareSqlValues(previous[first_difference], (*fields)[first_difference],
-                             CollationFor(descriptor.index_columns[first_difference].collation)) ==
-                std::weak_ordering::equivalent) {
-          ++first_difference;
+      {
+        auto current = cursor->ReadRecordPrefix(std::max<std::size_t>(tested_columns, 1U), scratch,
+                                                ByteCount{limits_.maximum_value_bytes});
+        if (!current.has_value()) {
+          return std::unexpected(std::move(current.error()));
         }
-      }
-      for (std::size_t prefix = first_difference; prefix < key_count; ++prefix) {
-        if (distinct[prefix] == std::numeric_limits<std::uint64_t>::max()) {
+        if (current->complete_field_count() < key_count) {
           return std::unexpected(
-              VmError(ErrorCode::kTooLarge, "ANALYZE distinct count is exhausted"));
+              VmError(ErrorCode::kCorruption, "ANALYZE index row has too few fields"));
         }
-        ++distinct[prefix];
-      }
-      previous.clear();
-      for (std::size_t field = 0; field < key_count; ++field) {
-        previous.push_back(std::move((*fields)[field]));
+        const bool unique_shortcut = operation.policy == Stat1IndexPolicy::UniqueNullable &&
+                                     key_count == 1U && tested_columns == 1U && state.rows != 0U &&
+                                     previous.front().value.type() != SqlValueType::kNull;
+        std::size_t first_changed = 0;
+        if (!unique_shortcut) {
+          auto retained = RetainStat1ChangedSuffix(*current, previous, columns, state.rows == 0U);
+          if (!retained.has_value()) {
+            return std::unexpected(std::move(retained.error()));
+          }
+          first_changed = *retained;
+        }
+        auto pushed = state.Push(first_changed);
+        if (!pushed.has_value()) {
+          return std::unexpected(std::move(pushed.error()));
+        }
       }
       has_row = cursor->Next();
       if (!has_row.has_value()) {
@@ -2174,33 +2257,11 @@ struct Vm::Impl {
       }
     }
 
-    if (limits_.maximum_value_bytes < 22U || key_count + 1U > limits_.maximum_value_bytes / 22U) {
-      return std::unexpected(
-          VmError(ErrorCode::kTooLarge, "ANALYZE stat text exceeds the VM limit"));
+    auto result = state.ResultText(key_count, operation.emit_empty, limits_.maximum_value_bytes);
+    if (!result.has_value()) {
+      return std::unexpected(std::move(result.error()));
     }
-    std::string stat = std::to_string(rows);
-    for (const std::uint64_t count : distinct) {
-      if (count == 0U) {
-        return std::unexpected(VmError(ErrorCode::kInternal, "ANALYZE distinct count is zero"));
-      }
-      std::uint64_t estimate = rows / count + static_cast<std::uint64_t>(rows % count != 0U);
-      if (estimate == 2U) {
-        if (rows <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) &&
-            count <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-          auto left = CheckedMultiply(static_cast<std::int64_t>(rows), 10);
-          auto right = CheckedMultiply(static_cast<std::int64_t>(count), 11);
-          if (!left.has_value() || !right.has_value()) {
-            return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE normalization overflow"));
-          }
-          if (*left <= *right) {
-            estimate = 1U;
-          }
-        }
-      }
-      stat.push_back(' ');
-      stat.append(std::to_string(estimate));
-    }
-    return SetRegister(operation.output, SqlValue::Text(std::move(stat)));
+    return SetRegister(operation.output, std::move(*result));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
@@ -2210,25 +2271,14 @@ struct Vm::Impl {
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
-    auto has_row = cursor->First();
-    if (!has_row.has_value()) {
-      return std::unexpected(std::move(has_row.error()));
+    auto rows = cursor->CountEntries();
+    if (!rows.has_value()) {
+      return std::unexpected(std::move(rows.error()));
     }
-    std::uint64_t rows = 0;
-    while (*has_row) {
-      if (rows == std::numeric_limits<std::uint64_t>::max()) {
-        return std::unexpected(VmError(ErrorCode::kTooLarge, "ANALYZE row count is exhausted"));
-      }
-      ++rows;
-      has_row = cursor->Next();
-      if (!has_row.has_value()) {
-        return std::unexpected(std::move(has_row.error()));
-      }
-    }
-    if (rows == 0U) {
+    if (*rows == 0U) {
       return SetRegister(operation.output, SqlValue{});
     }
-    return SetRegister(operation.output, SqlValue::Text(std::to_string(rows)));
+    return SetRegister(operation.output, SqlValue::Text(std::to_string(*rows)));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,

@@ -1229,6 +1229,9 @@ class StatementBinder final {
                             : index.name,
           .key_term_count = static_cast<std::uint32_t>(index.key_term_count),
           .columns = {},
+          .unique = index.unique,
+          .unique_not_null = index.unique_not_null,
+          .primary_without_rowid = table.without_rowid && index.origin == IndexOrigin::kPrimaryKey,
           .partial = index.partial_predicate.has_value(),
       };
       bound.columns.reserve(index.terms.size());
