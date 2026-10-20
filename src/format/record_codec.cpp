@@ -664,6 +664,37 @@ SqlValue RecordFieldView::ToOwned() const {
   return {};
 }
 
+Result<RecordFieldView> RecordFieldView::CopyTo(ByteBuffer& storage) const try {
+  switch (type()) {
+    case SqlValueType::kNull:
+    case SqlValueType::kInteger:
+    case SqlValueType::kReal:
+      return *this;
+    case SqlValueType::kText:
+    case SqlValueType::kBlob:
+      break;
+  }
+  const bool text = type() == SqlValueType::kText;
+  const ByteView source = text ? AsBytes(Required(text_value()).bytes()) : Required(blob_value());
+  if (storage.size().value() < source.size()) {
+    storage = ByteBuffer{ByteCount{source.size()}};
+  }
+  if (!CopyBytes(storage.mutable_view(), source).has_value()) {
+    return std::unexpected(Misuse("retained field storage is too small"));
+  }
+  const ByteView retained = storage.view().first(source.size());
+  return text ? RecordFieldView{Utf8View{AsStringView(retained)}} : RecordFieldView{retained};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
+}
+
+std::weak_ordering CompareRecordFields(const RecordFieldView& left, const RecordFieldView& right,
+                                       const Collation& collation) {
+  return CompareField(left, right, IndexColumnOrder{collation});
+}
+
 std::optional<RecordFieldView> RecordCursor::Next() noexcept {
   if (remaining_fields_ == 0) {
     return std::nullopt;

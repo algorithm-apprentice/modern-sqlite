@@ -150,3 +150,15 @@ remain typed and leak-free. Deterministic read failures prove that page
 counting does not read overflow payloads, and existing full-chain comparison
 failure/format precedence remains unchanged. Retained-field and STAT1 VM
 integration slices have not begun.
+
+## Retained-field prerequisite slice evidence
+
+The focused field-retention control first fails because `CopyTo()` is absent.
+The canonical copy-into-buffer operation and exposed shared comparator pass
+81 affected codec/golden/allocation cases. A complete default development build
+precedes the passing 1,486 ordinary plus 92 isolated fast cases. Tests retain
+only logical bytes across large-to-small, scalar, empty TEXT/BLOB and embedded
+NUL transitions, outlive the source record, and preserve exact mixed numeric
+and collation semantics. Allocation failure leaves old storage intact; cold
+byte retention allocates once and 1,024 warm copies/comparisons allocate zero.
+STAT1 VM integration has not begun.
