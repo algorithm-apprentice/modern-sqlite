@@ -133,7 +133,7 @@ class CursorCore final {
   CursorCore(const CursorCore&) = delete;
   CursorCore& operator=(const CursorCore&) = delete;
   CursorCore(CursorCore&&) noexcept = default;
-  CursorCore& operator=(CursorCore&&) noexcept = default;
+  CursorCore& operator=(CursorCore&&) = delete;
   ~CursorCore() = default;
 
   [[nodiscard]] static Result<CursorCore> Open(Pager& pager, PageNumber root_page, bool table) {
@@ -180,6 +180,7 @@ class CursorCore final {
     CursorCore core{pager, root_page, table, data_version, *geometry, false};
     core.frames_[0].emplace<Frame>(std::move(*root_pin));
     core.frame_count_ = 1;
+    core.page_view_.emplace(*root);
     return core;
   }
 
@@ -278,15 +279,16 @@ class CursorCore final {
     }
 
     while (true) {
-      auto page = CurrentPage();
-      if (!page.has_value()) {
-        return FailMovement(std::move(page.error()));
+      auto current_page = CurrentPage();
+      if (!current_page.has_value()) {
+        return FailMovement(std::move(current_page.error()));
       }
+      const BtreePageView& page = **current_page;
       std::size_t lower = 0;
-      std::size_t upper = page->cell_count();
+      std::size_t upper = page.cell_count();
       while (lower < upper) {
         const std::size_t middle = lower + (upper - lower) / 2U;
-        auto cell = page->cell(middle);
+        auto cell = page.cell(middle);
         if (!cell.has_value()) {
           return FailMovement(std::move(cell.error()));
         }
@@ -302,8 +304,8 @@ class CursorCore final {
       }
 
       bool exact = false;
-      if (lower < page->cell_count()) {
-        auto candidate = page->cell(lower);
+      if (lower < page.cell_count()) {
+        auto candidate = page.cell(lower);
         if (!candidate.has_value()) {
           return FailMovement(std::move(candidate.error()));
         }
@@ -314,15 +316,15 @@ class CursorCore final {
         exact = *candidate->rowid() == target;
       }
 
-      if (!page->is_leaf()) {
-        auto descended = DescendChild(lower, *page);
+      if (!page.is_leaf()) {
+        auto descended = DescendChild(lower, page);
         if (!descended.has_value()) {
           return FailMovement(std::move(descended.error()));
         }
         continue;
       }
 
-      auto positioned = PositionTableLeaf(lower, exact, mode, page->cell_count());
+      auto positioned = PositionTableLeaf(lower, exact, mode, page.cell_count());
       if (!positioned.has_value()) {
         return FailMovement(std::move(positioned.error()));
       }
@@ -349,15 +351,16 @@ class CursorCore final {
     }
 
     while (true) {
-      auto page = CurrentPage();
-      if (!page.has_value()) {
-        return FailMovement(std::move(page.error()));
+      auto current_page = CurrentPage();
+      if (!current_page.has_value()) {
+        return FailMovement(std::move(current_page.error()));
       }
+      const BtreePageView& page = **current_page;
       std::size_t lower = 0;
-      std::size_t upper = page->cell_count();
+      std::size_t upper = page.cell_count();
       while (lower < upper) {
         const std::size_t middle = lower + (upper - lower) / 2U;
-        auto cell = page->cell(middle);
+        auto cell = page.cell(middle);
         if (!cell.has_value()) {
           return FailMovement(std::move(cell.error()));
         }
@@ -377,8 +380,8 @@ class CursorCore final {
         }
       }
 
-      if (!page->is_leaf()) {
-        auto descended = DescendChild(lower, *page);
+      if (!page.is_leaf()) {
+        auto descended = DescendChild(lower, page);
         if (!descended.has_value()) {
           return FailMovement(std::move(descended.error()));
         }
@@ -387,7 +390,7 @@ class CursorCore final {
 
       Result<bool> positioned =
           mode == BtreeSeekMode::kGreaterOrEqual || mode == BtreeSeekMode::kGreater
-              ? PositionForwardCandidate(lower, page->cell_count())
+              ? PositionForwardCandidate(lower, page.cell_count())
           : mode == BtreeSeekMode::kLessOrEqual || mode == BtreeSeekMode::kLess
               ? PositionReverseCandidate(lower)
               : Result<bool>{false};
@@ -413,7 +416,7 @@ class CursorCore final {
     if (!page.has_value()) {
       return std::unexpected(std::move(page.error()));
     }
-    return page->cell(CurrentFrame().index);
+    return (*page)->cell(CurrentFrame().index);
   }
 
   [[nodiscard]] Status ReadCellPayload(
@@ -566,13 +569,20 @@ class CursorCore final {
     return *frame;
   }
 
-  [[nodiscard]] Result<BtreePageView> CurrentPage() const {
-    if (!geometry_.has_value()) {
-      return std::unexpected(Corruption("B-tree cursor is missing page geometry"));
+  [[nodiscard]] Result<const BtreePageView*> CurrentPage() const {
+    if (!page_view_.has_value()) {
+      if (!geometry_.has_value()) {
+        return std::unexpected(Corruption("B-tree cursor is missing page geometry"));
+      }
+      const Frame& frame = CurrentFrame();
+      auto page = BtreePageView::Parse(frame.pin.frame().bytes(), frame.pin.frame().page_number(),
+                                       geometry_.value());
+      if (!page.has_value()) {
+        return std::unexpected(std::move(page.error()));
+      }
+      page_view_.emplace(*page);
     }
-    const Frame& frame = CurrentFrame();
-    return BtreePageView::Parse(frame.pin.frame().bytes(), frame.pin.frame().page_number(),
-                                geometry_.value());
+    return &*page_view_;
   }
 
   [[nodiscard]] Status CheckSnapshot() {
@@ -592,6 +602,9 @@ class CursorCore final {
 
   void InvalidatePosition() noexcept {
     valid_ = false;
+    if (frame_count_ != 1U) {
+      page_view_.reset();
+    }
     for (std::size_t index = 1; index < frame_count_; ++index) {
       frames_[index].emplace<std::monostate>();
     }
@@ -619,20 +632,21 @@ class CursorCore final {
       return false;
     }
 
-    auto root = CurrentPage();
-    if (!root.has_value()) {
-      return std::unexpected(std::move(root.error()));
+    auto current_page = CurrentPage();
+    if (!current_page.has_value()) {
+      return std::unexpected(std::move(current_page.error()));
     }
-    if (root->cell_count() > 0) {
+    const BtreePageView& root = **current_page;
+    if (root.cell_count() > 0) {
       return true;
     }
-    if (root->is_leaf()) {
+    if (root.is_leaf()) {
       return false;
     }
     if (root_page_ != PageNumber{1}) {
       return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
     }
-    auto descended = DescendChild(0, *root);
+    auto descended = DescendChild(0, root);
     if (!descended.has_value()) {
       return std::unexpected(std::move(descended.error()));
     }
@@ -689,22 +703,25 @@ class CursorCore final {
       return std::unexpected(Corruption("B-tree child has the wrong tree kind"));
     }
 
+    page_view_.reset();
     frames_[frame_count_].emplace<Frame>(std::move(*child_pin));
     ++frame_count_;
+    page_view_.emplace(*child);
     return {};
   }
 
   [[nodiscard]] Status DescendLeftmost() {
     while (true) {
-      auto page = CurrentPage();
-      if (!page.has_value()) {
-        return std::unexpected(std::move(page.error()));
+      auto current_page = CurrentPage();
+      if (!current_page.has_value()) {
+        return std::unexpected(std::move(current_page.error()));
       }
-      if (page->is_leaf()) {
+      const BtreePageView& page = **current_page;
+      if (page.is_leaf()) {
         CurrentFrame().index = 0;
         return {};
       }
-      auto descended = DescendChild(0, *page);
+      auto descended = DescendChild(0, page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -713,15 +730,16 @@ class CursorCore final {
 
   [[nodiscard]] Status DescendRightmost() {
     while (true) {
-      auto page = CurrentPage();
-      if (!page.has_value()) {
-        return std::unexpected(std::move(page.error()));
+      auto current_page = CurrentPage();
+      if (!current_page.has_value()) {
+        return std::unexpected(std::move(current_page.error()));
       }
-      if (page->is_leaf()) {
-        CurrentFrame().index = page->cell_count() - 1U;
+      const BtreePageView& page = **current_page;
+      if (page.is_leaf()) {
+        CurrentFrame().index = page.cell_count() - 1U;
         return {};
       }
-      auto descended = DescendChild(page->cell_count(), *page);
+      auto descended = DescendChild(page.cell_count(), page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -730,6 +748,7 @@ class CursorCore final {
 
   void PopFrame() noexcept {
     assert(frame_count_ > 1);
+    page_view_.reset();
     frames_[frame_count_ - 1U].emplace<std::monostate>();
     --frame_count_;
   }
@@ -748,14 +767,14 @@ class CursorCore final {
       if (!page.has_value()) {
         return std::unexpected(std::move(page.error()));
       }
-      if (page->is_leaf() || !table_) {
-        const auto cells = static_cast<std::uint64_t>(page->cell_count());
+      if ((*page)->is_leaf() || !table_) {
+        const auto cells = static_cast<std::uint64_t>((*page)->cell_count());
         if (cells > std::numeric_limits<std::uint64_t>::max() - entries) {
           return std::unexpected(Corruption("B-tree entry count is out of range"));
         }
         entries += cells;
       }
-      if (page->is_leaf()) {
+      if ((*page)->is_leaf()) {
         while (true) {
           if (frame_count_ == 1U) {
             return entries;
@@ -765,13 +784,13 @@ class CursorCore final {
           if (!page.has_value()) {
             return std::unexpected(std::move(page.error()));
           }
-          if (CurrentFrame().index < page->cell_count()) {
+          if (CurrentFrame().index < (*page)->cell_count()) {
             ++CurrentFrame().index;
             break;
           }
         }
       }
-      auto descended = DescendChild(CurrentFrame().index, *page);
+      auto descended = DescendChild(CurrentFrame().index, **page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -779,18 +798,19 @@ class CursorCore final {
   }
 
   [[nodiscard]] Result<bool> NextImpl() {
-    auto page = CurrentPage();
-    if (!page.has_value()) {
-      return std::unexpected(std::move(page.error()));
+    auto current_page = CurrentPage();
+    if (!current_page.has_value()) {
+      return std::unexpected(std::move(current_page.error()));
     }
+    const BtreePageView& page = **current_page;
 
     const std::size_t next_index = CurrentFrame().index + 1U;
-    if (next_index < page->cell_count()) {
+    if (next_index < page.cell_count()) {
       CurrentFrame().index = next_index;
-      if (page->is_leaf()) {
+      if (page.is_leaf()) {
         return true;
       }
-      auto descended = DescendChild(next_index, *page);
+      auto descended = DescendChild(next_index, page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -801,8 +821,8 @@ class CursorCore final {
       return true;
     }
 
-    if (!page->is_leaf()) {
-      auto descended = DescendChild(page->cell_count(), *page);
+    if (!page.is_leaf()) {
+      auto descended = DescendChild(page.cell_count(), page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -815,19 +835,20 @@ class CursorCore final {
 
     while (frame_count_ > 1U) {
       PopFrame();
-      auto parent = CurrentPage();
-      if (!parent.has_value()) {
-        return std::unexpected(std::move(parent.error()));
+      auto parent_page = CurrentPage();
+      if (!parent_page.has_value()) {
+        return std::unexpected(std::move(parent_page.error()));
       }
+      const BtreePageView& parent = **parent_page;
       const std::size_t child_slot = CurrentFrame().index;
-      if (child_slot >= parent->cell_count()) {
+      if (child_slot >= parent.cell_count()) {
         continue;
       }
       if (!table_) {
         return true;
       }
 
-      auto descended = DescendChild(child_slot + 1U, *parent);
+      auto descended = DescendChild(child_slot + 1U, parent);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -841,13 +862,14 @@ class CursorCore final {
   }
 
   [[nodiscard]] Result<bool> PreviousImpl() {
-    auto page = CurrentPage();
-    if (!page.has_value()) {
-      return std::unexpected(std::move(page.error()));
+    auto current_page = CurrentPage();
+    if (!current_page.has_value()) {
+      return std::unexpected(std::move(current_page.error()));
     }
+    const BtreePageView& page = **current_page;
 
-    if (!page->is_leaf()) {
-      auto descended = DescendChild(CurrentFrame().index, *page);
+    if (!page.is_leaf()) {
+      auto descended = DescendChild(CurrentFrame().index, page);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -865,10 +887,11 @@ class CursorCore final {
 
     while (frame_count_ > 1U) {
       PopFrame();
-      auto parent = CurrentPage();
-      if (!parent.has_value()) {
-        return std::unexpected(std::move(parent.error()));
+      auto parent_page = CurrentPage();
+      if (!parent_page.has_value()) {
+        return std::unexpected(std::move(parent_page.error()));
       }
+      const BtreePageView& parent = **parent_page;
       const std::size_t child_slot = CurrentFrame().index;
       if (child_slot == 0) {
         continue;
@@ -878,7 +901,7 @@ class CursorCore final {
         return true;
       }
 
-      auto descended = DescendChild(child_slot - 1U, *parent);
+      auto descended = DescendChild(child_slot - 1U, parent);
       if (!descended.has_value()) {
         return std::unexpected(std::move(descended.error()));
       }
@@ -947,6 +970,8 @@ class CursorCore final {
   std::optional<BtreePageGeometry> geometry_;
   bool empty_database_;
   std::array<std::variant<std::monostate, Frame>, kMaximumBtreeDepth> frames_;
+  // End the current-frame borrow before releasing its owning pins.
+  mutable std::optional<BtreePageView> page_view_;
   std::size_t frame_count_ = 0;
   bool valid_ = false;
   bool terminal_ = false;

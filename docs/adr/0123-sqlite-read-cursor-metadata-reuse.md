@@ -113,3 +113,27 @@ counts, thresholds, deadlines and the selective allocation boundary.
 Publish the complete durable ledger and obtain integrated exact-head review
 and all nine hosted successes before guarded squash merge and cleanup.
 An incremental gain does not establish engine-wide parity or close ledger 12.
+
+## Current-page slice evidence
+
+The new scoped read-work interface is initially absent. After its observer
+is installed, the unchanged cursor performs 13 header parses for two page
+admissions in the focused repeated-access control. Reusing the admitted
+current-frame view reduces that count to two. The ownership characterization
+passes before and after the refactor, including writable exclusion, released
+child changes, malformed header/cell rejection, count, retry and move.
+
+The complete default development build precedes 1,491 ordinary plus 93
+isolated passing fast cases. All 78 affected cases pass in Debug, genuine
+GNU 16 and ASan/UBSan; 35 instrumented cases pass after relinking the complete
+instrumented tree, including its standalone allocation runner. Scoped probe
+isolation and disabled argument/link elimination remain covered.
+
+Frames remain 32 bytes, the page view is 128 bytes and the core is 1,048
+bytes, below the unchanged 2,000-byte lazy-value failure boundary. There is
+no additional allocation site. Private core move assignment is deleted to
+avoid replacing pins before their borrowed metadata; public facade moves
+still transfer the existing implementation owner.
+
+Current-cell implementation and combined native/performance/fuzz/hosted
+closure remain outstanding.

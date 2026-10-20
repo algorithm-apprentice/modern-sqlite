@@ -1382,6 +1382,93 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   }
 }
 
+TEST(BtreeCursor, RevalidatesReleasedChildPinsWithoutUnpinningTheRoot) {
+  const TemporaryDatabase database(MakeVirtualRootDatabase());
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenWritable(vfs, database.path().string()));
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_EQ(7, TakeValue(cursor.rowid()));
+    for (const PageNumber page : {PageNumber{1}, PageNumber{2}}) {
+      const auto blocked = pager->WritePage(page);
+      ASSERT_FALSE(blocked.has_value());
+      EXPECT_EQ(ErrorCode::kBusy, blocked.error().code());
+    }
+
+    RequireStatus(cursor.ClearPosition());
+    EXPECT_FALSE(cursor.valid());
+    const auto blocked_root = pager->WritePage(PageNumber{1});
+    ASSERT_FALSE(blocked_root.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, blocked_root.error().code());
+    {
+      WritePagePin child = TakeValue(pager->WritePage(PageNumber{2}));
+      TakeValue(child.mutable_bytes())[0] = std::byte{0};
+    }
+    const auto malformed_header = cursor.First();
+    ASSERT_FALSE(malformed_header.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed_header.error().code());
+    EXPECT_FALSE(cursor.valid());
+    {
+      WritePagePin child = TakeValue(pager->WritePage(PageNumber{2}));
+      MutableByteView bytes = TakeValue(child.mutable_bytes());
+      bytes[0] = static_cast<std::byte>(BtreePageType::kLeafTable);
+      Write16(bytes, 8, kPageSize - 1U);
+    }
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    const auto malformed_cell = cursor.rowid();
+    ASSERT_FALSE(malformed_cell.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed_cell.error().code());
+    EXPECT_TRUE(cursor.valid());
+
+    TableBtreeCursor moved = std::move(cursor);
+    RequireStatus(moved.ClearPosition());
+    {
+      WritePagePin child = TakeValue(pager->WritePage(PageNumber{2}));
+      Write16(TakeValue(child.mutable_bytes()), 8, kPageSize - 4U);
+    }
+    ASSERT_TRUE(TakeValue(moved.First()));
+    EXPECT_EQ(7, TakeValue(moved.rowid()));
+    EXPECT_EQ(ByteCount{0}, TakeValue(moved.payload()).size());
+    EXPECT_EQ(1U, TakeValue(moved.CountEntries()));
+    EXPECT_FALSE(moved.valid());
+    ASSERT_TRUE(TakeValue(moved.Last()));
+    EXPECT_EQ(7, TakeValue(moved.rowid()));
+    EXPECT_FALSE(TakeValue(moved.Next()));
+  }
+  RequireStatus(pager->Rollback());
+  RequireStatus(pager->EndRead());
+}
+
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST(BtreeCursor, ReusesOneHeaderPerPinnedCurrentFrame) {
+  using instrumentation::BtreeReadWorkMetric;
+  using instrumentation::ProbeCollectionKind;
+  using instrumentation::ProbeCounterCollection;
+  using instrumentation::ScopedProbeCounterCollection;
+
+  const TemporaryDatabase database(MakeVirtualRootDatabase());
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  RequireStatus(pager->BeginRead());
+  ProbeCounterCollection work{ProbeCollectionKind::BtreeReadWork};
+  {
+    const ScopedProbeCounterCollection scope{work};
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    for (std::size_t repeat = 0; repeat < 3U; ++repeat) {
+      EXPECT_EQ(7, TakeValue(cursor.rowid()));
+      EXPECT_EQ(ByteCount{0}, TakeValue(cursor.payload()).size());
+      RequireStatus(cursor.ReadPayload(ByteOffset{0}, MutableByteView{}));
+    }
+    EXPECT_EQ(2U, work.Value(BtreeReadWorkMetric::PageHeaderParse));
+  }
+  RequireStatus(pager->EndRead());
+}
+#endif
+
 TEST(BtreeCursor, RejectsInvalidChildLinksEmptyChildrenAndExcessiveDepth) {
   const std::vector<std::byte> fixture = ReadBytes(FixtureDatabasePath());
   const BtreePageGeometry geometry = TestGeometry();

@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "modern_sqlite/base/coding.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -180,6 +181,7 @@ std::optional<BtreeFreeblock> BtreeFreeblockCursor::Next() noexcept {
 
 Result<BtreePageView> BtreePageView::Parse(ByteView page, PageNumber page_number,
                                            BtreePageGeometry geometry) {
+  MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(instrumentation::BtreeReadWorkMetric::PageHeaderParse);
   if (page.size() != geometry.page_size().value()) {
     return std::unexpected(Misuse("B-tree page buffer must match the configured page size"));
   }
@@ -270,6 +272,7 @@ Result<ByteCount> BtreePageView::cell_offset(std::size_t index) const {
 }
 
 Result<BtreeCellView> BtreePageView::cell(std::size_t index) const {
+  MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(instrumentation::BtreeReadWorkMetric::CellDecode);
   auto decoded_offset = cell_offset(index);
   if (!decoded_offset.has_value()) {
     return std::unexpected(std::move(decoded_offset.error()));
