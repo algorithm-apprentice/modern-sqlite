@@ -57,5 +57,11 @@ void RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount, bool 
   }
 }
 
+void RecordBtreeReadWork(BtreeReadWorkMetric metric) noexcept {
+  if (active_probe_collection != nullptr) {
+    active_probe_collection->Record(metric);
+  }
+}
+
 }  // namespace detail
 }  // namespace modern_sqlite::instrumentation

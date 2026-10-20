@@ -125,3 +125,4 @@ their corresponding implementation begins.
 120. [ADR-0120: SQLite WhereLoop and Path Solving](0120-sqlite-where-loop-and-path-solving.md)
 121. [ADR-0121: SQLite Sorter-Backed Index Refill](0121-sqlite-sorter-backed-index-refill.md)
 122. [ADR-0122: SQLite Streaming STAT1 Accumulation](0122-sqlite-streaming-stat1-accumulation.md)
+123. [ADR-0123: SQLite Read-Cursor Metadata Reuse](0123-sqlite-read-cursor-metadata-reuse.md)

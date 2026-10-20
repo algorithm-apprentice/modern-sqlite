@@ -18,6 +18,8 @@ TEST(InstrumentationDisabled, HookArgumentsAreNotEvaluatedOrLinked) {
   MODERN_SQLITE_RECORD_AGGREGATE_OPERATION((++counter_evaluations, AggregateWorkMetric::Step));
   MODERN_SQLITE_RECORD_AGGREGATE_MAXIMUM(
       (++counter_evaluations, AggregateWorkMetric::RetainedBytesPeak), ++amount_evaluations);
+  MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(
+      (++counter_evaluations, BtreeReadWorkMetric::PageHeaderParse));
 
   EXPECT_EQ(0U, counter_evaluations);
   EXPECT_EQ(0U, amount_evaluations);

@@ -232,6 +232,9 @@ borrowed record prefixes, reusable retained fields, changed-suffix STAT1
 counters and UNIQUE/storage policies, preserving the original 37-allocation
 lowering contract. VM, function and preparation profile resolutions remain
 the next ordered prerequisites.
+ADR-0123 translates native page/cell metadata reuse through immutable
+read-cursor pins and scoped fixed-work evidence. It closes that shared
+prerequisite, not the remaining VM column/value/dispatch ownership work.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

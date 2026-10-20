@@ -103,6 +103,45 @@ TEST(Instrumentation, RecordsAggregateWorkOnlyInsideOptedInScope) {
   EXPECT_EQ(0U, aggregate.Value(AggregateWorkMetric::RetainedBytesPeak));
 }
 
+TEST(Instrumentation, RecordsBtreeReadWorkOnlyInsideOptedInScope) {
+  ProbeCounterCollection ordinary;
+  ProbeCounterCollection aggregate{ProbeCollectionKind::AggregateWork};
+  ProbeCounterCollection read{ProbeCollectionKind::BtreeReadWork};
+
+  MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::PageHeaderParse);
+  {
+    const ScopedProbeCounterCollection scope{read};
+    MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::PageHeaderParse);
+    {
+      const ScopedProbeCounterCollection nested{ordinary};
+      MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::PageHeaderParse);
+      MODERN_SQLITE_RECORD_PROBE_CALL(1);
+    }
+    {
+      const ScopedProbeCounterCollection nested{aggregate};
+      MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::CellDecode);
+      MODERN_SQLITE_RECORD_AGGREGATE_OPERATION(AggregateWorkMetric::Step);
+    }
+    MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::PageHeaderParse);
+    MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::CellDecode);
+    MODERN_SQLITE_RECORD_PROBE_CALL(1);
+  }
+  MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(BtreeReadWorkMetric::CellDecode);
+
+  EXPECT_EQ("page_header_parse", BtreeReadWorkMetricName(BtreeReadWorkMetric::PageHeaderParse));
+  EXPECT_EQ("cell_decode", BtreeReadWorkMetricName(BtreeReadWorkMetric::CellDecode));
+  EXPECT_EQ(2U, read.Value(BtreeReadWorkMetric::PageHeaderParse));
+  EXPECT_EQ(1U, read.Value(BtreeReadWorkMetric::CellDecode));
+  EXPECT_EQ(0U, ordinary.Value(BtreeReadWorkMetric::PageHeaderParse));
+  EXPECT_EQ(0U, ordinary.Value(BtreeReadWorkMetric::CellDecode));
+  EXPECT_EQ(0U, aggregate.Value(BtreeReadWorkMetric::CellDecode));
+  EXPECT_EQ(1U, ordinary.Value(1));
+  EXPECT_EQ(1U, aggregate.Value(AggregateWorkMetric::Step));
+  read.Reset();
+  EXPECT_EQ(0U, read.Value(BtreeReadWorkMetric::PageHeaderParse));
+  EXPECT_EQ(0U, read.Value(BtreeReadWorkMetric::CellDecode));
+}
+
 TEST(Instrumentation, RestoresNestedCollection) {
   CounterCollection outer;
   CounterCollection inner;

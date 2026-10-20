@@ -21,7 +21,27 @@ inline constexpr std::size_t kProbeTagCount = 512;
 enum class ProbeCollectionKind : std::uint8_t {
   RowEvaluation,
   AggregateWork,
+  BtreeReadWork,
 };
+
+enum class BtreeReadWorkMetric : std::uint8_t {
+  PageHeaderParse,
+  CellDecode,
+};
+
+inline constexpr std::size_t kBtreeReadWorkMetricCount =
+    static_cast<std::size_t>(BtreeReadWorkMetric::CellDecode) + 1U;
+
+[[nodiscard]] constexpr std::string_view BtreeReadWorkMetricName(
+    BtreeReadWorkMetric metric) noexcept {
+  switch (metric) {
+    case BtreeReadWorkMetric::PageHeaderParse:
+      return "page_header_parse";
+    case BtreeReadWorkMetric::CellDecode:
+      return "cell_decode";
+  }
+  return "unknown";
+}
 
 enum class AggregateWorkMetric : std::uint8_t {
   Open,
@@ -115,6 +135,7 @@ namespace detail {
 void RecordCounter(Counter counter, std::uint64_t amount) noexcept;
 void RecordProbeCall(std::size_t tag) noexcept;
 void RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount, bool maximum) noexcept;
+void RecordBtreeReadWork(BtreeReadWorkMetric metric) noexcept;
 
 }  // namespace detail
 
@@ -157,16 +178,30 @@ class ProbeCounterCollection final {
   [[nodiscard]] std::uint64_t Value(AggregateWorkMetric metric) const noexcept {
     return Value(kAggregateWorkFirstTag + static_cast<std::size_t>(metric));
   }
+  [[nodiscard]] std::uint64_t Value(BtreeReadWorkMetric metric) const noexcept {
+    const std::size_t tag = static_cast<std::size_t>(metric);
+    return kind_ == ProbeCollectionKind::BtreeReadWork && tag < kBtreeReadWorkMetricCount
+               ? Value(tag)
+               : 0;
+  }
   void Reset() noexcept { values_.fill(0); }
 
  private:
   friend void detail::RecordProbeCall(std::size_t tag) noexcept;
   friend void detail::RecordAggregateWork(AggregateWorkMetric metric, std::uint64_t amount,
                                           bool maximum) noexcept;
+  friend void detail::RecordBtreeReadWork(BtreeReadWorkMetric metric) noexcept;
 
   void Add(std::size_t tag) noexcept {
-    if (tag < values_.size() &&
+    if (kind_ != ProbeCollectionKind::BtreeReadWork && tag < values_.size() &&
         (kind_ != ProbeCollectionKind::AggregateWork || tag < kAggregateWorkFirstTag)) {
+      ++values_[tag];
+    }
+  }
+
+  void Record(BtreeReadWorkMetric metric) noexcept {
+    const std::size_t tag = static_cast<std::size_t>(metric);
+    if (kind_ == ProbeCollectionKind::BtreeReadWork && tag < kBtreeReadWorkMetricCount) {
       ++values_[tag];
     }
   }
@@ -224,6 +259,10 @@ class ScopedProbeCounterCollection final {
     ::modern_sqlite::instrumentation::detail::RecordAggregateWork( \
         (metric), static_cast<std::uint64_t>(amount), true);       \
   } while (false)
+#define MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(metric)                    \
+  do {                                                                       \
+    ::modern_sqlite::instrumentation::detail::RecordBtreeReadWork((metric)); \
+  } while (false)
 #else
 #define MODERN_SQLITE_RECORD_COUNTER(counter, amount)                                              \
   do {                                                                                             \
@@ -250,6 +289,12 @@ class ScopedProbeCounterCollection final {
       ::modern_sqlite::instrumentation::detail::RecordAggregateWork( \
           (metric), static_cast<std::uint64_t>(amount), true);       \
     }                                                                \
+  } while (false)
+#define MODERN_SQLITE_RECORD_BTREE_READ_OPERATION(metric)                      \
+  do {                                                                         \
+    if constexpr (false) {                                                     \
+      ::modern_sqlite::instrumentation::detail::RecordBtreeReadWork((metric)); \
+    }                                                                          \
   } while (false)
 #endif
 
