@@ -7,7 +7,7 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Thirteen are reference-faithful,
+  91 production paths map to 36 mechanisms. Thirteen are reference-faithful,
   eighteen are accepted architectural translations, one is an accepted
   measured alternative, one requires repair, and three remain unresolved
   pending matched profiles or preparation baselines.
@@ -283,7 +283,7 @@ audited revision.
 | `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
 | `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
 | `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |
-| `runtime-values` | `include/modern_sqlite/runtime/sql_value.hpp`<br>`src/runtime/sql_value.cpp`<br>`src/runtime/sqlite_float.hpp`<br>`src/runtime/sqlite_float.cpp` |
+| `runtime-values` | `include/modern_sqlite/runtime/sql_value.hpp`<br>`src/runtime/sql_value.cpp`<br>`src/runtime/sql_value_access.hpp`<br>`src/runtime/sqlite_float.hpp`<br>`src/runtime/sqlite_float.cpp` |
 | `runtime-collation` | `include/modern_sqlite/runtime/collation.hpp`<br>`src/runtime/collation.cpp` |
 | `runtime-functions` | `include/modern_sqlite/runtime/function_registry.hpp`<br>`src/runtime/function_registry.cpp` |
 | `runtime-temporary-core` | `include/modern_sqlite/temporary_storage/temporary_storage.hpp`<br>`src/temporary_storage/temporary_storage_internal.hpp`<br>`src/temporary_storage/temporary_storage.cpp` |

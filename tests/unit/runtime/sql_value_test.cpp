@@ -14,6 +14,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "src/runtime/sql_value_access.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -103,6 +105,152 @@ TEST(SqlValue, ReportsRetainedDynamicStorageCapacity) {
   EXPECT_GE(text_value.owned_capacity_bytes(), 1024U);
   EXPECT_GE(blob_value.owned_capacity_bytes(), 4U);
   EXPECT_EQ(SqlValue::Integer(1).owned_capacity_bytes(), 0U);
+}
+
+TEST(SqlValue, OwnedMovesRebindViewsAndLeaveNullSources) {
+  for (const std::string_view bytes :
+       {"inline", "a heap-owned text payload that does not use small-string storage"}) {
+    SqlValue source = TextValue(bytes);
+    SqlValue moved{std::move(source)};
+    ExpectText(moved, bytes);
+    ExpectNull(source);
+    source = TextValue("reused");
+    ExpectText(moved, bytes);
+
+    SqlValue destination = BlobValue("previous");
+    destination = std::move(moved);
+    ExpectText(destination, bytes);
+    ExpectNull(moved);
+    SqlValue& alias = destination;
+    destination = std::move(alias);
+    ExpectText(destination, bytes);
+  }
+
+  constexpr std::string_view blob_bytes{"a\0b", 3};
+  SqlValue source = BlobValue(blob_bytes);
+  SqlValue moved{std::move(source)};
+  ExpectBlob(moved, blob_bytes);
+  ExpectNull(source);
+  source = SqlValue::Integer(7);
+  source = std::move(moved);
+  ExpectBlob(source, blob_bytes);
+  ExpectNull(moved);
+}
+
+TEST(SqlValue, ReusableBytesSurviveScalarNullAndByteTypeTransitions) {
+  const std::string original(256, 'x');
+  SqlValue value = TextValue("external");
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{original}).has_value());
+  ExpectText(value, original);
+  const auto* address = AsBytes(value.text_value()->bytes()).data();
+  const std::size_t capacity = value.owned_capacity_bytes();
+  EXPECT_GE(capacity, original.size() + 2U);
+
+  SqlValueAccess::SetInteger(value, 17);
+  ExpectInteger(value, 17);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetReal(value, 1.25);
+  ExpectReal(value, 1.25);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetReal(value, std::numeric_limits<double>::quiet_NaN());
+  ExpectNull(value);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetNull(value);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+
+  constexpr std::string_view blob{"b\0c", 3};
+  ASSERT_TRUE(SqlValueAccess::CopyBlob(value, AsBytes(blob)).has_value());
+  ExpectBlob(value, blob);
+  EXPECT_EQ(address, value.blob_value()->data());
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{"short"}).has_value());
+  ExpectText(value, "short");
+  EXPECT_EQ(address, AsBytes(value.text_value()->bytes()).data());
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{}).has_value());
+  ExpectText(value, "");
+  ASSERT_TRUE(SqlValueAccess::CopyBlob(value, {}).has_value());
+  ExpectBlob(value, "");
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+
+  SqlValueAccess::Release(value);
+  ExpectNull(value);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+}
+
+TEST(SqlValue, ScalarStoresReleaseExternalOwnedBytes) {
+  SqlValue value = TextValue(std::string(256, 't'));
+  SqlValueAccess::SetInteger(value, 3);
+  ExpectInteger(value, 3);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+  value = BlobValue(std::string(256, 'b'));
+  SqlValueAccess::SetNull(value);
+  ExpectNull(value);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+}
+
+TEST(SqlValue, PrivateCopiesPreserveAliasedExternalAndInternalBytes) {
+  for (const std::string_view bytes :
+       {"inline", "heap-owned bytes long enough not to use small-string storage"}) {
+    SqlValue value = TextValue(bytes);
+    ASSERT_TRUE(SqlValueAccess::CopyText(value, *value.text_value()).has_value());
+    ExpectText(value, bytes);
+    const ByteView suffix = AsBytes(value.text_value()->bytes()).subspan(1);
+    ASSERT_TRUE(SqlValueAccess::CopyBlob(value, suffix).has_value());
+    ExpectBlob(value, bytes.substr(1));
+  }
+}
+
+TEST(SqlValue, ReusableStorageMovesAndPublicClonesOwnIndependentLogicalBytes) {
+  constexpr std::string_view bytes{"a\0b", 3};
+  SqlValue source;
+  ASSERT_TRUE(SqlValueAccess::CopyText(source, Utf8View{bytes}).has_value());
+  const auto* address = source.text_value()->data();
+  const std::size_t capacity = source.owned_capacity_bytes();
+  SqlValue clone = source.Clone();
+  EXPECT_NE(address, clone.text_value()->data());
+
+  SqlValue moved{std::move(source)};
+  ExpectNull(source);
+  EXPECT_EQ(0U, source.owned_capacity_bytes());
+  ExpectText(moved, bytes);
+  EXPECT_EQ(address, moved.text_value()->data());
+  EXPECT_EQ(capacity, moved.owned_capacity_bytes());
+  SqlValueAccess::SetNull(moved);
+  EXPECT_EQ(capacity, moved.owned_capacity_bytes());
+  ExpectText(clone, bytes);
+}
+
+TEST(SqlValue, CanonicalRetentionCopiesBeforeAliasedGrowAndKeepsLogicalLength) {
+  ByteBuffer storage = ByteBuffer::CopyOf(AsBytes("abcd"));
+  const auto grown = SqlValueAccess::RetainBytes(storage, storage.view(), ByteCount{2});
+  ASSERT_TRUE(grown.has_value());
+  EXPECT_EQ("abcd", AsStringView(*grown));
+  ASSERT_EQ(6U, storage.size().value());
+  EXPECT_EQ(std::byte{}, storage.view()[4]);
+  EXPECT_EQ(std::byte{}, storage.view()[5]);
+
+  const auto* address = storage.view().data();
+  const auto overlapped =
+      SqlValueAccess::RetainBytes(storage, storage.view().subspan(1, 2), ByteCount{2});
+  ASSERT_TRUE(overlapped.has_value());
+  EXPECT_EQ("bc", AsStringView(*overlapped));
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ(6U, storage.size().value());
+  const auto empty = SqlValueAccess::RetainBytes(storage, {});
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_TRUE(empty->empty());
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ(6U, storage.size().value());
+}
+
+TEST(SqlValue, CanonicalRetentionRejectsReserveOverflowWithoutChangingStorage) {
+  ByteBuffer storage = ByteBuffer::CopyOf(AsBytes("original"));
+  const auto* address = storage.view().data();
+  const auto rejected = SqlValueAccess::RetainBytes(
+      storage, storage.view(), ByteCount{std::numeric_limits<std::size_t>::max()});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ("original", AsStringView(storage.view()));
 }
 
 TEST(SqlValue, NormalizesNaNToNullAndPreservesInfinityAndSignedZero) {

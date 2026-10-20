@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "../runtime/sql_value_access.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -1845,12 +1846,9 @@ struct Vm::Impl {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "index refill record exceeds the VM value limit"));
     }
-    if (refill.previous_record.size().value() < encoded.size()) {
-      refill.previous_record = ByteBuffer{ByteCount{encoded.size()}};
-    }
-    if (!CopyBytes(refill.previous_record.mutable_view(), encoded).has_value()) {
-      return std::unexpected(
-          VmError(ErrorCode::kInternal, "index refill record buffer is too small"));
+    auto retained = SqlValueAccess::RetainBytes(refill.previous_record, encoded);
+    if (!retained.has_value()) {
+      return std::unexpected(std::move(retained.error()));
     }
     refill.previous_size = encoded.size();
     auto record = RecordView::Parse(refill.previous_record.view().first(refill.previous_size),
@@ -2180,7 +2178,8 @@ struct Vm::Impl {
                                        const ComputeIndexStat1Instruction& operation) {
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     if (descriptor.index_columns.size() >
-        limits_.maximum_value_bytes / (sizeof(IndexColumnOrder) + sizeof(SqlValue))) {
+        limits_.maximum_value_bytes /
+            (sizeof(IndexColumnOrder) + SqlValueAccess::kOwnedStorageBytes)) {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "ANALYZE index metadata exceeds the VM limit"));
     }
@@ -2218,7 +2217,8 @@ struct Vm::Impl {
       return std::unexpected(std::move(has_row.error()));
     }
     if (*has_row &&
-        key_count > limits_.maximum_value_bytes / (sizeof(std::uint64_t) + 2U * sizeof(SqlValue))) {
+        key_count > limits_.maximum_value_bytes /
+                        (sizeof(std::uint64_t) + 2U * SqlValueAccess::kOwnedStorageBytes)) {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "ANALYZE prefix state exceeds the VM limit"));
     }

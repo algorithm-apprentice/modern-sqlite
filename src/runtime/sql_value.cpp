@@ -16,44 +16,95 @@
 #include <system_error>
 #include <utility>
 
+#include "sql_value_access.hpp"
 #include "sqlite_float.hpp"
 
 namespace modern_sqlite {
 
-class SqlValueAccess {
- public:
-  [[nodiscard]] static std::int64_t Integer(const SqlValue& value) noexcept {
-    const auto* result = std::get_if<std::int64_t>(&value.storage_);
-    if (result == nullptr) {
-      std::terminate();
-    }
-    return *result;
+std::int64_t SqlValueAccess::Integer(const SqlValue& value) noexcept {
+  const auto* result = std::get_if<std::int64_t>(&value.value_);
+  if (result == nullptr) {
+    std::terminate();
   }
+  return *result;
+}
 
-  [[nodiscard]] static double Real(const SqlValue& value) noexcept {
-    const auto* result = std::get_if<double>(&value.storage_);
-    if (result == nullptr) {
-      std::terminate();
-    }
-    return *result;
+double SqlValueAccess::Real(const SqlValue& value) noexcept {
+  const auto* result = std::get_if<double>(&value.value_);
+  if (result == nullptr) {
+    std::terminate();
   }
+  return *result;
+}
 
-  [[nodiscard]] static Utf8View Text(const SqlValue& value) noexcept {
-    const auto* result = std::get_if<std::string>(&value.storage_);
-    if (result == nullptr) {
-      std::terminate();
-    }
-    return Utf8View{*result};
+Utf8View SqlValueAccess::Text(const SqlValue& value) noexcept {
+  const auto* result = std::get_if<Utf8View>(&value.value_);
+  if (result == nullptr) {
+    std::terminate();
   }
+  return *result;
+}
 
-  [[nodiscard]] static ByteView Blob(const SqlValue& value) noexcept {
-    const auto* result = std::get_if<ByteBuffer>(&value.storage_);
-    if (result == nullptr) {
-      std::terminate();
-    }
-    return result->view();
+ByteView SqlValueAccess::Blob(const SqlValue& value) noexcept {
+  const auto* result = std::get_if<ByteView>(&value.value_);
+  if (result == nullptr) {
+    std::terminate();
   }
-};
+  return *result;
+}
+
+void SqlValueAccess::SetNull(SqlValue& value) noexcept {
+  value.value_.emplace<std::monostate>();
+  if (!std::holds_alternative<SqlValue::RetainedBytes>(value.storage_)) {
+    value.storage_.emplace<std::monostate>();
+  }
+}
+
+void SqlValueAccess::SetInteger(SqlValue& value, std::int64_t integer) noexcept {
+  SetNull(value);
+  value.value_.emplace<std::int64_t>(integer);
+}
+
+void SqlValueAccess::SetReal(SqlValue& value, double real) noexcept {
+  SetNull(value);
+  if (!std::isnan(real)) {
+    value.value_.emplace<double>(real);
+  }
+}
+
+void SqlValueAccess::Release(SqlValue& value) noexcept {
+  value.value_.emplace<std::monostate>();
+  value.storage_.emplace<std::monostate>();
+}
+
+Status SqlValueAccess::CopyText(SqlValue& value, Utf8View source) noexcept {
+  return CopyByteValue(value, AsBytes(source.bytes()), SqlValueType::kText);
+}
+
+Status SqlValueAccess::CopyBlob(SqlValue& value, ByteView source) noexcept {
+  return CopyByteValue(value, source, SqlValueType::kBlob);
+}
+
+Status SqlValueAccess::CopyByteValue(SqlValue& value, ByteView source, SqlValueType type) noexcept {
+  ByteBuffer replacement;
+  auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
+  ByteBuffer& buffer = retained != nullptr ? retained->buffer : replacement;
+  auto copied = RetainBytes(buffer, source, kTerminatorBytes);
+  if (!copied.has_value()) {
+    return std::unexpected(std::move(copied.error()));
+  }
+  value.value_.emplace<std::monostate>();
+  if (retained == nullptr) {
+    value.storage_.emplace<SqlValue::RetainedBytes>(
+        SqlValue::RetainedBytes{std::move(replacement)});
+  }
+  if (type == SqlValueType::kText) {
+    value.value_.emplace<Utf8View>(Utf8View{AsStringView(*copied)});
+  } else {
+    value.value_.emplace<ByteView>(*copied);
+  }
+  return {};
+}
 
 namespace {
 
@@ -405,9 +456,32 @@ std::strong_ordering CompareSqlReals(double left, double right) noexcept {
   return CompareReals(left, right);
 }
 
+SqlValue::SqlValue(SqlValue&& other) noexcept
+    : storage_(std::move(other.storage_)), value_(other.value_) {
+  RebindOwnedText();
+  SqlValueAccess::Release(other);
+}
+
+SqlValue& SqlValue::operator=(SqlValue&& other) noexcept {
+  if (this != &other) {
+    SqlValueAccess::Release(*this);
+    storage_ = std::move(other.storage_);
+    value_ = other.value_;
+    RebindOwnedText();
+    SqlValueAccess::Release(other);
+  }
+  return *this;
+}
+
+void SqlValue::RebindOwnedText() noexcept {
+  if (const auto* text = std::get_if<std::string>(&storage_); text != nullptr) {
+    value_.emplace<Utf8View>(Utf8View{*text});
+  }
+}
+
 SqlValue SqlValue::Integer(std::int64_t value) noexcept {
   SqlValue result;
-  result.storage_.emplace<1>(value);
+  result.value_.emplace<std::int64_t>(value);
   return result;
 }
 
@@ -416,19 +490,21 @@ SqlValue SqlValue::Real(double value) noexcept {
     return {};
   }
   SqlValue result;
-  result.storage_.emplace<2>(value);
+  result.value_.emplace<double>(value);
   return result;
 }
 
 SqlValue SqlValue::Text(std::string value) {
   SqlValue result;
-  result.storage_.emplace<3>(std::move(value));
+  const auto& text = result.storage_.emplace<std::string>(std::move(value));
+  result.value_.emplace<Utf8View>(Utf8View{text});
   return result;
 }
 
 SqlValue SqlValue::Blob(ByteBuffer value) noexcept {
   SqlValue result;
-  result.storage_.emplace<4>(std::move(value));
+  const auto& blob = result.storage_.emplace<ByteBuffer>(std::move(value));
+  result.value_.emplace<ByteView>(blob.view());
   return result;
 }
 
@@ -448,32 +524,32 @@ SqlValue SqlValue::Clone() const {
   std::terminate();
 }
 
-SqlValueType SqlValue::type() const noexcept { return static_cast<SqlValueType>(storage_.index()); }
+SqlValueType SqlValue::type() const noexcept { return static_cast<SqlValueType>(value_.index()); }
 
 std::optional<std::int64_t> SqlValue::integer_value() const noexcept {
-  if (const auto* value = std::get_if<std::int64_t>(&storage_); value != nullptr) {
+  if (const auto* value = std::get_if<std::int64_t>(&value_); value != nullptr) {
     return *value;
   }
   return std::nullopt;
 }
 
 std::optional<double> SqlValue::real_value() const noexcept {
-  if (const auto* value = std::get_if<double>(&storage_); value != nullptr) {
+  if (const auto* value = std::get_if<double>(&value_); value != nullptr) {
     return *value;
   }
   return std::nullopt;
 }
 
 std::optional<Utf8View> SqlValue::text_value() const noexcept {
-  if (const auto* value = std::get_if<std::string>(&storage_); value != nullptr) {
-    return Utf8View{*value};
+  if (const auto* value = std::get_if<Utf8View>(&value_); value != nullptr) {
+    return *value;
   }
   return std::nullopt;
 }
 
 std::optional<ByteView> SqlValue::blob_value() const noexcept {
-  if (const auto* value = std::get_if<ByteBuffer>(&storage_); value != nullptr) {
-    return value->view();
+  if (const auto* value = std::get_if<ByteView>(&value_); value != nullptr) {
+    return *value;
   }
   return std::nullopt;
 }
@@ -484,6 +560,9 @@ std::size_t SqlValue::owned_capacity_bytes() const noexcept {
   }
   if (const auto* blob = std::get_if<ByteBuffer>(&storage_); blob != nullptr) {
     return blob->capacity().value();
+  }
+  if (const auto* retained = std::get_if<RetainedBytes>(&storage_); retained != nullptr) {
+    return retained->buffer.capacity().value();
   }
   return 0;
 }

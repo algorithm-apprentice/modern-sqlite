@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "../runtime/sql_value_access.hpp"
 #include "modern_sqlite/base/coding.hpp"
 
 namespace modern_sqlite {
@@ -664,7 +665,7 @@ SqlValue RecordFieldView::ToOwned() const {
   return {};
 }
 
-Result<RecordFieldView> RecordFieldView::CopyTo(ByteBuffer& storage) const try {
+Result<RecordFieldView> RecordFieldView::CopyTo(ByteBuffer& storage) const {
   switch (type()) {
     case SqlValueType::kNull:
     case SqlValueType::kInteger:
@@ -676,18 +677,11 @@ Result<RecordFieldView> RecordFieldView::CopyTo(ByteBuffer& storage) const try {
   }
   const bool text = type() == SqlValueType::kText;
   const ByteView source = text ? AsBytes(Required(text_value()).bytes()) : Required(blob_value());
-  if (storage.size().value() < source.size()) {
-    storage = ByteBuffer{ByteCount{source.size()}};
+  auto retained = SqlValueAccess::RetainBytes(storage, source);
+  if (!retained.has_value()) {
+    return std::unexpected(std::move(retained.error()));
   }
-  if (!CopyBytes(storage.mutable_view(), source).has_value()) {
-    return std::unexpected(Misuse("retained field storage is too small"));
-  }
-  const ByteView retained = storage.view().first(source.size());
-  return text ? RecordFieldView{Utf8View{AsStringView(retained)}} : RecordFieldView{retained};
-} catch (const std::bad_alloc&) {
-  return std::unexpected(Error::OutOfMemory());
-} catch (const std::length_error&) {
-  return std::unexpected(Error::OutOfMemory());
+  return text ? RecordFieldView{Utf8View{AsStringView(*retained)}} : RecordFieldView{*retained};
 }
 
 std::weak_ordering CompareRecordFields(const RecordFieldView& left, const RecordFieldView& right,
