@@ -240,5 +240,33 @@ traceability; only the final fully qualified tree may be squash-merged.
 The capacity tests first fail because both reservation operations are absent.
 The corrected producer passes the unchanged exact 36-allocation contract.
 A complete default development build finishes all 81 pending compile/link
-steps before the fresh fast run: all 1,479 ordinary and 92 isolated cases pass. This report,
-unlike the superseded reports, includes freshly linked standalone runners.
+steps before the fresh fast run: all 1,479 ordinary and 92 isolated cases pass.
+This report, unlike the superseded reports, includes freshly linked standalone
+runners.
+
+## Final local closure
+
+The corrected production head is `0794a1d` (tree
+`7878da2bb7862ce0522805bba242a30db1f6e97e`). Exact-head qualification passes
+27 reconciled shared checks, 58 native contracts, 1,613 isolated cases in each
+of Debug, Release, ASan/UBSan, GNU Debug and GNU Release, and 1,630 instrumented
+cases. All four SQL/database read/write fuzz campaigns complete their unchanged
+20,000 runs with seed 102. No selected case is skipped or disabled. The
+original ten-second sanitizer correlated model completes in 1.31 seconds.
+Final documentation may reuse this evidence only with an exact comparison of
+all 1,954 non-Markdown tree entries.
+
+The fifteen-case matched capture preserves the frozen workload, fixture,
+SQLite, host and build identities. CREATE INDEX falls from 6.80x to 3.05x
+SQLite wall time and 7.39x to 3.31x CPU, with allocations 85,565 to 46,437 and
+cache hits 105,193 to 9,041. All non-target diagnostic counters remain identical;
+their timing movements are not attributed to this repair. ANALYZE remains
+25,074 allocations and 2.87x wall time, and covering execution remains a
+separate ledger-12 gap. No whole-engine performance parity is claimed.
+
+The original driver-summary parsing interruption and failed `52f7fa9`
+allocation qualification remain historical evidence, not successful substitutes.
+Only the freshly rebuilt corrected suffix supplies final local qualification.
+Final integrated review and all nine exact-head hosted checks remain merge
+requirements. Node 43 stays active; ledgers 11-15 still block SQL feature
+expansion.
