@@ -150,5 +150,30 @@ and the passing 1,491 ordinary plus 93 isolated fast cases.
 
 The core measures 1,120 bytes with unchanged 32-byte path frames and a
 64-byte cell view; no new allocation site or raised limit is required.
-Combined exact-source native/performance/fuzz/hosted closing remains
-outstanding. Broader VM column/value/dispatch resolution is still open.
+At that slice boundary, combined exact-source native/performance/fuzz/hosted
+closing remained outstanding. Broader VM column/value/dispatch resolution
+is still open.
+
+## Integrated local closure
+
+Production source `6bfac58` (tree
+`a4ce1531b261a6509edc335b3deaf8e702a0e788`) passes all 44 executed closing
+steps covering the actual-change full plan. This includes 27 shared checks
+reconciled across seven trees, 58 native contracts, 1,626 isolated cases each
+in Debug, Release, ASan/UBSan and genuine GNU 16 Debug/Release, and 1,645
+instrumented cases. Four read/write SQL/database campaigns each complete
+20,000 runs with unchanged seed 102. The original ten-second correlated
+sanitizer model completes in 1.167 seconds. Quality, format, engineering and
+graph checks pass without changing assertions, workloads, limits or deadlines.
+
+The fresh unchanged fifteen-case index capture passes every guard and
+preserves all Modern and SQLite diagnostic counter sets. The matched
+covering control falls from 5.856023x to 4.646093x wall time; global functions
+and integer memory sorting record 6.388966x and 4.244052x. These remaining
+gaps are not a VM-parity claim or evidence for a speculative representation
+rewrite. The read metadata mechanisms are an architectural translation
+through immutable cursor pins, not an imported shared mutable page owner.
+
+PR #233 retains final integrated acceptance and nine exact-head hosted
+successes as merge prerequisites. After this metadata prerequisite, continue
+ledger 12's column/value/dispatch ownership resolution before later work.
