@@ -3427,6 +3427,61 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   EXPECT_EQ(aggregate_limit.error().code, ProgramErrorCode::kAggregateLimitExceeded);
 }
 
+TEST(BytecodeProgramTest, ReservesEmissionStorageWithoutPublishingResources) {
+  ProgramLimits limits;
+  limits.maximum_instructions = 8;
+  limits.maximum_labels = 4;
+  limits.maximum_owned_bytes = sizeof(Instruction);
+  auto created = ProgramBuilder::Create({}, Resources(0), limits);
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  ASSERT_TRUE(builder.ReserveInstructionCapacity(limits.maximum_instructions).has_value());
+  ASSERT_TRUE(builder.ReserveLabelCapacity(limits.maximum_labels).has_value());
+  ASSERT_TRUE(builder.Append(HaltInstruction{}).has_value());
+  const auto program = std::move(builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(1U, program->instructions().size());
+  EXPECT_EQ(sizeof(Instruction), program->verification_metrics().owned_bytes);
+}
+
+TEST(BytecodeProgramTest, RejectsInvalidEmissionCapacityAndMovedBuilders) {
+  ProgramLimits limits;
+  limits.maximum_instructions = 2;
+  limits.maximum_labels = 2;
+  auto created = ProgramBuilder::Create({}, Resources(0), limits);
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  const auto instructions = builder.ReserveInstructionCapacity(3);
+  ASSERT_FALSE(instructions.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded, instructions.error().code);
+  const auto labels = builder.ReserveLabelCapacity(3);
+  ASSERT_FALSE(labels.has_value());
+  EXPECT_EQ(ProgramErrorCode::kLabelLimitExceeded, labels.error().code);
+  ASSERT_TRUE(builder.ReserveInstructionCapacity(2).has_value());
+  ASSERT_TRUE(builder.ReserveLabelCapacity(2).has_value());
+  ProgramBuilder moved = std::move(builder);
+  const auto invalid_instructions = builder.ReserveInstructionCapacity(0);
+  ASSERT_FALSE(invalid_instructions.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidBuilder, invalid_instructions.error().code);
+  const auto invalid_labels = builder.ReserveLabelCapacity(0);
+  ASSERT_FALSE(invalid_labels.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidBuilder, invalid_labels.error().code);
+  ASSERT_TRUE(moved.ReserveInstructionCapacity(0).has_value());
+  ASSERT_TRUE(moved.ReserveLabelCapacity(0).has_value());
+
+  limits.maximum_instructions = std::numeric_limits<std::size_t>::max();
+  limits.maximum_labels = std::numeric_limits<std::size_t>::max();
+  auto wide = ProgramBuilder::Create({}, Resources(0), limits);
+  ASSERT_TRUE(wide.has_value());
+  const auto too_many_instructions =
+      wide->ReserveInstructionCapacity(std::numeric_limits<std::size_t>::max());
+  ASSERT_FALSE(too_many_instructions.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded, too_many_instructions.error().code);
+  const auto too_many_labels = wide->ReserveLabelCapacity(std::numeric_limits<std::size_t>::max());
+  ASSERT_FALSE(too_many_labels.has_value());
+  EXPECT_EQ(ProgramErrorCode::kLabelLimitExceeded, too_many_labels.error().code);
+}
+
 TEST(BytecodeProgramTest, EnforcesOwnedAndAnalysisMemoryForDirectInput) {
   const auto owned = ScalarProgramInput();
   ProgramLimits owned_limits;

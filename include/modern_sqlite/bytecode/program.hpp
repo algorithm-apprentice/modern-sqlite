@@ -1210,6 +1210,8 @@ class ProgramBuilder final {
       ProgramWriteEffects write_effects = {});
   [[nodiscard]] ProgramResult<void> MarkMayAbort();
   [[nodiscard]] ProgramResult<void> RequireDatabaseSnapshot();
+  [[nodiscard]] ProgramResult<void> ReserveInstructionCapacity(std::size_t count);
+  [[nodiscard]] ProgramResult<void> ReserveLabelCapacity(std::size_t count);
 
   [[nodiscard]] ProgramResult<Label> CreateLabel();
   [[nodiscard]] ProgramResult<void> BindLabel(Label label);

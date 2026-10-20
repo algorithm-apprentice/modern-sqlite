@@ -175,9 +175,11 @@ release before commit, 1,400-byte overflow records with a four-page cache,
 and nearby-page selection without changing ordinary freelist order.
 Exhaustive allocation failure includes retained-cursor creation and twelve
 overflow appends, with exact original-image rollback after every failure.
-All 76 affected storage cases pass in Debug, GNU Debug, and ASan/UBSan; the
-complete fast tier passes 1,467 ordinary and 92 isolated cases. Production
-quality, format, discipline, and graph checks pass. This accepted slice was
+All 76 affected storage cases pass in Debug, GNU Debug, and ASan/UBSan.
+Production quality, format, discipline, and graph checks pass. The initial
+fast report selected 1,467 ordinary and 92 isolated cases, but its complete
+source-qualification claim is superseded by the stale-link correction below.
+This accepted slice was
 committed as `d7ced2e` before sorter-backed VM/lowering integration began.
 
 ## Sorter-backed refill slice evidence
@@ -185,8 +187,9 @@ committed as `d7ced2e` before sorter-backed VM/lowering integration began.
 The focused producer test first fails at tree
 `815e40fb9627668a9680e16a537d984ac5e927fc`: CREATE INDEX has no shared sorter.
 The translated pipeline passes all 108 affected verifier, write-VM, and
-CREATE INDEX cases, plus the complete fast tier of 1,477 ordinary and 92
-isolated cases. Existing raw REAL/default and UNIQUE rollback tests remain.
+CREATE INDEX cases. Its initial fast report selected 1,477 ordinary and 92
+isolated cases; the stale-link correction below supersedes the complete
+source-qualification claim. Existing raw REAL/default and UNIQUE rollback tests remain.
 Direct bytecode controls cover strict rowid ties, nullable UNIQUE keys,
 constraint precedence, encoded value limits, large-to-short buffer reuse,
 actual PMA spill/read/write failures, and legacy physical DESC suppression
@@ -200,3 +203,42 @@ control first reports the later cursor-open error rather than the required
 cross-scope ownership error; propagating the association through the same
 ownership check makes the control pass. No second ownership table or
 comparison-column owner is added: refill uses `RecordSorter::CompareCurrent()`.
+
+## Bounded emission-capacity correction
+
+- Amendment status: Accepted
+
+Fully relinked isolated Debug at `52f7fa9` passes 1,610 of 1,611 cases but
+exposes CREATE INDEX lowering at 43 allocations against its original exact
+36-allocation contract. Earlier selected-target builds had left some static
+standalone runners stale: `run_fast_tests.py` executes binaries but does not
+build them. Those fast claims are superseded, not backdated. Build the entire
+development preset before every complete fast run and requalify the dependent
+suffix after this correction.
+
+Keep the native sorter pipeline, required metadata, and original allocation
+contract. Its complete emission has one instruction per key term plus 25
+fixed instructions and four branch labels. Reserve those known capacities
+through narrow `ProgramBuilder::ReserveInstructionCapacity()` and
+`ReserveLabelCapacity()` operations on the existing pending-instruction and
+label vectors. Reservations check builder validity and existing identity/count
+limits, publish no instruction or label, and do not change owned-byte
+accounting. The no-op requests no capacity. No alternate builder, publication
+owner, compacting factory, or index-only compiler path is introduced.
+
+This removes seven avoidable small-vector growth allocations rather than
+raising the contract: six pending-instruction allocations become one and
+three label allocations become one. It follows the pinned VDBE's block
+allocation intent in `vdbeaux.c:164-211,1147-1182` and delayed label-block
+allocation in `vdbeaux.c:615-657`, through the canonical Modern owners.
+The unrelated public input-copy/canonicalization contract remains unchanged.
+The existing allocation runner supplies the focused red; capacity/count,
+moved-builder, OOM, full-build fast, and final exact-head gates close the
+correction. Retain the unamended earlier commits and failed reports for
+traceability; only the final fully qualified tree may be squash-merged.
+
+The capacity tests first fail because both reservation operations are absent.
+The corrected producer passes the unchanged exact 36-allocation contract.
+A complete default development build finishes all 81 pending compile/link
+steps before the fresh fast run: all 1,479 ordinary and 92 isolated cases pass. This report,
+unlike the superseded reports, includes freshly linked standalone runners.

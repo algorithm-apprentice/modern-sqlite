@@ -910,6 +910,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto descriptors = AddCreateIndexDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
       }
+      constexpr std::size_t kCreateIndexFixedInstructions = 25;
+      constexpr std::size_t kCreateIndexBranchLabels = 4;
+      const std::size_t key_term_count = bound_create_index_->terms().size();
+      if (key_term_count >
+          std::numeric_limits<std::uint32_t>::max() - kCreateIndexFixedInstructions) {
+        return std::unexpected(
+            ProgramFailure(ProgramError{.code = ProgramErrorCode::kInstructionLimitExceeded},
+                           "CREATE INDEX instruction count exceeds the bytecode identity range"));
+      }
+      auto instructions = ConvertProgramResult(AssumeValue(builder_).ReserveInstructionCapacity(
+                                                   key_term_count + kCreateIndexFixedInstructions),
+                                               "unable to reserve CREATE INDEX instructions");
+      if (!instructions.has_value()) {
+        return std::unexpected(std::move(instructions.error()));
+      }
+      auto labels =
+          ConvertProgramResult(AssumeValue(builder_).ReserveLabelCapacity(kCreateIndexBranchLabels),
+                               "unable to reserve CREATE INDEX branch labels");
+      if (!labels.has_value()) {
+        return std::unexpected(std::move(labels.error()));
+      }
       if (auto emitted = EmitCreateIndex(); !emitted.has_value()) {
         return std::unexpected(std::move(emitted.error()));
       }

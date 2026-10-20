@@ -4269,6 +4269,30 @@ ProgramResult<void> ProgramBuilder::RequireDatabaseSnapshot() {
   return {};
 }
 
+ProgramResult<void> ProgramBuilder::ReserveInstructionCapacity(std::size_t count) {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  if (count > limits_.maximum_instructions || count > std::numeric_limits<std::uint32_t>::max() ||
+      count > pending_.max_size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  pending_.reserve(count);
+  return {};
+}
+
+ProgramResult<void> ProgramBuilder::ReserveLabelCapacity(std::size_t count) {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  if (count > limits_.maximum_labels || count > std::numeric_limits<std::uint32_t>::max() ||
+      count > label_addresses_.max_size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kLabelLimitExceeded));
+  }
+  label_addresses_.reserve(count);
+  return {};
+}
+
 ProgramResult<Label> ProgramBuilder::CreateLabel() {
   if (auto usable = CheckUsable(); !usable) {
     return std::unexpected(usable.error());
