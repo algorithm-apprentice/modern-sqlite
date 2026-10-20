@@ -131,6 +131,7 @@ struct PhysicalRangeBound {
   std::size_t conjunct_position = 0;
   PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
   bool inclusive = false;
+  TypeAffinity probe_affinity = TypeAffinity::kNone;
 
   constexpr auto operator<=>(const PhysicalRangeBound&) const noexcept = default;
 };
@@ -158,6 +159,7 @@ struct PhysicalIndexEquality {
   std::string_view collation_name = "BINARY";
   SortOrder order = SortOrder::kAscending;
   bool reject_null = true;
+  TypeAffinity probe_affinity = TypeAffinity::kNone;
 
   constexpr auto operator<=>(const PhysicalIndexEquality&) const noexcept = default;
 };
@@ -195,6 +197,7 @@ struct PhysicalAutomaticIndexNode {
   RootPageId table_root_page{};
   std::vector<PhysicalIndexEquality> equalities{};
   std::vector<ColumnId> covering_columns{};
+  std::vector<BoundExpressionId> construction_predicates{};
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
 
   constexpr bool operator==(const PhysicalAutomaticIndexNode&) const noexcept = default;
@@ -338,6 +341,7 @@ struct PhysicalJoinPredicatePlacement {
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
   std::optional<BoundSourceId> source{};
+  bool consumed_by_access = false;
 
   constexpr auto operator<=>(const PhysicalJoinPredicatePlacement&) const noexcept = default;
 };
@@ -408,6 +412,8 @@ struct PhysicalCoreAccessPlan {
   std::size_t core_index = 0;
   std::vector<AccessPathCandidate> candidates;
   std::size_t selected_candidate = 0;
+  std::vector<BoundSourceId> source_order{};
+  bool search_limited = false;
 
   constexpr bool operator==(const PhysicalCoreAccessPlan&) const noexcept = default;
 };

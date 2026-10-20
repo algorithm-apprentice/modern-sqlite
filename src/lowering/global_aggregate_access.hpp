@@ -31,9 +31,12 @@ class GlobalAggregateAccessServices {
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateCompletion() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitGlobalAggregateEarlyStopCompletion() = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitIndexKeyExpressions(
-      const PhysicalIndexScanNode& index, std::optional<Label> null_target) = 0;
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal, IndexKeyPhase phase,
+      std::optional<Label> null_target,
+      std::optional<CursorId> positioned_cursor = std::nullopt) = 0;
   [[nodiscard]] virtual LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound) = 0;
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound,
+      IndexKeyPhase phase = IndexKeyPhase::start) = 0;
 };
 
 struct GlobalAggregateAccessInput {

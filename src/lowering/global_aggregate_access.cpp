@@ -131,14 +131,17 @@ class GlobalAggregateAccessEmitter final {
     return services_.EmitGlobalAggregateEarlyStopCompletion();
   }
 
-  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(const PhysicalIndexScanNode& index,
-                                                             std::optional<Label> null_target) {
-    return services_.EmitIndexKeyExpressions(index, null_target);
+  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal, IndexKeyPhase phase,
+      std::optional<Label> null_target, std::optional<CursorId> positioned_cursor = std::nullopt) {
+    return services_.EmitIndexKeyExpressions(index, traversal, phase, null_target,
+                                             positioned_cursor);
   }
 
-  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(const PhysicalIndexScanNode& index,
-                                                                IndexTraversalBound range_bound) {
-    return services_.EmitIndexKeyBlock(index, range_bound);
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound,
+      IndexKeyPhase phase = IndexKeyPhase::start) {
+    return services_.EmitIndexKeyBlock(index, range_bound, phase);
   }
 
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateEmpty() {
@@ -552,7 +555,7 @@ class GlobalAggregateAccessEmitter final {
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
                                                   }) ||
-                              index.range.has_value();
+                              traversal.start.expression != nullptr;
 
     std::optional<Label> preopen_completion;
     if (limit_ != nullptr) {
@@ -582,7 +585,8 @@ class GlobalAggregateAccessEmitter final {
       }
     }
     if (!index.equalities.empty() || index.range.has_value()) {
-      if (auto keys = EmitIndexKeyExpressions(index, opened_empty); !keys.has_value()) {
+      if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::start, opened_empty);
+          !keys.has_value()) {
         return keys;
       }
     }
@@ -629,7 +633,12 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, traversal.end);
+      if (auto keys =
+              EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end, *unpositioned, cursor_);
+          !keys.has_value()) {
+        return keys;
+      }
+      auto key = EmitIndexKeyBlock(index, traversal.end, IndexKeyPhase::end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -841,7 +850,7 @@ class GlobalAggregateAccessEmitter final {
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
                                                   }) ||
-                              index.range.has_value();
+                              traversal.start.expression != nullptr;
 
     std::optional<Label> preopen_completion;
     if (limit_ != nullptr) {
@@ -870,7 +879,8 @@ class GlobalAggregateAccessEmitter final {
         return guards;
       }
     }
-    if (auto keys = EmitIndexKeyExpressions(index, opened_empty); !keys.has_value()) {
+    if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::start, opened_empty);
+        !keys.has_value()) {
       return keys;
     }
 
@@ -908,7 +918,12 @@ class GlobalAggregateAccessEmitter final {
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, traversal.end);
+      if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end, *index_missing,
+                                              index_cursor);
+          !keys.has_value()) {
+        return keys;
+      }
+      auto key = EmitIndexKeyBlock(index, traversal.end, IndexKeyPhase::end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -1221,11 +1236,16 @@ class GlobalAggregateAccessEmitter final {
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexedMinMaxEndKey(
-      const PhysicalIndexScanNode& index, const IndexTraversal& traversal) {
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal, CursorId cursor,
+      Label missing) {
     if (!traversal.has_end_key) {
       return 0U;
     }
-    return EmitIndexKeyBlock(index, traversal.end);
+    if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end, missing, cursor);
+        !keys.has_value()) {
+      return std::unexpected(std::move(keys.error()));
+    }
+    return EmitIndexKeyBlock(index, traversal.end, IndexKeyPhase::end);
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexedMinMaxNullKey(
@@ -1477,7 +1497,7 @@ class GlobalAggregateAccessEmitter final {
           region == IndexedMinMaxPassRegion::kNonNull &&
                   runtime.extremum == BoundAggregateExtremumKind::kMaximum
               ? EmitIndexedMinMaxNullKey(index)
-              : EmitIndexedMinMaxEndKey(index, traversal);
+              : EmitIndexedMinMaxEndKey(index, traversal, index_cursor, *missing);
       if (!count.has_value()) {
         return std::unexpected(std::move(count.error()));
       }
@@ -1672,7 +1692,7 @@ class GlobalAggregateAccessEmitter final {
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
                                                   }) ||
-                              index.range.has_value();
+                              traversal.start.expression != nullptr;
 
     std::optional<Label> preopen_completion;
     if (limit_ != nullptr) {
@@ -1701,7 +1721,8 @@ class GlobalAggregateAccessEmitter final {
         return guards;
       }
     }
-    if (auto keys = EmitIndexKeyExpressions(index, opened_empty); !keys.has_value()) {
+    if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::start, opened_empty);
+        !keys.has_value()) {
       return keys;
     }
 

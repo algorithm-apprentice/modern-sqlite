@@ -469,11 +469,13 @@ int main() try {
   }
 
   constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
-  constexpr std::array<std::string_view, 4> kAutomaticSqls{
+  constexpr std::array<std::string_view, 5> kAutomaticSqls{
       "SELECT a.id,b.Payload,c.Payload FROM Items a JOIN Items b ON b.Name=a.Name "
       "JOIN Items c ON c.Name=b.Name",
       "SELECT a.id,count(b.id),max(b.Payload) FROM Items a LEFT JOIN Items b "
       "ON b.Name IS a.Name GROUP BY a.id ORDER BY 1 LIMIT ?1",
+      "SELECT a.id,b.Payload FROM Items a LEFT JOIN Items b "
+      "ON b.Name IS a.Name AND b.id>1",
       "SELECT DISTINCT b.Name,b.Payload FROM Items a JOIN Items b ON b.Name=a.Name",
       "SELECT b.Payload FROM Items a JOIN Items b ON b.Name=a.Name "
       "UNION SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3",

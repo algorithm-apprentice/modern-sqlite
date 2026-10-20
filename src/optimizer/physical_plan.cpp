@@ -28,6 +28,8 @@ namespace {
 constexpr std::uint64_t kDefaultEstimatedRows = 1U << 20U;
 constexpr std::uint64_t kMinimumDefaultIndexRows = 1'000;
 using LogEst = std::int32_t;
+using SourceMask = std::uint64_t;
+constexpr std::size_t kTopColumn = std::numeric_limits<SourceMask>::digits - 1U;
 constexpr LogEst kLogEstScale = 10;
 constexpr LogEst kTableScanCostBias = 16;
 constexpr LogEst kIndexScanCostBase = 1;
@@ -38,6 +40,31 @@ constexpr LogEst kShortcutOutput = 1;
 constexpr LogEst kRangeReduction = 20;
 constexpr LogEst kMinimumRangeOutput = 10;
 constexpr std::size_t kShortcutIndexTermLimit = 3;
+constexpr std::size_t kPlannerSearchLimit = 20'000;
+constexpr std::size_t kPlannerSearchLimitIncrement = 1'000;
+constexpr std::size_t kMaximumEquivalentColumns = 11;
+constexpr LogEst kAutomaticIndexSetupBias = 28;
+constexpr LogEst kAutomaticIndexOutput = 43;
+constexpr LogEst kMaximumOuterLoopEstimate = 48;
+constexpr LogEst kDistinctOutputReduction = 30;
+
+[[nodiscard]] std::optional<std::size_t> SourcePosition(std::span<const BoundTableSource> sources,
+                                                        BoundSourceId source) noexcept {
+  const auto found = std::ranges::find(sources, source, &BoundTableSource::id);
+  return found == sources.end() ? std::nullopt
+                                : std::optional{static_cast<std::size_t>(found - sources.begin())};
+}
+
+[[nodiscard]] constexpr SourceMask SourceBit(std::size_t position) noexcept {
+  if (position >= kMaximumSelectSources) {
+    std::terminate();
+  }
+  return SourceMask{1} << position;
+}
+
+[[nodiscard]] constexpr SourceMask AllSources(std::size_t count) noexcept {
+  return count == kMaximumSelectSources ? ~SourceMask{0} : SourceBit(count) - 1U;
+}
 
 [[nodiscard]] constexpr LogEst ToLogEst(std::uint64_t value) noexcept {
   constexpr std::array<LogEst, 8> kFraction{0, 2, 3, 5, 6, 7, 8, 9};
@@ -51,8 +78,8 @@ constexpr std::size_t kShortcutIndexTermLimit = 3;
       value <<= 1U;
     }
   } else {
-    const auto shift = static_cast<int>(std::bit_width(value)) - 4;
-    exponent += shift * kLogEstScale;
+    const auto shift = static_cast<unsigned>(std::bit_width(value)) - 4U;
+    exponent += static_cast<LogEst>(shift) * kLogEstScale;
     value >>= shift;
   }
   return kFraction[value & 7U] + exponent - kLogEstScale;
@@ -70,7 +97,7 @@ constexpr std::size_t kShortcutIndexTermLimit = 3;
   if (difference > 49) {
     return left;
   }
-  if (difference >= static_cast<LogEst>(kCorrection.size())) {
+  if (std::cmp_greater_equal(difference, kCorrection.size())) {
     return left + 1;
   }
   return left + kCorrection[static_cast<std::size_t>(difference)];
@@ -78,23 +105,6 @@ constexpr std::size_t kShortcutIndexTermLimit = 3;
 
 [[nodiscard]] constexpr LogEst LogEstLogarithm(LogEst value) noexcept {
   return value <= kLogEstScale ? 0 : ToLogEst(static_cast<std::uint64_t>(value)) - 33;
-}
-
-[[nodiscard]] constexpr std::uint64_t LogEstToRows(LogEst value) noexcept {
-  if (value <= 0) {
-    return 1;
-  }
-  std::uint64_t fraction = static_cast<std::uint64_t>(value % kLogEstScale);
-  const LogEst exponent = value / kLogEstScale;
-  if (fraction >= 5U) {
-    fraction -= 2U;
-  } else if (fraction >= 1U) {
-    --fraction;
-  }
-  if (exponent > 60) {
-    return static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-  }
-  return exponent >= 3 ? (fraction + 8U) << (exponent - 3) : (fraction + 8U) >> (3 - exponent);
 }
 
 struct SourceInfo {
@@ -115,10 +125,33 @@ struct PredicateAnalysis {
   std::vector<BoundExpressionId> residuals{};
 };
 
+struct LoopColumnReference {
+  std::size_t source_position = 0;
+  std::optional<ColumnId> column{};
+
+  constexpr auto operator<=>(const LoopColumnReference&) const noexcept = default;
+};
+
 struct ReadPredicateTerm {
   BoundExpressionId predicate{0};
   std::size_t conjunct_position = 0;
   PhysicalPredicateOrigin origin = PhysicalPredicateOrigin::kWhere;
+  std::optional<BoundSourceId> on_source{};
+  std::optional<BoundSourceId> constraint_owner{};
+  SourceMask prerequisites = 0;
+  SourceMask key_floor = 0;
+  SourceMask left_prerequisites = 0;
+  SourceMask right_prerequisites = 0;
+  const BoundComparisonExpression* comparison = nullptr;
+  std::optional<LoopColumnReference> left_column{};
+  std::optional<LoopColumnReference> right_column{};
+  LogEst truth_probability = 1;
+  bool outer_on = false;
+  bool equivalence = false;
+  bool left_is_column = false;
+  bool right_is_column = false;
+  std::optional<BoundSourceId> evaluation_source{};
+  bool consumed_by_access = false;
 };
 
 struct ReadPredicateAnalysis {
@@ -143,13 +176,23 @@ struct IndexCandidatePlan {
   std::vector<bool> selected_terms{};
 };
 
-using ReadAccessPayload =
-    std::variant<std::monostate, RowIdCandidatePlan, RowIdRangeCandidatePlan, IndexCandidatePlan>;
+struct AutomaticCandidatePlan {
+  PhysicalAutomaticIndexNode node{};
+  std::vector<bool> selected_terms{};
+};
+
+using ReadAccessPayload = std::variant<std::monostate, RowIdCandidatePlan, RowIdRangeCandidatePlan,
+                                       IndexCandidatePlan, AutomaticCandidatePlan>;
 
 struct ReadAccessCandidate {
   AccessPathCandidate published{};
   ReadAccessPayload payload{};
   bool single_row_shortcut = false;
+  std::size_t source_position = 0;
+  SourceMask prerequisites = 0;
+  std::size_t sort_index = 0;
+  bool transitive = false;
+  PhysicalScanDirection direction = PhysicalScanDirection::kForward;
 };
 
 [[nodiscard]] std::uint64_t DerivedTableRowSize(const CatalogTable& table) noexcept;
@@ -410,41 +453,164 @@ template <typename Bound>
   return !VisitExpressionSources(bound_select, id, visitor) || depends;
 }
 
-[[nodiscard]] std::expected<std::vector<BoundSourceId>, OptimizerError> JoinPredicateSources(
-    const BoundQueryView& bound_select, const BoundSelectCore& core,
-    std::span<const BoundExpressionId> predicates,
-    std::optional<BoundSourceId> condition_owner = std::nullopt) {
-  std::vector<BoundSourceId> sources;
-  if (core.table_sources.size() < 2U) {
-    return sources;
+template <typename Bound>
+[[nodiscard]] std::expected<SourceMask, OptimizerError> ExpressionSourceMask(
+    const Bound& bound_select, std::span<const BoundTableSource> sources, BoundExpressionId id) {
+  SourceMask mask = 0;
+  bool valid = true;
+  auto visitor = [&](BoundSourceId source) {
+    if (IsCapturedSource(bound_select, source)) {
+      return;
+    }
+    const auto position = SourcePosition(sources, source);
+    if (!position.has_value()) {
+      valid = false;
+    } else {
+      mask |= SourceBit(*position);
+    }
+  };
+  if (!VisitExpressionSources(bound_select, id, visitor) || !valid) {
+    return std::unexpected(InvariantFailure("expression has invalid source dependencies"));
   }
-  sources.reserve(predicates.size());
-  BoundSourceId floor = core.table_sources.front().id;
-  for (const BoundTableSource& source : core.table_sources) {
-    if (SourceJoinPreservesRight(source.join) &&
-        (!condition_owner.has_value() || source.id <= *condition_owner)) {
-      floor = source.id;
+  return mask;
+}
+
+[[nodiscard]] LogEst PredicateTruthProbability(const BoundQueryView& bound,
+                                               BoundExpressionId id) noexcept {
+  constexpr auto kProbabilityScale = std::uint64_t{1} << 27U;
+  constexpr LogEst kProbabilityLogScale = 270;
+  while (IsValidExpressionId(bound, id)) {
+    const auto& payload = bound.expression(id).payload;
+    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&payload);
+        likelihood != nullptr) {
+      return ToLogEst(static_cast<std::uint64_t>(likelihood->probability *
+                                                 static_cast<double>(kProbabilityScale))) -
+             kProbabilityLogScale;
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+        alias != nullptr) {
+      id = alias->target;
+    } else if (const auto* collate = std::get_if<BoundCollateExpression>(&payload);
+               collate != nullptr) {
+      id = collate->operand;
+    } else {
+      break;
     }
   }
-  for (const BoundExpressionId predicate : predicates) {
-    BoundSourceId ready = floor;
-    bool valid = true;
-    auto visitor = [&](BoundSourceId source) {
-      if (IsCapturedSource(bound_select, source)) {
-        return;
+  return 1;
+}
+
+[[nodiscard]] bool SourceIsLeftOfRightJoin(const BoundSelectCore& core,
+                                           std::size_t position) noexcept {
+  return std::ranges::any_of(
+      std::span{core.table_sources}.subspan(position + 1U),
+      [](const BoundTableSource& source) { return SourceJoinPreservesRight(source.join); });
+}
+
+[[nodiscard]] bool ConstraintCompatibleWithSource(const BoundSelectCore& core, std::size_t position,
+                                                  const ReadPredicateTerm& term) noexcept {
+  const auto& source = core.table_sources[position];
+  const bool outer = SourceJoinPreservesLeft(source.join) || SourceJoinPreservesRight(source.join);
+  if (!outer && !SourceIsLeftOfRightJoin(core, position)) {
+    return true;
+  }
+  return term.constraint_owner == source.id && (!outer || term.outer_on);
+}
+
+[[nodiscard]] std::optional<LoopColumnReference> LoopColumnOf(const BoundQueryView& bound,
+                                                              const BoundSelectCore& core,
+                                                              BoundExpressionId expression);
+[[nodiscard]] bool TermIsEquivalence(const BoundQueryView& bound, const BoundSelectCore& core,
+                                     const ReadPredicateTerm& term);
+
+[[nodiscard]] std::optional<BoundSourceLeafIdentity> LoopOperandIdentity(
+    const BoundQueryView& bound, BoundExpressionId expression) {
+  expression = TransparentRowIdOperandId(bound, expression);
+  return IsValidExpressionId(bound, expression)
+             ? BoundSourceLeafIdentityOf(bound.expression(expression), bound.source_columns())
+             : std::nullopt;
+}
+
+[[nodiscard]] std::expected<void, OptimizerError> PrepareLoopTerms(
+    const BoundQueryView& bound, const BoundSelectCore& core, std::span<ReadPredicateTerm> terms) {
+  for (ReadPredicateTerm& term : terms) {
+    const auto transparent = TransparentPredicateId(bound, term.predicate);
+    if (!IsValidExpressionId(bound, transparent)) {
+      return std::unexpected(InvariantFailure("loop term has an invalid expression"));
+    }
+    term.comparison =
+        std::get_if<BoundComparisonExpression>(&bound.expression(transparent).payload);
+    if (term.comparison != nullptr) {
+      auto left = ExpressionSourceMask(bound, core.table_sources, term.comparison->left);
+      auto right = ExpressionSourceMask(bound, core.table_sources, term.comparison->right);
+      if (!left.has_value()) {
+        return std::unexpected(std::move(left.error()));
       }
-      if (std::ranges::find(core.table_sources, source, &BoundTableSource::id) ==
-          core.table_sources.end()) {
-        valid = false;
+      if (!right.has_value()) {
+        return std::unexpected(std::move(right.error()));
       }
-      ready = std::max(ready, source);
+      term.left_prerequisites = *left;
+      term.right_prerequisites = *right;
+      term.prerequisites = *left | *right;
+      term.left_column = LoopColumnOf(bound, core, term.comparison->left);
+      term.right_column = LoopColumnOf(bound, core, term.comparison->right);
+      term.left_is_column = LoopOperandIdentity(bound, term.comparison->left).has_value();
+      term.right_is_column = LoopOperandIdentity(bound, term.comparison->right).has_value();
+    } else {
+      auto prerequisites = ExpressionSourceMask(bound, core.table_sources, term.predicate);
+      if (!prerequisites.has_value()) {
+        return std::unexpected(std::move(prerequisites.error()));
+      }
+      term.prerequisites = *prerequisites;
+    }
+    term.truth_probability = PredicateTruthProbability(bound, term.predicate);
+    if (term.on_source.has_value()) {
+      const auto position = SourcePosition(core.table_sources, *term.on_source);
+      if (!position.has_value()) {
+        return std::unexpected(InvariantFailure("ON term has no declared source owner"));
+      }
+      const auto join = core.table_sources[*position].join;
+      term.outer_on = SourceJoinPreservesLeft(join) || SourceJoinPreservesRight(join);
+      const SourceMask owner = SourceBit(*position);
+      if (term.outer_on) {
+        term.constraint_owner = term.on_source;
+        term.prerequisites |= owner;
+        term.key_floor = owner - 1U;
+      } else if ((term.prerequisites >> 1U) < owner) {
+        term.constraint_owner = term.on_source;
+      }
+    }
+    term.equivalence = TermIsEquivalence(bound, core, term);
+  }
+  return {};
+}
+
+[[nodiscard]] std::vector<ReadPredicateTerm> CollectLoopTerms(const BoundQueryView& bound,
+                                                              const BoundSelectCore& core) {
+  std::vector<ReadPredicateTerm> terms;
+  const auto append = [&](BoundExpressionId expression, std::optional<BoundSourceId> owner) {
+    std::size_t position = 0;
+    auto visitor = [&](BoundExpressionId predicate) {
+      terms.push_back(ReadPredicateTerm{
+          .predicate = predicate,
+          .conjunct_position = position++,
+          .origin =
+              owner.has_value() ? PhysicalPredicateOrigin::kOn : PhysicalPredicateOrigin::kWhere,
+          .on_source = owner,
+      });
+      return true;
     };
-    if (!VisitExpressionSources(bound_select, predicate, visitor) || !valid) {
-      return std::unexpected(InvariantFailure("join predicate has invalid source dependencies"));
-    }
-    sources.push_back(ready);
+    static_cast<void>(VisitConjuncts(bound, expression, &visitor));
+  };
+  if (core.where.has_value()) {
+    append(*core.where, std::nullopt);
   }
-  return sources;
+  for (const BoundTableSource& source : core.table_sources) {
+    if (source.on.has_value()) {
+      append(*source.on, source.id);
+    }
+  }
+  return terms;
 }
 
 template <typename Bound>
@@ -497,68 +663,18 @@ template <typename Bound>
          ExpressionIsDeterministic(bound_select, id);
 }
 
-struct AdvancedPredicateParts {
-  std::vector<BoundExpressionId> predicates{};
-  std::vector<BoundExpressionId> guards{};
-};
-
-[[nodiscard]] AdvancedPredicateParts SplitAdvancedPredicate(const BoundQueryView& bound_select,
-                                                            BoundExpressionId predicate) {
-  AdvancedPredicateParts parts;
-  const auto visit = [&](BoundExpressionId conjunct) {
-    (IsStatementGuard(bound_select, conjunct) ? parts.guards : parts.predicates)
-        .push_back(conjunct);
-    return true;
-  };
-  auto visitor = visit;
-  static_cast<void>(VisitConjuncts(bound_select, predicate, &visitor));
-  return parts;
-}
-
-[[nodiscard]] std::expected<std::vector<PhysicalJoinPredicatePlacement>, OptimizerError>
-PlanJoinPredicatePlacements(const LogicalQueryView& plan, const LogicalJoinNode& join) {
-  std::vector<PhysicalJoinPredicatePlacement> placements;
-  if (!join.on.has_value()) {
-    return placements;
+[[nodiscard]] bool CanFilterAutomaticIndex(const BoundQueryView& bound, const BoundSelectCore& core,
+                                           std::size_t position, const ReadPredicateTerm& term) {
+  const auto& source = core.table_sources[position];
+  if (SourceIsLeftOfRightJoin(core, position) ||
+      (SourceJoinPreservesLeft(source.join) ? !term.outer_on || term.on_source != source.id
+                                            : term.outer_on) ||
+      !ExpressionIsDeterministic(bound, term.predicate)) {
+    return false;
   }
-  const auto* right = std::get_if<LogicalScanNode>(&plan.node(join.right).payload);
-  if (right == nullptr) {
-    return std::unexpected(InvariantFailure("join condition has no right source"));
-  }
-  const BoundQueryView& bound = plan.bound_select();
-  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[join.core_index]);
-  std::vector<BoundExpressionId> predicates;
-  predicates.reserve(CountConjuncts(bound, *join.on));
-  CollectConjuncts(bound, *join.on, &predicates);
-  auto sources = JoinPredicateSources(bound, core, predicates, right->source);
-  if (!sources.has_value()) {
-    return std::unexpected(std::move(sources.error()));
-  }
-  if (sources->size() != predicates.size()) {
-    return std::unexpected(InvariantFailure("join condition placement count is invalid"));
-  }
-  placements.reserve(predicates.size());
-  const bool outer = SourceJoinPreservesLeft(join.join) || SourceJoinPreservesRight(join.join);
-  const BoundSourceId first = core.table_sources.front().id;
-  const bool fenced_by_later_right =
-      !outer && std::ranges::any_of(core.table_sources, [&](const BoundTableSource& source) {
-        return source.id > right->source && SourceJoinPreservesRight(source.join);
-      });
-  for (std::size_t index = 0; index < predicates.size(); ++index) {
-    std::optional<BoundSourceId> source =
-        outer ? std::optional{right->source} : std::optional{(*sources)[index]};
-    if (fenced_by_later_right && *source <= right->source) {
-      source = right->source;
-    } else if (!outer && *source == first && IsStatementGuard(bound, predicates[index])) {
-      source.reset();
-    }
-    placements.push_back(PhysicalJoinPredicatePlacement{
-        .predicate = predicates[index],
-        .conjunct_position = index,
-        .source = source,
-    });
-  }
-  return placements;
+  bool single_table = true;
+  auto visitor = [&](BoundSourceId dependency) { single_table &= dependency == source.id; };
+  return VisitExpressionSources(bound, term.predicate, visitor) && single_table;
 }
 
 template <typename Bound>
@@ -574,148 +690,6 @@ template <typename Bound>
   const BoundExpression& expression = bound_select.expression(id);
   const auto identity = BoundSourceLeafIdentityOf(expression, bound_select.source_columns());
   return identity.has_value() && identity->source == source.id && identity->is_rowid();
-}
-
-template <typename Bound>
-[[nodiscard]] bool ExpressionSourcesAvailableBeforeSource(const Bound& bound_select,
-                                                          BoundExpressionId expression,
-                                                          BoundSourceId source) {
-  bool available = true;
-  auto visitor = [&](BoundSourceId owner) {
-    available = available && (IsCapturedSource(bound_select, owner) || owner < source);
-  };
-  return VisitExpressionSources(bound_select, expression, visitor) && available;
-}
-
-template <typename Bound>
-[[nodiscard]] bool ExpressionAvailableBeforeSource(const Bound& bound_select,
-                                                   BoundExpressionId expression,
-                                                   BoundSourceId source) {
-  return ExpressionIsDeterministic(bound_select, expression) &&
-         ExpressionSourcesAvailableBeforeSource(bound_select, expression, source);
-}
-
-enum class JoinedExpressionShape : std::uint8_t {
-  kValue,
-  kArithmetic,
-  kScalar,
-  kPredicate,
-};
-
-template <typename Bound>
-[[nodiscard]] bool IsJoinedAccessExpression(const Bound& bound_select, BoundExpressionId id,
-                                            JoinedExpressionShape shape) {
-  id = shape == JoinedExpressionShape::kPredicate ? TransparentPredicateId(bound_select, id)
-                                                  : TransparentRowIdOperandId(bound_select, id);
-  if (!IsValidExpressionId(bound_select, id)) {
-    return false;
-  }
-  const BoundExpression& expression = bound_select.expression(id);
-  if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
-      std::holds_alternative<BoundParameterExpression>(expression.payload) ||
-      std::holds_alternative<BoundColumnExpression>(expression.payload) ||
-      std::holds_alternative<BoundRowIdExpression>(expression.payload)) {
-    return true;
-  }
-  const auto admitted = [&](BoundExpressionId operand) {
-    return IsJoinedAccessExpression(bound_select, operand, shape);
-  };
-  if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-      coalesce != nullptr) {
-    return std::ranges::all_of(coalesce->arguments, admitted);
-  }
-  if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-      call != nullptr) {
-    return shape == JoinedExpressionShape::kScalar &&
-           call->function.value() < bound_select.functions().size() &&
-           bound_select.functions()[call->function.value()].deterministic &&
-           std::ranges::all_of(call->arguments, admitted);
-  }
-  if (shape == JoinedExpressionShape::kValue) {
-    return false;
-  }
-
-  if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-      unary != nullptr) {
-    return (unary->operation != BoundUnaryOperation::kLogicalNot ||
-            shape == JoinedExpressionShape::kPredicate) &&
-           admitted(unary->operand);
-  }
-  if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-      binary != nullptr) {
-    switch (binary->operation) {
-      case BoundBinaryOperation::kAdd:
-      case BoundBinaryOperation::kSubtract:
-      case BoundBinaryOperation::kMultiply:
-      case BoundBinaryOperation::kDivide:
-      case BoundBinaryOperation::kRemainder:
-      case BoundBinaryOperation::kShiftLeft:
-      case BoundBinaryOperation::kShiftRight:
-      case BoundBinaryOperation::kBitwiseAnd:
-      case BoundBinaryOperation::kBitwiseOr:
-        return admitted(binary->left) && admitted(binary->right);
-      case BoundBinaryOperation::kLogicalAnd:
-      case BoundBinaryOperation::kLogicalOr:
-        return shape == JoinedExpressionShape::kPredicate && admitted(binary->left) &&
-               admitted(binary->right);
-      case BoundBinaryOperation::kConcatenate:
-        return false;
-    }
-  }
-  if (shape == JoinedExpressionShape::kPredicate) {
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-        comparison != nullptr) {
-      return admitted(comparison->left) && admitted(comparison->right);
-    }
-    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-        truth != nullptr) {
-      return admitted(truth->operand);
-    }
-  }
-  return false;
-}
-
-template <typename Bound>
-[[nodiscard]] bool ExpressionContainsScalarCall(const Bound& bound_select, BoundExpressionId id) {
-  id = TransparentRowIdOperandId(bound_select, id);
-  if (!IsValidExpressionId(bound_select, id)) {
-    return false;
-  }
-  const BoundExpression& expression = bound_select.expression(id);
-  return std::visit(
-      [&](const auto& payload) -> bool {
-        using Payload = std::decay_t<decltype(payload)>;
-        if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
-          return true;
-        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                             std::is_same_v<Payload, BoundCollateExpression>) {
-          return ExpressionContainsScalarCall(bound_select, payload.operand);
-        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression>) {
-          return ExpressionContainsScalarCall(bound_select, payload.left) ||
-                 ExpressionContainsScalarCall(bound_select, payload.right);
-        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return ExpressionContainsScalarCall(bound_select, payload.target);
-        } else if constexpr (std::is_same_v<Payload, BoundCoalesceExpression>) {
-          return std::ranges::any_of(payload.arguments, [&](BoundExpressionId argument) {
-            return ExpressionContainsScalarCall(bound_select, argument);
-          });
-        }
-        return false;
-      },
-      expression.payload);
-}
-
-template <typename Bound>
-[[nodiscard]] bool IsAccessKeyAvailable(
-    const Bound& bound_select, BoundExpressionId key,
-    std::optional<BoundSourceId> available_before = std::nullopt,
-    JoinedExpressionShape shape = JoinedExpressionShape::kValue) {
-  if (available_before.has_value()) {
-    return IsJoinedAccessExpression(bound_select, key, shape) &&
-           ExpressionAvailableBeforeSource(bound_select, key, *available_before);
-  }
-  return !ExpressionDependsOnSource(bound_select, key);
 }
 
 template <typename Bound>
@@ -741,130 +715,14 @@ template <typename Bound>
 }
 
 template <typename Bound>
-[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(
-    const Bound& bound_select, const SourceInfo& source, BoundExpressionId predicate,
-    std::optional<BoundSourceId> available_before = std::nullopt,
-    JoinedExpressionShape shape = JoinedExpressionShape::kValue) {
+[[nodiscard]] std::optional<BoundExpressionId> RowIdLookupKey(const Bound& bound_select,
+                                                              const SourceInfo& source,
+                                                              BoundExpressionId predicate) {
   const auto key = RowIdEqualityKey(bound_select, source, predicate);
-  if (!key.has_value() || !IsAccessKeyAvailable(bound_select, *key, available_before, shape)) {
-    return std::nullopt;
-  }
-  if (shape == JoinedExpressionShape::kScalar &&
-      !ExpressionContainsScalarCall(bound_select, *key)) {
+  if (!key.has_value() || ExpressionDependsOnSource(bound_select, *key)) {
     return std::nullopt;
   }
   return key;
-}
-
-struct RowIdRangeMatch {
-  PhysicalRangeBound bound{};
-  bool lower = false;
-};
-
-template <typename Bound>
-[[nodiscard]] std::optional<RowIdRangeMatch> MatchRowIdRange(
-    const Bound& bound_select, const SourceInfo& source, const ReadPredicateTerm& term,
-    std::optional<BoundSourceId> available_before = std::nullopt,
-    JoinedExpressionShape shape = JoinedExpressionShape::kValue) {
-  const BoundExpressionId transparent = TransparentPredicateId(bound_select, term.predicate);
-  if (!IsValidExpressionId(bound_select, transparent)) {
-    return std::nullopt;
-  }
-  const auto* comparison =
-      std::get_if<BoundComparisonExpression>(&bound_select.expression(transparent).payload);
-  if (comparison == nullptr) {
-    return std::nullopt;
-  }
-  const bool left_rowid = IsRowIdReference(bound_select, source, comparison->left);
-  const bool right_rowid = IsRowIdReference(bound_select, source, comparison->right);
-  if (left_rowid == right_rowid) {
-    return std::nullopt;
-  }
-  const BoundExpressionId key = left_rowid ? comparison->right : comparison->left;
-  if (!IsAccessKeyAvailable(bound_select, key, available_before, shape)) {
-    return std::nullopt;
-  }
-
-  bool lower = false;
-  bool inclusive = false;
-  switch (comparison->comparison) {
-    case SqlComparison::kLess:
-      lower = !left_rowid;
-      break;
-    case SqlComparison::kLessEqual:
-      lower = !left_rowid;
-      inclusive = true;
-      break;
-    case SqlComparison::kGreater:
-      lower = left_rowid;
-      break;
-    case SqlComparison::kGreaterEqual:
-      lower = left_rowid;
-      inclusive = true;
-      break;
-    case SqlComparison::kEqual:
-    case SqlComparison::kNotEqual:
-    case SqlComparison::kIs:
-    case SqlComparison::kIsNot:
-      return std::nullopt;
-  }
-  return RowIdRangeMatch{
-      .bound =
-          PhysicalRangeBound{
-              .key = key,
-              .predicate = term.predicate,
-              .conjunct_position = term.conjunct_position,
-              .inclusive = inclusive,
-          },
-      .lower = lower,
-  };
-}
-
-[[nodiscard]] std::optional<RowIdRangeCandidatePlan> AnalyzeRowIdRangeCandidate(
-    const BoundQueryView& bound_select, const SourceInfo& source,
-    std::span<const ReadPredicateTerm> predicates) {
-  if (!source.rowid_eligible) {
-    return std::nullopt;
-  }
-  RowIdRangeCandidatePlan candidate{
-      .node =
-          PhysicalRowIdRangeNode{
-              .source = source.id,
-              .source_kind = source.source_kind,
-              .table = source.table,
-              .root_page = source.root_page,
-          },
-      .selected_terms = {},
-  };
-  std::optional<std::size_t> lower_term;
-  std::optional<std::size_t> upper_term;
-  for (std::size_t index = 0; index < predicates.size(); ++index) {
-    const auto match = MatchRowIdRange(bound_select, source, predicates[index]);
-    if (!match.has_value()) {
-      continue;
-    }
-    if (match->lower && !candidate.node.lower.has_value()) {
-      candidate.node.lower = match->bound;
-      lower_term = index;
-    } else if (!match->lower && !candidate.node.upper.has_value()) {
-      candidate.node.upper = match->bound;
-      upper_term = index;
-    }
-    if (candidate.node.lower.has_value() && candidate.node.upper.has_value()) {
-      break;
-    }
-  }
-  if (!candidate.node.lower.has_value() && !candidate.node.upper.has_value()) {
-    return std::nullopt;
-  }
-  candidate.selected_terms.assign(predicates.size(), false);
-  if (lower_term.has_value()) {
-    candidate.selected_terms[*lower_term] = true;
-  }
-  if (upper_term.has_value()) {
-    candidate.selected_terms[*upper_term] = true;
-  }
-  return candidate;
 }
 
 [[nodiscard]] SourceInfo ResolveTableSource(const BoundQueryView& bound_select,
@@ -920,10 +778,6 @@ template <typename Bound>
     };
   }
   return ResolveTableSource(bound_select, core.table_sources.front());
-}
-
-[[nodiscard]] SourceInfo ResolveSource(const LogicalQueryView& logical_plan) {
-  return ResolveCoreSource(logical_plan.bound_select(), 0);
 }
 
 [[nodiscard]] bool IsAdvancedLogicalPlan(const LogicalQueryView& logical_plan) {
@@ -1261,27 +1115,6 @@ template <typename Bound>
   return true;
 }
 
-[[nodiscard]] bool IsIndexedColumnReference(const BoundQueryView& bound_select,
-                                            BoundSourceId source_id,
-                                            std::size_t source_column_begin,
-                                            std::size_t source_column_count, ColumnId column_id,
-                                            BoundExpressionId expression_id) noexcept {
-  expression_id = TransparentRowIdOperandId(bound_select, expression_id);
-  if (!IsValidExpressionId(bound_select, expression_id)) {
-    return false;
-  }
-  const auto* column =
-      std::get_if<BoundColumnExpression>(&bound_select.expression(expression_id).payload);
-  const std::size_t source_index = column != nullptr ? column->column.value() : 0U;
-  if (column == nullptr || source_index < source_column_begin ||
-      source_index - source_column_begin >= source_column_count ||
-      source_index >= bound_select.source_columns().size()) {
-    return false;
-  }
-  const BoundSourceColumn& source = bound_select.source_columns()[source_index];
-  return source.source == source_id && source.catalog_column == column_id;
-}
-
 [[nodiscard]] SqlComparison ReverseComparison(SqlComparison comparison) noexcept {
   switch (comparison) {
     case SqlComparison::kLess:
@@ -1315,96 +1148,6 @@ struct IndexConstraintMatch {
   bool inclusive = false;
   bool reject_null = true;
 };
-
-[[nodiscard]] std::optional<IndexConstraintMatch> MatchIndexConstraint(
-    const BoundQueryView& bound_select, BoundSourceId source_id, std::size_t source_column_begin,
-    std::size_t source_column_count, const CatalogIndexTerm& term,
-    const ReadPredicateTerm& predicate,
-    std::optional<BoundSourceId> available_before = std::nullopt) {
-  const auto* indexed_column = std::get_if<ColumnId>(&term.target);
-  if (indexed_column == nullptr) {
-    return std::nullopt;
-  }
-  const BoundExpressionId transparent = TransparentPredicateId(bound_select, predicate.predicate);
-  if (!IsValidExpressionId(bound_select, transparent)) {
-    return std::nullopt;
-  }
-  const auto* comparison =
-      std::get_if<BoundComparisonExpression>(&bound_select.expression(transparent).payload);
-  if (comparison == nullptr || comparison->collation.value() >= bound_select.collations().size()) {
-    return std::nullopt;
-  }
-
-  const bool left_column =
-      IsIndexedColumnReference(bound_select, source_id, source_column_begin, source_column_count,
-                               *indexed_column, comparison->left);
-  const bool right_column =
-      IsIndexedColumnReference(bound_select, source_id, source_column_begin, source_column_count,
-                               *indexed_column, comparison->right);
-  if (left_column == right_column) {
-    return std::nullopt;
-  }
-  const BoundExpressionId key = left_column ? comparison->right : comparison->left;
-  if (!IsAccessKeyAvailable(bound_select, key, available_before)) {
-    return std::nullopt;
-  }
-  const TypeAffinity indexed_affinity =
-      bound_select
-          .expression(TransparentRowIdOperandId(bound_select,
-                                                left_column ? comparison->left : comparison->right))
-          .properties.affinity;
-  const auto is_numeric = [](TypeAffinity affinity) noexcept {
-    return affinity == TypeAffinity::kNumeric || affinity == TypeAffinity::kInteger ||
-           affinity == TypeAffinity::kReal;
-  };
-  if ((comparison->affinity == TypeAffinity::kText && indexed_affinity != TypeAffinity::kText) ||
-      (is_numeric(comparison->affinity) && !is_numeric(indexed_affinity))) {
-    return std::nullopt;
-  }
-  const SqlComparison normalized =
-      left_column ? comparison->comparison : ReverseComparison(comparison->comparison);
-  const bool is_null_test = normalized == SqlComparison::kIs && IsNullLiteral(bound_select, key);
-  if (!is_null_test &&
-      !CatalogNamesEqual(bound_select.collations()[comparison->collation.value()].name,
-                         term.collation_name)) {
-    return std::nullopt;
-  }
-  IndexConstraintMatch match{
-      .key = key,
-      .predicate = predicate.predicate,
-      .conjunct_position = predicate.conjunct_position,
-  };
-  switch (normalized) {
-    case SqlComparison::kEqual:
-      match.kind = IndexConstraintKind::kEquality;
-      match.reject_null = true;
-      return match;
-    case SqlComparison::kIs:
-      match.kind = IndexConstraintKind::kEquality;
-      match.reject_null = false;
-      return match;
-    case SqlComparison::kGreater:
-      match.kind = IndexConstraintKind::kLower;
-      match.inclusive = false;
-      return match;
-    case SqlComparison::kGreaterEqual:
-      match.kind = IndexConstraintKind::kLower;
-      match.inclusive = true;
-      return match;
-    case SqlComparison::kLess:
-      match.kind = IndexConstraintKind::kUpper;
-      match.inclusive = false;
-      return match;
-    case SqlComparison::kLessEqual:
-      match.kind = IndexConstraintKind::kUpper;
-      match.inclusive = true;
-      return match;
-    case SqlComparison::kNotEqual:
-    case SqlComparison::kIsNot:
-      return std::nullopt;
-  }
-  return std::nullopt;
-}
 
 void MarkRequiredSourceValues(const BoundQueryView& bound_select, BoundSourceId source_id,
                               BoundExpressionId id, std::vector<bool>* columns, bool* rowid) {
@@ -1580,15 +1323,9 @@ struct RequiredSourceValues {
   return estimate;
 }
 
-[[nodiscard]] std::uint64_t EstimateEqualityPrefixOutput(
-    const BoundQueryView& bound_select, std::span<const PhysicalIndexEquality> equalities,
-    std::uint64_t input_rows, std::span<const std::uint64_t> rows_per_prefix = {}) noexcept {
-  return LogEstToRows(
-      EstimateEqualityPrefixLogEst(bound_select, equalities, input_rows, rows_per_prefix));
-}
-
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 [[nodiscard]] LogEst EstimateRangeOutputLogEst(LogEst input, std::uint32_t bound_count) noexcept {
-  const LogEst bounds = static_cast<LogEst>(bound_count);
+  const auto bounds = static_cast<LogEst>(bound_count);
   const LogEst reduction = (bounds + static_cast<LogEst>(bound_count == 2U)) * kRangeReduction;
   return std::min(input - bounds, std::max(input - reduction, kMinimumRangeOutput));
 }
@@ -1635,283 +1372,6 @@ struct RequiredSourceValues {
   };
 }
 
-[[nodiscard]] AccessPathCost RowIdRangeCost(const SourceInfo& source,
-                                            std::uint32_t bound_count) noexcept {
-  const LogEst rows = ToLogEst(source.estimated_rows);
-  const LogEst output = EstimateRangeOutputLogEst(rows, bound_count);
-  return AccessPathCost{
-      .run_log_est = AddLogEst(LogEstLogarithm(rows), output + kTableScanCostBias),
-      .output_log_est = output,
-  };
-}
-
-template <typename Visitor>
-void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const BoundSelectCore& core,
-                                 const BoundTableSource& source, Visitor* visitor) {
-  if (source.on.has_value()) {
-    auto visit_on = [&](BoundExpressionId predicate) {
-      return (*visitor)(predicate, PhysicalPredicateOrigin::kOn);
-    };
-    if (!VisitConjuncts(bound_select, *source.on, &visit_on)) {
-      return;
-    }
-  }
-  const bool right_core = std::ranges::any_of(core.table_sources, [](const BoundTableSource& item) {
-    return SourceJoinPreservesRight(item.join);
-  });
-  if (!SourceJoinPreservesLeft(source.join) && !right_core && core.where.has_value()) {
-    auto visit_where = [&](BoundExpressionId predicate) {
-      return (*visitor)(predicate, PhysicalPredicateOrigin::kWhere);
-    };
-    static_cast<void>(VisitConjuncts(bound_select, *core.where, &visit_where));
-  }
-}
-
-[[nodiscard]] std::vector<ReadPredicateTerm> JoinedAccessPredicates(
-    const BoundQueryView& bound_select, const BoundSelectCore& core,
-    const BoundTableSource& source) {
-  std::vector<ReadPredicateTerm> predicates;
-  auto visitor = [&](BoundExpressionId predicate, PhysicalPredicateOrigin origin) {
-    predicates.push_back(ReadPredicateTerm{
-        .predicate = predicate,
-        .conjunct_position = predicates.size(),
-        .origin = origin,
-    });
-    return true;
-  };
-  VisitJoinedAccessPredicates(bound_select, core, source, &visitor);
-  return predicates;
-}
-
-[[nodiscard]] std::expected<std::optional<RowIdCandidatePlan>, OptimizerError> JoinedRowIdLookupKey(
-    const LogicalQueryView& logical_plan, std::size_t core_index, BoundSourceId source_id) {
-  const BoundQueryView& bound_select = logical_plan.bound_select();
-  const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[core_index]);
-  if (core == nullptr || core->table_sources.size() < 2U) {
-    return std::optional<RowIdCandidatePlan>{};
-  }
-  const auto source = std::ranges::find(core->table_sources, source_id, &BoundTableSource::id);
-  if (source == core->table_sources.end()) {
-    return std::optional<RowIdCandidatePlan>{};
-  }
-  const SourceInfo info = ResolveTableSource(bound_select, *source);
-  if (!info.rowid_eligible ||
-      RowIdCost(info.estimated_rows).run_log_est >= ScanCost(info.estimated_rows).run_log_est) {
-    return std::optional<RowIdCandidatePlan>{};
-  }
-  const std::vector<ReadPredicateTerm> predicates =
-      JoinedAccessPredicates(bound_select, *core, *source);
-  const auto make_candidate =
-      [&](std::size_t index, JoinedExpressionShape shape) -> std::optional<RowIdCandidatePlan> {
-    const auto key =
-        RowIdLookupKey(bound_select, info, predicates[index].predicate, source_id, shape);
-    if (!key.has_value()) {
-      return std::nullopt;
-    }
-    return RowIdCandidatePlan{
-        .key = *key,
-        .selected_term = index,
-        .constraint = predicates[index],
-    };
-  };
-
-  for (std::size_t index = 0; index < predicates.size(); ++index) {
-    if (predicates[index].origin != PhysicalPredicateOrigin::kOn) {
-      continue;
-    }
-    for (const JoinedExpressionShape shape :
-         {JoinedExpressionShape::kValue, JoinedExpressionShape::kArithmetic,
-          JoinedExpressionShape::kScalar}) {
-      if (auto candidate = make_candidate(index, shape); candidate.has_value()) {
-        return candidate;
-      }
-    }
-    const auto excluded = RowIdEqualityKey(bound_select, info, predicates[index].predicate);
-    if (excluded.has_value() &&
-        ExpressionSourcesAvailableBeforeSource(bound_select, *excluded, source_id)) {
-      return std::optional<RowIdCandidatePlan>{};
-    }
-  }
-
-  for (std::size_t index = 0; index < predicates.size(); ++index) {
-    if (predicates[index].origin == PhysicalPredicateOrigin::kWhere) {
-      if (auto value = make_candidate(index, JoinedExpressionShape::kValue); value.has_value()) {
-        return value;
-      }
-    }
-  }
-
-  std::optional<RowIdCandidatePlan> arithmetic;
-  for (std::size_t index = 0; index < predicates.size() && !arithmetic.has_value(); ++index) {
-    if (predicates[index].origin == PhysicalPredicateOrigin::kWhere) {
-      arithmetic = make_candidate(index, JoinedExpressionShape::kArithmetic);
-    }
-  }
-  if (!arithmetic.has_value()) {
-    return arithmetic;
-  }
-  for (const LogicalNode& node : logical_plan.nodes()) {
-    const auto* join = std::get_if<LogicalJoinNode>(&node.payload);
-    if (join == nullptr || join->core_index != core_index || !join->on.has_value() ||
-        IsJoinedAccessExpression(bound_select, *join->on, JoinedExpressionShape::kPredicate)) {
-      continue;
-    }
-    auto placements = PlanJoinPredicatePlacements(logical_plan, *join);
-    if (!placements.has_value()) {
-      return std::unexpected(std::move(placements.error()));
-    }
-    if (std::ranges::any_of(*placements, [source_id](const auto& placement) {
-          return placement.source == source_id;
-        })) {
-      return std::optional<RowIdCandidatePlan>{};
-    }
-  }
-  return arithmetic;
-}
-
-[[nodiscard]] std::optional<IndexCandidatePlan> AnalyzeIndexCandidate(
-    const BoundQueryView& bound_select, BoundSourceId source_id, TableId table_id,
-    std::size_t source_column_begin, std::size_t source_column_count, IndexId index_id,
-    std::span<const ReadPredicateTerm> predicates, const BoundSelectCore* select_core = nullptr,
-    bool allow_noncovering_full_scan = false,
-    std::optional<BoundSourceId> available_before = std::nullopt) {
-  const CatalogSnapshot& catalog = *bound_select.catalog();
-  const CatalogTable& table = catalog.table(table_id);
-  const CatalogIndex& index = catalog.index(index_id);
-  if (!IsSupportedIndexShape(bound_select, table, index)) {
-    return std::nullopt;
-  }
-
-  IndexCandidatePlan candidate{
-      .node =
-          PhysicalIndexScanNode{
-              .source = source_id,
-              .table = table_id,
-              .table_root_page = table.root_page,
-              .index = index_id,
-              .index_root_page = index.root_page,
-              .equalities = {},
-              .range = std::nullopt,
-              .covering = false,
-          },
-      .selected_terms = std::vector<bool>(predicates.size(), false),
-  };
-  candidate.node.equalities.reserve(index.key_term_count);
-  std::size_t equality_count = 0;
-  for (; equality_count < index.key_term_count; ++equality_count) {
-    const CatalogIndexTerm& term = index.terms[equality_count];
-    std::optional<std::size_t> selected;
-    std::optional<IndexConstraintMatch> selected_match;
-    for (std::size_t predicate_index = 0; predicate_index < predicates.size(); ++predicate_index) {
-      if (candidate.selected_terms[predicate_index]) {
-        continue;
-      }
-      const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
-                               term, predicates[predicate_index], available_before);
-      if (match.has_value() && match->kind == IndexConstraintKind::kEquality) {
-        selected = predicate_index;
-        selected_match = match;
-        break;
-      }
-    }
-    if (!selected.has_value() || !selected_match.has_value()) {
-      break;
-    }
-    const auto* column = std::get_if<ColumnId>(&term.target);
-    if (column == nullptr || column->value >= table.columns.size()) {
-      return std::nullopt;
-    }
-    candidate.selected_terms[*selected] = true;
-    candidate.node.equalities.push_back(PhysicalIndexEquality{
-        .column = *column,
-        .key = selected_match->key,
-        .predicate = selected_match->predicate,
-        .conjunct_position = selected_match->conjunct_position,
-        .origin = predicates[*selected].origin,
-        .affinity = table.columns[column->value].affinity,
-        .collation_name = term.collation_name,
-        .order = term.order,
-        .reject_null = selected_match->reject_null,
-    });
-  }
-
-  if (equality_count < index.key_term_count && !index.statistics.unordered) {
-    const CatalogIndexTerm& term = index.terms[equality_count];
-    std::optional<std::size_t> lower_index;
-    std::optional<std::size_t> upper_index;
-    std::optional<IndexConstraintMatch> lower;
-    std::optional<IndexConstraintMatch> upper;
-    for (std::size_t predicate_index = 0; predicate_index < predicates.size(); ++predicate_index) {
-      if (candidate.selected_terms[predicate_index]) {
-        continue;
-      }
-      const std::optional<IndexConstraintMatch> match =
-          MatchIndexConstraint(bound_select, source_id, source_column_begin, source_column_count,
-                               term, predicates[predicate_index], available_before);
-      if (!match.has_value()) {
-        continue;
-      }
-      if (match->kind == IndexConstraintKind::kLower && !lower.has_value()) {
-        lower_index = predicate_index;
-        lower = match;
-      } else if (match->kind == IndexConstraintKind::kUpper && !upper.has_value()) {
-        upper_index = predicate_index;
-        upper = match;
-      }
-      if (lower.has_value() && upper.has_value()) {
-        break;
-      }
-    }
-    if (lower.has_value() || upper.has_value()) {
-      const auto* column = std::get_if<ColumnId>(&term.target);
-      if (column == nullptr || column->value >= table.columns.size() ||
-          (lower.has_value() && !lower_index.has_value()) ||
-          (upper.has_value() && !upper_index.has_value())) {
-        return std::nullopt;
-      }
-      PhysicalIndexRange range{
-          .column = *column,
-          .affinity = table.columns[column->value].affinity,
-          .collation_name = term.collation_name,
-          .order = term.order,
-      };
-      if (lower.has_value()) {
-        candidate.selected_terms[*lower_index] = true;
-        range.lower = PhysicalRangeBound{
-            .key = lower->key,
-            .predicate = lower->predicate,
-            .conjunct_position = lower->conjunct_position,
-            .origin = predicates[*lower_index].origin,
-            .inclusive = lower->inclusive,
-        };
-      }
-      if (upper.has_value()) {
-        candidate.selected_terms[*upper_index] = true;
-        range.upper = PhysicalRangeBound{
-            .key = upper->key,
-            .predicate = upper->predicate,
-            .conjunct_position = upper->conjunct_position,
-            .origin = predicates[*upper_index].origin,
-            .inclusive = upper->inclusive,
-        };
-      }
-      candidate.node.range = range;
-    }
-  }
-
-  const bool constrained = !candidate.node.equalities.empty() || candidate.node.range.has_value();
-  if (!constrained && index.statistics.unordered) {
-    return std::nullopt;
-  }
-  candidate.node.covering = IsCoveringIndex(bound_select, source_id, table, index, predicates,
-                                            candidate.selected_terms, select_core);
-  if (!constrained && !candidate.node.covering && !allow_noncovering_full_scan) {
-    return std::nullopt;
-  }
-  return candidate;
-}
-
 [[nodiscard]] bool IsUniqueLookupShortcut(const BoundQueryView& bound_select,
                                           const PhysicalIndexScanNode& node) noexcept {
   const CatalogIndex& index = bound_select.catalog()->index(node.index);
@@ -1923,16 +1383,17 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
          });
 }
 
-[[nodiscard]] AccessPathCandidate PublishIndexCandidate(const BoundQueryView& bound_select,
-                                                        const SourceInfo& source,
-                                                        const IndexCandidatePlan& plan,
-                                                        bool allow_shortcut = false) noexcept {
+[[nodiscard]] AccessPathCandidate PublishIndexCandidate(
+    const BoundQueryView& bound_select, const SourceInfo& source, const IndexCandidatePlan& plan,
+    bool allow_shortcut = false, std::optional<LogEst> output_estimate = std::nullopt) noexcept {
   const CatalogSnapshot& catalog = *bound_select.catalog();
   const CatalogIndex& index = catalog.index(plan.node.index);
   const std::uint64_t index_rows = IndexCardinality(index, source.estimated_rows);
   const std::uint64_t row_size =
       index.statistics.average_row_size.value_or(DerivedIndexRowSize(catalog, index));
-  LogEst output = EstimateIndexOutputLogEst(bound_select, index, plan.node, index_rows);
+  LogEst output = output_estimate.has_value()
+                      ? *output_estimate
+                      : EstimateIndexOutputLogEst(bound_select, index, plan.node, index_rows);
   const bool constrained = !plan.node.equalities.empty() || plan.node.range.has_value();
   const LogEst table_width = std::max<LogEst>(ToLogEst(source.estimated_row_size), 1);
   LogEst run =
@@ -1972,6 +1433,1481 @@ void VisitJoinedAccessPredicates(const BoundQueryView& bound_select, const Bound
           candidate.cost.output_log_est < selected.cost.output_log_est);
 }
 
+template <typename Visitor>
+void VisitLoopTerms(const ReadAccessCandidate& loop, Visitor&& visitor) {
+  std::visit(
+      [&](const auto& payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, RowIdCandidatePlan>) {
+          visitor(payload.selected_term);
+        } else if constexpr (std::is_same_v<Payload, RowIdRangeCandidatePlan> ||
+                             std::is_same_v<Payload, IndexCandidatePlan> ||
+                             std::is_same_v<Payload, AutomaticCandidatePlan>) {
+          for (std::size_t term = 0; term < payload.selected_terms.size(); ++term) {
+            if (payload.selected_terms[term]) {
+              visitor(term);
+            }
+          }
+        }
+      },
+      loop.payload);
+}
+
+[[nodiscard]] bool LoopUsesTerm(const ReadAccessCandidate& loop, std::size_t term) {
+  bool used = false;
+  VisitLoopTerms(loop, [&](std::size_t selected) { used = used || selected == term; });
+  return used;
+}
+
+[[nodiscard]] std::size_t LoopTermCount(const ReadAccessCandidate& loop) noexcept {
+  return loop.published.kind == PhysicalAccessKind::kRowIdLookup
+             ? 1U
+             : static_cast<std::size_t>(loop.published.equality_term_count) +
+                   loop.published.range_bound_count;
+}
+
+[[nodiscard]] bool LoopIsCheaperProperSubset(const ReadAccessCandidate& left,
+                                             const ReadAccessCandidate& right) {
+  const auto& left_cost = left.published.cost;
+  const auto& right_cost = right.published.cost;
+  if (left_cost.run_log_est > right_cost.run_log_est &&
+      left_cost.output_log_est > right_cost.output_log_est) {
+    return false;
+  }
+  if (left.published.index == right.published.index &&
+      left.published.equality_term_count < right.published.equality_term_count) {
+    return true;
+  }
+  if (LoopTermCount(left) >= LoopTermCount(right) ||
+      (left.published.covering && !right.published.covering)) {
+    return false;
+  }
+  bool subset = true;
+  VisitLoopTerms(left, [&](std::size_t term) { subset = subset && LoopUsesTerm(right, term); });
+  return subset;
+}
+
+void AdjustLoopSubsetCost(std::span<const ReadAccessCandidate> loops,
+                          ReadAccessCandidate& candidate) {
+  if (candidate.published.kind != PhysicalAccessKind::kIndexScan) {
+    return;
+  }
+  for (const ReadAccessCandidate& loop : loops) {
+    if (loop.source_position != candidate.source_position ||
+        loop.published.kind != PhysicalAccessKind::kIndexScan) {
+      continue;
+    }
+    auto& cost = candidate.published.cost;
+    if (LoopIsCheaperProperSubset(loop, candidate)) {
+      cost.run_log_est = std::min(cost.run_log_est, loop.published.cost.run_log_est);
+      cost.output_log_est = std::min(cost.output_log_est, loop.published.cost.output_log_est - 1);
+    } else if (LoopIsCheaperProperSubset(candidate, loop)) {
+      cost.run_log_est = std::max(cost.run_log_est, loop.published.cost.run_log_est);
+      cost.output_log_est = std::max(cost.output_log_est, loop.published.cost.output_log_est + 1);
+    }
+  }
+}
+
+[[nodiscard]] std::optional<std::size_t> FindLesserLoop(std::span<const ReadAccessCandidate> loops,
+                                                        const ReadAccessCandidate& candidate,
+                                                        std::size_t start = 0U) {
+  for (std::size_t index = start; index < loops.size(); ++index) {
+    const ReadAccessCandidate& loop = loops[index];
+    if (loop.source_position != candidate.source_position ||
+        loop.sort_index != candidate.sort_index) {
+      continue;
+    }
+    const auto& old = loop.published.cost;
+    const auto& next = candidate.published.cost;
+    const bool candidate_dependencies =
+        (loop.prerequisites & candidate.prerequisites) == candidate.prerequisites;
+    if (loop.published.kind == PhysicalAccessKind::kAutomaticIndex &&
+        candidate.published.kind == PhysicalAccessKind::kIndexScan &&
+        candidate.published.equality_term_count != 0U && candidate_dependencies) {
+      return index;
+    }
+    if ((loop.prerequisites & candidate.prerequisites) == loop.prerequisites &&
+        old.setup_log_est <= next.setup_log_est && old.run_log_est <= next.run_log_est &&
+        old.output_log_est <= next.output_log_est) {
+      return std::nullopt;
+    }
+    if (candidate_dependencies && old.run_log_est >= next.run_log_est &&
+        old.output_log_est >= next.output_log_est) {
+      return index;
+    }
+  }
+  return loops.size();
+}
+
+struct WhereLoopPlan {
+  std::vector<ReadAccessCandidate> loops{};
+  std::array<std::size_t, kMaximumSelectSources> selected{};
+  std::size_t level_count = 0;
+  LogEst output_log_est = 0;
+  bool search_limited = false;
+  bool star_used = false;
+};
+
+[[nodiscard]] bool InsertWhereLoop(WhereLoopPlan& plan, ReadAccessCandidate& candidate,
+                                   std::size_t& budget) {
+  if (budget == 0U) {
+    plan.search_limited = true;
+    return false;
+  }
+  --budget;
+  AdjustLoopSubsetCost(plan.loops, candidate);
+  const auto replacement = FindLesserLoop(plan.loops, candidate);
+  if (!replacement.has_value()) {
+    return true;
+  }
+  if (*replacement == plan.loops.size()) {
+    plan.loops.push_back(candidate);
+    return true;
+  }
+  plan.loops[*replacement] = candidate;
+  std::size_t tail = *replacement + 1U;
+  while (tail < plan.loops.size()) {
+    const auto superseded = FindLesserLoop(plan.loops, candidate, tail);
+    if (!superseded.has_value() || *superseded == plan.loops.size()) {
+      break;
+    }
+    tail = *superseded;
+    plan.loops.erase(plan.loops.begin() + static_cast<std::ptrdiff_t>(tail));
+  }
+  return true;
+}
+
+[[nodiscard]] bool IsDeclaredJoinBarrier(const BoundTableSource& source) noexcept {
+  return source.join == SourceJoinKind::kCross || SourceJoinPreservesLeft(source.join) ||
+         SourceJoinPreservesRight(source.join);
+}
+
+[[nodiscard]] std::size_t ComputePathWidth(WhereLoopPlan& plan, const BoundSelectCore& core) {
+  constexpr std::size_t kGeneralPaths = 12;
+  constexpr std::size_t kStarPaths = 18;
+  const std::size_t count = core.table_sources.size();
+  if (count <= 1U) {
+    return 1;
+  }
+  if (count == 2U) {
+    return 5;
+  }
+  if (count < 4U) {
+    return kGeneralPaths;
+  }
+  SourceMask self_joins = 0;
+  std::size_t start = 0;
+  for (std::size_t fact = 0; fact < count; ++fact) {
+    const auto& fact_source = core.table_sources[fact];
+    const SourceMask fact_mask = SourceBit(fact);
+    if (IsDeclaredJoinBarrier(fact_source)) {
+      if (fact + 3U > count) {
+        break;
+      }
+      while (start < plan.loops.size() && plan.loops[start].source_position <= fact) {
+        ++start;
+      }
+    }
+    SourceMask dimensions = 0;
+    std::size_t dimension_count = 0;
+    for (std::size_t index = start; index < plan.loops.size(); ++index) {
+      const auto& loop = plan.loops[index];
+      const auto& source = core.table_sources[loop.source_position];
+      if (IsDeclaredJoinBarrier(source)) {
+        break;
+      }
+      const SourceMask mask = SourceBit(loop.source_position);
+      if ((loop.prerequisites & fact_mask) != 0U && (mask & dimensions) == 0U &&
+          (mask & self_joins) == 0U) {
+        if (source.kind == fact_source.kind && source.table == fact_source.table) {
+          self_joins |= fact_mask;
+        } else {
+          ++dimension_count;
+          dimensions |= mask;
+        }
+      }
+    }
+    if (dimension_count <= 2U) {
+      continue;
+    }
+    plan.star_used = true;
+    LogEst maximum = std::numeric_limits<LogEst>::lowest();
+    for (std::size_t index = start; index < plan.loops.size(); ++index) {
+      const auto& loop = plan.loops[index];
+      if (loop.source_position > fact) {
+        break;
+      }
+      if (loop.source_position == fact) {
+        maximum = std::max(maximum, loop.published.cost.run_log_est);
+      }
+    }
+    if (maximum < std::numeric_limits<LogEst>::max()) {
+      ++maximum;
+    }
+    for (std::size_t index = start; index < plan.loops.size(); ++index) {
+      auto& loop = plan.loops[index];
+      if ((SourceBit(loop.source_position) & dimensions) != 0U && LoopTermCount(loop) == 0U) {
+        loop.published.cost.run_log_est = std::max(loop.published.cost.run_log_est, maximum);
+      }
+    }
+  }
+  return plan.star_used ? kStarPaths : kGeneralPaths;
+}
+
+[[nodiscard]] bool LoopIsNoBetter(const BoundQueryView& bound, const ReadAccessCandidate& candidate,
+                                  const ReadAccessCandidate& baseline) noexcept {
+  if (candidate.published.kind != PhysicalAccessKind::kIndexScan ||
+      baseline.published.kind != PhysicalAccessKind::kIndexScan) {
+    return true;
+  }
+  const auto width = [&](const ReadAccessCandidate& loop) {
+    const auto& index = bound.catalog()->index(*loop.published.index);
+    return ToLogEst(
+        index.statistics.average_row_size.value_or(DerivedIndexRowSize(*bound.catalog(), index)));
+  };
+  return width(candidate) >= width(baseline);
+}
+
+[[nodiscard]] std::expected<void, OptimizerError> SolveWherePath(WhereLoopPlan& plan,
+                                                                 const BoundQueryView& bound,
+                                                                 const BoundSelectCore& core,
+                                                                 LogEst outer_loops) {
+  struct Path {
+    SourceMask visited = 0;
+    LogEst rows = 0;
+    LogEst cost = 0;
+    LogEst unsorted = 0;
+    std::span<std::size_t> loops{};
+  };
+  constexpr std::size_t kMaximumPaths = 18;
+  const std::size_t count = core.table_sources.size();
+  const std::size_t width = ComputePathWidth(plan, core);
+  std::array<Path, 2U * kMaximumPaths> headers{};
+  std::array<std::size_t, 2> single_source;
+  // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+  std::unique_ptr<std::size_t[]> storage;
+  std::span<std::size_t> sequences{single_source};
+  if (count != 1U) {
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    storage = std::make_unique_for_overwrite<std::size_t[]>(2U * width * count);
+    sequences = std::span{storage.get(), 2U * width * count};
+  }
+  for (std::size_t index = 0; index < 2U * width; ++index) {
+    headers[index].loops = sequences.subspan(index * count, count);
+  }
+  std::span<Path> from{headers.data() + width, width};
+  std::span<Path> to{headers.data(), width};
+  from[0].rows = std::min(outer_loops, kMaximumOuterLoopEstimate);
+  std::size_t from_count = 1;
+  std::size_t worst = 0;
+  LogEst maximum_cost = 0;
+  LogEst maximum_unsorted = 0;
+  for (std::size_t level = 0; level < count; ++level) {
+    std::size_t to_count = 0;
+    for (const Path& prefix : from.first(from_count)) {
+      for (std::size_t choice = 0; choice < plan.loops.size(); ++choice) {
+        const ReadAccessCandidate& loop = plan.loops[choice];
+        const SourceMask self = SourceBit(loop.source_position);
+        if ((loop.prerequisites & ~prefix.visited) != 0U || (self & prefix.visited) != 0U ||
+            (loop.published.kind == PhysicalAccessKind::kAutomaticIndex && prefix.rows < 3)) {
+          continue;
+        }
+        const auto& loop_cost = loop.published.cost;
+        LogEst unsorted = loop_cost.run_log_est + prefix.rows;
+        if (loop_cost.setup_log_est != 0) {
+          unsorted = AddLogEst(loop_cost.setup_log_est, unsorted);
+        }
+        unsorted = AddLogEst(unsorted, prefix.unsorted);
+        const LogEst cost = unsorted;
+        unsorted -= 2;
+        const LogEst rows = prefix.rows + loop_cost.output_log_est;
+        const SourceMask visited = prefix.visited | self;
+        std::size_t target = 0;
+        while (target < to_count && to[target].visited != visited) {
+          ++target;
+        }
+        if (target == to_count) {
+          if (to_count >= width &&
+              (cost > maximum_cost || (cost == maximum_cost && unsorted >= maximum_unsorted))) {
+            continue;
+          }
+          target = to_count < width ? to_count++ : worst;
+        } else {
+          const Path& previous = to[target];
+          if (previous.cost < cost || (previous.cost == cost && previous.rows < rows) ||
+              (previous.cost == cost && previous.rows == rows && previous.unsorted < unsorted) ||
+              (previous.cost == cost && previous.rows == rows && previous.unsorted == unsorted &&
+               LoopIsNoBetter(bound, loop, plan.loops[previous.loops[level]]))) {
+            continue;
+          }
+        }
+        Path& next = to[target];
+        next.visited = visited;
+        next.rows = rows;
+        next.cost = cost;
+        next.unsorted = unsorted;
+        std::copy_n(prefix.loops.begin(), level, next.loops.begin());
+        next.loops[level] = choice;
+        if (to_count >= width) {
+          worst = 0;
+          maximum_cost = to[0].cost;
+          maximum_unsorted = to[0].rows;
+          for (std::size_t index = 1; index < width; ++index) {
+            if (to[index].cost > maximum_cost ||
+                (to[index].cost == maximum_cost && to[index].unsorted > maximum_unsorted)) {
+              worst = index;
+              maximum_cost = to[index].cost;
+              maximum_unsorted = to[index].unsorted;
+            }
+          }
+        }
+      }
+    }
+    std::swap(from, to);
+    from_count = to_count;
+  }
+  if (from_count != 1U) {
+    return std::unexpected(InvariantFailure("optimizer found no query solution"));
+  }
+  plan.level_count = count;
+  plan.output_log_est = from[0].rows;
+  std::copy_n(from[0].loops.begin(), count, plan.selected.begin());
+  return {};
+}
+
+[[nodiscard]] bool IsNumericIndexAffinity(TypeAffinity affinity) noexcept {
+  return affinity == TypeAffinity::kNumeric || affinity == TypeAffinity::kInteger ||
+         affinity == TypeAffinity::kReal;
+}
+
+[[nodiscard]] bool IndexAffinityMatches(TypeAffinity comparison, TypeAffinity column) noexcept {
+  if (comparison == TypeAffinity::kText) {
+    return column == TypeAffinity::kText;
+  }
+  return !IsNumericIndexAffinity(comparison) || IsNumericIndexAffinity(column);
+}
+
+[[nodiscard]] TypeAffinity IndexProbeAffinity(const BoundQueryView& bound, BoundExpressionId key,
+                                              TypeAffinity column) noexcept {
+  const TypeAffinity operand = bound.expression(key).properties.affinity;
+  if (operand != TypeAffinity::kNone && column != TypeAffinity::kNone) {
+    return IsNumericIndexAffinity(operand) || IsNumericIndexAffinity(column)
+               ? TypeAffinity::kNumeric
+               : TypeAffinity::kBlob;
+  }
+  return operand == TypeAffinity::kNone ? column : operand;
+}
+
+[[nodiscard]] std::optional<LoopColumnReference> LoopColumnOf(const BoundQueryView& bound,
+                                                              const BoundSelectCore& core,
+                                                              BoundExpressionId expression) {
+  const auto identity = LoopOperandIdentity(bound, expression);
+  if (!identity.has_value()) {
+    return std::nullopt;
+  }
+  const auto source = SourcePosition(core.table_sources, identity->source);
+  if (!source.has_value()) {
+    return std::nullopt;
+  }
+  std::optional<ColumnId> column;
+  if (identity->column.has_value()) {
+    const auto& declaration = core.table_sources[*source];
+    const auto& bound_column = bound.source_columns()[identity->column->value()];
+    column =
+        declaration.kind == BoundSourceKind::kSchemaTable
+            ? std::optional{ColumnId{identity->column->value() - declaration.source_column_begin}}
+            : bound_column.catalog_column;
+    if (!column.has_value()) {
+      return std::nullopt;
+    }
+  }
+  return LoopColumnReference{.source_position = *source, .column = column};
+}
+
+[[nodiscard]] bool TermIsEquivalence(const BoundQueryView& bound, const BoundSelectCore& core,
+                                     const ReadPredicateTerm& term) {
+  const BoundExpression& expression =
+      bound.expression(TransparentPredicateId(bound, term.predicate));
+  const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+  if (comparison == nullptr || term.outer_on || expression.properties.has_explicit_collation ||
+      (comparison->comparison != SqlComparison::kEqual &&
+       comparison->comparison != SqlComparison::kIs) ||
+      (comparison->comparison == SqlComparison::kIs && !core.table_sources.empty() &&
+       SourceIsLeftOfRightJoin(core, 0U))) {
+    return false;
+  }
+  const auto left = TransparentRowIdOperandId(bound, comparison->left);
+  const auto right = TransparentRowIdOperandId(bound, comparison->right);
+  if (!BoundSourceLeafIdentityOf(bound.expression(left), bound.source_columns()).has_value() ||
+      !BoundSourceLeafIdentityOf(bound.expression(right), bound.source_columns()).has_value()) {
+    return false;
+  }
+  const auto& left_properties = bound.expression(left).properties;
+  const auto& right_properties = bound.expression(right).properties;
+  if (left_properties.affinity != right_properties.affinity &&
+      (!IsNumericIndexAffinity(left_properties.affinity) ||
+       !IsNumericIndexAffinity(right_properties.affinity))) {
+    return false;
+  }
+  const auto collation = [&](const BoundExpressionProperties& properties) {
+    return properties.collation.has_value()
+               ? std::string_view{bound.collations()[properties.collation->value()].name}
+               : std::string_view{"BINARY"};
+  };
+  return CatalogNamesEqual(collation(left_properties), collation(right_properties));
+}
+
+[[nodiscard]] bool IsSmallIntegerKey(const BoundQueryView& bound, BoundExpressionId key) {
+  key = TransparentPredicateId(bound, key);
+  if (const auto* unary = std::get_if<BoundUnaryExpression>(&bound.expression(key).payload);
+      unary != nullptr && (unary->operation == BoundUnaryOperation::kPositive ||
+                           unary->operation == BoundUnaryOperation::kNegative)) {
+    key = TransparentPredicateId(bound, unary->operand);
+  }
+  const auto* literal = std::get_if<BoundLiteralExpression>(&bound.expression(key).payload);
+  if (literal == nullptr || literal->value.type() != SqlValueType::kInteger) {
+    return false;
+  }
+  const auto integer = literal->value.integer_value();
+  if (!integer.has_value()) {
+    return false;
+  }
+  const auto value = *integer;
+  return value >= -1 && value <= 1;
+}
+
+[[nodiscard]] bool HasMinMaxOrder(const BoundQueryView& bound, const BoundSelectCore& core) {
+  if (!core.aggregate.has_value()) {
+    return false;
+  }
+  const auto& aggregate = *core.aggregate;
+  if (!aggregate.group_by.empty()) {
+    return true;
+  }
+  if (aggregate.having.has_value() || aggregate.invocations.size() != 1U) {
+    return false;
+  }
+  const auto& invocation = bound.aggregate_invocations()[aggregate.invocations[0].value()];
+  return !invocation.distinct && invocation.order_by.empty() && !invocation.filter.has_value() &&
+         invocation.arguments.size() == 1U &&
+         bound.aggregate_functions()[invocation.function.value()].extremum !=
+             BoundAggregateExtremumKind::kNone;
+}
+
+[[nodiscard]] bool RequestsInputDistinct(const BoundQueryView& bound,
+                                         const BoundSelectCore& core) noexcept {
+  if (core.aggregate.has_value()) {
+    const auto& invocations = core.aggregate->invocations;
+    return invocations.size() == 1U &&
+           bound.aggregate_invocations()[invocations[0].value()].distinct;
+  }
+  return core.quantifier == SelectQuantifier::kDistinct &&
+         BoundQueryRequiresResultValues(bound.query(), bound.expressions());
+}
+
+class WhereLoopBuilder final {
+ public:
+  WhereLoopBuilder(const BoundQueryView& bound, std::size_t core_index,
+                   std::span<ReadPredicateTerm> terms, OptimizerOptions options,
+                   LogEst outer_loops = 0)
+      : bound_(bound),
+        core_(std::get<BoundSelectCore>(bound.query_cores()[core_index])),
+        core_index_(core_index),
+        terms_(terms),
+        options_(options),
+        outer_loops_(outer_loops),
+        order_candidates_(HasMinMaxOrder(bound, core_) || !bound.order_by().empty()),
+        adjust_output_(!bound.order_by().empty() || order_candidates_) {}
+
+  [[nodiscard]] std::expected<WhereLoopPlan, OptimizerError> Run() {
+    if (core_.table_sources.empty() || core_.table_sources.size() > kMaximumSelectSources) {
+      return std::unexpected(InvariantFailure("loop builder has an invalid source count"));
+    }
+    if (auto prepared = PrepareLoopTerms(bound_, core_, terms_); !prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
+    const bool shortcut = core_.table_sources.size() == 1U && TryShortcut();
+    if (error_.has_value()) {
+      return std::unexpected(std::move(*error_));
+    }
+    if (shortcut) {
+      plan_.level_count = 1U;
+      plan_.selected[0] = 0U;
+      plan_.output_log_est = kShortcutOutput;
+      return std::move(plan_);
+    }
+    SourceMask prerequisites = 0;
+    SourceMask prior = 0;
+    bool first_past_right = false;
+    bool right_or_cross = false;
+    for (std::size_t position = 0; position < core_.table_sources.size(); ++position) {
+      budget_ += kPlannerSearchLimitIncrement;
+      const auto& declaration = core_.table_sources[position];
+      const bool left_of_right = SourceIsLeftOfRightJoin(core_, position);
+      if (first_past_right || left_of_right || IsDeclaredJoinBarrier(declaration)) {
+        right_or_cross =
+            right_or_cross || left_of_right || declaration.join == SourceJoinKind::kCross;
+        prerequisites |= prior;
+        first_past_right = SourceJoinPreservesRight(declaration.join);
+      } else if (!right_or_cross) {
+        prerequisites = 0;
+      }
+      static_cast<void>(AddSource(position, prerequisites));
+      if (error_.has_value()) {
+        return std::unexpected(std::move(*error_));
+      }
+      prior |= SourceBit(position);
+    }
+    if (auto solved = SolveWherePath(plan_, bound_, core_, outer_loops_); !solved.has_value()) {
+      return std::unexpected(std::move(solved.error()));
+    }
+    if (core_.table_sources.size() == 1U && !core_.aggregate.has_value() &&
+        !bound_.order_by().empty()) {
+      PreferSingleSourceOrder();
+    }
+    SourceMask ready = 0;
+    for (std::size_t level = 0; level < plan_.level_count; ++level) {
+      auto& loop = plan_.loops[plan_.selected[level]];
+      if (loop.published.kind == PhysicalAccessKind::kAutomaticIndex) {
+        if (auto finalized = CompleteAutomatic(loop, ready); !finalized.has_value()) {
+          return std::unexpected(std::move(finalized.error()));
+        }
+      }
+      ready |= SourceBit(loop.source_position);
+    }
+    if (RequestsInputDistinct(bound_, core_)) {
+      plan_.output_log_est -= kDistinctOutputReduction;
+    }
+    return std::move(plan_);
+  }
+
+ private:
+  struct Match {
+    IndexConstraintMatch constraint{};
+    std::size_t term = 0;
+    SourceMask prerequisites = 0;
+    bool transitive = false;
+  };
+
+  template <typename Visitor>
+  bool VisitIndexes(TableId table, Visitor&& visitor) {
+    const auto indexes = bound_.catalog()->table_indexes(table);
+    for (const bool replacements : {false, true}) {
+      for (const IndexId id : std::views::reverse(indexes)) {
+        const auto& index = bound_.catalog()->index(id);
+        if ((index.conflict_action == ConflictAction::kReplace) == replacements && !visitor(id)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] LoopColumnReference IndexColumn(std::size_t position,
+                                                const CatalogIndexTerm& term) const {
+    const auto* column = std::get_if<ColumnId>(&term.target);
+    const auto& source = core_.table_sources[position];
+    const auto& table = bound_.catalog()->table(AssumePresent(source.table));
+    return LoopColumnReference{
+        .source_position = position,
+        .column = column == nullptr || table.rowid_alias == *column ? std::nullopt
+                                                                    : std::optional{*column},
+    };
+  }
+
+  template <typename Visitor>
+  bool VisitComparisons(Visitor&& visitor) const {
+    for (std::size_t index = 0; index < terms_.size(); ++index) {
+      const auto& term = terms_[index];
+      if (term.comparison != nullptr && (term.left_is_column || term.right_is_column) &&
+          !visitor(index, !term.left_is_column)) {
+        return false;
+      }
+    }
+    for (std::size_t index = terms_.size(); index > 0U;) {
+      const auto& term = terms_[--index];
+      if (term.left_is_column && term.right_is_column && !visitor(index, true)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] std::optional<Match> ComparisonMatch(std::size_t index, bool commuted) const {
+    const auto& term = terms_[index];
+    const auto& comparison = *term.comparison;
+    Match match{
+        .constraint =
+            IndexConstraintMatch{
+                .key = commuted ? comparison.left : comparison.right,
+                .predicate = term.predicate,
+                .conjunct_position = term.conjunct_position,
+            },
+        .term = index,
+        .prerequisites =
+            (commuted ? term.left_prerequisites : term.right_prerequisites) | term.key_floor,
+    };
+    const auto operation =
+        commuted ? ReverseComparison(comparison.comparison) : comparison.comparison;
+    switch (operation) {
+      case SqlComparison::kEqual:
+        break;
+      case SqlComparison::kIs:
+        match.constraint.reject_null = false;
+        break;
+      case SqlComparison::kGreater:
+      case SqlComparison::kGreaterEqual:
+        match.constraint.kind = IndexConstraintKind::kLower;
+        match.constraint.inclusive = operation == SqlComparison::kGreaterEqual;
+        break;
+      case SqlComparison::kLess:
+      case SqlComparison::kLessEqual:
+        match.constraint.kind = IndexConstraintKind::kUpper;
+        match.constraint.inclusive = operation == SqlComparison::kLessEqual;
+        break;
+      case SqlComparison::kNotEqual:
+      case SqlComparison::kIsNot:
+        return std::nullopt;
+    }
+    return match;
+  }
+
+  template <typename Visitor>
+  bool ScanConstraints(LoopColumnReference target, const CatalogIndexTerm* index_term,
+                       Visitor&& visitor, SourceMask available) {
+    std::array<LoopColumnReference, kMaximumEquivalentColumns> equivalent{};
+    equivalent[0] = target;
+    std::size_t equivalent_count = 1U;
+    for (std::size_t current = 0; current < equivalent_count; ++current) {
+      const bool proceed = VisitComparisons([&](std::size_t term_index, bool commuted) {
+        const auto& term = terms_[term_index];
+        const auto column = commuted ? term.right_column : term.left_column;
+        if (column != equivalent[current] || (current != 0U && term.outer_on)) {
+          return true;
+        }
+        const auto other = commuted ? term.left_column : term.right_column;
+        if (other.has_value() && equivalent_count < equivalent.size() && term.equivalence &&
+            std::ranges::find(std::span{equivalent}.first(equivalent_count), *other) ==
+                std::span{equivalent}.first(equivalent_count).end()) {
+          equivalent[equivalent_count++] = *other;
+        }
+        auto match = ComparisonMatch(term_index, commuted);
+        if (!match.has_value() || (match->prerequisites & ~available) != 0U ||
+            (match->prerequisites & SourceBit(equivalent[current].source_position)) != 0U ||
+            (match->prerequisites & SourceBit(target.source_position)) != 0U ||
+            !ConstraintCompatibleWithSource(core_, target.source_position, term)) {
+          return true;
+        }
+        const auto& comparison = *term.comparison;
+        const bool null_test =
+            !match->constraint.reject_null && IsNullLiteral(bound_, match->constraint.key);
+        if (index_term != nullptr && !null_test) {
+          const auto& table =
+              bound_.catalog()->table(*core_.table_sources[target.source_position].table);
+          const auto* index_column = std::get_if<ColumnId>(&index_term->target);
+          const TypeAffinity affinity = index_column != nullptr
+                                            ? table.columns[index_column->value].affinity
+                                            : TypeAffinity::kInteger;
+          if (!IndexAffinityMatches(comparison.affinity, affinity) ||
+              !CatalogNamesEqual(bound_.collations()[comparison.collation.value()].name,
+                                 index_term->collation_name)) {
+            return true;
+          }
+        }
+        match->transitive = current != 0U;
+        return visitor(*match);
+      });
+      if (!proceed) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] PhysicalIndexEquality Equality(const CatalogIndexTerm& column,
+                                               const SourceInfo& source, const Match& match) const {
+    const auto id = std::get<ColumnId>(column.target);
+    return PhysicalIndexEquality{
+        .column = id,
+        .key = match.constraint.key,
+        .predicate = match.constraint.predicate,
+        .conjunct_position = match.constraint.conjunct_position,
+        .origin = terms_[match.term].origin,
+        .affinity = bound_.catalog()->table(AssumePresent(source.table)).columns[id.value].affinity,
+        .collation_name = column.collation_name,
+        .order = column.order,
+        .reject_null = match.constraint.reject_null,
+        .probe_affinity = IndexProbeAffinity(
+            bound_, match.constraint.key,
+            bound_.catalog()->table(AssumePresent(source.table)).columns[id.value].affinity),
+    };
+  }
+
+  [[nodiscard]] PhysicalRangeBound RangeBound(
+      const Match& match, TypeAffinity affinity = TypeAffinity::kNumeric) const {
+    return PhysicalRangeBound{
+        .key = match.constraint.key,
+        .predicate = match.constraint.predicate,
+        .conjunct_position = match.constraint.conjunct_position,
+        .origin = terms_[match.term].origin,
+        .inclusive = match.constraint.inclusive,
+        .probe_affinity = IndexProbeAffinity(bound_, match.constraint.key, affinity),
+    };
+  }
+
+  [[nodiscard]] IndexCandidatePlan IndexTemplate(std::size_t position, IndexId id) const {
+    const auto& declaration = core_.table_sources[position];
+    const auto& table = bound_.catalog()->table(AssumePresent(declaration.table));
+    const auto& index = bound_.catalog()->index(id);
+    return IndexCandidatePlan{
+        .node =
+            PhysicalIndexScanNode{
+                .core_index = core_index_,
+                .source = declaration.id,
+                .table = AssumePresent(declaration.table),
+                .table_root_page = table.root_page,
+                .index = id,
+                .index_root_page = index.root_page,
+            },
+        .selected_terms = std::vector<bool>(terms_.size(), false),
+    };
+  }
+
+  void SetCovering(IndexCandidatePlan& candidate, const SourceInfo& source) const {
+    candidate.node.covering = IsCoveringIndex(
+        bound_, source.id, bound_.catalog()->table(AssumePresent(source.table)),
+        bound_.catalog()->index(candidate.node.index), terms_, candidate.selected_terms, &core_);
+  }
+
+  [[nodiscard]] bool TryShortcut() {
+    const auto& declaration = core_.table_sources[0];
+    const SourceInfo source = ResolveTableSource(bound_, declaration);
+    if (!source.rowid_eligible) {
+      return false;
+    }
+    ScanConstraints(
+        LoopColumnReference{}, nullptr,
+        [&](const Match& match) {
+          if (match.constraint.kind != IndexConstraintKind::kEquality ||
+              (!match.constraint.reject_null && IsNullLiteral(bound_, match.constraint.key))) {
+            return true;
+          }
+          plan_.loops.push_back(ReadAccessCandidate{
+              .published = AccessPathCandidate{.kind = PhysicalAccessKind::kRowIdLookup,
+                                               .cost = RowIdCost(source.estimated_rows, true)},
+              .payload = RowIdCandidatePlan{.key = match.constraint.key,
+                                            .selected_term = match.term,
+                                            .constraint = terms_[match.term]},
+              .single_row_shortcut = true,
+              .transitive = match.transitive,
+          });
+          return false;
+        },
+        0);
+    if (!plan_.loops.empty() || !source.table.has_value()) {
+      return !plan_.loops.empty();
+    }
+    VisitIndexes(*source.table, [&](IndexId id) {
+      const auto& index = bound_.catalog()->index(id);
+      const auto& table = bound_.catalog()->table(*source.table);
+      if (!index.unique || index.key_term_count > kShortcutIndexTermLimit ||
+          !IsSupportedIndexShape(bound_, table, index)) {
+        return true;
+      }
+      IndexCandidatePlan candidate = IndexTemplate(0U, id);
+      bool transitive = false;
+      for (std::size_t column = 0; column < index.key_term_count; ++column) {
+        bool found = false;
+        ScanConstraints(
+            IndexColumn(0U, index.terms[column]), &index.terms[column],
+            [&](const Match& match) {
+              if (match.constraint.kind != IndexConstraintKind::kEquality ||
+                  (!match.constraint.reject_null &&
+                   (!index.unique_not_null || IsNullLiteral(bound_, match.constraint.key)))) {
+                return true;
+              }
+              candidate.node.equalities.push_back(Equality(index.terms[column], source, match));
+              candidate.selected_terms[match.term] = true;
+              transitive = transitive || match.transitive;
+              found = true;
+              return false;
+            },
+            0);
+        if (!found) {
+          return true;
+        }
+      }
+      SetCovering(candidate, source);
+      plan_.loops.push_back(ReadAccessCandidate{
+          .published = PublishIndexCandidate(bound_, source, candidate, true),
+          .payload = std::move(candidate),
+          .single_row_shortcut = true,
+          .transitive = transitive,
+      });
+      return false;
+    });
+    return !plan_.loops.empty();
+  }
+
+  void AdjustOutput(ReadAccessCandidate& loop, LogEst table_rows) const {
+    if (core_.table_sources.size() <= 1U && !adjust_output_) {
+      return;
+    }
+    LogEst reduction = 0;
+    const SourceMask self = SourceBit(loop.source_position);
+    const SourceMask allowed = loop.prerequisites | self;
+    for (std::size_t term = 0; term < terms_.size(); ++term) {
+      const auto& predicate = terms_[term];
+      if ((predicate.prerequisites & ~allowed) != 0U || (predicate.prerequisites & self) == 0U ||
+          LoopUsesTerm(loop, term)) {
+        continue;
+      }
+      auto& output = loop.published.cost.output_log_est;
+      if (predicate.truth_probability <= 0) {
+        output += predicate.truth_probability;
+      } else {
+        --output;
+        const auto* comparison = std::get_if<BoundComparisonExpression>(
+            &bound_.expression(TransparentPredicateId(bound_, predicate.predicate)).payload);
+        if (comparison != nullptr && (comparison->comparison == SqlComparison::kEqual ||
+                                      comparison->comparison == SqlComparison::kIs)) {
+          reduction =
+              std::max<LogEst>(reduction, IsSmallIntegerKey(bound_, comparison->right) ? 10 : 20);
+        }
+      }
+    }
+    loop.published.cost.output_log_est =
+        std::min(loop.published.cost.output_log_est, table_rows - reduction);
+  }
+
+  [[nodiscard]] LogEst PrefixEstimate(const CatalogIndex& index, const SourceInfo& source,
+                                      std::size_t prefix) const {
+    if (prefix == 0U) {
+      return ToLogEst(IndexCardinality(index, source.estimated_rows));
+    }
+    if (index.statistics.has_stat1 && prefix < index.statistics.rows_per_prefix.size()) {
+      return ToLogEst(index.statistics.rows_per_prefix[prefix]);
+    }
+    return index.unique && prefix == index.key_term_count ? 0 : DefaultPrefixLogEst(prefix);
+  }
+
+  [[nodiscard]] LogEst RangeEstimate(LogEst input, const std::optional<PhysicalRangeBound>& lower,
+                                     const std::optional<PhysicalRangeBound>& upper) const {
+    LogEst estimate = input;
+    const auto probability = [&](const PhysicalRangeBound& bound) {
+      return PredicateTruthProbability(bound_, bound.predicate);
+    };
+    if (lower.has_value()) {
+      const LogEst truth = probability(*lower);
+      estimate += truth <= 0 ? truth : -kRangeReduction;
+    }
+    if (upper.has_value()) {
+      const LogEst truth = probability(*upper);
+      estimate += truth <= 0 ? truth : -kRangeReduction;
+    }
+    if (lower.has_value() && upper.has_value() && probability(*lower) > 0 &&
+        probability(*upper) > 0) {
+      estimate -= kRangeReduction;
+    }
+    return std::min(
+        input - static_cast<LogEst>(lower.has_value()) - static_cast<LogEst>(upper.has_value()),
+        std::max(estimate, kMinimumRangeOutput));
+  }
+
+  [[nodiscard]] BoundExpressionId OrderExpression(const BoundOrderingTerm& term) const {
+    return term.result_column.has_value() && *term.result_column < core_.result_columns.size()
+               ? core_.result_columns[*term.result_column].expression
+               : term.expression;
+  }
+
+  [[nodiscard]] bool OrderTermFixed(const BoundOrderingTerm& order) {
+    const BoundExpressionId expression = OrderExpression(order);
+    if (IsStatementGuard(bound_, expression)) {
+      return true;
+    }
+    const auto column = LoopColumnOf(bound_, core_, expression);
+    if (!column.has_value() || column->source_position != 0U) {
+      return false;
+    }
+    bool fixed = false;
+    ScanConstraints(
+        *column, nullptr,
+        [&](const Match& match) {
+          if (match.constraint.kind != IndexConstraintKind::kEquality) {
+            return true;
+          }
+          const auto& comparison = std::get<BoundComparisonExpression>(
+              bound_.expression(TransparentPredicateId(bound_, terms_[match.term].predicate))
+                  .payload);
+          const TypeAffinity operand = bound_.expression(match.constraint.key).properties.affinity;
+          const TypeAffinity indexed = bound_.expression(expression).properties.affinity;
+          if (column->column.has_value() &&
+              (!CatalogNamesEqual(bound_.collations()[comparison.collation.value()].name,
+                                  bound_.collations()[order.collation.value()].name) ||
+               (operand != TypeAffinity::kNone && operand != indexed))) {
+            return true;
+          }
+          fixed = true;
+          return false;
+        },
+        0);
+    return fixed;
+  }
+
+  [[nodiscard]] std::optional<bool> SourceSatisfiesOrder(const ReadAccessCandidate& loop) {
+    if (loop.published.kind == PhysicalAccessKind::kRowIdLookup) {
+      return false;
+    }
+    std::size_t requested = 0;
+    const auto skip_fixed = [&] {
+      while (requested < bound_.order_by().size() && OrderTermFixed(bound_.order_by()[requested])) {
+        ++requested;
+      }
+    };
+    skip_fixed();
+    if (requested == bound_.order_by().size()) {
+      return false;
+    }
+    const SourceInfo source = ResolveTableSource(bound_, core_.table_sources[0]);
+    const auto* index_plan = std::get_if<IndexCandidatePlan>(&loop.payload);
+    const CatalogIndex* index =
+        index_plan != nullptr ? &bound_.catalog()->index(index_plan->node.index) : nullptr;
+    if ((index == nullptr && !source.rowid_eligible) ||
+        (index != nullptr && index->statistics.unordered)) {
+      return std::nullopt;
+    }
+    const std::size_t columns = index != nullptr ? index->terms.size() : 1U;
+    const std::size_t equalities = index_plan != nullptr ? index_plan->node.equalities.size() : 0U;
+    std::optional<bool> reverse;
+    for (std::size_t position = equalities; position < columns; ++position) {
+      const LoopColumnReference available =
+          index != nullptr ? IndexColumn(0U, index->terms[position]) : LoopColumnReference{};
+      const auto& order = bound_.order_by()[requested];
+      const auto needed = LoopColumnOf(bound_, core_, OrderExpression(order));
+      if (!needed.has_value() || *needed != available) {
+        return std::nullopt;
+      }
+      const bool physical_descending =
+          index != nullptr && index->terms[position].order == SortOrder::kDescending;
+      const bool desired_descending = order.order == SortOrder::kDescending;
+      const bool backwards = physical_descending != desired_descending;
+      if (reverse.has_value() && *reverse != backwards) {
+        return std::nullopt;
+      }
+      reverse = backwards;
+      if (available.column.has_value()) {
+        if (!CatalogNamesEqual(bound_.collations()[order.collation.value()].name,
+                               index->terms[position].collation_name)) {
+          return std::nullopt;
+        }
+        const auto& column =
+            bound_.catalog()->table(*source.table).columns[available.column->value];
+        const BoundNullPlacement natural =
+            desired_descending ? BoundNullPlacement::kLast : BoundNullPlacement::kFirst;
+        if (!column.effective_not_null_conflict.has_value() && order.null_placement != natural) {
+          return std::nullopt;
+        }
+      }
+      ++requested;
+      skip_fixed();
+      if (requested == bound_.order_by().size()) {
+        return reverse;
+      }
+      const bool distinct =
+          !available.column.has_value() ||
+          (index != nullptr && index->unique_not_null && position + 1U >= index->key_term_count);
+      if (distinct) {
+        for (; requested < bound_.order_by().size(); ++requested) {
+          const auto expression = OrderExpression(bound_.order_by()[requested]);
+          auto dependencies = ExpressionSourceMask(bound_, core_.table_sources, expression);
+          if (!dependencies.has_value() ||
+              (*dependencies == 0U && !IsStatementGuard(bound_, expression))) {
+            return std::nullopt;
+          }
+        }
+        return reverse;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] LogEst SourceSortingCost(LogEst rows) const {
+    constexpr std::size_t kColumnWidthPadding = 59;
+    constexpr std::size_t kColumnsPerWidthUnit = 30;
+    LogEst cost =
+        rows + ToLogEst((core_.result_columns.size() + kColumnWidthPadding) / kColumnsPerWidthUnit);
+    const auto literal = [&](BoundExpressionId expression) -> std::optional<std::uint64_t> {
+      expression = TransparentPredicateId(bound_, expression);
+      if (const auto* unary =
+              std::get_if<BoundUnaryExpression>(&bound_.expression(expression).payload);
+          unary != nullptr && unary->operation == BoundUnaryOperation::kPositive) {
+        expression = TransparentPredicateId(bound_, unary->operand);
+      }
+      const auto* value =
+          std::get_if<BoundLiteralExpression>(&bound_.expression(expression).payload);
+      if (value == nullptr || value->value.type() != SqlValueType::kInteger ||
+          *value->value.integer_value() < 0) {
+        return std::nullopt;
+      }
+      return static_cast<std::uint64_t>(*value->value.integer_value());
+    };
+    const BoundLimit* limit = bound_.limit();
+    const auto bound = limit != nullptr ? literal(limit->limit) : std::nullopt;
+    if (bound.has_value()) {
+      std::uint64_t count = *bound;
+      if (limit->offset.has_value()) {
+        if (const auto offset = literal(*limit->offset); offset.has_value()) {
+          count = SaturatingAdd(count, *offset);
+        }
+      }
+      cost += kLogEstScale;
+      rows = std::min(rows, ToLogEst(count));
+    } else if (core_.quantifier == SelectQuantifier::kDistinct && rows > kLogEstScale) {
+      rows -= kLogEstScale;
+    }
+    return cost + LogEstLogarithm(rows);
+  }
+
+  void PreferSingleSourceOrder() {
+    const auto& normal = plan_.loops[plan_.selected[0]];
+    const bool protect_search = normal.published.kind == PhysicalAccessKind::kRowIdLookup ||
+                                (normal.published.kind == PhysicalAccessKind::kIndexScan &&
+                                 normal.published.equality_term_count != 0U);
+    const LogEst sort = SourceSortingCost(plan_.output_log_est < 0 ? 1 : plan_.output_log_est + 1);
+    std::optional<std::size_t> best;
+    std::optional<bool> best_reverse;
+    LogEst best_cost = 0;
+    LogEst best_rows = 0;
+    LogEst best_unsorted = 0;
+    for (std::size_t candidate = 0; candidate < plan_.loops.size(); ++candidate) {
+      const auto& loop = plan_.loops[candidate];
+      if (protect_search && LoopTermCount(loop) == 0U) {
+        continue;
+      }
+      const auto ordered = SourceSatisfiesOrder(loop);
+      LogEst unsorted =
+          loop.published.cost.run_log_est + std::min(outer_loops_, kMaximumOuterLoopEstimate);
+      if (loop.published.cost.setup_log_est != 0) {
+        unsorted = AddLogEst(unsorted, loop.published.cost.setup_log_est);
+      }
+      unsorted = AddLogEst(unsorted, 0);
+      const LogEst cost = ordered.has_value() ? unsorted : AddLogEst(unsorted, sort) + 3;
+      const LogEst rows =
+          std::min(outer_loops_, kMaximumOuterLoopEstimate) + loop.published.cost.output_log_est;
+      if (!best.has_value() || cost < best_cost || (cost == best_cost && rows < best_rows) ||
+          (cost == best_cost && rows == best_rows && unsorted < best_unsorted) ||
+          (cost == best_cost && rows == best_rows && unsorted == best_unsorted &&
+           !LoopIsNoBetter(bound_, loop, plan_.loops[*best]))) {
+        best = candidate;
+        best_reverse = ordered;
+        best_cost = cost;
+        best_rows = rows;
+        best_unsorted = unsorted;
+      }
+    }
+    if (best.has_value()) {
+      plan_.selected[0] = *best;
+      plan_.output_log_est = best_rows;
+      plan_.loops[*best].direction = best_reverse.has_value() && *best_reverse
+                                         ? PhysicalScanDirection::kReverse
+                                         : PhysicalScanDirection::kForward;
+    }
+  }
+
+  bool AddIndexTerms(ReadAccessCandidate& loop, const SourceInfo& source, LogEst input) {
+    auto& candidate = std::get<IndexCandidatePlan>(loop.payload);
+    const auto& index = bound_.catalog()->index(candidate.node.index);
+    const std::size_t column = candidate.node.equalities.size();
+    if (column >= index.key_term_count ||
+        (candidate.node.range.has_value() && candidate.node.range->upper.has_value())) {
+      return true;
+    }
+    return ScanConstraints(
+        IndexColumn(loop.source_position, index.terms[column]), &index.terms[column],
+        [&](const Match& match) {
+          const bool equality = match.constraint.kind == IndexConstraintKind::kEquality;
+          if ((candidate.node.range.has_value() &&
+               (equality || match.constraint.kind != IndexConstraintKind::kUpper)) ||
+              (!equality && index.statistics.unordered)) {
+            return true;
+          }
+          const auto column_id = std::get<ColumnId>(index.terms[column].target);
+          if (equality && !match.constraint.reject_null &&
+              IsNullLiteral(bound_, match.constraint.key) &&
+              bound_.catalog()
+                  ->table(*source.table)
+                  .columns[column_id.value]
+                  .effective_not_null_conflict.has_value()) {
+            return true;
+          }
+          const SourceMask previous_prerequisites = loop.prerequisites;
+          const bool previous_transitive = loop.transitive;
+          const bool previously_selected = candidate.selected_terms[match.term];
+          loop.prerequisites |= match.prerequisites;
+          candidate.selected_terms[match.term] = true;
+          LogEst output = input;
+          if (equality) {
+            candidate.node.equalities.push_back(Equality(index.terms[column], source, match));
+            loop.transitive = loop.transitive || match.transitive;
+            const LogEst truth = terms_[match.term].truth_probability;
+            output += truth <= 0 ? truth
+                                 : PrefixEstimate(index, source, column + 1U) -
+                                       PrefixEstimate(index, source, column);
+            if (!match.constraint.reject_null && IsNullLiteral(bound_, match.constraint.key) &&
+                truth > 0) {
+              output += kLogEstScale;
+            }
+          } else {
+            if (!candidate.node.range.has_value()) {
+              candidate.node.range = PhysicalIndexRange{
+                  .column = column_id,
+                  .affinity =
+                      bound_.catalog()->table(*source.table).columns[column_id.value].affinity,
+                  .collation_name = index.terms[column].collation_name,
+                  .order = index.terms[column].order,
+              };
+            }
+            (match.constraint.kind == IndexConstraintKind::kLower ? candidate.node.range->lower
+                                                                  : candidate.node.range->upper) =
+                RangeBound(match, candidate.node.range->affinity);
+            output = RangeEstimate(input, candidate.node.range->lower, candidate.node.range->upper);
+          }
+          loop.published = PublishIndexCandidate(bound_, source, candidate, false, output);
+          AdjustOutput(loop, ToLogEst(source.estimated_rows));
+          bool proceed = InsertWhereLoop(plan_, loop, budget_);
+          if (proceed &&
+              (!candidate.node.range.has_value() || !candidate.node.range->upper.has_value())) {
+            proceed = AddIndexTerms(loop, source, equality ? output : input);
+          }
+          if (equality) {
+            candidate.node.equalities.pop_back();
+          } else if (match.constraint.kind == IndexConstraintKind::kUpper &&
+                     candidate.node.range->lower.has_value()) {
+            candidate.node.range->upper.reset();
+          } else {
+            candidate.node.range.reset();
+          }
+          candidate.selected_terms[match.term] = previously_selected;
+          loop.prerequisites = previous_prerequisites;
+          loop.transitive = previous_transitive;
+          return proceed;
+        },
+        AllSources(core_.table_sources.size()) & ~SourceBit(loop.source_position));
+  }
+
+  bool AddRowIdTerms(std::size_t position, const SourceInfo& source, SourceMask prerequisites) {
+    const SourceMask available = AllSources(core_.table_sources.size()) & ~SourceBit(position);
+    return ScanConstraints(
+        LoopColumnReference{.source_position = position}, nullptr,
+        [&](const Match& match) {
+          if (match.constraint.kind != IndexConstraintKind::kEquality) {
+            if (core_.table_sources.size() != 1U) {
+              return true;
+            }
+            if (!AddRowIdRange(position, source, prerequisites, match, std::nullopt)) {
+              return false;
+            }
+            if (match.constraint.kind != IndexConstraintKind::kLower) {
+              return true;
+            }
+            return ScanConstraints(
+                LoopColumnReference{.source_position = position}, nullptr,
+                [&](const Match& upper) {
+                  return upper.constraint.kind != IndexConstraintKind::kUpper ||
+                         AddRowIdRange(position, source, prerequisites, match, upper);
+                },
+                available);
+          }
+          if (!match.constraint.reject_null && IsNullLiteral(bound_, match.constraint.key)) {
+            return true;
+          }
+          ReadAccessCandidate loop{
+              .published = AccessPathCandidate{.kind = PhysicalAccessKind::kRowIdLookup,
+                                               .cost = RowIdCost(source.estimated_rows)},
+              .payload = RowIdCandidatePlan{.key = match.constraint.key,
+                                            .selected_term = match.term,
+                                            .constraint = terms_[match.term]},
+              .source_position = position,
+              .prerequisites = prerequisites | match.prerequisites,
+              .sort_index = order_candidates_ ? 1U : 0U,
+              .transitive = match.transitive,
+          };
+          AdjustOutput(loop, ToLogEst(source.estimated_rows));
+          return InsertWhereLoop(plan_, loop, budget_);
+        },
+        available);
+  }
+
+  bool AddRowIdRange(std::size_t position, const SourceInfo& source, SourceMask prerequisites,
+                     const Match& first, const std::optional<Match>& second) {
+    RowIdRangeCandidatePlan range{
+        .node =
+            PhysicalRowIdRangeNode{
+                .core_index = core_index_,
+                .source = source.id,
+                .source_kind = source.source_kind,
+                .table = source.table,
+                .root_page = source.root_page,
+            },
+        .selected_terms = std::vector<bool>(terms_.size(), false),
+    };
+    const auto add = [&](const Match& match) {
+      (match.constraint.kind == IndexConstraintKind::kLower ? range.node.lower : range.node.upper) =
+          RangeBound(match);
+      range.selected_terms[match.term] = true;
+    };
+    add(first);
+    if (second.has_value()) {
+      add(*second);
+    }
+    const LogEst input = ToLogEst(source.estimated_rows);
+    const LogEst output = RangeEstimate(input, range.node.lower, range.node.upper);
+    ReadAccessCandidate loop{
+        .published =
+            AccessPathCandidate{
+                .kind = PhysicalAccessKind::kRowIdRange,
+                .cost =
+                    AccessPathCost{
+                        .run_log_est =
+                            AddLogEst(LogEstLogarithm(input), output + kTableScanCostBias),
+                        .output_log_est = output,
+                    },
+                .range_bound_count = second.has_value() ? 2U : 1U,
+            },
+        .payload = std::move(range),
+        .source_position = position,
+        .prerequisites = prerequisites | first.prerequisites |
+                         (second.has_value() ? second->prerequisites : SourceMask{0}),
+        .sort_index = order_candidates_ ? 1U : 0U,
+    };
+    AdjustOutput(loop, input);
+    return InsertWhereLoop(plan_, loop, budget_);
+  }
+
+  [[nodiscard]] bool GoodAutomaticColumn(const SourceInfo& source, ColumnId column) const {
+    for (const IndexId id : bound_.catalog()->table_indexes(AssumePresent(source.table))) {
+      const auto& index = bound_.catalog()->index(id);
+      for (std::size_t position = 0; position < index.key_term_count; ++position) {
+        if (std::get_if<ColumnId>(&index.terms[position].target) != nullptr &&
+            std::get<ColumnId>(index.terms[position].target) == column) {
+          if (position == 0U ||
+              (index.statistics.has_stat1 && PrefixEstimate(index, source, position + 1U) > 20)) {
+            return false;
+          }
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
+  template <typename Visitor>
+  bool VisitAutomaticDrivers(std::size_t position, const SourceInfo& source, SourceMask ready,
+                             Visitor&& visitor) const {
+    const auto& table = bound_.catalog()->table(AssumePresent(source.table));
+    return VisitComparisons([&](std::size_t term_index, bool commuted) {
+      const auto& term = terms_[term_index];
+      const auto column = commuted ? term.right_column : term.left_column;
+      if (!column.has_value() || column->source_position != position ||
+          !column->column.has_value() || table.rowid_alias == column->column ||
+          !ConstraintCompatibleWithSource(core_, position, term)) {
+        return true;
+      }
+      auto match = ComparisonMatch(term_index, commuted);
+      if (!match.has_value() || match->constraint.kind != IndexConstraintKind::kEquality ||
+          (match->prerequisites & ~ready) != 0U ||
+          (!match->constraint.reject_null && IsNullLiteral(bound_, match->constraint.key)) ||
+          !IndexAffinityMatches(term.comparison->affinity,
+                                table.columns[column->column->value].affinity) ||
+          !GoodAutomaticColumn(source, *column->column)) {
+        return true;
+      }
+      return visitor(*column->column, *match);
+    });
+  }
+
+  bool AddAutomatic(std::size_t position, const SourceInfo& source, SourceMask prerequisites) {
+    if (!options_.allow_file_backed_automatic_indexes || core_.table_sources.size() < 2U ||
+        !source.table.has_value() || !source.rowid_eligible ||
+        std::ranges::any_of(core_.table_sources, [](const auto& declaration) {
+          return SourceJoinPreservesRight(declaration.join);
+        })) {
+      return true;
+    }
+    return VisitAutomaticDrivers(
+        position, source, AllSources(core_.table_sources.size()) & ~SourceBit(position),
+        [&](ColumnId column, const Match& match) {
+          const auto& comparison = *terms_[match.term].comparison;
+          const CatalogIndexTerm key{
+              .target = column,
+              .collation_name = bound_.collations()[comparison.collation.value()].name,
+          };
+          PhysicalIndexEquality equality = Equality(key, source, match);
+          equality.collation_name = bound_.collations()[comparison.collation.value()].name;
+          AutomaticCandidatePlan automatic{
+              .node =
+                  PhysicalAutomaticIndexNode{
+                      .core_index = core_index_,
+                      .source = source.id,
+                      .table = *source.table,
+                      .table_root_page = source.root_page,
+                      .equalities = {equality},
+                  },
+              .selected_terms = std::vector<bool>(terms_.size(), false),
+          };
+          automatic.selected_terms[match.term] = true;
+          const LogEst rows = ToLogEst(source.estimated_rows);
+          ReadAccessCandidate loop{
+              .published =
+                  AccessPathCandidate{
+                      .kind = PhysicalAccessKind::kAutomaticIndex,
+                      .cost =
+                          AccessPathCost{
+                              .setup_log_est = std::max<LogEst>(
+                                  0, LogEstLogarithm(rows) + rows + kAutomaticIndexSetupBias),
+                              .run_log_est =
+                                  AddLogEst(LogEstLogarithm(rows), kAutomaticIndexOutput),
+                              .output_log_est = kAutomaticIndexOutput,
+                          },
+                      .covering = true,
+                      .equality_term_count = 1,
+                  },
+              .payload = std::move(automatic),
+              .source_position = position,
+              .prerequisites = prerequisites | match.prerequisites,
+          };
+          return InsertWhereLoop(plan_, loop, budget_);
+        });
+  }
+
+  bool AddSource(std::size_t position, SourceMask prerequisites) {
+    const auto& declaration = core_.table_sources[position];
+    const SourceInfo source = ResolveTableSource(bound_, declaration);
+    if (!AddAutomatic(position, source, prerequisites)) {
+      return false;
+    }
+    ReadAccessCandidate scan{
+        .published = AccessPathCandidate{.kind = PhysicalAccessKind::kTableScan,
+                                         .cost = ScanCost(source.estimated_rows)},
+        .source_position = position,
+        .prerequisites = prerequisites,
+        .sort_index = order_candidates_ ? 1U : 0U,
+    };
+    AdjustOutput(scan, ToLogEst(source.estimated_rows));
+    if (!InsertWhereLoop(plan_, scan, budget_)) {
+      return false;
+    }
+    if (!source.rowid_eligible) {
+      return true;
+    }
+    if (!AddRowIdTerms(position, source, prerequisites)) {
+      return false;
+    }
+    if (!source.table.has_value()) {
+      return true;
+    }
+    const auto& table = bound_.catalog()->table(AssumePresent(source.table));
+    return VisitIndexes(*source.table, [&](IndexId id) {
+      const auto& index = bound_.catalog()->index(id);
+      if (!IsSupportedIndexShape(bound_, table, index)) {
+        return true;
+      }
+      ReadAccessCandidate loop{
+          .payload = IndexTemplate(position, id),
+          .source_position = position,
+          .prerequisites = prerequisites,
+          .sort_index = order_candidates_ && !index.statistics.unordered ? id.value + 2U : 0U,
+      };
+      auto& candidate = std::get<IndexCandidatePlan>(loop.payload);
+      candidate.node.equalities.reserve(index.key_term_count);
+      SetCovering(candidate, source);
+      const LogEst index_width = ToLogEst(index.statistics.average_row_size.value_or(
+          DerivedIndexRowSize(*bound_.catalog(), index)));
+      if (!index.statistics.unordered &&
+          (order_candidates_ ||
+           (candidate.node.covering && index_width < ToLogEst(source.estimated_row_size)))) {
+        loop.published = PublishIndexCandidate(bound_, source, candidate);
+        AdjustOutput(loop, ToLogEst(source.estimated_rows));
+        if (!InsertWhereLoop(plan_, loop, budget_)) {
+          return false;
+        }
+      }
+      return AddIndexTerms(loop, source, PrefixEstimate(index, source, 0U));
+    });
+  }
+
+  [[nodiscard]] std::expected<void, OptimizerError> CompleteAutomatic(ReadAccessCandidate& loop,
+                                                                      SourceMask ready) {
+    auto& automatic = std::get<AutomaticCandidatePlan>(loop.payload);
+    const auto& source = core_.table_sources[loop.source_position];
+    const auto& table = bound_.catalog()->table(AssumePresent(source.table));
+    const SourceInfo information = ResolveTableSource(bound_, source);
+    automatic.node.equalities.clear();
+    std::ranges::fill(automatic.selected_terms, false);
+    for (const auto& term : terms_) {
+      if (CanFilterAutomaticIndex(bound_, core_, loop.source_position, term)) {
+        automatic.node.construction_predicates.push_back(term.predicate);
+      }
+    }
+    SourceMask indexed_columns = 0;
+    VisitAutomaticDrivers(
+        loop.source_position, information, ready, [&](ColumnId column, const Match& match) {
+          const SourceMask bit = SourceBit(std::min(column.value, kTopColumn));
+          if ((indexed_columns & bit) != 0U) {
+            return true;
+          }
+          const auto& comparison = *terms_[match.term].comparison;
+          const CatalogIndexTerm key{
+              .target = column,
+              .collation_name = bound_.collations()[comparison.collation.value()].name,
+          };
+          PhysicalIndexEquality equality = Equality(key, information, match);
+          equality.collation_name = bound_.collations()[comparison.collation.value()].name;
+          automatic.node.equalities.push_back(equality);
+          automatic.selected_terms[match.term] = true;
+          indexed_columns |= bit;
+          return true;
+        });
+    if (automatic.node.equalities.empty()) {
+      return std::unexpected(InvariantFailure("selected automatic loop has no available key"));
+    }
+    auto required = DiscoverRequiredSourceValues(bound_, source.id, table, terms_, {}, &core_);
+    for (const auto& equality : automatic.node.equalities) {
+      if (equality.column.value < kTopColumn) {
+        required.columns[equality.column.value] = false;
+      }
+    }
+    const bool wide_columns = std::ranges::any_of(required.columns | std::views::drop(kTopColumn),
+                                                  [](bool used) { return used; });
+    for (std::size_t column = 0; column < required.columns.size(); ++column) {
+      if ((required.columns[column] || (wide_columns && column >= kTopColumn)) &&
+          table.rowid_alias != ColumnId{column}) {
+        automatic.node.covering_columns.push_back(ColumnId{column});
+      }
+    }
+    if (automatic.node.equalities.size() + automatic.node.covering_columns.size() + 1U >
+        kMaximumRecordFieldCount) {
+      return std::unexpected(OptimizerFailure(OptimizerErrorCode::kUnsupportedFeature,
+                                              "automatic index exceeds record field limit"));
+    }
+    loop.published.equality_term_count =
+        static_cast<std::uint32_t>(automatic.node.equalities.size());
+    return {};
+  }
+
+  const BoundQueryView& bound_;
+  const BoundSelectCore& core_;
+  std::size_t core_index_;
+  std::span<ReadPredicateTerm> terms_;
+  OptimizerOptions options_;
+  LogEst outer_loops_;
+  bool order_candidates_;
+  bool adjust_output_;
+  std::size_t budget_ = kPlannerSearchLimit;
+  WhereLoopPlan plan_{};
+  std::optional<OptimizerError> error_{};
+};
+
 struct NonjoinedCoreAccessAnalysis {
   std::size_t core_index = 0;
   SourceInfo source{};
@@ -1981,11 +2917,17 @@ struct NonjoinedCoreAccessAnalysis {
   std::vector<bool> selected_terms{};
   std::vector<BoundExpressionId> residuals{};
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  LogEst output_log_est = 0;
+  bool search_limited = false;
+  // These buffers remain stable when ownership moves into the published nodes.
+  std::span<const BoundExpressionId> published_guards{};
+  std::span<const BoundExpressionId> published_residuals{};
+  std::span<const PhysicalIndexEquality> published_equalities{};
 };
 
-[[nodiscard]] NonjoinedCoreAccessAnalysis AnalyzeNonjoinedCoreAccess(
-    const BoundQueryView& bound_select, std::size_t core_index,
-    bool allow_secondary_index_selection = true) {
+[[nodiscard]] std::expected<NonjoinedCoreAccessAnalysis, OptimizerError> AnalyzeNonjoinedCoreAccess(
+    const BoundQueryView& bound_select, std::size_t core_index, OptimizerOptions options = {},
+    LogEst outer_loops = 0) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
   NonjoinedCoreAccessAnalysis analysis{
       .core_index = core_index,
@@ -2010,117 +2952,31 @@ struct NonjoinedCoreAccessAnalysis {
                 .cost = AccessPathCost{},
             },
     });
+    analysis.output_log_est =
+        RequestsInputDistinct(bound_select, core) ? -kDistinctOutputReduction : 0;
     return analysis;
   }
 
-  std::size_t index_count = 0;
-  if (analysis.source.source_kind == BoundSourceKind::kCatalogTable &&
-      analysis.source.table.has_value()) {
-    index_count = bound_select.catalog()->table_indexes(*analysis.source.table).size();
+  auto planned =
+      WhereLoopBuilder{bound_select, core_index, analysis.predicates.terms, options, outer_loops}
+          .Run();
+  if (!planned.has_value()) {
+    return std::unexpected(std::move(planned.error()));
   }
-  analysis.access_candidates.reserve(3U + index_count);
-  analysis.access_candidates.push_back(ReadAccessCandidate{
-      .published =
-          AccessPathCandidate{
-              .kind = PhysicalAccessKind::kTableScan,
-              .cost = ScanCost(analysis.source.estimated_rows),
-          },
-  });
-  for (std::size_t term = 0; term < analysis.predicates.terms.size(); ++term) {
-    const auto key =
-        RowIdLookupKey(bound_select, analysis.source, analysis.predicates.terms[term].predicate);
-    if (!key.has_value()) {
-      continue;
-    }
-    analysis.access_candidates.push_back(ReadAccessCandidate{
-        .published =
-            AccessPathCandidate{
-                .kind = PhysicalAccessKind::kRowIdLookup,
-                .cost = RowIdCost(analysis.source.estimated_rows, true),
-            },
-        .payload =
-            RowIdCandidatePlan{
-                .key = *key,
-                .selected_term = term,
-                .constraint = analysis.predicates.terms[term],
-            },
-        .single_row_shortcut = true,
-    });
-    break;
-  }
-  if (auto range =
-          AnalyzeRowIdRangeCandidate(bound_select, analysis.source, analysis.predicates.terms);
-      range.has_value()) {
-    const std::uint32_t bound_count = static_cast<std::uint32_t>(range->node.lower.has_value()) +
-                                      static_cast<std::uint32_t>(range->node.upper.has_value());
-    analysis.access_candidates.push_back(ReadAccessCandidate{
-        .published =
-            AccessPathCandidate{
-                .kind = PhysicalAccessKind::kRowIdRange,
-                .cost = RowIdRangeCost(analysis.source, bound_count),
-                .range_bound_count = bound_count,
-            },
-        .payload = std::move(*range),
-    });
-  }
-  if (analysis.source.source_kind == BoundSourceKind::kCatalogTable &&
-      analysis.source.table.has_value() && analysis.source.rowid_eligible) {
-    for (const IndexId index_id : bound_select.catalog()->table_indexes(*analysis.source.table)) {
-      auto candidate = AnalyzeIndexCandidate(
-          bound_select, analysis.source.id, *analysis.source.table, core.source_column_begin,
-          core.source_column_count, index_id, analysis.predicates.terms, &core, true);
-      if (!candidate.has_value()) {
-        continue;
-      }
-      const bool shortcut = IsUniqueLookupShortcut(bound_select, candidate->node);
-      analysis.access_candidates.push_back(ReadAccessCandidate{
-          .published = PublishIndexCandidate(bound_select, analysis.source, *candidate, true),
-          .payload = std::move(*candidate),
-          .single_row_shortcut = shortcut,
-      });
-    }
-  }
-
-  const bool has_constrained_rowid =
-      std::ranges::any_of(analysis.access_candidates, [](const ReadAccessCandidate& candidate) {
-        return candidate.published.kind == PhysicalAccessKind::kRowIdLookup ||
-               candidate.published.kind == PhysicalAccessKind::kRowIdRange;
-      });
-  for (std::size_t candidate = 1; candidate < analysis.access_candidates.size(); ++candidate) {
-    const auto* index =
-        std::get_if<IndexCandidatePlan>(&analysis.access_candidates[candidate].payload);
-    if (index != nullptr && !allow_secondary_index_selection &&
-        !analysis.access_candidates[candidate].single_row_shortcut) {
-      continue;
-    }
-    const bool constrained_index =
-        index != nullptr && (!index->node.equalities.empty() || index->node.range.has_value());
-    const bool normal_eligible =
-        index == nullptr || ((!has_constrained_rowid || constrained_index) &&
-                             (index->node.covering || constrained_index));
-    if (normal_eligible && analysis.access_candidates[candidate].single_row_shortcut) {
-      analysis.selected_access = candidate;
-      break;
-    }
-    if (normal_eligible &&
-        PreferCandidate(analysis.access_candidates[candidate].published,
-                        analysis.access_candidates[analysis.selected_access].published)) {
-      analysis.selected_access = candidate;
-    }
-  }
+  analysis.selected_access = planned->selected[0];
+  analysis.direction = planned->loops[analysis.selected_access].direction;
+  analysis.output_log_est = planned->output_log_est;
+  analysis.search_limited = planned->search_limited;
+  analysis.access_candidates = std::move(planned->loops);
 
   analysis.selected_terms.assign(analysis.predicates.terms.size(), false);
   const ReadAccessCandidate& selected = analysis.access_candidates[analysis.selected_access];
-  if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload); rowid != nullptr) {
-    analysis.selected_terms[rowid->selected_term] = true;
-  } else if (const auto* range = std::get_if<RowIdRangeCandidatePlan>(&selected.payload);
-             range != nullptr) {
-    analysis.selected_terms = range->selected_terms;
-  } else if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
-             index != nullptr) {
-    analysis.selected_terms = index->selected_terms;
-  }
-  analysis.residuals.reserve(analysis.predicates.terms.size());
+  VisitLoopTerms(selected, [&](std::size_t term) {
+    analysis.selected_terms[term] =
+        !selected.transitive || !analysis.predicates.terms[term].equivalence;
+  });
+  analysis.residuals.reserve(
+      static_cast<std::size_t>(std::ranges::count(analysis.selected_terms, false)));
   for (std::size_t term = 0; term < analysis.predicates.terms.size(); ++term) {
     if (!analysis.selected_terms[term]) {
       analysis.residuals.push_back(analysis.predicates.terms[term].predicate);
@@ -2135,6 +2991,7 @@ struct NonjoinedCoreAccessAnalysis {
       .core_index = analysis.core_index,
       .candidates = {},
       .selected_candidate = analysis.selected_access,
+      .search_limited = analysis.search_limited,
   };
   published.candidates.reserve(analysis.access_candidates.size());
   for (const ReadAccessCandidate& candidate : analysis.access_candidates) {
@@ -2143,14 +3000,15 @@ struct NonjoinedCoreAccessAnalysis {
   return published;
 }
 
-[[nodiscard]] PhysicalNodePayload BuildNonjoinedAccessLeaf(NonjoinedCoreAccessAnalysis& analysis) {
+[[nodiscard]] PhysicalNodePayload BuildNonjoinedAccessLeaf(
+    const NonjoinedCoreAccessAnalysis& analysis) {
   if (analysis.predicates.empty) {
     return PhysicalEmptyNode{.core_index = analysis.core_index};
   }
   if (analysis.source.single_row) {
     return PhysicalSingleRowNode{.core_index = analysis.core_index};
   }
-  ReadAccessCandidate& selected = analysis.access_candidates[analysis.selected_access];
+  const ReadAccessCandidate& selected = analysis.access_candidates[analysis.selected_access];
   if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload); rowid != nullptr) {
     return PhysicalRowIdLookupNode{
         .core_index = analysis.core_index,
@@ -2174,8 +3032,8 @@ struct NonjoinedCoreAccessAnalysis {
     node.direction = analysis.direction;
     return node;
   }
-  if (auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
-    PhysicalIndexScanNode node = std::move(index->node);
+  if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
+    PhysicalIndexScanNode node = index->node;
     node.core_index = analysis.core_index;
     node.direction = analysis.direction;
     return node;
@@ -2190,230 +3048,206 @@ struct NonjoinedCoreAccessAnalysis {
   };
 }
 
-[[nodiscard]] std::optional<PhysicalIndexScanNode> JoinedIndexScan(
-    const BoundQueryView& bound_select, std::size_t core_index, BoundSourceId source_id) {
-  const auto query_cores = bound_select.query_cores();
-  const auto* core = std::get_if<BoundSelectCore>(&query_cores[core_index]);
-  if (core == nullptr || core->table_sources.size() < 2U) {
-    return std::nullopt;
-  }
-  const auto source = std::ranges::find(core->table_sources, source_id, &BoundTableSource::id);
-  if (source == core->table_sources.end() || source->kind != BoundSourceKind::kCatalogTable) {
-    return std::nullopt;
-  }
-  const auto table_id = source->table;
-  if (!table_id.has_value()) {
-    return std::nullopt;
-  }
-  const SourceInfo info = ResolveTableSource(bound_select, *source);
-  const auto indexes = bound_select.catalog()->table_indexes(*table_id);
-  if (!info.rowid_eligible || indexes.empty()) {
-    return std::nullopt;
-  }
-  const std::vector<ReadPredicateTerm> predicates =
-      JoinedAccessPredicates(bound_select, *core, *source);
-  if (predicates.empty()) {
-    return std::nullopt;
-  }
-  ReadAccessCandidate selected{
-      .published =
-          AccessPathCandidate{
-              .kind = PhysicalAccessKind::kTableScan,
-              .cost = ScanCost(info.estimated_rows),
-          },
-  };
-  for (const IndexId index : indexes) {
-    auto candidate = AnalyzeIndexCandidate(bound_select, source_id, *table_id,
-                                           source->source_column_begin, source->source_column_count,
-                                           index, predicates, core, false, source_id);
-    if (!candidate.has_value() ||
-        (candidate->node.equalities.empty() && !candidate->node.range.has_value())) {
-      continue;
+struct JoinedCoreAccessAnalysis {
+  std::size_t core_index = 0;
+  std::vector<ReadPredicateTerm> terms{};
+  WhereLoopPlan plan{};
+};
+
+[[nodiscard]] std::optional<std::size_t> JoinedSourceLevel(const JoinedCoreAccessAnalysis& analysis,
+                                                           std::size_t source_position) noexcept {
+  for (std::size_t level = 0; level < analysis.plan.level_count; ++level) {
+    if (analysis.plan.loops[analysis.plan.selected[level]].source_position == source_position) {
+      return level;
     }
-    const AccessPathCandidate published = PublishIndexCandidate(bound_select, info, *candidate);
-    if (PreferCandidate(published, selected.published)) {
-      selected = ReadAccessCandidate{.published = published, .payload = std::move(*candidate)};
-    }
-  }
-  if (auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
-    index->node.core_index = core_index;
-    return std::move(index->node);
   }
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<PhysicalAutomaticIndexNode> JoinedAutomaticIndex(
-    const BoundQueryView& bound_select, std::size_t core_index, const BoundSelectCore& core,
-    const BoundTableSource& source, const SourceInfo& info, std::uint64_t repetitions,
-    OptimizerOptions options) {
-  if (!options.allow_file_backed_automatic_indexes || repetitions <= 1U ||
-      core.table_sources.size() < 2U || !info.rowid_eligible ||
-      source.kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
-      std::ranges::any_of(core.table_sources, [](const BoundTableSource& item) {
-        return SourceJoinPreservesRight(item.join);
-      })) {
-    return std::nullopt;
-  }
-  const CatalogTable& table = bound_select.catalog()->table(*source.table);
-  const std::vector<ReadPredicateTerm> predicates =
-      JoinedAccessPredicates(bound_select, core, source);
-  PhysicalAutomaticIndexNode automatic{
-      .core_index = core_index,
-      .source = source.id,
-      .table = *source.table,
-      .table_root_page = table.root_page,
-  };
-  for (std::size_t column = 0; column < table.columns.size(); ++column) {
-    for (const ReadPredicateTerm& predicate : predicates) {
-      const BoundExpressionId transparent =
-          TransparentPredicateId(bound_select, predicate.predicate);
-      if (!IsValidExpressionId(bound_select, transparent)) {
-        continue;
+[[nodiscard]] std::expected<void, OptimizerError> AssignJoinedTermPhases(
+    JoinedCoreAccessAnalysis& analysis, const BoundQueryView& bound) {
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[analysis.core_index]);
+  const auto& plan = analysis.plan;
+  for (ReadPredicateTerm& term : analysis.terms) {
+    std::size_t floor = 0;
+    std::optional<std::size_t> owner;
+    if (term.on_source.has_value()) {
+      owner = SourcePosition(core.table_sources, *term.on_source);
+      if (!owner.has_value()) {
+        return std::unexpected(InvariantFailure("joined term has no declared ON owner"));
       }
-      const auto* comparison =
-          std::get_if<BoundComparisonExpression>(&bound_select.expression(transparent).payload);
-      if (comparison == nullptr ||
-          comparison->collation.value() >= bound_select.collations().size()) {
-        continue;
+    }
+    for (std::size_t position = 0; position < core.table_sources.size(); ++position) {
+      if (SourceJoinPreservesRight(core.table_sources[position].join) &&
+          (!term.constraint_owner.has_value() || !owner.has_value() || position <= *owner)) {
+        const auto level = JoinedSourceLevel(analysis, position);
+        if (!level.has_value()) {
+          return std::unexpected(InvariantFailure("RIGHT source is absent from selected levels"));
+        }
+        floor = std::max(floor, *level);
       }
-      const std::string_view collation =
-          bound_select.collations()[comparison->collation.value()].name;
-      if (!IsRegisteredCollation(bound_select, collation)) {
-        continue;
+    }
+    SourceMask ready = 0;
+    std::optional<std::size_t> evaluation;
+    for (std::size_t level = 0; level < plan.level_count; ++level) {
+      ready |= SourceBit(plan.loops[plan.selected[level]].source_position);
+      if (level >= floor && (term.prerequisites & ~ready) == 0U) {
+        evaluation = level;
+        break;
       }
-      const CatalogIndexTerm term{
-          .target = ColumnId{column},
-          .collation_name = std::string{collation},
-          .order = SortOrder::kAscending,
-      };
-      const auto match =
-          MatchIndexConstraint(bound_select, source.id, source.source_column_begin,
-                               source.source_column_count, term, predicate, source.id);
-      if (!match.has_value() || match->kind != IndexConstraintKind::kEquality) {
-        continue;
+    }
+    if (!evaluation.has_value()) {
+      return std::unexpected(
+          InvariantFailure("joined predicate has no available evaluation level"));
+    }
+    if (owner.has_value()) {
+      const auto owner_level = JoinedSourceLevel(analysis, *owner);
+      if (!owner_level.has_value()) {
+        return std::unexpected(InvariantFailure("ON owner is absent from selected levels"));
       }
-      automatic.equalities.push_back(PhysicalIndexEquality{
-          .column = ColumnId{column},
-          .key = match->key,
-          .predicate = match->predicate,
-          .conjunct_position = match->conjunct_position,
-          .origin = predicate.origin,
-          .affinity = table.columns[column].affinity,
-          .collation_name = collation,
-          .order = SortOrder::kAscending,
-          .reject_null = match->reject_null,
-      });
-      break;
+      if (term.outer_on || (SourceIsLeftOfRightJoin(core, *owner) && *evaluation <= *owner_level)) {
+        evaluation = *owner_level;
+      }
+    }
+    const bool preopen = term.on_source.has_value() && !term.outer_on && *evaluation == 0U &&
+                         IsStatementGuard(bound, term.predicate) &&
+                         (!owner.has_value() || !SourceIsLeftOfRightJoin(core, *owner));
+    if (!preopen) {
+      term.evaluation_source =
+          core.table_sources[plan.loops[plan.selected[*evaluation]].source_position].id;
+    }
+    if (preopen) {
+      continue;
+    }
+    ready = 0;
+    for (std::size_t level = 0; level <= *evaluation; ++level) {
+      const auto& loop = plan.loops[plan.selected[level]];
+      ready |= SourceBit(loop.source_position);
+      const auto& source = core.table_sources[loop.source_position];
+      if ((term.prerequisites & ~ready) == 0U &&
+          (!SourceJoinPreservesLeft(source.join) || term.outer_on) &&
+          (!loop.transitive || !term.equivalence)) {
+        const auto term_index = static_cast<std::size_t>(&term - analysis.terms.data());
+        term.consumed_by_access = term.consumed_by_access || LoopUsesTerm(loop, term_index);
+      }
     }
   }
-  if (automatic.equalities.empty()) {
-    return std::nullopt;
-  }
-  RequiredSourceValues required =
-      DiscoverRequiredSourceValues(bound_select, source.id, table, predicates, {}, &core);
-  std::uint64_t width_units = 1;
-  for (const PhysicalIndexEquality& equality : automatic.equalities) {
-    required.columns[equality.column.value] = false;
-    width_units = SaturatingAdd(width_units,
-                                AffinityWidthUnits(table.columns[equality.column.value].affinity));
-  }
-  for (std::size_t column = 0; column < required.columns.size(); ++column) {
-    if (required.columns[column] && table.rowid_alias != ColumnId{column}) {
-      automatic.covering_columns.push_back(ColumnId{column});
-      width_units = SaturatingAdd(width_units, AffinityWidthUnits(table.columns[column].affinity));
-    }
-  }
-  if (automatic.equalities.size() + automatic.covering_columns.size() + 1U >
-      kMaximumRecordFieldCount) {
-    return std::nullopt;
-  }
-  const std::uint64_t width = SaturatingMultiply(width_units, 4);
-  const std::uint64_t levels =
-      static_cast<std::uint64_t>(std::bit_width(std::max<std::uint64_t>(info.estimated_rows, 1U)));
-  const std::uint64_t matches =
-      EstimateEqualityPrefixOutput(bound_select, automatic.equalities, info.estimated_rows);
-  const std::uint64_t source_work =
-      SaturatingMultiply(info.estimated_rows, info.estimated_row_size);
-  const std::uint64_t build_work =
-      SaturatingMultiply(SaturatingMultiply(info.estimated_rows, levels), width);
-  const std::uint64_t probe_work =
-      SaturatingMultiply(repetitions, SaturatingAdd(levels, SaturatingMultiply(matches, width)));
-  const std::uint64_t automatic_work =
-      SaturatingAdd(source_work, SaturatingAdd(build_work, probe_work));
-  if (automatic_work >= SaturatingMultiply(repetitions, source_work)) {
-    return std::nullopt;
-  }
-  return automatic;
+  return {};
 }
 
-[[nodiscard]] std::expected<PhysicalNodePayload, OptimizerError> ChooseJoinedAccess(
-    const LogicalQueryView& logical_plan, const LogicalScanNode& scan, OptimizerOptions options,
-    std::vector<std::uint64_t>& prefix_executions) {
-  const BoundQueryView& bound_select = logical_plan.bound_select();
-  const auto* core = std::get_if<BoundSelectCore>(&bound_select.query_cores()[scan.core_index]);
-  if (core == nullptr) {
-    return std::unexpected(InvariantFailure("joined scan does not belong to a SELECT core"));
-  }
-  const auto source = std::ranges::find(core->table_sources, scan.source, &BoundTableSource::id);
-  if (source == core->table_sources.end()) {
-    return std::unexpected(InvariantFailure("joined scan does not name a core-owned source"));
-  }
-  if (options.allow_file_backed_automatic_indexes && core->table_sources.size() > 1U &&
-      prefix_executions.empty()) {
-    prefix_executions.assign(bound_select.query_cores().size(), 1);
-  }
-  const std::uint64_t repetitions =
-      prefix_executions.empty() ? 1U : prefix_executions[scan.core_index];
-  const SourceInfo info = ResolveTableSource(bound_select, *source);
-  std::uint64_t output_rows = info.estimated_rows;
-  PhysicalNodePayload selected = PhysicalTableScanNode{
-      .core_index = scan.core_index,
-      .source = source->id,
-      .source_kind = source->kind,
-      .table = source->table,
-      .root_page = info.root_page,
+[[nodiscard]] std::expected<JoinedCoreAccessAnalysis, OptimizerError> AnalyzeJoinedCoreAccess(
+    const BoundQueryView& bound, std::size_t core_index, OptimizerOptions options,
+    LogEst outer_loops = 0) {
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[core_index]);
+  JoinedCoreAccessAnalysis analysis{
+      .core_index = core_index,
+      .terms = CollectLoopTerms(bound, core),
   };
-  auto key = JoinedRowIdLookupKey(logical_plan, scan.core_index, source->id);
-  if (!key.has_value()) {
-    return std::unexpected(std::move(key.error()));
+  auto planned = WhereLoopBuilder{bound, core_index, analysis.terms, options, outer_loops}.Run();
+  if (!planned.has_value()) {
+    return std::unexpected(std::move(planned.error()));
   }
-  if (key->has_value()) {
-    const RowIdCandidatePlan& candidate = **key;
-    selected = PhysicalRowIdLookupNode{
-        .core_index = scan.core_index,
-        .source = source->id,
-        .source_kind = source->kind,
-        .table = source->table,
-        .root_page = info.root_page,
-        .key = candidate.key,
+  analysis.plan = std::move(*planned);
+  if (auto assigned = AssignJoinedTermPhases(analysis, bound); !assigned.has_value()) {
+    return std::unexpected(std::move(assigned.error()));
+  }
+  return analysis;
+}
+
+[[nodiscard]] PhysicalCoreAccessPlan PublishJoinedCoreAccessPlan(
+    const JoinedCoreAccessAnalysis& analysis, const BoundQueryView& bound) {
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[analysis.core_index]);
+  PhysicalCoreAccessPlan published{
+      .core_index = analysis.core_index,
+      .candidates = {},
+      .search_limited = analysis.plan.search_limited,
+  };
+  published.source_order.reserve(analysis.plan.level_count);
+  for (std::size_t level = 0; level < analysis.plan.level_count; ++level) {
+    published.source_order.push_back(
+        core.table_sources[analysis.plan.loops[analysis.plan.selected[level]].source_position].id);
+  }
+  return published;
+}
+
+[[nodiscard]] std::expected<PhysicalNodePayload, OptimizerError> BuildJoinedAccessLeaf(
+    const JoinedCoreAccessAnalysis& analysis, const BoundQueryView& bound,
+    BoundSourceId source_id) {
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[analysis.core_index]);
+  const auto position = SourcePosition(core.table_sources, source_id);
+  const auto level = position.has_value() ? JoinedSourceLevel(analysis, *position) : std::nullopt;
+  if (!level.has_value()) {
+    return std::unexpected(InvariantFailure("joined leaf has no selected access"));
+  }
+  const auto& selected = analysis.plan.loops[analysis.plan.selected[*level]];
+  const SourceInfo source = ResolveTableSource(bound, core.table_sources[*position]);
+  if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload); rowid != nullptr) {
+    return PhysicalRowIdLookupNode{
+        .core_index = analysis.core_index,
+        .source = source_id,
+        .source_kind = source.source_kind,
+        .table = source.table,
+        .root_page = source.root_page,
+        .key = rowid->key,
         .constraint =
-            PhysicalAccessPredicate{
-                .predicate = candidate.constraint.predicate,
-                .conjunct_position = candidate.constraint.conjunct_position,
-                .origin = candidate.constraint.origin,
-            },
+            PhysicalAccessPredicate{.predicate = rowid->constraint.predicate,
+                                    .conjunct_position = rowid->constraint.conjunct_position,
+                                    .origin = rowid->constraint.origin},
     };
-    output_rows = LogEstToRows(RowIdCost(info.estimated_rows).output_log_est);
-  } else if (auto index = JoinedIndexScan(bound_select, scan.core_index, source->id);
-             index.has_value()) {
-    const CatalogIndex& definition = bound_select.catalog()->index(index->index);
-    output_rows = LogEstToRows(EstimateIndexOutputLogEst(
-        bound_select, definition, *index, IndexCardinality(definition, info.estimated_rows)));
-    selected = std::move(*index);
-  } else if (auto automatic = JoinedAutomaticIndex(bound_select, scan.core_index, *core, *source,
-                                                   info, repetitions, options);
-             automatic.has_value()) {
-    output_rows =
-        EstimateEqualityPrefixOutput(bound_select, automatic->equalities, info.estimated_rows);
-    selected = std::move(*automatic);
   }
-  if (SourceJoinPreservesLeft(source->join)) {
-    output_rows = std::max<std::uint64_t>(output_rows, 1U);
+  if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
+    return index->node;
   }
-  if (!prefix_executions.empty()) {
-    prefix_executions[scan.core_index] = SaturatingMultiply(repetitions, output_rows);
+  if (const auto* automatic = std::get_if<AutomaticCandidatePlan>(&selected.payload);
+      automatic != nullptr) {
+    return automatic->node;
   }
-  return selected;
+  if (selected.published.kind != PhysicalAccessKind::kTableScan) {
+    return std::unexpected(InvariantFailure("joined selected access has an unsupported payload"));
+  }
+  return PhysicalTableScanNode{
+      .core_index = analysis.core_index,
+      .source = source_id,
+      .source_kind = source.source_kind,
+      .table = source.table,
+      .root_page = source.root_page,
+  };
+}
+
+[[nodiscard]] std::vector<PhysicalJoinPredicatePlacement> PublishJoinedPredicates(
+    const JoinedCoreAccessAnalysis& analysis, BoundSourceId owner) {
+  std::vector<PhysicalJoinPredicatePlacement> predicates;
+  for (const ReadPredicateTerm& term : analysis.terms) {
+    if (term.on_source == owner) {
+      predicates.push_back(PhysicalJoinPredicatePlacement{
+          .predicate = term.predicate,
+          .conjunct_position = term.conjunct_position,
+          .source = term.evaluation_source,
+          .consumed_by_access = term.consumed_by_access,
+      });
+    }
+  }
+  return predicates;
+}
+
+[[nodiscard]] std::expected<PhysicalFilterNode, OptimizerError> PublishJoinedFilter(
+    const JoinedCoreAccessAnalysis& analysis, const BoundQueryView& bound, PhysicalNodeId input) {
+  PhysicalFilterNode filter{.input = input};
+  for (const ReadPredicateTerm& term : analysis.terms) {
+    if (term.origin != PhysicalPredicateOrigin::kWhere) {
+      continue;
+    }
+    if (IsStatementGuard(bound, term.predicate)) {
+      filter.guards.push_back(term.predicate);
+    } else if (!term.consumed_by_access) {
+      if (!term.evaluation_source.has_value()) {
+        return std::unexpected(InvariantFailure("joined WHERE term has no evaluation source"));
+      }
+      filter.predicates.push_back(term.predicate);
+      filter.predicate_sources.push_back(*term.evaluation_source);
+    }
+  }
+  return filter;
 }
 
 [[nodiscard]] bool MatchesJoinedAccess(const PhysicalNode& actual,
@@ -2455,11 +3289,12 @@ struct NonjoinedCoreAccessAnalysis {
 
 [[nodiscard]] bool MatchesIndexScan(const PhysicalIndexScanNode& actual,
                                     const PhysicalIndexScanNode& expected, std::size_t core_index,
-                                    PhysicalScanDirection direction) noexcept {
+                                    PhysicalScanDirection direction,
+                                    std::span<const PhysicalIndexEquality> equalities) noexcept {
   return actual.core_index == core_index && actual.source == expected.source &&
          actual.table == expected.table && actual.table_root_page == expected.table_root_page &&
          actual.index == expected.index && actual.index_root_page == expected.index_root_page &&
-         actual.equalities == expected.equalities && actual.range == expected.range &&
+         std::ranges::equal(actual.equalities, equalities) && actual.range == expected.range &&
          actual.covering == expected.covering && actual.direction == direction;
 }
 
@@ -2494,6 +3329,8 @@ struct AggregateCorePlan {
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
   bool at_most_one_row = false;
   bool order_satisfied = false;
+  LogEst output_log_est = 0;
+  bool search_limited = false;
 };
 
 [[nodiscard]] std::optional<DirectSourceIdentity> ResolveDirectSourceIdentity(
@@ -3018,8 +3855,9 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   };
 }
 
-[[nodiscard]] AggregateCorePlan BuildAggregateCorePlan(const BoundQueryView& bound_select,
-                                                       std::size_t core_index) {
+[[nodiscard]] std::expected<AggregateCorePlan, OptimizerError> BuildAggregateCorePlan(
+    const BoundQueryView& bound_select, std::size_t core_index, OptimizerOptions options = {},
+    LogEst outer_loops = 0) {
   const auto& core = std::get<BoundSelectCore>(bound_select.query_cores()[core_index]);
   const BoundAggregateProgram& aggregate = AssumePresent(core.aggregate);
   AggregateCorePlan plan;
@@ -3034,10 +3872,16 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
     ConfigureAggregateOrder(bound_select, aggregate, &plan);
     return plan;
   }
-  NonjoinedCoreAccessAnalysis access = AnalyzeNonjoinedCoreAccess(bound_select, core_index);
+  auto analyzed = AnalyzeNonjoinedCoreAccess(bound_select, core_index, options, outer_loops);
+  if (!analyzed.has_value()) {
+    return std::unexpected(std::move(analyzed.error()));
+  }
+  NonjoinedCoreAccessAnalysis access = std::move(*analyzed);
   plan.source = access.source;
   plan.predicates = std::move(access.predicates);
   const std::size_t normal_access = access.selected_access;
+  plan.output_log_est = access.output_log_est;
+  plan.search_limited = access.search_limited;
   plan.access_candidates = std::move(access.access_candidates);
   if (plan.predicates.empty) {
     plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
@@ -3114,14 +3958,15 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   plan.selected_access = selected_ordered.value_or(normal_access);
   std::vector<bool> selected_terms(plan.predicates.terms.size(), false);
   const ReadAccessCandidate& selected = plan.access_candidates[*plan.selected_access];
-  if (const auto* rowid = std::get_if<RowIdCandidatePlan>(&selected.payload); rowid != nullptr) {
-    selected_terms[rowid->selected_term] = true;
-  } else if (const auto* range = std::get_if<RowIdRangeCandidatePlan>(&selected.payload);
-             range != nullptr) {
-    selected_terms = range->selected_terms;
-  } else if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload);
-             index != nullptr) {
-    selected_terms = index->selected_terms;
+  VisitLoopTerms(selected, [&](std::size_t term) {
+    selected_terms[term] = !selected.transitive || !plan.predicates.terms[term].equivalence;
+  });
+  plan.output_log_est = selected.single_row_shortcut
+                            ? kShortcutOutput
+                            : std::min(outer_loops, kMaximumOuterLoopEstimate) +
+                                  selected.published.cost.output_log_est;
+  if (!selected.single_row_shortcut && RequestsInputDistinct(bound_select, core)) {
+    plan.output_log_est -= kDistinctOutputReduction;
   }
   plan.residuals.reserve(plan.predicates.terms.size());
   for (std::size_t term = 0; term < plan.predicates.terms.size(); ++term) {
@@ -3167,257 +4012,18 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   return PhysicalAccessKind::kEmpty;
 }
 
-[[nodiscard]] std::expected<void, OptimizerError> ValidateCandidates(
-    const BoundQueryView& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
-    std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index) {
-  const auto matches = [&](std::size_t index, PhysicalAccessKind kind, AccessPathCost cost) {
-    return index < candidates.size() && candidates[index].kind == kind &&
-           candidates[index].cost == cost;
-  };
-
-  if (std::holds_alternative<PhysicalEmptyNode>(leaf.payload)) {
-    if (candidates.size() != 1U || selected_candidate_index != 0U ||
-        !matches(0, PhysicalAccessKind::kEmpty, AccessPathCost{})) {
-      return std::unexpected{InvariantFailure("empty access candidate is invalid")};
-    }
-    return {};
-  }
-  if (std::holds_alternative<PhysicalSingleRowNode>(leaf.payload)) {
-    constexpr AccessPathCost kSingleRowCost{};
-    if (candidates.size() != 1U || selected_candidate_index != 0U ||
-        !matches(0, PhysicalAccessKind::kSingleRow, kSingleRowCost)) {
-      return std::unexpected{InvariantFailure("single-row access candidate is invalid")};
-    }
-    return {};
-  }
-  if (candidates.empty() || selected_candidate_index >= candidates.size() ||
-      !matches(0, PhysicalAccessKind::kTableScan, ScanCost(source.estimated_rows))) {
-    return std::unexpected{InvariantFailure("table-scan access candidate is invalid")};
-  }
-
-  std::size_t candidate_index = 1;
-  if (candidate_index < candidates.size() &&
-      candidates[candidate_index].kind == PhysicalAccessKind::kRowIdLookup) {
-    if (!source.rowid_eligible ||
-        candidates[candidate_index].cost != RowIdCost(source.estimated_rows, true) ||
-        candidates[candidate_index].index.has_value()) {
-      return std::unexpected{InvariantFailure("rowid access candidates are invalid")};
-    }
-    ++candidate_index;
-  }
-  if (candidate_index < candidates.size() &&
-      candidates[candidate_index].kind == PhysicalAccessKind::kRowIdRange) {
-    const AccessPathCandidate& candidate = candidates[candidate_index];
-    if (!source.rowid_eligible || candidate.range_bound_count < 1U ||
-        candidate.range_bound_count > 2U ||
-        candidate.cost != RowIdRangeCost(source, candidate.range_bound_count) ||
-        candidate.index.has_value() || candidate.covering || candidate.equality_term_count != 0U) {
-      return std::unexpected{InvariantFailure("rowid-range access candidate is invalid")};
-    }
-    ++candidate_index;
-  }
-  std::size_t table_index_position = 0;
-  const CatalogSnapshot* catalog = bound_select.catalog();
-  const std::span<const IndexId> table_indexes = source.table.has_value() && catalog != nullptr
-                                                     ? catalog->table_indexes(*source.table)
-                                                     : std::span<const IndexId>{};
-  for (; candidate_index < candidates.size(); ++candidate_index) {
-    const AccessPathCandidate& candidate = candidates[candidate_index];
-    if (candidate.kind != PhysicalAccessKind::kIndexScan || !candidate.index.has_value()) {
-      return std::unexpected{InvariantFailure("index access candidate is invalid")};
-    }
-    while (table_index_position < table_indexes.size() &&
-           table_indexes[table_index_position] != *candidate.index) {
-      ++table_index_position;
-    }
-    if (table_index_position >= table_indexes.size()) {
-      return std::unexpected{InvariantFailure("index access candidate order is invalid")};
-    }
-    ++table_index_position;
-  }
-
-  const AccessPathCandidate& selected = candidates[selected_candidate_index];
-  if (AccessKindOf(leaf) != selected.kind) {
-    return std::unexpected{InvariantFailure("selected access candidate does not match its leaf")};
-  }
-  if (std::holds_alternative<PhysicalTableScanNode>(leaf.payload)) {
-    if (selected_candidate_index != 0U) {
-      return std::unexpected{InvariantFailure("selected table scan is not the first candidate")};
-    }
-    return {};
-  }
-  if (std::holds_alternative<PhysicalRowIdLookupNode>(leaf.payload)) {
-    if (selected.kind != PhysicalAccessKind::kRowIdLookup ||
-        selected.cost != RowIdCost(source.estimated_rows, true)) {
-      return std::unexpected{InvariantFailure("selected rowid candidate is invalid")};
-    }
-    return {};
-  }
-  if (const auto* range = std::get_if<PhysicalRowIdRangeNode>(&leaf.payload); range != nullptr) {
-    const std::uint32_t bound_count = static_cast<std::uint32_t>(range->lower.has_value()) +
-                                      static_cast<std::uint32_t>(range->upper.has_value());
-    if (selected.kind != PhysicalAccessKind::kRowIdRange ||
-        selected.range_bound_count != bound_count ||
-        selected.cost != RowIdRangeCost(source, bound_count)) {
-      return std::unexpected{InvariantFailure("selected rowid-range candidate is invalid")};
-    }
-    return {};
-  }
-  if (const auto* index = std::get_if<PhysicalIndexScanNode>(&leaf.payload); index != nullptr) {
-    if (selected.kind != PhysicalAccessKind::kIndexScan || selected.index != index->index ||
-        selected.covering != index->covering ||
-        selected.equality_term_count != index->equalities.size() ||
-        selected.range_bound_count !=
-            static_cast<std::uint32_t>(
-                index->range.has_value()
-                    ? static_cast<std::size_t>(index->range->lower.has_value()) +
-                          static_cast<std::size_t>(index->range->upper.has_value())
-                    : 0U)) {
-      return std::unexpected{InvariantFailure("selected index candidate is invalid")};
-    }
-    return {};
-  }
-  return std::unexpected{InvariantFailure("physical plan does not begin with an access node")};
-}
-
-[[nodiscard]] std::expected<void, OptimizerError> ValidatePredicates(
-    const BoundQueryView& bound_select, const SourceInfo& source, const PhysicalNode& leaf,
-    std::span<const BoundExpressionId> guard_predicates,
-    std::span<const BoundExpressionId> filter_predicates) {
-  const bool empty_access = std::holds_alternative<PhysicalEmptyNode>(leaf.payload);
-  const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf.payload);
-  const auto* rowid_range = std::get_if<PhysicalRowIdRangeNode>(&leaf.payload);
-  const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
-  std::vector<std::pair<std::size_t, BoundExpressionId>> selected_index_predicates;
-  if (index_scan != nullptr) {
-    selected_index_predicates.reserve(
-        index_scan->equalities.size() +
-        static_cast<std::size_t>(index_scan->range.has_value() &&
-                                 index_scan->range->lower.has_value()) +
-        static_cast<std::size_t>(index_scan->range.has_value() &&
-                                 index_scan->range->upper.has_value()));
-    for (const PhysicalIndexEquality& equality : index_scan->equalities) {
-      selected_index_predicates.emplace_back(equality.conjunct_position, equality.predicate);
-    }
-    if (index_scan->range.has_value() && index_scan->range->lower.has_value()) {
-      selected_index_predicates.emplace_back(index_scan->range->lower->conjunct_position,
-                                             index_scan->range->lower->predicate);
-    }
-    if (index_scan->range.has_value() && index_scan->range->upper.has_value()) {
-      selected_index_predicates.emplace_back(index_scan->range->upper->conjunct_position,
-                                             index_scan->range->upper->predicate);
-    }
-    std::ranges::sort(selected_index_predicates, {}, [](const auto& entry) { return entry.first; });
-  } else if (rowid_range != nullptr) {
-    selected_index_predicates.reserve(static_cast<std::size_t>(rowid_range->lower.has_value()) +
-                                      static_cast<std::size_t>(rowid_range->upper.has_value()));
-    if (rowid_range->lower.has_value()) {
-      selected_index_predicates.emplace_back(rowid_range->lower->conjunct_position,
-                                             rowid_range->lower->predicate);
-    }
-    if (rowid_range->upper.has_value()) {
-      selected_index_predicates.emplace_back(rowid_range->upper->conjunct_position,
-                                             rowid_range->upper->predicate);
-    }
-    std::ranges::sort(selected_index_predicates, {}, [](const auto& entry) { return entry.first; });
-  }
-  std::size_t guard_index = 0;
-  std::size_t filter_index = 0;
-  std::size_t selected_index_predicate = 0;
-  std::size_t conjunct_position = 0;
-  bool known_false = false;
-  bool selected_rowid = false;
-  bool invalid = false;
-
-  const auto visit = [&](BoundExpressionId predicate) {
-    const std::size_t position = conjunct_position++;
-    const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, predicate);
-    if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
-      return true;
-    }
-    if (truth.has_value()) {
-      known_false = true;
-      return false;
-    }
-    if (source.single_row) {
-      if (guard_index >= guard_predicates.size() || guard_predicates[guard_index] != predicate) {
-        invalid = true;
-        return false;
-      }
-      ++guard_index;
-      return true;
-    }
-    if (IsStatementGuard(bound_select, predicate)) {
-      if (guard_index >= guard_predicates.size() || guard_predicates[guard_index] != predicate) {
-        invalid = true;
-        return false;
-      }
-      ++guard_index;
-      return true;
-    }
-    if (empty_access) {
-      return true;
-    }
-    if (selected_index_predicate < selected_index_predicates.size() &&
-        selected_index_predicates[selected_index_predicate].second == predicate) {
-      ++selected_index_predicate;
-      return true;
-    }
-    if (!selected_rowid) {
-      const std::optional<BoundExpressionId> key = RowIdLookupKey(bound_select, source, predicate);
-      if (key.has_value()) {
-        if (lookup == nullptr || lookup->key != *key || !lookup->constraint.has_value() ||
-            lookup->constraint->predicate != predicate ||
-            lookup->constraint->conjunct_position != position ||
-            lookup->constraint->origin != PhysicalPredicateOrigin::kWhere) {
-          invalid = true;
-          return false;
-        }
-        selected_rowid = true;
-        return true;
-      }
-    }
-    if (filter_index >= filter_predicates.size() || filter_predicates[filter_index] != predicate) {
-      invalid = true;
-      return false;
-    }
-    ++filter_index;
-    return true;
-  };
-
-  if (const std::optional<BoundExpressionId> where = bound_select.where_expression();
-      where.has_value()) {
-    static_cast<void>(VisitConjuncts(bound_select, *where, &visit));
-  }
-  if (invalid || guard_index != guard_predicates.size() ||
-      filter_index != filter_predicates.size() || empty_access != known_false ||
-      (lookup != nullptr) != selected_rowid ||
-      selected_index_predicate != selected_index_predicates.size()) {
-    return std::unexpected{InvariantFailure("physical predicate classification is invalid")};
-  }
-  return {};
-}
-
 [[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
     const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index,
-    std::span<const PhysicalCoreAccessPlan> core_accesses, OptimizerOptions options) {
-  if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value()) {
+    std::span<const PhysicalCoreAccessPlan> core_accesses,
+    std::span<const std::optional<AggregateCorePlan>> aggregate_plans,
+    std::span<const std::optional<NonjoinedCoreAccessAnalysis>> nonjoined_plans,
+    std::span<const std::optional<JoinedCoreAccessAnalysis>> joined_plans) {
+  const std::size_t core_count = logical_plan.bound_select().query_cores().size();
+  if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value() ||
+      aggregate_plans.size() != core_count || nonjoined_plans.size() != core_count ||
+      (!joined_plans.empty() && joined_plans.size() != core_count)) {
     return std::unexpected{InvariantFailure("advanced physical plan arena is invalid")};
-  }
-  std::vector<std::optional<AggregateCorePlan>> aggregate_plans(
-      logical_plan.bound_select().query_cores().size());
-  std::vector<std::optional<NonjoinedCoreAccessAnalysis>> nonjoined_plans(
-      logical_plan.bound_select().query_cores().size());
-  std::vector<std::uint64_t> prefix_executions;
-  for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
-    const auto* select =
-        std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
-    if (select != nullptr && select->aggregate.has_value()) {
-      aggregate_plans[core] = BuildAggregateCorePlan(logical_plan.bound_select(), core);
-    } else if (select != nullptr && select->table_sources.size() <= 1U) {
-      nonjoined_plans[core] = AnalyzeNonjoinedCoreAccess(logical_plan.bound_select(), core, false);
-    }
   }
   std::vector<PhysicalCoreAccessPlan> expected_core_accesses;
   for (std::size_t core = 0; core < nonjoined_plans.size(); ++core) {
@@ -3429,12 +4035,16 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
           .core_index = core,
           .candidates = {},
           .selected_candidate = aggregate.selected_access.value_or(0U),
+          .search_limited = aggregate.search_limited,
       };
       published.candidates.reserve(aggregate.access_candidates.size());
       for (const ReadAccessCandidate& candidate : aggregate.access_candidates) {
         published.candidates.push_back(candidate.published);
       }
       expected_core_accesses.push_back(std::move(published));
+    } else if (!joined_plans.empty() && joined_plans[core].has_value()) {
+      expected_core_accesses.push_back(PublishJoinedCoreAccessPlan(
+          AssumePresent(joined_plans[core]), logical_plan.bound_select()));
     }
   }
   if (!std::ranges::equal(core_accesses, expected_core_accesses)) {
@@ -3523,8 +4133,9 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                 if (const auto* index_plan = std::get_if<IndexCandidatePlan>(&selected.payload);
                     index_plan != nullptr) {
                   const auto* value = std::get_if<PhysicalIndexScanNode>(&physical);
-                  return value != nullptr && MatchesIndexScan(*value, index_plan->node,
-                                                              node.core_index, aggregate.direction);
+                  return value != nullptr &&
+                         MatchesIndexScan(*value, index_plan->node, node.core_index,
+                                          aggregate.direction, index_plan->node.equalities);
                 }
               }
               const auto* value = std::get_if<PhysicalTableScanNode>(&physical);
@@ -3540,17 +4151,26 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                   nodes[index],
                   BuildNonjoinedAccessLeaf(AssumePresent(nonjoined_plans[node.core_index])));
             }
-            const auto expected =
-                ChooseJoinedAccess(logical_plan, node, options, prefix_executions);
+            if (joined_plans.empty() || !joined_plans[node.core_index].has_value()) {
+              return false;
+            }
+            const auto expected = BuildJoinedAccessLeaf(*joined_plans[node.core_index],
+                                                        logical_plan.bound_select(), node.source);
             return expected.has_value() && MatchesJoinedAccess(nodes[index], *expected);
           } else if constexpr (std::is_same_v<Node, LogicalJoinNode>) {
             const auto* value = std::get_if<PhysicalNestedLoopJoinNode>(&physical);
-            const auto placements = PlanJoinPredicatePlacements(logical_plan, node);
+            const auto* right =
+                std::get_if<LogicalScanNode>(&logical_plan.node(node.right).payload);
+            if (right == nullptr || joined_plans.empty() ||
+                !joined_plans[node.core_index].has_value()) {
+              return false;
+            }
+            const auto placements =
+                PublishJoinedPredicates(*joined_plans[node.core_index], right->source);
             return value != nullptr && value->core_index == node.core_index &&
                    value->left.value() == node.left.value() &&
                    value->right.value() == node.right.value() && value->join == node.join &&
-                   value->on == node.on && placements.has_value() &&
-                   value->predicates == *placements;
+                   value->on == node.on && value->predicates == placements;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
             if (value == nullptr || value->input.value() != node.input.value()) {
@@ -3579,21 +4199,15 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
               return value->predicates == access.residuals &&
                      value->guards == access.predicates.guards && value->predicate_sources.empty();
             }
-            const AdvancedPredicateParts expected =
-                SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
-            std::vector<BoundSourceId> placements;
-            if (core_index.has_value()) {
-              const auto query_cores = logical_plan.bound_select().query_cores();
-              const auto& core = std::get<BoundSelectCore>(query_cores[*core_index]);
-              auto ready =
-                  JoinPredicateSources(logical_plan.bound_select(), core, expected.predicates);
-              if (!ready.has_value()) {
-                return false;
-              }
-              placements = std::move(*ready);
+            if (core_index.has_value() && !joined_plans.empty() &&
+                joined_plans[*core_index].has_value()) {
+              const auto expected = PublishJoinedFilter(*joined_plans[*core_index],
+                                                        logical_plan.bound_select(), value->input);
+              return expected.has_value() && value->predicates == expected->predicates &&
+                     value->guards == expected->guards &&
+                     value->predicate_sources == expected->predicate_sources;
             }
-            return value->predicates == expected.predicates && value->guards == expected.guards &&
-                   value->predicate_sources == placements;
+            return false;
           } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
             const auto* value = std::get_if<PhysicalLimitNode>(&physical);
             return value != nullptr && value->input.value() == node.input.value() &&
@@ -3728,13 +4342,18 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
 [[nodiscard]] std::expected<void, OptimizerError> ValidatePhysicalPlan(
     const LogicalQueryView& logical_plan, std::span<const PhysicalNode> nodes, PhysicalNodeId root,
     std::span<const AccessPathCandidate> candidates, std::size_t selected_candidate_index,
-    std::span<const PhysicalCoreAccessPlan> core_accesses, OptimizerOptions options) {
+    std::span<const PhysicalCoreAccessPlan> core_accesses,
+    const NonjoinedCoreAccessAnalysis* root_analysis,
+    std::span<const std::optional<AggregateCorePlan>> aggregate_plans = {},
+    std::span<const std::optional<NonjoinedCoreAccessAnalysis>> nonjoined_plans = {},
+    std::span<const std::optional<JoinedCoreAccessAnalysis>> joined_plans = {}) {
   if (!logical_plan.valid()) {
     return std::unexpected{InvariantFailure("physical plan retained an invalid logical plan")};
   }
   if (IsAdvancedLogicalPlan(logical_plan)) {
     return ValidateAdvancedPhysicalPlan(logical_plan, nodes, root, candidates,
-                                        selected_candidate_index, core_accesses, options);
+                                        selected_candidate_index, core_accesses, aggregate_plans,
+                                        nonjoined_plans, joined_plans);
   }
   if (nodes.size() < 2U || nodes.size() > 6U || root.value() != nodes.size() - 1U) {
     return std::unexpected{InvariantFailure("physical plan node arena is invalid")};
@@ -3750,133 +4369,29 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   }
 
   const BoundQueryView& bound_select = logical_plan.bound_select();
-  const SourceInfo source = ResolveSource(logical_plan);
-  const PhysicalNode& leaf = nodes.front();
-  if (std::expected<void, OptimizerError> validated =
-          ValidateCandidates(bound_select, source, leaf, candidates, selected_candidate_index);
-      !validated.has_value()) {
-    return validated;
+  if (root_analysis == nullptr || root_analysis->selected_access != selected_candidate_index ||
+      root_analysis->access_candidates.size() != candidates.size() ||
+      core_accesses.front().search_limited != root_analysis->search_limited ||
+      !core_accesses.front().source_order.empty()) {
+    return std::unexpected(InvariantFailure("physical validation has no matching core analysis"));
   }
-  if (const auto* scan = std::get_if<PhysicalTableScanNode>(&leaf.payload); scan != nullptr) {
-    if (source.single_row || scan->source != source.id || scan->source_kind != source.source_kind ||
-        scan->table != source.table || scan->root_page != source.root_page ||
-        scan->direction != PhysicalScanDirection::kForward) {
-      return std::unexpected{InvariantFailure("physical table scan does not match logical source")};
-    }
-  } else if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&leaf.payload);
-             lookup != nullptr) {
-    if (!source.rowid_eligible || lookup->source != source.id ||
-        lookup->source_kind != source.source_kind || lookup->table != source.table ||
-        lookup->root_page != source.root_page || !IsValidExpressionId(bound_select, lookup->key) ||
-        ExpressionDependsOnSource(bound_select, lookup->key) || !lookup->constraint.has_value() ||
-        lookup->constraint->origin != PhysicalPredicateOrigin::kWhere) {
-      return std::unexpected{InvariantFailure("physical rowid lookup is invalid")};
-    }
-    const auto key = RowIdLookupKey(bound_select, source, lookup->constraint->predicate);
-    if (!key.has_value() || *key != lookup->key) {
-      return std::unexpected{InvariantFailure("physical rowid lookup constraint is invalid")};
-    }
-  } else if (const auto* rowid_range = std::get_if<PhysicalRowIdRangeNode>(&leaf.payload);
-             rowid_range != nullptr) {
-    if (!source.rowid_eligible || rowid_range->source != source.id ||
-        rowid_range->source_kind != source.source_kind || rowid_range->table != source.table ||
-        rowid_range->root_page != source.root_page ||
-        (!rowid_range->lower.has_value() && !rowid_range->upper.has_value()) ||
-        rowid_range->direction != PhysicalScanDirection::kForward) {
-      return std::unexpected{InvariantFailure("physical rowid range is invalid")};
-    }
-    const auto validate_bound = [&](const PhysicalRangeBound& bound, bool lower) {
-      const auto match = MatchRowIdRange(bound_select, source,
-                                         ReadPredicateTerm{
-                                             .predicate = bound.predicate,
-                                             .conjunct_position = bound.conjunct_position,
-                                         });
-      return match.has_value() && match->lower == lower && match->bound == bound;
-    };
-    if ((rowid_range->lower.has_value() && !validate_bound(*rowid_range->lower, true)) ||
-        (rowid_range->upper.has_value() && !validate_bound(*rowid_range->upper, false))) {
-      return std::unexpected{InvariantFailure("physical rowid range bound is invalid")};
-    }
-  } else if (const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
-             index_scan != nullptr) {
-    if (source.source_kind != BoundSourceKind::kCatalogTable || !source.table.has_value() ||
-        index_scan->source != source.id || index_scan->table != source.table ||
-        index_scan->table_root_page != source.root_page || bound_select.catalog() == nullptr ||
-        index_scan->index.value >= bound_select.catalog()->indexes().size()) {
-      return std::unexpected{InvariantFailure("physical index scan source is invalid")};
-    }
-    const CatalogTable& table = bound_select.catalog()->table(index_scan->table);
-    const CatalogIndex& index = bound_select.catalog()->index(index_scan->index);
-    if (index.table != index_scan->table || index.root_page != index_scan->index_root_page ||
-        !IsSupportedIndexShape(bound_select, table, index) ||
-        index_scan->equalities.size() > index.key_term_count ||
-        index_scan->direction != PhysicalScanDirection::kForward) {
-      return std::unexpected{InvariantFailure("physical index scan metadata is invalid")};
-    }
-    for (std::size_t term_index = 0; term_index < index_scan->equalities.size(); ++term_index) {
-      const PhysicalIndexEquality& equality = index_scan->equalities[term_index];
-      const CatalogIndexTerm& term = index.terms[term_index];
-      const auto* column = std::get_if<ColumnId>(&term.target);
-      const std::optional<IndexConstraintMatch> match = MatchIndexConstraint(
-          bound_select, source.id, 0U, bound_select.source_columns().size(), term,
-          ReadPredicateTerm{
-              .predicate = equality.predicate,
-              .conjunct_position = equality.conjunct_position,
-          });
-      if (column == nullptr || equality.column != *column ||
-          equality.affinity != table.columns[column->value].affinity ||
-          !CatalogNamesEqual(equality.collation_name, term.collation_name) ||
-          equality.order != term.order || !match.has_value() ||
-          match->kind != IndexConstraintKind::kEquality || match->key != equality.key ||
-          match->reject_null != equality.reject_null ||
-          equality.origin != PhysicalPredicateOrigin::kWhere) {
-        return std::unexpected{InvariantFailure("physical index equality is invalid")};
-      }
-    }
-    if (index_scan->range.has_value()) {
-      const std::size_t term_index = index_scan->equalities.size();
-      if (term_index >= index.key_term_count || index.statistics.unordered) {
-        return std::unexpected{InvariantFailure("physical index range position is invalid")};
-      }
-      const CatalogIndexTerm& term = index.terms[term_index];
-      const auto* column = std::get_if<ColumnId>(&term.target);
-      const PhysicalIndexRange& range = *index_scan->range;
-      if (column == nullptr || range.column != *column ||
-          range.affinity != table.columns[column->value].affinity ||
-          !CatalogNamesEqual(range.collation_name, term.collation_name) ||
-          range.order != term.order || (!range.lower.has_value() && !range.upper.has_value())) {
-        return std::unexpected{InvariantFailure("physical index range metadata is invalid")};
-      }
-      const auto validate_bound = [&](const PhysicalRangeBound& bound,
-                                      IndexConstraintKind expected) {
-        const std::optional<IndexConstraintMatch> match = MatchIndexConstraint(
-            bound_select, source.id, 0U, bound_select.source_columns().size(), term,
-            ReadPredicateTerm{
-                .predicate = bound.predicate,
-                .conjunct_position = bound.conjunct_position,
-            });
-        return match.has_value() && match->kind == expected && match->key == bound.key &&
-               match->inclusive == bound.inclusive &&
-               bound.origin == PhysicalPredicateOrigin::kWhere;
-      };
-      if ((range.lower.has_value() && !validate_bound(*range.lower, IndexConstraintKind::kLower)) ||
-          (range.upper.has_value() && !validate_bound(*range.upper, IndexConstraintKind::kUpper))) {
-        return std::unexpected{InvariantFailure("physical index range bound is invalid")};
-      }
-    } else if (index_scan->equalities.empty() &&
-               (index.statistics.unordered || !index_scan->covering)) {
-      return std::unexpected{InvariantFailure("index cannot provide the selected full scan")};
-    }
-  } else if (std::holds_alternative<PhysicalSingleRowNode>(leaf.payload)) {
-    if (!source.single_row) {
-      return std::unexpected{InvariantFailure("single-row access does not match logical source")};
-    }
-  } else if (std::holds_alternative<PhysicalEmptyNode>(leaf.payload)) {
-    if (!bound_select.where_expression().has_value()) {
-      return std::unexpected{InvariantFailure("empty access has no WHERE predicate")};
-    }
+  const SourceInfo& source = root_analysis->source;
+  const PhysicalNode& leaf = nodes.front();
+  const auto expected_candidates =
+      root_analysis->access_candidates |
+      std::views::transform([](const ReadAccessCandidate& loop) { return loop.published; });
+  bool matches_leaf = false;
+  const auto* index_leaf = std::get_if<PhysicalIndexScanNode>(&leaf.payload);
+  const auto* index_expected = std::get_if<IndexCandidatePlan>(
+      &root_analysis->access_candidates[root_analysis->selected_access].payload);
+  if (index_leaf != nullptr && index_expected != nullptr) {
+    matches_leaf = MatchesIndexScan(*index_leaf, index_expected->node, root_analysis->core_index,
+                                    root_analysis->direction, root_analysis->published_equalities);
   } else {
-    return std::unexpected{InvariantFailure("physical plan does not begin with an access node")};
+    matches_leaf = MatchesNonjoinedAccess(leaf, BuildNonjoinedAccessLeaf(*root_analysis));
+  }
+  if (!std::ranges::equal(candidates, expected_candidates) || !matches_leaf) {
+    return std::unexpected(InvariantFailure("physical leaf differs from selected native loop"));
   }
 
   std::size_t index = 1;
@@ -3970,10 +4485,9 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
       return std::unexpected{InvariantFailure("physical projection does not match logical root")};
     }
   }
-  if (std::expected<void, OptimizerError> validated =
-          ValidatePredicates(bound_select, source, leaf, guard_predicates, filter_predicates);
-      !validated.has_value()) {
-    return validated;
+  if (!std::ranges::equal(guard_predicates, root_analysis->published_guards) ||
+      !std::ranges::equal(filter_predicates, root_analysis->published_residuals)) {
+    return std::unexpected(InvariantFailure("physical predicates differ from native term coding"));
   }
   return {};
 }
@@ -4049,11 +4563,23 @@ class PhysicalPlanBuilder final {
     auto impl = std::make_unique<PhysicalPlan::Impl>(std::move(logical_plan), options);
     const std::size_t count = impl->logical_plan.bound_select().query_count();
     impl->nested_queries.resize(count - 1U);
+    std::vector<std::optional<LogEst>> invocation_estimates;
+    if (count > 1U) {
+      invocation_estimates.resize(count);
+    }
     for (std::size_t index = 0; index < count; ++index) {
       const BoundQueryId id{static_cast<std::uint32_t>(index)};
       PhysicalQueryPlan& query = index == 0U ? impl->root_query : impl->nested_queries[index - 1U];
       query.query = id;
-      if (auto built = BuildQuery(LogicalQueryView{impl->logical_plan, id}, &query, impl->options);
+      const auto& declaration = impl->logical_plan.bound_select().query(id);
+      if (declaration.parent.has_value() && declaration.parent->value() >= index) {
+        return std::unexpected(InvariantFailure("query parent is not planned before its child"));
+      }
+      // Unemitted binding-only owners retain the native initial context.
+      const LogEst outer_loops =
+          invocation_estimates.empty() ? 0 : invocation_estimates[index].value_or(0);
+      if (auto built = BuildQuery(LogicalQueryView{impl->logical_plan, id}, &query, impl->options,
+                                  outer_loops, invocation_estimates);
           !built.has_value()) {
         return std::unexpected(std::move(built.error()));
       }
@@ -4062,16 +4588,126 @@ class PhysicalPlanBuilder final {
   }
 
  private:
+  [[nodiscard]] static bool RecordExpressionLoops(const BoundQueryView& bound,
+                                                  BoundExpressionId expression, LogEst loops,
+                                                  std::span<std::optional<LogEst>> invocations) {
+    if (invocations.empty()) {
+      return true;
+    }
+    const auto query = [&](BoundQueryId id) -> std::optional<std::span<const BoundQueryCapture>> {
+      if (id.value() >= invocations.size()) {
+        return std::nullopt;
+      }
+      if (bound.owner().query(id).parent == bound.query().id &&
+          !invocations[id.value()].has_value()) {
+        invocations[id.value()] = loops;
+      }
+      return std::span<const BoundQueryCapture>{};
+    };
+    auto dependency = [](const BoundQueryCapture&) { return true; };
+    return binder_detail::VisitQueryDependencies(bound.expressions(), bound.source_columns(),
+                                                 expression, query, BoundSourceDependency::kValue,
+                                                 dependency);
+  }
+
+  [[nodiscard]] static std::expected<void, OptimizerError> RecordCoreLoops(
+      const BoundQueryView& bound, std::size_t core_index,
+      std::optional<PhysicalAggregateStrategy> strategy, LogEst outer_loops, LogEst output,
+      std::span<std::optional<LogEst>> invocations) {
+    if (invocations.empty()) {
+      return {};
+    }
+    const auto record = [&](BoundExpressionId expression, LogEst loops) {
+      return RecordExpressionLoops(bound, expression, loops, invocations);
+    };
+    bool valid = true;
+    if (const auto* core = std::get_if<BoundSelectCore>(&bound.query_cores()[core_index]);
+        core != nullptr) {
+      const LogEst active = outer_loops + output;
+      if (core->where.has_value()) {
+        valid &= record(*core->where, active);
+      }
+      for (const auto& source : core->table_sources) {
+        if (source.on.has_value()) {
+          valid &= record(*source.on, active);
+        }
+      }
+      if (core->aggregate.has_value()) {
+        const auto& aggregate = *core->aggregate;
+        for (const auto& term : aggregate.group_by) {
+          valid &= record(term.expression, active);
+        }
+        const LogEst input =
+            strategy == PhysicalAggregateStrategy::kSortedGroup ? outer_loops : active;
+        for (const auto id : aggregate.invocations) {
+          const auto& invocation = bound.aggregate_invocations()[id.value()];
+          if (invocation.filter.has_value()) {
+            valid &= record(*invocation.filter, input);
+          }
+          for (const auto& term : invocation.order_by) {
+            valid &= record(term.expression, input);
+          }
+          for (const auto argument : invocation.arguments) {
+            valid &= record(argument, input);
+          }
+        }
+        if (aggregate.having.has_value()) {
+          valid &= record(*aggregate.having, outer_loops);
+        }
+      }
+      const LogEst result = !BoundQueryRequiresResultValues(bound.query(), bound.expressions())
+                                ? 0
+                                : (core->aggregate.has_value() ? outer_loops : active);
+      for (const auto& column : core->result_columns) {
+        valid &= record(column.expression, result);
+      }
+      for (const auto& term : bound.order_by()) {
+        valid &= record(term.expression, result);
+      }
+    } else {
+      const auto& values = std::get<BoundValuesCore>(bound.query_cores()[core_index]);
+      for (const auto& row : values.rows) {
+        for (const auto expression : row) {
+          valid &= record(expression, outer_loops);
+        }
+      }
+    }
+    if (!valid) {
+      return std::unexpected(InvariantFailure("nested query context has invalid dependencies"));
+    }
+    return {};
+  }
+
   [[nodiscard]] static std::expected<void, OptimizerError> BuildQuery(
-      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options) {
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options,
+      LogEst outer_loops, std::span<std::optional<LogEst>> invocations) {
+    if (const auto* limit = logical_plan.bound_select().limit();
+        limit != nullptr && (!RecordExpressionLoops(logical_plan.bound_select(), limit->limit,
+                                                    outer_loops, invocations) ||
+                             (limit->offset.has_value() &&
+                              !RecordExpressionLoops(logical_plan.bound_select(), *limit->offset,
+                                                     outer_loops, invocations)))) {
+      return std::unexpected(InvariantFailure("query limit has invalid nested dependencies"));
+    }
     if (IsAdvancedLogicalPlan(logical_plan)) {
-      return BuildAdvanced(logical_plan, impl, options);
+      return BuildAdvanced(logical_plan, impl, options, outer_loops, invocations);
     }
 
-    NonjoinedCoreAccessAnalysis access =
-        AnalyzeNonjoinedCoreAccess(logical_plan.bound_select(), 0U);
+    auto analyzed =
+        AnalyzeNonjoinedCoreAccess(logical_plan.bound_select(), 0U, options, outer_loops);
+    if (!analyzed.has_value()) {
+      return std::unexpected(std::move(analyzed.error()));
+    }
+    NonjoinedCoreAccessAnalysis access = std::move(*analyzed);
+    if (auto recorded = RecordCoreLoops(logical_plan.bound_select(), 0U, std::nullopt, outer_loops,
+                                        access.output_log_est, invocations);
+        !recorded.has_value()) {
+      return recorded;
+    }
     ReadPredicateAnalysis& predicates = access.predicates;
     std::vector<BoundExpressionId>& residuals = access.residuals;
+    access.published_guards = predicates.guards;
+    access.published_residuals = residuals;
 
     const bool ordered = !logical_plan.bound_select().order_by().empty();
     const std::size_t node_count =
@@ -4082,7 +4718,15 @@ class PhysicalPlanBuilder final {
     impl->nodes.reserve(node_count);
 
     impl->root_core_access.emplace(PublishCoreAccessPlan(access));
-    impl->nodes.push_back(PhysicalNode{.payload = BuildNonjoinedAccessLeaf(access)});
+    auto* index =
+        std::get_if<IndexCandidatePlan>(&access.access_candidates[access.selected_access].payload);
+    if (index != nullptr) {
+      access.published_equalities = index->node.equalities;
+      index->node.direction = access.direction;
+      impl->nodes.push_back(PhysicalNode{.payload = std::move(index->node)});
+    } else {
+      impl->nodes.push_back(PhysicalNode{.payload = BuildNonjoinedAccessLeaf(access)});
+    }
 
     PhysicalNodeId input{0};
     if (!predicates.guards.empty()) {
@@ -4161,7 +4805,7 @@ class PhysicalPlanBuilder final {
     const std::span<const PhysicalCoreAccessPlan> core_accesses = CoreAccessPlans(*impl);
     if (std::expected<void, OptimizerError> validated =
             ValidatePhysicalPlan(logical_plan, impl->nodes, impl->root, candidates,
-                                 root_access.selected_candidate, core_accesses, options);
+                                 root_access.selected_candidate, core_accesses, &access);
         !validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
@@ -4171,7 +4815,8 @@ class PhysicalPlanBuilder final {
   }
 
   [[nodiscard]] static std::expected<void, OptimizerError> BuildAdvanced(
-      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options) {
+      const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options,
+      LogEst outer_loops, std::span<std::optional<LogEst>> invocations) {
     impl->nodes.reserve(logical_plan.nodes().size());
     std::vector<PhysicalNodeId> mapped;
     mapped.reserve(logical_plan.nodes().size());
@@ -4179,15 +4824,54 @@ class PhysicalPlanBuilder final {
         logical_plan.bound_select().query_cores().size());
     std::vector<std::optional<NonjoinedCoreAccessAnalysis>> nonjoined_plans(
         logical_plan.bound_select().query_cores().size());
-    std::vector<std::uint64_t> prefix_executions;
+    std::vector<std::optional<JoinedCoreAccessAnalysis>> joined_plans;
+    if (std::ranges::any_of(logical_plan.bound_select().query_cores(), [](const auto& core) {
+          const auto* select = std::get_if<BoundSelectCore>(&core);
+          return select != nullptr && select->table_sources.size() > 1U;
+        })) {
+      joined_plans.resize(aggregate_plans.size());
+    }
     for (std::size_t core = 0; core < aggregate_plans.size(); ++core) {
       const auto* select =
           std::get_if<BoundSelectCore>(&logical_plan.bound_select().query_cores()[core]);
       if (select != nullptr && select->aggregate.has_value()) {
-        aggregate_plans[core] = BuildAggregateCorePlan(logical_plan.bound_select(), core);
+        auto aggregate =
+            BuildAggregateCorePlan(logical_plan.bound_select(), core, options, outer_loops);
+        if (!aggregate.has_value()) {
+          return std::unexpected(std::move(aggregate.error()));
+        }
+        aggregate_plans[core] = std::move(*aggregate);
       } else if (select != nullptr && select->table_sources.size() <= 1U) {
-        nonjoined_plans[core] =
-            AnalyzeNonjoinedCoreAccess(logical_plan.bound_select(), core, false);
+        auto access =
+            AnalyzeNonjoinedCoreAccess(logical_plan.bound_select(), core, options, outer_loops);
+        if (!access.has_value()) {
+          return std::unexpected(std::move(access.error()));
+        }
+        nonjoined_plans[core] = std::move(*access);
+      }
+      if (select != nullptr && select->table_sources.size() > 1U) {
+        auto joined =
+            AnalyzeJoinedCoreAccess(logical_plan.bound_select(), core, options, outer_loops);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
+        }
+        joined_plans[core] = std::move(*joined);
+      }
+      LogEst output = 0;
+      if (!joined_plans.empty() && joined_plans[core].has_value()) {
+        output = joined_plans[core]->plan.output_log_est;
+      } else if (aggregate_plans[core].has_value()) {
+        output = aggregate_plans[core]->output_log_est;
+      } else if (nonjoined_plans[core].has_value()) {
+        output = nonjoined_plans[core]->output_log_est;
+      }
+      if (auto recorded = RecordCoreLoops(logical_plan.bound_select(), core,
+                                          aggregate_plans[core].has_value()
+                                              ? std::optional{aggregate_plans[core]->strategy}
+                                              : std::nullopt,
+                                          outer_loops, output, invocations);
+          !recorded.has_value()) {
+        return recorded;
       }
     }
 
@@ -4215,29 +4899,26 @@ class PhysicalPlanBuilder final {
       if (const auto* join =
               std::get_if<LogicalJoinNode>(&logical_plan.nodes()[logical_index].payload);
           join != nullptr) {
-        auto placements = PlanJoinPredicatePlacements(logical_plan, *join);
-        if (!placements.has_value()) {
-          return std::unexpected(std::move(placements.error()));
+        const auto* right = std::get_if<LogicalScanNode>(&logical_plan.node(join->right).payload);
+        if (right == nullptr || joined_plans.empty() ||
+            !joined_plans[join->core_index].has_value()) {
+          return std::unexpected(InvariantFailure("join has no selected source analysis"));
         }
-        join_predicates = std::move(*placements);
+        join_predicates = PublishJoinedPredicates(*joined_plans[join->core_index], right->source);
       }
-      std::vector<BoundSourceId> predicate_sources;
+      std::optional<PhysicalFilterNode> joined_filter;
       if (const auto* filter =
               std::get_if<LogicalFilterNode>(&logical_plan.nodes()[logical_index].payload);
           filter != nullptr) {
         const auto* join = std::get_if<LogicalJoinNode>(&logical_plan.node(filter->input).payload);
         if (join != nullptr) {
-          const auto predicates =
-              SplitAdvancedPredicate(logical_plan.bound_select(), filter->predicate);
-          auto ready =
-              JoinPredicateSources(logical_plan.bound_select(),
-                                   std::get<BoundSelectCore>(
-                                       logical_plan.bound_select().query_cores()[join->core_index]),
-                                   predicates.predicates);
-          if (!ready.has_value()) {
-            return std::unexpected(std::move(ready.error()));
+          auto published =
+              PublishJoinedFilter(*joined_plans[join->core_index], logical_plan.bound_select(),
+                                  mapped[filter->input.value()]);
+          if (!published.has_value()) {
+            return std::unexpected(std::move(published.error()));
           }
-          predicate_sources = std::move(*ready);
+          joined_filter = std::move(*published);
         }
       }
       const LogicalNode& logical = logical_plan.nodes()[logical_index];
@@ -4246,7 +4927,11 @@ class PhysicalPlanBuilder final {
           scan != nullptr && !nonjoined_plans[scan->core_index].has_value() &&
           (!aggregate_plans[scan->core_index].has_value() ||
            AssumePresent(aggregate_plans[scan->core_index]).joined)) {
-        auto selected = ChooseJoinedAccess(logical_plan, *scan, options, prefix_executions);
+        if (joined_plans.empty() || !joined_plans[scan->core_index].has_value()) {
+          return std::unexpected(InvariantFailure("joined scan has no core access analysis"));
+        }
+        auto selected = BuildJoinedAccessLeaf(*joined_plans[scan->core_index],
+                                              logical_plan.bound_select(), scan->source);
         if (!selected.has_value()) {
           return std::unexpected(std::move(selected.error()));
         }
@@ -4362,14 +5047,10 @@ class PhysicalPlanBuilder final {
                     .guards = access.predicates.guards,
                 };
               }
-              AdvancedPredicateParts predicates =
-                  SplitAdvancedPredicate(logical_plan.bound_select(), node.predicate);
-              return PhysicalFilterNode{
-                  .input = mapped[node.input.value()],
-                  .predicates = std::move(predicates.predicates),
-                  .guards = std::move(predicates.guards),
-                  .predicate_sources = std::move(predicate_sources),
-              };
+              if (joined_filter.has_value()) {
+                return std::move(*joined_filter);
+              }
+              std::terminate();
             } else if constexpr (std::is_same_v<Node, LogicalLimitNode>) {
               return PhysicalLimitNode{
                   .input = mapped[node.input.value()],
@@ -4508,12 +5189,16 @@ class PhysicalPlanBuilder final {
             .core_index = core,
             .candidates = {},
             .selected_candidate = aggregate.selected_access.value_or(0U),
+            .search_limited = aggregate.search_limited,
         };
         published.candidates.reserve(aggregate.access_candidates.size());
         for (const ReadAccessCandidate& candidate : aggregate.access_candidates) {
           published.candidates.push_back(candidate.published);
         }
         append_access(std::move(published));
+      } else if (!joined_plans.empty() && joined_plans[core].has_value()) {
+        append_access(
+            PublishJoinedCoreAccessPlan(*joined_plans[core], logical_plan.bound_select()));
       }
     }
     if (multiple_accesses.empty()) {
@@ -4528,9 +5213,9 @@ class PhysicalPlanBuilder final {
       candidates = core_accesses.front().candidates;
       selected_candidate = core_accesses.front().selected_candidate;
     }
-    std::expected<void, OptimizerError> validated =
-        ValidatePhysicalPlan(logical_plan, impl->nodes, impl->root, candidates, selected_candidate,
-                             core_accesses, options);
+    std::expected<void, OptimizerError> validated = ValidatePhysicalPlan(
+        logical_plan, impl->nodes, impl->root, candidates, selected_candidate, core_accesses,
+        nullptr, aggregate_plans, nonjoined_plans, joined_plans);
     if (!validated.has_value()) {
       return std::unexpected{std::move(validated.error())};
     }
@@ -4915,7 +5600,7 @@ OptimizeLogicalStatementPlanResult OptimizeLogicalStatementPlan(LogicalStatement
 
 namespace {
 
-[[nodiscard]] std::string ExplainPhysicalQuery(const PhysicalQueryView& plan) {
+[[nodiscard]] std::string ExplainPhysicalQueryNodes(const PhysicalQueryView& plan) {
   const std::span<const PhysicalNode> nodes = plan.nodes();
   if (nodes.empty()) {
     std::terminate();
@@ -5004,7 +5689,9 @@ namespace {
         std::string line = "CORE " + std::to_string(automatic->core_index) + " SEARCH ";
         AppendExplainIdentifier(table.name, &line);
         line.append(" SOURCE ").append(std::to_string(automatic->source.value()));
-        line.append(" USING AUTOMATIC COVERING INDEX");
+        line.append(automatic->construction_predicates.empty()
+                        ? " USING AUTOMATIC COVERING INDEX"
+                        : " USING AUTOMATIC PARTIAL COVERING INDEX");
         append_line(line);
       } else if (const auto* aggregate = std::get_if<PhysicalAggregateNode>(&node.payload);
                  aggregate != nullptr) {
@@ -5156,6 +5843,32 @@ namespace {
     }
     explain.append(sort->input_order_satisfied ? ") USING INPUT ORDER" : ") USING SORTER");
     break;
+  }
+  return explain;
+}
+
+[[nodiscard]] std::string ExplainPhysicalQuery(const PhysicalQueryView& plan) {
+  std::string explain = ExplainPhysicalQueryNodes(plan);
+  const auto cores = plan.logical_plan().bound_select().query_cores();
+  for (const PhysicalCoreAccessPlan& access : plan.core_access_plans()) {
+    if (access.search_limited) {
+      explain.append("\nCORE ").append(std::to_string(access.core_index)).append(" SEARCH LIMITED");
+    }
+    if (access.source_order.empty()) {
+      continue;
+    }
+    const auto& core = std::get<BoundSelectCore>(cores[access.core_index]);
+    const bool declared_order = std::ranges::equal(
+        access.source_order,
+        core.table_sources |
+            std::views::transform([](const BoundTableSource& source) { return source.id; }));
+    if (!declared_order) {
+      explain.append("\nCORE ").append(std::to_string(access.core_index)).append(" LOOP ORDER");
+      for (const BoundSourceId source : access.source_order) {
+        explain.push_back(' ');
+        explain.append(std::to_string(source.value()));
+      }
+    }
   }
   return explain;
 }

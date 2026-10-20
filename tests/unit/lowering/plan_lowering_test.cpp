@@ -1321,6 +1321,20 @@ TEST_F(ReadLoweringAggregateIntegration, UsesUniqueShortcutsAcrossOrdinaryCompou
   EXPECT_EQ(0, compound[1][0].integer_value());
 }
 
+TEST_F(ReadLoweringJoin, EvaluatesNativeAccessKeysOncePerOuterRow) {
+  const CustomEnvironment custom;
+  for (const std::string_view sql :
+       {"SELECT count() FROM items a CROSS JOIN items b ON b.id=trace_key(a.id)",
+        "SELECT count() FROM items a CROSS JOIN items b WHERE b.id=trace_key(a.id)",
+        "SELECT count() FROM items a CROSS JOIN items b ON b.name=trace_key(a.name)"}) {
+    SCOPED_TRACE(sql);
+    callback_trace.clear();
+    const auto rows = Execute(sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(3U, callback_trace.size());
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, AppliesSqliteRowIdRangeKeyConversions) {
   const auto ids = [&](std::string_view sql, SqlValue key) {
     std::array<SqlValue, 1> parameters{std::move(key)};
@@ -1402,10 +1416,57 @@ class ReadLoweringAutomaticJoin : public ReadLoweringAggregateIntegration {
   }
 };
 
+TEST_F(ReadLoweringAutomaticJoin, UsesNativePartialConstructionWithoutConsumingItsResidual) {
+  const CustomEnvironment custom;
+  struct Case {
+    std::string_view sql;
+    std::int64_t rows;
+    std::size_t calls;
+  };
+  for (const Case& test : {
+           Case{"SELECT count() FROM items a CROSS JOIN items b "
+                "WHERE b.score IS a.score AND deterministic_trace(b.id)>1",
+                3, 7},
+           Case{"SELECT count() FROM items a CROSS JOIN items b "
+                "WHERE b.score IS a.score AND trace_argument(b.id)>1",
+                3, 0},
+           Case{"SELECT count() FROM items a LEFT JOIN items b "
+                "ON b.score IS a.score AND deterministic_trace(b.id)>1",
+                4, 7},
+           Case{"SELECT count() FROM items a LEFT JOIN items b "
+                "ON b.score IS a.score WHERE deterministic_trace(b.id)>1",
+                3, 4},
+       }) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    callback_trace.clear();
+    const auto rows = Execute(test.sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(test.rows, rows[0][0].integer_value());
+    EXPECT_EQ(test.calls, callback_count);
+    EXPECT_EQ(test.calls == 0U ? 4U : 0U, callback_trace.size());
+  }
+}
+
 class ReadLoweringJoinedPhase : public ReadLoweringAggregateIntegration {
  protected:
   void SetUp() override { OpenFixture(JoinedIndexFixturePath()); }
 };
+
+TEST_F(ReadLoweringJoinedPhase, KeepsDeclaredFieldsWhenCrossRightSourcesAreReordered) {
+  const auto rows = Execute(
+      "SELECT a.id,b.id,c.id FROM key_rows a CROSS JOIN key_rows b "
+      "JOIN probe_rows c ON c.id=a.id WHERE a.id<=3 ORDER BY a.id,b.id,c.id");
+  constexpr std::size_t kOuterRows = 3;
+  constexpr std::size_t kInnerRows = 12;
+  ASSERT_EQ(kOuterRows * kInnerRows, rows.size());
+  for (std::size_t row = 0; row < rows.size(); ++row) {
+    const auto outer = static_cast<std::int64_t>(row / kInnerRows + 1U);
+    EXPECT_EQ(outer, rows[row][0].integer_value());
+    EXPECT_EQ(static_cast<std::int64_t>(row % kInnerRows + 1U), rows[row][1].integer_value());
+    EXPECT_EQ(outer, rows[row][2].integer_value());
+  }
+}
 
 TEST_F(ReadLoweringJoinedPhase, MatchesJoinedOnReadinessAndCandidateMissPhases) {
   constexpr std::string_view kOverflow = "abs(-9223372036854775808)";
@@ -1465,7 +1526,7 @@ TEST_F(ReadLoweringJoinedPhase, MatchesJoinedOnReadinessAndCandidateMissPhases) 
                std::runtime_error);
 }
 
-TEST_F(ReadLoweringJoinedPhase, RetainsStoredIndexAffinityResiduals) {
+TEST_F(ReadLoweringJoinedPhase, UsesNativeProbeAffinityForStoredEquality) {
   const auto rows = Execute(
       "SELECT p.id,b.id FROM probe_rows p JOIN key_rows b "
       "ON b.text_key=p.raw_key ORDER BY p.id,b.id");
@@ -1479,6 +1540,113 @@ TEST_F(ReadLoweringJoinedPhase, RetainsStoredIndexAffinityResiduals) {
   for (std::size_t index = 0; index < rows.size(); ++index) {
     EXPECT_EQ(kExpected[index][0], rows[index][0].integer_value());
     EXPECT_EQ(kExpected[index][1], rows[index][1].integer_value());
+  }
+}
+
+TEST_F(ReadLoweringJoinedPhase, AppliesProbeAffinitiesIndependentlyToRangeBounds) {
+  const auto open = Execute(
+      "SELECT p.id,count(b.id) FROM probe_rows p JOIN key_rows b "
+      "ON b.text_key>p.raw_key GROUP BY p.id ORDER BY p.id");
+  constexpr std::array<std::array<std::int64_t, 2>, 4> kOpen{{
+      {1, 9},
+      {2, 4},
+      {4, 2},
+      {5, 2},
+  }};
+  ASSERT_EQ(kOpen.size(), open.size());
+  for (std::size_t row = 0; row < open.size(); ++row) {
+    EXPECT_EQ(kOpen[row][0], open[row][0].integer_value());
+    EXPECT_EQ(kOpen[row][1], open[row][1].integer_value());
+  }
+  const auto closed = Execute(
+      "SELECT p.id,count(b.id) FROM probe_rows p JOIN key_rows b "
+      "ON b.text_key>p.raw_key AND b.text_key<'same' GROUP BY p.id ORDER BY p.id");
+  ASSERT_EQ(2U, closed.size());
+  EXPECT_EQ(1, closed[0][0].integer_value());
+  EXPECT_EQ(7, closed[0][1].integer_value());
+  EXPECT_EQ(2, closed[1][0].integer_value());
+  EXPECT_EQ(2, closed[1][1].integer_value());
+}
+
+TEST_F(ReadLoweringJoinedPhase, EvaluatesStoredEndKeysOnlyAfterSuccessfulPositioning) {
+  const CustomEnvironment custom;
+  struct Case {
+    std::string_view sql;
+    std::size_t rows = 0;
+    bool null_extended = false;
+  };
+  for (const Case& test : {
+           Case{"SELECT default_text,numeric_key FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()"},
+           Case{"SELECT payload FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()"},
+           Case{"SELECT count(),sum(numeric_key) FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()",
+                1},
+           Case{"SELECT count(payload) FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()",
+                1},
+           Case{"SELECT min(numeric_key) FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()",
+                1},
+           Case{"SELECT DISTINCT default_text FROM key_rows "
+                "WHERE default_text='zzzz' AND numeric_key<failing()"},
+           Case{"SELECT p.id,b.payload FROM probe_rows p CROSS JOIN key_rows b "
+                "WHERE p.id=1 AND b.default_text='zzzz' AND b.numeric_key<failing()"},
+           Case{"SELECT text_key,numeric_key FROM empty_key_rows "
+                "WHERE text_key<'x' AND text_key>failing()"},
+           Case{"SELECT text_key,numeric_key FROM empty_key_rows "
+                "WHERE text_key>'x' AND text_key<failing() ORDER BY text_key ASC"},
+           Case{"SELECT payload FROM key_rows "
+                "WHERE default_text='fallback' AND numeric_key<NULL"},
+           Case{"SELECT count(payload) FROM key_rows "
+                "WHERE default_text='fallback' AND numeric_key<NULL",
+                1},
+           Case{"SELECT p.id,b.payload FROM probe_rows p LEFT JOIN key_rows b "
+                "ON b.default_text='fallback' AND b.numeric_key<NULL WHERE p.id=1",
+                1, true},
+       }) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    std::vector<std::vector<SqlValue>> rows;
+    EXPECT_NO_THROW(rows = Execute(test.sql, custom.Binder(), custom.Vm()));
+    EXPECT_EQ(test.rows, rows.size());
+    EXPECT_EQ(0U, callback_count);
+    if (test.null_extended) {
+      ASSERT_EQ(1U, rows.size());
+      ASSERT_EQ(2U, rows[0].size());
+      EXPECT_EQ(1, rows[0][0].integer_value());
+      EXPECT_EQ(SqlValueType::kNull, rows[0][1].type());
+    }
+  }
+  for (const std::string_view sql :
+       {"SELECT default_text,numeric_key FROM key_rows "
+        "WHERE default_text='fallback' AND numeric_key<failing()",
+        "SELECT payload FROM key_rows WHERE default_text='fallback' AND numeric_key<failing()",
+        "SELECT min(numeric_key) FROM key_rows "
+        "WHERE default_text='fallback' AND numeric_key<failing()",
+        "SELECT default_text,numeric_key FROM key_rows "
+        "WHERE default_text='aaaa' AND numeric_key<failing()"}) {
+    SCOPED_TRACE(sql);
+    callback_count = 0;
+    EXPECT_THROW(static_cast<void>(Execute(sql, custom.Binder(), custom.Vm())), std::runtime_error);
+    EXPECT_EQ(1U, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringJoinedPhase, EvaluatesCompositeKeysInPhysicalPrefixOrder) {
+  const CustomEnvironment custom;
+  for (const std::string_view sql :
+       {"SELECT text_key,numeric_key FROM key_rows "
+        "WHERE numeric_key=trace_argument(1) AND text_key=trace_key('a')",
+        "SELECT payload FROM key_rows "
+        "WHERE numeric_key=trace_argument(1) AND text_key=trace_key('a')",
+        "SELECT p.id,b.payload FROM probe_rows p CROSS JOIN key_rows b WHERE p.id=1 "
+        "AND b.numeric_key=trace_argument(1) AND b.text_key=trace_key('a')"}) {
+    SCOPED_TRACE(sql);
+    callback_trace.clear();
+    static_cast<void>(Execute(sql, custom.Binder(), custom.Vm()));
+    EXPECT_EQ((std::vector<std::string>{"key", "argument"}), callback_trace);
   }
 }
 
@@ -1813,7 +1981,7 @@ TEST_F(ReadLoweringAggregateIntegration, ExecutesOuterOwnedAggregatesInOwnerPhas
       custom.Binder(), custom.Vm());
   ASSERT_EQ(1U, outer_order.size());
   EXPECT_EQ(3U, callback_count);
-  EXPECT_EQ("1,2,3", TextBytes(outer_order[0][0]));
+  EXPECT_EQ("2,1,3", TextBytes(outer_order[0][0]));
 
   callback_count = 0;
   const auto source_free_order =
@@ -2629,7 +2797,7 @@ TEST_F(ReadLoweringJoin, SkipsProjectionAndLaterWorkForLimitOffsetAndRejectedPre
       custom.Binder(), custom.Vm());
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(1U, callback_count);
-  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(2, rows[0][1].integer_value());
   EXPECT_EQ(3, rows[0][2].integer_value());
   EXPECT_TRUE(
       Execute("SELECT failing() FROM items a CROSS JOIN items b WHERE a.id>99 AND failing()",
@@ -2671,7 +2839,7 @@ TEST_F(ReadLoweringJoin, StopsDemandOneWithoutAnUnreachableInnerAdvance) {
       "UNION SELECT failing() LIMIT 1",
       custom.Binder(), custom.Vm());
   ASSERT_EQ(1U, rows.size());
-  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
   const auto filtered = Execute(
       "SELECT b.id FROM items a CROSS JOIN items b WHERE b.id>2 "
@@ -2912,7 +3080,7 @@ TEST_F(ReadLoweringJoin, AppliesInnerForwardConditionsAndConsumesLeftRowsInAllDe
       "SELECT a.id,b.id FROM items a LEFT JOIN items b ON 0 "
       "UNION SELECT 99,99 LIMIT 1");
   ASSERT_EQ(1U, demanded.size());
-  EXPECT_EQ(1, demanded[0][0].integer_value());
+  EXPECT_EQ(2, demanded[0][0].integer_value());
   EXPECT_EQ(SqlValueType::kNull, demanded[0][1].type());
   const auto unconditional =
       Execute("SELECT a.id,b.id FROM items a LEFT JOIN items b UNION SELECT 99,99 LIMIT 1");
@@ -2985,16 +3153,20 @@ TEST_F(ReadLoweringJoin, KeepsComputedProbesBehindForwardOnCallbacks) {
                std::runtime_error);
 }
 
-TEST_F(ReadLoweringJoin, KeepsNondeterministicJoinKeysInTheirPhysicalCandidatePhase) {
+TEST_F(ReadLoweringJoin, UsesNativeVolatileKeyInvocationPhases) {
   const CustomEnvironment custom;
-  for (const std::string_view key : {"trace_argument(a.id)", "trace_argument(2)"}) {
-    SCOPED_TRACE(key);
+  struct Case {
+    std::string_view key;
+    std::size_t calls;
+  };
+  for (const Case test : {Case{"trace_argument(a.id)", 3U}, Case{"trace_argument(2)", 1U}}) {
+    SCOPED_TRACE(test.key);
     callback_trace.clear();
     const auto rows =
-        Execute("SELECT a.id,b.id FROM items a JOIN items b ON b.id=" + std::string{key},
+        Execute("SELECT a.id,b.id FROM items a JOIN items b ON b.id=" + std::string{test.key},
                 custom.Binder(), custom.Vm());
     EXPECT_EQ(3U, rows.size());
-    EXPECT_EQ(9U, std::ranges::count(callback_trace, "argument"));
+    EXPECT_EQ(test.calls, static_cast<std::size_t>(std::ranges::count(callback_trace, "argument")));
   }
 }
 
@@ -3003,7 +3175,7 @@ TEST_F(ReadLoweringJoin, EvaluatesDeterministicScalarAccessKeysOncePerPrefix) {
   callback_count = 0;
   const auto rows = Execute(
       "SELECT a.id,b.id FROM items a JOIN items b "
-      "ON b.id=deterministic_counter(a.id) ORDER BY a.id",
+      "ON b.id=deterministic_trace(a.id) ORDER BY a.id",
       custom.Binder(), custom.Vm());
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(3U, callback_count);
@@ -3062,7 +3234,7 @@ TEST_F(ReadLoweringJoin, PreservesMergedScopesAcrossGroupingSetsAndValuesCores) 
       "UNION SELECT failing() LIMIT 1",
       custom.Binder(), custom.Vm());
   ASSERT_EQ(1U, demanded.size());
-  EXPECT_EQ(1, demanded[0][0].integer_value());
+  EXPECT_EQ(2, demanded[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
 }
 
@@ -4747,7 +4919,7 @@ TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
   const auto catalog = IndexedMutationCatalog();
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
-  for (const std::string_view join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+  for (const std::string_view join : {"CROSS JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
     for (const std::string_view operation : {"=", ">", "<"}) {
       SCOPED_TRACE(::testing::Message() << join << " " << operation);
       const BytecodeProgram program =
@@ -8917,7 +9089,7 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
       key_parameter_order.push_back(parameter->parameter.value());
     }
   }
-  EXPECT_EQ((std::vector<std::uint32_t>{1, 0}), key_parameter_order);
+  EXPECT_EQ((std::vector<std::uint32_t>{0, 1}), key_parameter_order);
   const auto reordered_seek = std::ranges::find_if(
       reordered.instructions(),
       [](const Instruction& value) { return std::holds_alternative<SeekIndexInstruction>(value); });
@@ -9057,8 +9229,20 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   const auto ordered_rows =
       ExecuteRows(ordered_keys, *pager, catalog->version().generation, custom.Vm());
   EXPECT_EQ(2U, callback_count);
-  ASSERT_EQ(16U, ordered_rows.size());
-  for (const auto& row : ordered_rows) {
+  EXPECT_TRUE(ordered_rows.empty());
+
+  callback_count = 0;
+  const BytecodeProgram reversed_keys = LowerOrThrow(
+      "SELECT id, score FROM items "
+      "WHERE score>=volatile_counter() AND score<volatile_counter() ORDER BY score ASC",
+      catalog, custom.Binder());
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const auto reversed_key_rows =
+      ExecuteRows(reversed_keys, *pager, catalog->version().generation, custom.Vm(), &temporary);
+  EXPECT_EQ(2U, callback_count);
+  ASSERT_EQ(16U, reversed_key_rows.size());
+  for (const auto& row : reversed_key_rows) {
     EXPECT_EQ(1, row[1].integer_value());
   }
 

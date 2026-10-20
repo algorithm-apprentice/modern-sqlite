@@ -25,6 +25,7 @@ The reference is the local SQLite 3.54.0 snapshot in `project/manifest.json`.
 | Term prerequisites, likelihood, ON ownership | `whereexpr.c:75-84,1154-1240`; `where.c:832-853` |
 | Compatible column/affinity/collation term scanning | `where.c:351-521` |
 | Access-term consumption and outer residual readiness | `wherecode.c:419-438,1494-1516,2678-2733,2854-2872` |
+| Comparison-specific probe affinity, independently for each bound | `expr.c:344-359`; `wherecode.c:976-1008` |
 | RIGHT replay and execution-level null prefix | `wherecode.c:2893-2935` |
 | Loop ownership, transfer, pruning, subset adjustment | `whereInt.h:129-174`; `where.c:2522-2612,2652-2935` |
 | Range and residual output estimates | `where.c:1911-1922,2225-2247,3032-3129` |
@@ -190,3 +191,88 @@ baseline executes nine. Native coalesce and correlated query-value keys also
 use the existing access mechanism. Evidence remains in session artifacts.
 Publish joined `source_order` and bounded-search status through the existing
 `PhysicalCoreAccessPlan`, not a parallel query-plan container.
+
+## Construction and nested-context closure
+
+Cache the normalized column references and both operand prerequisite masks
+once per original term. Visit original terms first, followed by the commuted
+virtual terms in reverse original order (`whereexpr.c:1225-1290,1926-1928`).
+Automatic admission and finalization use direct clause passes, as
+`termCanDriveIndex()` and `constructAutomaticIndex()` do
+(`where.c:901-925,1029-1156`), not a column-by-term-by-clause search.
+Preserve the shared top-column bit and the native all-wide-columns covering
+tail when any column at or above 63 is needed.
+
+Translate automatic partial construction through the existing build cursor,
+bound-expression emitter, and false-or-NULL continuation. Eligible original
+terms are deterministic, contain no subquery, and reference only the build
+table; LEFT/RIGHT ownership restrictions are unchanged
+(`expr.c:2543-2623,2716-2832`; `where.c:1034-1046,1203-1220`).
+They remain residuals unless separately consumed by an exact access key.
+Construction temporarily borrows the existing source-to-cursor binding;
+the covering and construction descriptors already share field positions.
+No second evaluator, expression copy, or construction executor is added.
+
+Carry signed native `nQueryLoop` between existing query owners. A source
+loop's compilation context adds its selected output estimate to the saved
+ambient context, and ending that loop restores the ambient context
+(`where.c:6926,7207,7505,7902`; `sqliteInt.h:3926`). Keep the solver's cap of
+48, not an unsigned or globally clamped ambient estimate. LIMIT/OFFSET,
+source-free false-WHERE bypass terms, aggregate HAVING/results, and VALUES
+use the saved context. Source-dependent WHERE/ON, ordinary projections and
+ordering, grouping keys, and aggregate input compiled inside a source loop
+use its augmented context. Sorted-group aggregate inputs are compiled after
+that loop and use the saved context
+(`where.c:7003-7046`; `select.c:8411-8473,8650-8719,8780-8834,9003-9035`).
+Reuse the canonical bound dependency traversal to find directly referenced
+query owners. Keep invocation estimates in transient builder state, not a
+second retained query-plan owner. Binding-only query owners need no
+execution-context estimate.
+
+Access-key evaluation follows `wherecode.c:970-1008,2053-2110,2155-2177`:
+equalities run in physical index-prefix order, followed by the resolved
+traversal-start bound. Evaluate the resolved end bound only after positioning
+succeeds. Extend the existing shared key emitter with explicit start/end
+phases and use the same `IndexTraversal` in ordinary, streaming, joined, and
+aggregate consumers. Do not sort key callbacks by conjunct occurrence or
+introduce a key-result cache. Retain the converted prefix registers when
+building the end key. A NULL end key retires its positioned cursor through
+the existing `NullRow(false)` transition before joining seek-miss cleanup;
+the bytecode verifier's cursor-state rules remain unchanged.
+
+Before propagating a solved non-shortcut input, apply the native 30-point
+`WHERE_WANT_DISTINCT` output reduction (`where.c:7124-7130`), including the
+single-DISTINCT-aggregate input request. Preserve shortcut bypass and the
+existing destination/value-admission contracts. This is an invocation-estimate
+adjustment, not ordered DISTINCT or a DISTINCT-to-GROUP-BY implementation.
+
+The second slice's focused native source-order, volatile-key frequency,
+mixed-affinity probes, original/commuted key order (including captures),
+partial construction, wide-column tail, and nested-loop-context regressions
+were observed red and then green. Existing unordered expectations changed
+only after executing the same fixture against the pinned library. Additional
+controls cover CROSS right-side reordering with differently shaped sources,
+star schedules, search-budget exhaustion without lost residuals, and
+automatic-construction OOM cleanup.
+
+The completed fast-local selection passes 1,461 batched and 92 isolated
+cases. Optimizer simple and stored-index allocation contracts remain unchanged;
+aggregate planning falls from 59 to 35 allocations. Native loop templates
+transfer the basic selected index payload once, and validation borrows its
+stable equality/predicate buffers instead of allocating another copy.
+The construction/nested-context design completion was approved by
+GPT-5.6 Sol before those production changes.
+
+Implementation review identified eager stored-index end keys and missing
+DISTINCT invocation reduction. Both were independently confirmed against the
+pinned source and executable controls, then corrected through the accepted
+shared mechanisms. Covering/noncovering, streaming, joined, global aggregate,
+MIN/MAX, NULL extension, ascending/descending, and seek-miss controls now
+cover phased keys. DISTINCT controls include source-free negative estimates,
+aggregate inputs, and shortcut bypass. Removing the sorted-key scratch
+tightens the four affected lowering allocation counts from
+34/40/47/59 to 33/39/46/57; no allocation ceiling is raised.
+
+GPT-5.6 Sol approved the corrected second implementation slice with no
+significant unresolved issue. Integrated exact-head qualification and matched
+closing evidence remain required before ledger 9 closes.

@@ -256,7 +256,7 @@ int main() try {
       "SELECT Name,count() AS total FROM Items WHERE id>0 "
       "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1";
   const std::size_t aggregate_allocations = OptimizeAllocationCount(kAggregateSql, indexed_catalog);
-  if (aggregate_allocations != 59U) {
+  if (aggregate_allocations != 35U) {
     return 1;
   }
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {

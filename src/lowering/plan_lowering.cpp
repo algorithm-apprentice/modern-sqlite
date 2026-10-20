@@ -35,6 +35,7 @@ using lowering_internal::ConvertProgramResult;
 using lowering_internal::EmitIndexTableLookup;
 using lowering_internal::EmitIndexTraversalEndCheck;
 using lowering_internal::EmitIndexTraversalSeek;
+using lowering_internal::IndexKeyPhase;
 using lowering_internal::IndexTraversal;
 using lowering_internal::IndexTraversalBound;
 using lowering_internal::InternalFailure;
@@ -986,6 +987,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   struct JoinedSourcePlan {
     const PhysicalNode* access = nullptr;
     BoundSourceId source{0};
+    const BoundTableSource* declaration = nullptr;
     std::optional<CursorId> cursor{};
     std::optional<CursorId> table_cursor{};
     std::optional<RegisterId> index_key_first{};
@@ -1031,6 +1033,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalIndexScanNode* index_scan = nullptr;
     const PhysicalNestedLoopJoinNode* join = nullptr;
     std::vector<JoinedSourcePlan> joined_sources{};
+    std::span<const PhysicalNode> source_nodes{};
     const PhysicalValuesNode* values = nullptr;
     const PhysicalFilterNode* filter = nullptr;
     const PhysicalAggregateNode* aggregate = nullptr;
@@ -1062,7 +1065,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         source != select->table_sources[source_index].id) {
       return std::unexpected(InternalFailure("join access does not match declared sources"));
     }
-    core.joined_sources.push_back(JoinedSourcePlan{.access = &access, .source = source});
+    core.joined_sources.push_back(JoinedSourcePlan{
+        .access = &access,
+        .source = source,
+        .declaration = &select->table_sources[source_index],
+    });
     return true;
   }
 
@@ -1358,6 +1365,35 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       } else {
         return std::unexpected(
             UnsupportedFailure("streaming query contains an unsupported physical node"));
+      }
+    }
+
+    for (StreamingCorePlan& core : streaming_cores_) {
+      if (core.join == nullptr) {
+        continue;
+      }
+      if (core.joined_sources.empty() || core.leaf == nullptr ||
+          core.joined_sources.front().access == nullptr) {
+        return std::unexpected(InternalFailure("joined source arena is incomplete"));
+      }
+      const PhysicalNode* first = core.joined_sources.front().access;
+      core.source_nodes = std::span{first, static_cast<std::size_t>(core.leaf - first) + 1U};
+      const auto access = std::ranges::find(read_plan_->core_access_plans(), core.core_index,
+                                            &PhysicalCoreAccessPlan::core_index);
+      if (access == read_plan_->core_access_plans().end() ||
+          access->source_order.size() != core.joined_sources.size()) {
+        return std::unexpected(InternalFailure("joined source order is not published"));
+      }
+      for (std::size_t level = 0; level < access->source_order.size(); ++level) {
+        const auto suffix = std::span{core.joined_sources}.subspan(level);
+        const auto selected =
+            std::ranges::find(suffix, access->source_order[level], &JoinedSourcePlan::source);
+        if (selected == suffix.end()) {
+          return std::unexpected(
+              InternalFailure("joined source order is not an exact permutation"));
+        }
+        std::ranges::iter_swap(core.joined_sources.begin() + static_cast<std::ptrdiff_t>(level),
+                               selected);
       }
     }
 
@@ -2102,7 +2138,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (core.aggregate != nullptr &&
           core.aggregate->strategy == PhysicalAggregateStrategy::kIndexedMinMax &&
           core.aggregate->min_max.has_value() &&
-          core.aggregate->min_max->null_strategy ==
+          AssumeValue(core.aggregate->min_max).null_strategy ==
               PhysicalMinMaxNullStrategy::kNonNullFirstWithSingleNullFallback) {
         key_count = std::max(key_count, core.index_scan->equalities.size() + 1U);
       }
@@ -2774,25 +2810,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     result_block_first_ = *result_block;
 
     for (StreamingCorePlan& core : streaming_cores_) {
-      for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
-        JoinedSourcePlan& source = core.joined_sources[index];
-        if (source.access == nullptr) {
+      for (JoinedSourcePlan& source : core.joined_sources) {
+        if (source.access == nullptr || source.declaration == nullptr) {
           return std::unexpected(InternalFailure("joined source has no register-layout access"));
         }
         if (const auto* scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
             scan != nullptr) {
-          if ((scan->equalities.empty() && !scan->range.has_value()) ||
-              scan->direction != PhysicalScanDirection::kForward) {
+          if (scan->direction != PhysicalScanDirection::kForward) {
             return std::unexpected(InternalFailure("joined index prefix metadata is invalid"));
           }
           const std::size_t capacity =
               scan->equalities.size() + static_cast<std::size_t>(scan->range.has_value());
-          auto keys = AllocateRegisters(capacity);
-          if (!keys.has_value()) {
-            return std::unexpected(std::move(keys.error()));
+          if (capacity != 0U) {
+            auto keys = AllocateRegisters(capacity);
+            if (!keys.has_value()) {
+              return std::unexpected(std::move(keys.error()));
+            }
+            source.index_key_first = *keys;
+            source.index_key_capacity = static_cast<std::uint32_t>(capacity);
           }
-          source.index_key_first = *keys;
-          source.index_key_capacity = static_cast<std::uint32_t>(capacity);
           if (!scan->covering && !index_rowid_register_.has_value()) {
             auto rowid = AllocateRegisters(1);
             if (!rowid.has_value()) {
@@ -2828,8 +2864,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           source.matched = *matched;
         }
         if (source.join != nullptr && SourceJoinPreservesRight(source.join->join)) {
-          const auto& select = std::get<BoundSelectCore>(*core.bound);
-          const BoundTableSource& bound_source = select.table_sources[index];
+          const BoundTableSource& bound_source = *source.declaration;
           std::size_t key_count = 1;
           if (bound_source.table.has_value()) {
             const CatalogSnapshot& catalog = *bound_select_->catalog();
@@ -3817,12 +3852,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (StreamingCorePlan& core : streaming_cores_) {
       if (const auto* select = std::get_if<BoundSelectCore>(core.bound); select != nullptr) {
         if (core.join != nullptr) {
-          for (std::size_t index = 0; index < core.joined_sources.size(); ++index) {
-            JoinedSourcePlan& joined = core.joined_sources[index];
-            const BoundTableSource& source = select->table_sources[index];
-            if (joined.access == nullptr) {
+          for (JoinedSourcePlan& joined : core.joined_sources) {
+            if (joined.access == nullptr || joined.declaration == nullptr) {
               return std::unexpected(InternalFailure("joined source has no access leaf"));
             }
+            const BoundTableSource& source = *joined.declaration;
             table_scan_ = std::get_if<PhysicalTableScanNode>(&joined.access->payload);
             rowid_lookup_ = std::get_if<PhysicalRowIdLookupNode>(&joined.access->payload);
             rowid_range_ = std::get_if<PhysicalRowIdRangeNode>(&joined.access->payload);
@@ -7357,85 +7391,93 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return EmitReadCompletion();
   }
 
-  struct OrderedIndexKey {
-    std::size_t conjunct_position = 0;
-    BoundExpressionId expression{0};
-    bool reject_null = true;
-  };
-
-  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(
-      const PhysicalIndexScanNode& index, std::optional<Label> null_target) override {
-    return EmitIndexKeyExpressions(index.equalities,
-                                   index.range.has_value() ? &*index.range : nullptr, null_target);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(
-      std::span<const PhysicalIndexEquality> equalities, const PhysicalIndexRange* range,
-      std::optional<Label> null_target) {
-    std::vector<OrderedIndexKey> keys;
-    keys.reserve(equalities.size() +
-                 static_cast<std::size_t>(range != nullptr && range->lower.has_value()) +
-                 static_cast<std::size_t>(range != nullptr && range->upper.has_value()));
-    for (const PhysicalIndexEquality& equality : equalities) {
-      keys.push_back(OrderedIndexKey{
-          .conjunct_position = equality.conjunct_position,
-          .expression = equality.key,
-          .reject_null = equality.reject_null,
-      });
+  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpression(
+      BoundExpressionId expression, bool reject_null, std::optional<Label> null_target,
+      std::optional<CursorId> positioned_cursor = std::nullopt) {
+    const RegisterId home = Home(expression);
+    if (auto emitted = EmitExpression(expression, home); !emitted.has_value()) {
+      return emitted;
     }
-    if (range != nullptr && range->lower.has_value()) {
-      keys.push_back(OrderedIndexKey{
-          .conjunct_position = range->lower->conjunct_position,
-          .expression = range->lower->key,
-          .reject_null = true,
-      });
-    }
-    if (range != nullptr && range->upper.has_value()) {
-      keys.push_back(OrderedIndexKey{
-          .conjunct_position = range->upper->conjunct_position,
-          .expression = range->upper->key,
-          .reject_null = true,
-      });
-    }
-    std::ranges::sort(keys, {}, &OrderedIndexKey::conjunct_position);
-    for (const OrderedIndexKey& key : keys) {
-      const RegisterId home = Home(key.expression);
-      if (auto emitted = EmitExpression(key.expression, home); !emitted.has_value()) {
-        return emitted;
+    if (reject_null) {
+      if (!null_target.has_value()) {
+        return std::unexpected(InternalFailure("NULL-rejecting index key has no completion label"));
       }
-      if (key.reject_null) {
-        if (!null_target.has_value()) {
-          return std::unexpected(
-              InternalFailure("NULL-rejecting covering index key has no completion label"));
+      if (positioned_cursor.has_value()) {
+        auto accepted = CreateLabel();
+        if (!accepted.has_value()) {
+          return std::unexpected(std::move(accepted.error()));
         }
-        if (auto jumped = EmitJumpIf(home, JumpCondition::kIfNull, *null_target);
+        if (auto jumped = EmitJumpIf(home, JumpCondition::kIfNotNull, *accepted);
             !jumped.has_value()) {
           return jumped;
         }
+        // The rejection edge joins seek misses, which have no positioned row.
+        if (auto cleared =
+                Append(NullRowInstruction{.cursor = *positioned_cursor, .enabled = false});
+            !cleared.has_value()) {
+          return cleared;
+        }
+        if (auto jumped = EmitJump(*null_target); !jumped.has_value()) {
+          return jumped;
+        }
+        return BindLabel(*accepted);
+      }
+      return EmitJumpIf(home, JumpCondition::kIfNull, *null_target);
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitIndexEqualityExpressions(
+      std::span<const PhysicalIndexEquality> equalities, std::optional<Label> null_target) {
+    for (const auto& equality : equalities) {
+      if (auto emitted = EmitIndexKeyExpression(equality.key, equality.reject_null, null_target);
+          !emitted.has_value()) {
+        return emitted;
       }
     }
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitIndexKeyExpressions(
+      const PhysicalIndexScanNode& index, const IndexTraversal& traversal, IndexKeyPhase phase,
+      std::optional<Label> null_target,
+      std::optional<CursorId> positioned_cursor = std::nullopt) override {
+    if (phase == IndexKeyPhase::start) {
+      if (auto equalities = EmitIndexEqualityExpressions(index.equalities, null_target);
+          !equalities.has_value()) {
+        return equalities;
+      }
+    }
+    const auto& bound = phase == IndexKeyPhase::start ? traversal.start : traversal.end;
+    if (phase == IndexKeyPhase::end && bound.expression != nullptr &&
+        !positioned_cursor.has_value()) {
+      return std::unexpected(InternalFailure("range-end key has no positioned cursor"));
+    }
+    return bound.expression != nullptr
+               ? EmitIndexKeyExpression(bound.expression->key, true, null_target, positioned_cursor)
+               : LoweringResult<void>{};
+  }
+
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
-      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound) override {
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound,
+      IndexKeyPhase phase = IndexKeyPhase::start) override {
     if (!index_key_first_.has_value()) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
-    return EmitIndexKeyBlock(index, range_bound, *index_key_first_, index_key_capacity_);
+    return EmitIndexKeyBlock(index, range_bound, *index_key_first_, index_key_capacity_, phase);
   }
 
-  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(const PhysicalIndexScanNode& index,
-                                                                IndexTraversalBound range_bound,
-                                                                RegisterId first,
-                                                                std::uint32_t capacity) {
+  [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
+      const PhysicalIndexScanNode& index, IndexTraversalBound range_bound, RegisterId first,
+      std::uint32_t capacity, IndexKeyPhase phase = IndexKeyPhase::start) {
     return EmitIndexKeyBlock(index.equalities, index.range.has_value() ? &*index.range : nullptr,
-                             range_bound, first, capacity);
+                             range_bound, first, capacity, phase);
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
       std::span<const PhysicalIndexEquality> equalities, const PhysicalIndexRange* range,
-      IndexTraversalBound range_bound, RegisterId first, std::uint32_t capacity) {
+      IndexTraversalBound range_bound, RegisterId first, std::uint32_t capacity,
+      IndexKeyPhase phase = IndexKeyPhase::start) {
     if ((range_bound.expression != nullptr && range_bound.implicit_null) ||
         (range_bound.has_range_term() && range == nullptr)) {
       return std::unexpected(InternalFailure("covering index range boundary is invalid"));
@@ -7445,7 +7487,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (count == 0U || count > capacity) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
-    std::size_t offset = 0;
+    std::size_t offset = phase == IndexKeyPhase::start ? 0U : equalities.size();
     const auto copy_term = [&](BoundExpressionId expression,
                                TypeAffinity affinity) -> LoweringResult<void> {
       const RegisterId destination{first.value() + static_cast<std::uint32_t>(offset++)};
@@ -7464,13 +7506,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .output = destination,
       });
     };
-    for (const PhysicalIndexEquality& equality : equalities) {
-      if (auto copied = copy_term(equality.key, equality.affinity); !copied.has_value()) {
-        return std::unexpected(std::move(copied.error()));
+    if (phase == IndexKeyPhase::start) {
+      for (const PhysicalIndexEquality& equality : equalities) {
+        if (auto copied = copy_term(equality.key, equality.probe_affinity); !copied.has_value()) {
+          return std::unexpected(std::move(copied.error()));
+        }
       }
     }
     if (range_bound.expression != nullptr) {
-      if (auto copied = copy_term(range_bound.expression->key, range->affinity);
+      if (auto copied =
+              copy_term(range_bound.expression->key, range_bound.expression->probe_affinity);
           !copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
       }
@@ -7504,7 +7549,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
                                                   }) ||
-                              index.range.has_value();
+                              traversal.start.expression != nullptr;
 
     std::optional<Label> closed_completion;
     if (NeedsPreopenCompletion() || rejects_null) {
@@ -7521,7 +7566,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return guards;
     }
     if (!index.equalities.empty() || index.range.has_value()) {
-      if (auto keys = EmitIndexKeyExpressions(index, closed_completion); !keys.has_value()) {
+      if (auto keys =
+              EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::start, closed_completion);
+          !keys.has_value()) {
         return keys;
       }
     }
@@ -7574,7 +7621,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, traversal.end);
+      if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end,
+                                              *unpositioned_completion, cursor_);
+          !keys.has_value()) {
+        return keys;
+      }
+      auto key = EmitIndexKeyBlock(index, traversal.end, IndexKeyPhase::end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -7695,7 +7747,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   [](const PhysicalIndexEquality& equality) {
                                                     return equality.reject_null;
                                                   }) ||
-                              index.range.has_value();
+                              traversal.start.expression != nullptr;
 
     std::optional<Label> closed_completion;
     if (NeedsPreopenCompletion() || rejects_null) {
@@ -7711,7 +7763,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
       return guards;
     }
-    if (auto keys = EmitIndexKeyExpressions(index, closed_completion); !keys.has_value()) {
+    if (auto keys =
+            EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::start, closed_completion);
+        !keys.has_value()) {
       return keys;
     }
 
@@ -7753,7 +7807,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
-      auto key = EmitIndexKeyBlock(index, traversal.end);
+      if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end, *index_missing,
+                                              index_cursor);
+          !keys.has_value()) {
+        return keys;
+      }
+      auto key = EmitIndexKeyBlock(index, traversal.end, IndexKeyPhase::end);
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
@@ -10033,11 +10092,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                       std::size_t depth) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
     if (!source.cursor.has_value() || !source.right_key_first.has_value() ||
-        source.right_key_count == 0U) {
+        source.right_key_count == 0U || source.declaration == nullptr) {
       return std::unexpected(InternalFailure("RIGHT identity has no cursor or registers"));
     }
-    const auto& select = std::get<BoundSelectCore>(*core.bound);
-    const BoundTableSource& bound_source = select.table_sources[depth];
+    const BoundTableSource& bound_source = *source.declaration;
     const CatalogSnapshot& catalog = *bound_select_->catalog();
     if (!bound_source.table.has_value() || !catalog.table(*bound_source.table).without_rowid) {
       return EmitCursorRowIdValue(source.source, *source.right_key_first);
@@ -10119,6 +10177,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
+    if (!automatic.construction_predicates.empty()) {
+      auto binding = SourceCursor(automatic.source);
+      if (!binding.has_value()) {
+        return std::unexpected(std::move(binding.error()));
+      }
+      auto snapshots = std::exchange(source_snapshot_registers_, {});
+      source_cursor_bindings_[automatic.source.value()] =
+          SourceCursorBinding{.cursor = cursor, .rowid_field = binding->rowid_field};
+      const auto filtered = [&]() -> LoweringResult<void> {
+        for (const BoundExpressionId predicate : automatic.construction_predicates) {
+          if (auto emitted = EmitAggregatePredicate(
+                  predicate, *advance, lowering_internal::AggregateExpressionSource::AccessRow);
+              !emitted.has_value()) {
+            return emitted;
+          }
+        }
+        return {};
+      }();
+      source_cursor_bindings_[automatic.source.value()] = *binding;
+      source_snapshot_registers_ = std::move(snapshots);
+      if (!filtered.has_value()) {
+        return filtered;
+      }
+    }
     const CatalogTable& table = bound_select_->catalog()->table(automatic.table);
     std::uint32_t field = 0;
     const auto emit_column = [&](ColumnId column) -> LoweringResult<void> {
@@ -10166,22 +10248,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Append(SealRelationInstruction{.relation = *source.automatic_relation});
   }
 
-  [[nodiscard]] static bool AccessConsumesPredicate(
-      const JoinedSourcePlan& source, const PhysicalNestedLoopJoinNode& owner,
-      const PhysicalJoinPredicatePlacement& predicate) noexcept {
-    if (source.access == nullptr || source.join != &owner) {
-      return false;
-    }
-    if (const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
-        lookup != nullptr) {
-      return lookup->constraint.has_value() &&
-             lookup->constraint->origin == PhysicalPredicateOrigin::kOn &&
-             lookup->constraint->predicate == predicate.predicate &&
-             lookup->constraint->conjunct_position == predicate.conjunct_position;
-    }
-    return false;
-  }
-
   template <typename RowConsumer>
   [[nodiscard]] LoweringResult<void> EmitJoinedLoop(
       const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
@@ -10201,14 +10267,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                   !source.right_matches.has_value() || !source.right_key_first.has_value())) {
       return std::unexpected(InternalFailure("RIGHT source has no replay state"));
     }
-    const bool has_on =
-        std::ranges::any_of(core.joined_sources, [&](const JoinedSourcePlan& candidate) {
-          return candidate.join != nullptr &&
-                 std::ranges::any_of(candidate.join->predicates, [&](const auto& predicate) {
-                   return predicate.source == source.source &&
-                          !AccessConsumesPredicate(source, *candidate.join, predicate);
-                 });
-        });
+    const bool has_on = std::ranges::any_of(core.source_nodes, [&](const PhysicalNode& node) {
+      const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+      return join != nullptr && std::ranges::any_of(join->predicates, [&](const auto& predicate) {
+               return predicate.source == source.source && !predicate.consumed_by_access;
+             });
+    });
     const bool has_predicate = core.filter != nullptr &&
                                std::ranges::contains(core.filter->predicate_sources, source.source);
     const bool can_advance = right || has_inner || has_predicate || has_on || !always_stops;
@@ -10223,14 +10287,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<Label> index_end;
     std::optional<IndexTraversal> index_traversal;
     if (index_scan != nullptr) {
-      if (!source.index_key_first.has_value() || source.index_key_capacity == 0U) {
-        return std::unexpected(InternalFailure("joined index has no retained prefix registers"));
-      }
       auto resolved_traversal = ResolveIndexTraversal(*index_scan, *bound_select_->catalog());
       if (!resolved_traversal.has_value()) {
         return std::unexpected(std::move(resolved_traversal.error()));
       }
       index_traversal = *resolved_traversal;
+      if ((index_traversal->has_start_key || index_traversal->has_end_key) &&
+          (!source.index_key_first.has_value() || source.index_key_capacity == 0U)) {
+        return std::unexpected(InternalFailure("joined index has no retained prefix registers"));
+      }
       if (index_traversal->has_end_key) {
         auto label = CreateLabel();
         if (!label.has_value()) {
@@ -10315,7 +10380,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*ready); !bound.has_value()) {
         return bound;
       }
-      if (auto keys = EmitIndexKeyExpressions(automatic->equalities, nullptr, *done);
+      if (auto keys = EmitIndexEqualityExpressions(automatic->equalities, *done);
           !keys.has_value()) {
         return keys;
       }
@@ -10331,12 +10396,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(sought.error()));
       }
     } else if (index_scan != nullptr) {
-      if (auto keys = EmitIndexKeyExpressions(*index_scan, *done); !keys.has_value()) {
+      const IndexTraversal& traversal = AssumeValue(index_traversal);
+      if (auto keys = EmitIndexKeyExpressions(*index_scan, traversal, IndexKeyPhase::start, *done);
+          !keys.has_value()) {
         return keys;
       }
-      const RegisterId first = AssumeValue(source.index_key_first);
-      const IndexTraversal& traversal = AssumeValue(index_traversal);
       if (traversal.has_start_key) {
+        const RegisterId first = AssumeValue(source.index_key_first);
         auto count =
             EmitIndexKeyBlock(*index_scan, traversal.start, first, source.index_key_capacity);
         if (!count.has_value()) {
@@ -10356,9 +10422,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(rewound.error()));
         }
       }
+      if (auto keys =
+              EmitIndexKeyExpressions(*index_scan, traversal, IndexKeyPhase::end, *done, cursor);
+          !keys.has_value()) {
+        return keys;
+      }
       if (traversal.end.has_range_term()) {
         auto count =
-            EmitIndexKeyBlock(*index_scan, traversal.end, first, source.index_key_capacity);
+            EmitIndexKeyBlock(*index_scan, traversal.end, AssumeValue(source.index_key_first),
+                              source.index_key_capacity, IndexKeyPhase::end);
         if (!count.has_value()) {
           return std::unexpected(std::move(count.error()));
         }
@@ -10402,7 +10474,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(
               InternalFailure("outer ON predicate is not owned by its right source"));
         }
-        if (!AccessConsumesPredicate(source, *source.join, predicate)) {
+        if (!predicate.consumed_by_access) {
           if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
               !on.has_value()) {
             return on;
@@ -10439,20 +10511,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return bound;
       }
     }
-    for (const JoinedSourcePlan& candidate : core.joined_sources) {
-      if (candidate.join != nullptr && !SourceJoinPreservesLeft(candidate.join->join) &&
-          !SourceJoinPreservesRight(candidate.join->join)) {
-        for (const PhysicalJoinPredicatePlacement& predicate : candidate.join->predicates) {
-          if (predicate.source == source.source &&
-              !AccessConsumesPredicate(source, *candidate.join, predicate)) {
-            if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
-                !on.has_value()) {
-              return on;
-            }
-          }
-        }
-      }
-    }
     if (core.filter != nullptr) {
       for (std::size_t index = 0; index < core.filter->predicates.size(); ++index) {
         if (core.filter->predicate_sources[index] == source.source) {
@@ -10460,6 +10518,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                   EmitPredicate(core.filter->predicates[index], advance.value_or(*done));
               !filtered.has_value()) {
             return filtered;
+          }
+        }
+      }
+    }
+    for (const PhysicalNode& node : core.source_nodes) {
+      const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+      if (join != nullptr && !SourceJoinPreservesLeft(join->join) &&
+          !SourceJoinPreservesRight(join->join)) {
+        for (const PhysicalJoinPredicatePlacement& predicate : join->predicates) {
+          if (predicate.source == source.source && !predicate.consumed_by_access) {
+            if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
+                !on.has_value()) {
+              return on;
+            }
           }
         }
       }
@@ -10718,12 +10790,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitStreamingGuards(core, *after); !guards.has_value()) {
       return guards;
     }
-    for (const JoinedSourcePlan& source : core.joined_sources) {
-      if (source.join == nullptr || SourceJoinPreservesLeft(source.join->join) ||
-          SourceJoinPreservesRight(source.join->join)) {
+    for (const PhysicalNode& node : core.source_nodes) {
+      const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+      if (join == nullptr || SourceJoinPreservesLeft(join->join) ||
+          SourceJoinPreservesRight(join->join)) {
         continue;
       }
-      for (const PhysicalJoinPredicatePlacement& predicate : source.join->predicates) {
+      for (const PhysicalJoinPredicatePlacement& predicate : join->predicates) {
         if (!predicate.source.has_value()) {
           if (auto emitted = EmitPredicate(predicate.predicate, *after); !emitted.has_value()) {
             return emitted;
@@ -10951,7 +11024,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (index != nullptr && !core.index_cursor.has_value()) {
       return std::unexpected(InternalFailure("streaming index access has no index cursor"));
     }
-    const CursorId cursor = index != nullptr ? *core.index_cursor : *core.cursor;
+    const CursorId cursor = index != nullptr ? AssumeValue(core.index_cursor) : *core.cursor;
     const bool table_lookup = index != nullptr && !index->covering;
     if (auto opened = Append(OpenReadCursorInstruction{.cursor = cursor}); !opened.has_value()) {
       return opened;
@@ -11015,7 +11088,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       index_traversal = *resolved;
       reverse = index->direction == PhysicalScanDirection::kReverse;
       if (!index->equalities.empty() || index->range.has_value()) {
-        if (auto keys = EmitIndexKeyExpressions(*index, unpositioned_completion);
+        if (auto keys = EmitIndexKeyExpressions(*index, *index_traversal, IndexKeyPhase::start,
+                                                unpositioned_completion);
             !keys.has_value()) {
           return keys;
         }
@@ -11042,7 +11116,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       if (index_traversal->has_end_key) {
-        auto key = EmitIndexKeyBlock(*index, index_traversal->end);
+        if (auto keys = EmitIndexKeyExpressions(*index, *index_traversal, IndexKeyPhase::end,
+                                                unpositioned_completion, cursor);
+            !keys.has_value()) {
+          return keys;
+        }
+        auto key = EmitIndexKeyBlock(*index, index_traversal->end, IndexKeyPhase::end);
         if (!key.has_value()) {
           return std::unexpected(std::move(key.error()));
         }

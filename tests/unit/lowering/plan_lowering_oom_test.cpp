@@ -578,7 +578,7 @@ int main() try {
   const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
   const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
   constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
-  const std::array<PhysicalPlan, 6> automatic_plans{
+  const std::array<PhysicalPlan, 7> automatic_plans{
       DistinctFixture(catalog,
                       "SELECT a.id,b.Name,c.Name FROM Items a JOIN Items b ON b.Name=a.Name "
                       "JOIN Items c ON c.Name=b.Name",
@@ -586,6 +586,10 @@ int main() try {
       DistinctFixture(catalog,
                       "SELECT a.id,b.Name FROM Items a LEFT JOIN Items b ON b.Name IS a.Name "
                       "ORDER BY a.id,b.id LIMIT ?1 OFFSET ?2",
+                      kAutomaticOptions),
+      DistinctFixture(catalog,
+                      "SELECT a.id,b.Name FROM Items a LEFT JOIN Items b "
+                      "ON b.Name IS a.Name AND b.id>1",
                       kAutomaticOptions),
       DistinctFixture(catalog, "SELECT DISTINCT b.Name FROM Items a JOIN Items b ON b.Name=a.Name",
                       kAutomaticOptions),
