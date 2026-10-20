@@ -23,6 +23,7 @@ register bytes alive until Reset or destruction.
 | Logical value versus retained `zMalloc` | `vdbeInt.h:230-270`; `vdbemem.c:250-324,993-1060` |
 | Ordinary Column byte copies and reuse | `vdbe.c:3247-3378` |
 | Constants, parameters, copies and moves | `vdbe.c:1427-1760`; `vdbemem.c:1187-1249` |
+| Ready/running phase and busy binding rejection | `vdbeapi.c:835-886,1721-1732,1854-1868` |
 | Result suspension | `vdbe.c:1806-1840`; `vdbeapi.c:834-980` |
 | Cursor then register cleanup | `vdbeaux.c:2190-2236,2749-2860` |
 | Distinct large-overflow sharing branch | `vdbe.c:741-817`; `printf.c:1677-1727` |
@@ -98,6 +99,17 @@ factories. Forbid rvalue borrowing. Copy instructions preserve such static
 borrowing, but copy nonstatic bytes into destination-owned storage; output
 aliasing must not alter inputs or leave a dangling view.
 
+Translate the native ready/running distinction through `VmState::Running`,
+not a parallel activity flag. Enter it before execution validation/dispatch
+and leave it only through row, halt or error publication. The existing
+ready-only Bind/ClearBindings rule then also excludes active callbacks.
+Reject recursive Step, Reset and detach while running; a rejected nested
+Step does not own the outer execution's cleanup, including diagnostic OOM.
+This closes parameter-owner invalidation before enabling static register
+borrows, without admitting concurrent or destructive reentrant VM use.
+SQLite's clear-bindings implementation itself has no ready check; retain
+Modern's existing stricter ready-only contract.
+
 Bindings still clone caller values. Public Clone and callbacks cannot export
 an engine-internal borrowed value as an independently owned result.
 Reset/clear-binding/move/destruction order must end register borrows before
@@ -137,6 +149,7 @@ inline/heap string moves, logical versus physical length, scalar/NULL
 retention, aliased grow, allocation failure, source/destination overlap,
 static-load lifetimes and every cleanup path. Exercise existing caller
 ABI/resource controls and the unchanged selective 2,000-byte boundary.
+Include active-callback binding/lifecycle rejection and nested diagnostic OOM.
 
 Focused red/green or a green refactor baseline and complete fast units follow
 a full default development build. Run deadline-bound tests after compiler
