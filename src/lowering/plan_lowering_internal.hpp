@@ -76,6 +76,11 @@ template <typename T>
   }
 }
 
+enum class IndexKeyPhase : std::uint8_t {
+  start,
+  end,
+};
+
 struct IndexTraversalBound {
   const PhysicalRangeBound* expression = nullptr;
   bool implicit_null = false;

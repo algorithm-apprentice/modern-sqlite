@@ -256,7 +256,7 @@ int main() try {
       "SELECT Name,count() AS total FROM Items WHERE id>0 "
       "GROUP BY Name HAVING total>0 ORDER BY Name DESC LIMIT ?1";
   const std::size_t aggregate_allocations = OptimizeAllocationCount(kAggregateSql, indexed_catalog);
-  if (aggregate_allocations != 59U) {
+  if (aggregate_allocations != 35U) {
     return 1;
   }
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
@@ -322,7 +322,7 @@ int main() try {
     return 1;
   }
   checksum += *published->selected_candidate_index();
-  checksum += published->selected_candidate()->cost.work_units;
+  checksum += static_cast<std::uint64_t>(published->selected_candidate()->cost.run_log_est);
   for (std::uint32_t index = 0; index < published->nodes().size(); ++index) {
     const PhysicalNode& node = published->node(PhysicalNodeId{index});
     checksum += static_cast<std::uint64_t>(PhysicalNodeKindOf(node));
@@ -341,7 +341,7 @@ int main() try {
     return 1;
   }
   checksum += *compound->selected_candidate_index();
-  checksum += compound->selected_candidate()->cost.work_units;
+  checksum += static_cast<std::uint64_t>(compound->selected_candidate()->cost.run_log_est);
   checksum += compound->core_access_plans().size();
   for (std::uint32_t index = 0; index < compound->nodes().size(); ++index) {
     const PhysicalNode& node = compound->node(PhysicalNodeId{index});

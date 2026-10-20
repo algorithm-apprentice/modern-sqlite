@@ -220,6 +220,9 @@ borrowed key-prefix comparison, and lazy OFFSET drain.
 ADR-0119 follows with compiler-owned multi-write/ABORT effects, conditional
 anonymous statement-savepoint admission, and error-class-aware completion
 through the existing transaction coordinator.
+ADR-0120 translates native LogEst costs and bounded WhereLoop/path solving
+for admitted accesses, with one published source sequence consumed by the
+existing lowering producer.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and
