@@ -176,5 +176,29 @@ allocation across retained TEXT growth and overflow prefixes; each failure
 and the whole-record value limit release pins and preserve the original
 database bytes. The original 37-allocation lowering contract is unchanged.
 A complete default development build precedes the passing 1,490 ordinary plus
-92 isolated fast cases. Integrated native, matched performance and final-head
-closing gates remain outstanding.
+92 isolated fast cases. At this slice boundary, integrated native, matched
+performance and final-head closing gates remained outstanding.
+
+## Integrated local closure
+
+Production source `c552e9f` (tree
+`e735a9796c9ca5326752e6da941fe53547cbe9fe`) passes the actual-change full
+plan: 27 shared checks reconciled across all excluded configurations, 58
+native contracts, 1,624 isolated cases each in Debug, Release, ASan/UBSan and
+genuine GNU 16 Debug/Release, and 1,641 instrumented cases. Four independent
+20,000-run read/write SQL/database fuzz campaigns use unchanged seed 102,
+workloads and deadlines. The original ten-second correlated sanitizer model
+completes in 1.258 seconds. Production quality, format, engineering and graph
+checks pass. Existing imported expression, partial, empty-partial and
+WITHOUT ROWID ANALYZE compatibility remains green.
+
+The fresh unchanged fifteen-case capture `streaming-stat1-final-v1` matches
+the frozen workload, inputs, SQLite, host and build settings. ANALYZE wall
+ratio falls from 2.871359x to 1.875284x and CPU ratio from 3.069774x to
+1.956503x. Allocations fall from 25,074 to 499 and copied bytes from 131,802
+to 1,178; the native count prepass raises cache hits from 15 to 57. All
+fourteen non-target Modern diagnostic counter sets and all fifteen SQLite
+counter sets remain identical. All guards pass; this is not engine-wide
+performance parity. Final integrated acceptance and all nine exact-head
+hosted successes remain merge prerequisites, recorded with the durable
+PR #232 ledger.
