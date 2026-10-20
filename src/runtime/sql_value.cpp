@@ -38,16 +38,16 @@ double SqlValueAccess::Real(const SqlValue& value) noexcept {
 }
 
 Utf8View SqlValueAccess::Text(const SqlValue& value) noexcept {
-  const auto* result = std::get_if<Utf8View>(&value.value_);
-  if (result == nullptr) {
+  const auto result = value.text_value();
+  if (!result.has_value()) {
     std::terminate();
   }
   return *result;
 }
 
 ByteView SqlValueAccess::Blob(const SqlValue& value) noexcept {
-  const auto* result = std::get_if<ByteView>(&value.value_);
-  if (result == nullptr) {
+  const auto result = value.blob_value();
+  if (!result.has_value()) {
     std::terminate();
   }
   return *result;
@@ -83,6 +83,67 @@ Status SqlValueAccess::CopyText(SqlValue& value, Utf8View source) noexcept {
 
 Status SqlValueAccess::CopyBlob(SqlValue& value, ByteView source) noexcept {
   return CopyByteValue(value, source, SqlValueType::kBlob);
+}
+
+bool SqlValueAccess::IsStaticBorrow(const SqlValue& value) noexcept {
+  return std::holds_alternative<SqlValue::BorrowedText>(value.value_) ||
+         std::holds_alternative<SqlValue::BorrowedBlob>(value.value_);
+}
+
+void SqlValueAccess::BorrowStable(SqlValue& destination, const SqlValue& source) noexcept {
+  if (&destination == &source) {
+    return;
+  }
+  switch (source.type()) {
+    case SqlValueType::kNull:
+      SetNull(destination);
+      return;
+    case SqlValueType::kInteger:
+      SetInteger(destination, Integer(source));
+      return;
+    case SqlValueType::kReal:
+      SetReal(destination, Real(source));
+      return;
+    case SqlValueType::kText: {
+      const Utf8View text = Text(source);
+      SetNull(destination);
+      destination.value_.emplace<SqlValue::BorrowedText>(SqlValue::BorrowedText{.view = text});
+      return;
+    }
+    case SqlValueType::kBlob: {
+      const ByteView blob = Blob(source);
+      SetNull(destination);
+      destination.value_.emplace<SqlValue::BorrowedBlob>(SqlValue::BorrowedBlob{.view = blob});
+      return;
+    }
+  }
+  std::terminate();
+}
+
+Status SqlValueAccess::Copy(SqlValue& destination, const SqlValue& source) noexcept {
+  if (&destination == &source) {
+    return {};
+  }
+  if (IsStaticBorrow(source)) {
+    BorrowStable(destination, source);
+    return {};
+  }
+  switch (source.type()) {
+    case SqlValueType::kNull:
+      SetNull(destination);
+      return {};
+    case SqlValueType::kInteger:
+      SetInteger(destination, Integer(source));
+      return {};
+    case SqlValueType::kReal:
+      SetReal(destination, Real(source));
+      return {};
+    case SqlValueType::kText:
+      return CopyText(destination, Text(source));
+    case SqlValueType::kBlob:
+      return CopyBlob(destination, Blob(source));
+  }
+  std::terminate();
 }
 
 Status SqlValueAccess::CopyByteValue(SqlValue& value, ByteView source, SqlValueType type) noexcept {
@@ -524,7 +585,14 @@ SqlValue SqlValue::Clone() const {
   std::terminate();
 }
 
-SqlValueType SqlValue::type() const noexcept { return static_cast<SqlValueType>(value_.index()); }
+SqlValueType SqlValue::type() const noexcept {
+  static constexpr std::array kLogicalTypes{
+      SqlValueType::kNull, SqlValueType::kInteger, SqlValueType::kReal, SqlValueType::kText,
+      SqlValueType::kBlob, SqlValueType::kText,    SqlValueType::kBlob,
+  };
+  static_assert(kLogicalTypes.size() == std::variant_size_v<LogicalValue>);
+  return kLogicalTypes[value_.index()];
+}
 
 std::optional<std::int64_t> SqlValue::integer_value() const noexcept {
   if (const auto* value = std::get_if<std::int64_t>(&value_); value != nullptr) {
@@ -544,12 +612,18 @@ std::optional<Utf8View> SqlValue::text_value() const noexcept {
   if (const auto* value = std::get_if<Utf8View>(&value_); value != nullptr) {
     return *value;
   }
+  if (const auto* value = std::get_if<BorrowedText>(&value_); value != nullptr) {
+    return value->view;
+  }
   return std::nullopt;
 }
 
 std::optional<ByteView> SqlValue::blob_value() const noexcept {
   if (const auto* value = std::get_if<ByteView>(&value_); value != nullptr) {
     return *value;
+  }
+  if (const auto* value = std::get_if<BorrowedBlob>(&value_); value != nullptr) {
+    return value->view;
   }
   return std::nullopt;
 }

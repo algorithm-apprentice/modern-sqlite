@@ -171,6 +171,78 @@ void Deallocate(void* memory) noexcept {
          live_before == live_allocations.load(std::memory_order_relaxed);
 }
 
+[[nodiscard]] bool CheckStaticBorrowCopies() {
+  using namespace modern_sqlite;
+  const std::string text(512, 't');
+  for (const bool blob : {false, true}) {
+    const SqlValue owner =
+        blob ? SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(text))) : SqlValue::Text(text);
+    SqlValue destination;
+    if (!SqlValueAccess::CopyText(destination, Utf8View{text}).has_value()) {
+      return false;
+    }
+    const std::size_t capacity = destination.owned_capacity_bytes();
+    SqlValue copy;
+    allocation_count.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    SqlValueAccess::BorrowStable(destination, owner);
+    const auto copied = SqlValueAccess::Copy(copy, destination);
+    bool correct = copied.has_value() && SqlValueAccess::IsStaticBorrow(destination) &&
+                   SqlValueAccess::IsStaticBorrow(copy) &&
+                   destination.owned_capacity_bytes() == capacity &&
+                   allocation_count.load(std::memory_order_relaxed) == 0U;
+    bool clone_failed = false;
+    try {
+      const SqlValue clone = copy.Clone();
+    } catch (const std::bad_alloc&) {
+      clone_failed = true;
+    }
+    fail_allocations.store(false, std::memory_order_relaxed);
+    SqlValue clone = copy.Clone();
+    const ByteView original = blob ? *owner.blob_value() : AsBytes(owner.text_value()->bytes());
+    const ByteView cloned = blob ? *clone.blob_value() : AsBytes(clone.text_value()->bytes());
+    correct =
+        correct && clone_failed && original.data() != cloned.data() && AsStringView(cloned) == text;
+    SqlValueAccess::Release(copy);
+    SqlValueAccess::Release(destination);
+    if (!correct) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool CheckOwnedCopies() {
+  using namespace modern_sqlite;
+  const std::string text(512, 't');
+  const SqlValue source = SqlValue::Text(text);
+  SqlValue destination;
+  if (!SqlValueAccess::CopyText(destination, Utf8View{"old"}).has_value()) {
+    return false;
+  }
+  const std::size_t capacity = destination.owned_capacity_bytes();
+  fail_allocations.store(true, std::memory_order_relaxed);
+  const auto rejected = SqlValueAccess::Copy(destination, source);
+  fail_allocations.store(false, std::memory_order_relaxed);
+  if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+      destination.text_value()->bytes() != "old" ||
+      destination.owned_capacity_bytes() != capacity || source.text_value()->bytes() != text) {
+    return false;
+  }
+  if (!SqlValueAccess::Copy(destination, source).has_value()) {
+    return false;
+  }
+  allocation_count.store(0, std::memory_order_relaxed);
+  fail_allocations.store(true, std::memory_order_relaxed);
+  const auto reused = SqlValueAccess::Copy(destination, source);
+  const auto self = SqlValueAccess::Copy(destination, destination);
+  fail_allocations.store(false, std::memory_order_relaxed);
+  return reused.has_value() && self.has_value() &&
+         allocation_count.load(std::memory_order_relaxed) == 0U &&
+         destination.text_value()->data() != source.text_value()->data() &&
+         destination.text_value()->bytes() == text;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -199,7 +271,9 @@ int main() try {
                           Case{"retained transitions", CheckRetainedTransitions},
                           Case{"strong copy failures", CheckStrongCopyFailures},
                           Case{"aliased grow failure", CheckAliasedGrowFailure},
-                          Case{"retained grow failure", CheckRetainedGrowFailure}}) {
+                          Case{"retained grow failure", CheckRetainedGrowFailure},
+                          Case{"static borrow copies", CheckStaticBorrowCopies},
+                          Case{"owned copies", CheckOwnedCopies}}) {
     if (!test.run()) {
       std::fprintf(stderr, "SQL value allocation control failed: %s\n", test.name);
       return 1;

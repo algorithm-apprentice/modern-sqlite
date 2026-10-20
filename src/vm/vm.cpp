@@ -671,9 +671,9 @@ struct Vm::Impl {
     if (pager_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "VM execution context is not attached"));
     }
-    if (state_ == VmState::kRow) {
+    if (state_ == VmState::kRow || state_ == VmState::Running) {
       return std::unexpected(
-          VmError(ErrorCode::kMisuse, "cannot detach a VM while a result row is suspended"));
+          VmError(ErrorCode::kMisuse, "cannot detach an executing or row-suspended VM"));
     }
     ClearExecution();
     pager_ = nullptr;
@@ -721,7 +721,9 @@ struct Vm::Impl {
           VmError(ErrorCode::kMisuse, "the VM has no attached execution context"));
     }
 
-    if (state_ == VmState::kReady) {
+    const bool first_step = state_ == VmState::kReady;
+    state_ = VmState::Running;
+    if (first_step) {
       Status schema = ValidateSchema();
       if (!schema.has_value()) {
         return Fail(std::move(schema.error()));
@@ -770,6 +772,9 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] Status Reset() {
+    if (state_ == VmState::Running) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "cannot reset a running VM"));
+    }
     ClearExecution();
     program_counter_ = 0;
     executed_instruction_count_ = 0;
@@ -915,15 +920,19 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const LoadConstantInstruction& operation) {
-    return SetRegister(operation.output, program_->constant(operation.constant).Clone());
+    SqlValueAccess::BorrowStable(registers_[operation.output.value()],
+                                 program_->constant(operation.constant));
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const LoadParameterInstruction& operation) {
-    return SetRegister(operation.output, parameters_[operation.parameter.value()].Clone());
+    SqlValueAccess::BorrowStable(registers_[operation.output.value()],
+                                 parameters_[operation.parameter.value()]);
+    return std::nullopt;
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CopyInstruction& operation) {
-    return SetRegister(operation.output, Register(operation.input).Clone());
+    return CopyRegister(operation.output, Register(operation.input));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const UnaryInstruction& operation) {
@@ -1187,10 +1196,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RealAffinityInstruction& operation) {
     const SqlValue& input = Register(operation.input);
-    SqlValue output = input.type() == SqlValueType::kInteger
-                          ? SqlValue::Real(static_cast<double>(input.integer_value().value_or(0)))
-                          : input.Clone();
-    return SetRegister(operation.output, std::move(output));
+    if (input.type() == SqlValueType::kInteger) {
+      return SetRegister(operation.output,
+                         SqlValue::Real(static_cast<double>(SqlValueAccess::Integer(input))));
+    }
+    return CopyRegister(operation.output, input);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
@@ -3198,6 +3208,17 @@ struct Vm::Impl {
     return VmStep::kDone;
   }
 
+  [[nodiscard]] DispatchResult CopyRegister(RegisterId destination, const SqlValue& source) {
+    if (ValueByteSize(source) > limits_.maximum_value_bytes) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
+    }
+    auto copied = SqlValueAccess::Copy(registers_[destination.value()], source);
+    if (!copied.has_value()) {
+      return std::unexpected(std::move(copied.error()));
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlValue value) {
     if (ValueByteSize(value) > limits_.maximum_value_bytes) {
       return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
@@ -3540,10 +3561,15 @@ Status Vm::Bind(ParameterId parameter, const SqlValue& value) {
 }
 
 Status Vm::ClearBindings() {
-  if (impl_ == nullptr) {
-    return std::unexpected(VmError(ErrorCode::kMisuse, "cannot clear bindings on a moved-from VM"));
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "cannot clear bindings on a moved-from VM"));
+    }
+    return impl_->ClearBindings();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  return impl_->ClearBindings();
 }
 
 Status Vm::AttachExecutionContext(VmExecutionContext context) {
@@ -3555,26 +3581,32 @@ Status Vm::AttachExecutionContext(VmExecutionContext context) {
 }
 
 Status Vm::DetachExecutionContext() {
-  if (impl_ == nullptr) {
-    return std::unexpected(
-        VmError(ErrorCode::kMisuse, "cannot detach execution context from a moved-from VM"));
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "cannot detach execution context from a moved-from VM"));
+    }
+    return impl_->DetachExecutionContext();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  return impl_->DetachExecutionContext();
 }
 
 Result<VmStep> Vm::Step() {
+  const bool owns_execution =
+      impl_ != nullptr && (impl_->state_ == VmState::kReady || impl_->state_ == VmState::kRow);
   try {
     if (impl_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "cannot step a moved-from VM"));
     }
     return impl_->Step();
   } catch (const std::bad_alloc&) {
-    if (impl_ != nullptr) {
+    if (owns_execution && impl_ != nullptr) {
       impl_->FailForException();
     }
     return std::unexpected(Error::OutOfMemory());
   } catch (...) {
-    if (impl_ != nullptr) {
+    if (owns_execution && impl_ != nullptr) {
       impl_->FailForException();
     }
     throw;
@@ -3582,10 +3614,14 @@ Result<VmStep> Vm::Step() {
 }
 
 Status Vm::Reset() {
-  if (impl_ == nullptr) {
-    return std::unexpected(VmError(ErrorCode::kMisuse, "cannot reset a moved-from VM"));
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "cannot reset a moved-from VM"));
+    }
+    return impl_->Reset();
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  return impl_->Reset();
 }
 
 VmState Vm::state() const noexcept { return impl_ == nullptr ? VmState::kInvalid : impl_->state_; }

@@ -21,6 +21,7 @@ class TransactionWriter;
 
 enum class VmState : std::uint8_t {
   kReady,
+  Running,
   kRow,
   kDone,
   kError,

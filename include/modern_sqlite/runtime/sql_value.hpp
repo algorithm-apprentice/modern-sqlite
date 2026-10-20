@@ -87,9 +87,16 @@ class SqlValue {
   struct RetainedBytes {
     ByteBuffer buffer;
   };
+  struct BorrowedText {
+    Utf8View view;
+  };
+  struct BorrowedBlob {
+    ByteView view;
+  };
 
   using ByteStorage = std::variant<std::monostate, std::string, ByteBuffer, RetainedBytes>;
-  using LogicalValue = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView>;
+  using LogicalValue = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView,
+                                    BorrowedText, BorrowedBlob>;
 
   void RebindOwnedText() noexcept;
 

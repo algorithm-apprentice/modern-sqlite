@@ -28,6 +28,13 @@ class SqlValueAccess {
   static void Release(SqlValue& value) noexcept;
   [[nodiscard]] static Status CopyText(SqlValue& value, Utf8View source) noexcept;
   [[nodiscard]] static Status CopyBlob(SqlValue& value, ByteView source) noexcept;
+  [[nodiscard]] static Status Copy(SqlValue& destination, const SqlValue& source) noexcept;
+  [[nodiscard]] static bool IsStaticBorrow(const SqlValue& value) noexcept;
+
+  // The source's byte owner must remain immutable and stable until the borrow ends.
+  static void BorrowStable(SqlValue& destination, const SqlValue& source) noexcept;
+  static void BorrowStable(SqlValue& destination, SqlValue&& source) = delete;
+  static void BorrowStable(SqlValue& destination, const SqlValue&& source) = delete;
 
   [[nodiscard]] static Result<ByteView> RetainBytes(ByteBuffer& storage, ByteView source,
                                                     ByteCount trailing_zeros = {}) noexcept try {

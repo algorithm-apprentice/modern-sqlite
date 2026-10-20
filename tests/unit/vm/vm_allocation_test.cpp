@@ -185,6 +185,69 @@ void Deallocate(void* allocation) noexcept {
   return live_allocations.load(std::memory_order_relaxed) == before_vm;
 }
 
+[[nodiscard]] bool CheckStaticLoads(modern_sqlite::Pager& pager,
+                                    modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 4;
+  input.parameter_count = 1;
+  input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'c')));
+  for (std::size_t column = 0; column < input.register_count; ++column) {
+    input.result_columns.push_back(ResultColumnMetadata{
+        .name = "value", .declared_type = {}, .affinity = TypeAffinity::kNone});
+  }
+  input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      LoadParameterInstruction{.parameter = ParameterId(0), .output = RegisterId(1)},
+      CopyInstruction{.input = RegisterId(0), .output = RegisterId(2)},
+      CopyInstruction{.input = RegisterId(1), .output = RegisterId(3)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 4},
+      HaltInstruction{},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment::Core());
+  const SqlValue binding =
+      SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(kOwnedTextBytes, 'b'))));
+  if (!vm.has_value() || !vm->Bind(ParameterId(0), binding).has_value() ||
+      !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+    return false;
+  }
+  const std::size_t before = allocation_count.load(std::memory_order_relaxed);
+  const auto row = vm->Step();
+  const std::size_t after = allocation_count.load(std::memory_order_relaxed);
+  if (!row.has_value() || *row != VmStep::kRow || after != before || vm->row().size() != 4U) {
+    std::fprintf(stderr, "static register loads/copies allocated %zu times\n", after - before);
+    return false;
+  }
+  if (vm->row()[0].text_value()->data() != program->constant(ConstantId(0)).text_value()->data() ||
+      vm->row()[2].text_value()->data() != vm->row()[0].text_value()->data() ||
+      vm->row()[1].blob_value()->data() != vm->bindings()[0].blob_value()->data() ||
+      vm->row()[3].blob_value()->data() != vm->row()[1].blob_value()->data()) {
+    return false;
+  }
+  SqlValue clone = vm->row()[3].Clone();
+  Vm moved = std::move(*vm);
+  if (clone.blob_value()->data() == moved.row()[3].blob_value()->data() ||
+      !moved.Reset().has_value() ||
+      !moved.Bind(ParameterId(0), SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("replacement"))))
+           .has_value() ||
+      !moved.AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+    return false;
+  }
+  const auto rebound = moved.Step();
+  if (!rebound.has_value() || *rebound != VmStep::kRow ||
+      AsStringView(*moved.row()[3].blob_value()) != "replacement" ||
+      clone.blob_value()->size() != kOwnedTextBytes || !moved.Reset().has_value() ||
+      !moved.ClearBindings().has_value()) {
+    return false;
+  }
+  return moved.bindings()[0].type() == SqlValueType::kNull;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -403,6 +466,10 @@ int main() try {
     }
   }
   const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
+
+  if (!CheckStaticLoads(**opened, input.schema_version)) {
+    return 1;
+  }
 
   for (const RegisterCleanupEnd end :
        {RegisterCleanupEnd::Halt, RegisterCleanupEnd::Failure, RegisterCleanupEnd::ForeignException,
