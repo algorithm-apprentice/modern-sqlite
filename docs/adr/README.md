@@ -124,3 +124,4 @@ their corresponding implementation begins.
 119. [ADR-0119: SQLite Conditional Statement Journals](0119-sqlite-conditional-statement-journals.md)
 120. [ADR-0120: SQLite WhereLoop and Path Solving](0120-sqlite-where-loop-and-path-solving.md)
 121. [ADR-0121: SQLite Sorter-Backed Index Refill](0121-sqlite-sorter-backed-index-refill.md)
+122. [ADR-0122: SQLite Streaming STAT1 Accumulation](0122-sqlite-streaming-stat1-accumulation.md)

@@ -171,6 +171,13 @@ enum class Stat1ClearScope : std::uint8_t {
   kIndex,
 };
 
+enum class Stat1IndexPolicy : std::uint8_t {
+  Ordinary,
+  UniqueNullable,
+  UniqueNotNull,
+  PrimaryWithoutRowid,
+};
+
 enum class RelationInsertMode : std::uint8_t {
   kKeepExisting,
   kReplaceExisting,
@@ -568,6 +575,7 @@ struct ComputeIndexStat1Instruction {
   CursorId cursor;
   std::uint32_t key_term_count;
   bool emit_empty = false;
+  Stat1IndexPolicy policy = Stat1IndexPolicy::Ordinary;
   RegisterId output;
 };
 

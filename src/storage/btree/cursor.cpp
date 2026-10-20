@@ -187,6 +187,12 @@ class CursorCore final {
 
   void ClearPosition() noexcept { InvalidatePosition(); }
 
+  [[nodiscard]] Result<std::uint64_t> CountEntries() {
+    auto counted = CountEntriesImpl();
+    InvalidatePosition();
+    return counted;
+  }
+
   [[nodiscard]] Result<bool> First() {
     auto ready = ResetToRoot();
     if (!ready.has_value()) {
@@ -728,6 +734,50 @@ class CursorCore final {
     --frame_count_;
   }
 
+  [[nodiscard]] Result<std::uint64_t> CountEntriesImpl() {
+    auto ready = ResetToRoot();
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (!*ready) {
+      return 0;
+    }
+    std::uint64_t entries = 0;
+    while (true) {
+      auto page = CurrentPage();
+      if (!page.has_value()) {
+        return std::unexpected(std::move(page.error()));
+      }
+      if (page->is_leaf() || !table_) {
+        const auto cells = static_cast<std::uint64_t>(page->cell_count());
+        if (cells > std::numeric_limits<std::uint64_t>::max() - entries) {
+          return std::unexpected(Corruption("B-tree entry count is out of range"));
+        }
+        entries += cells;
+      }
+      if (page->is_leaf()) {
+        while (true) {
+          if (frame_count_ == 1U) {
+            return entries;
+          }
+          PopFrame();
+          page = CurrentPage();
+          if (!page.has_value()) {
+            return std::unexpected(std::move(page.error()));
+          }
+          if (CurrentFrame().index < page->cell_count()) {
+            ++CurrentFrame().index;
+            break;
+          }
+        }
+      }
+      auto descended = DescendChild(CurrentFrame().index, *page);
+      if (!descended.has_value()) {
+        return std::unexpected(std::move(descended.error()));
+      }
+    }
+  }
+
   [[nodiscard]] Result<bool> NextImpl() {
     auto page = CurrentPage();
     if (!page.has_value()) {
@@ -932,14 +982,33 @@ struct IndexBtreeCursor::Impl {
       }
       return compare(*record);
     }
+    auto record = ReadCellRecordPrefix(cell, requested_fields, scratch,
+                                       ByteCount{std::numeric_limits<std::size_t>::max()});
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    return compare(*record);
+  }
 
+  [[nodiscard]] Result<RecordPrefixView> ReadCellRecordPrefix(const BtreeCellView& cell,
+                                                              std::size_t requested_fields,
+                                                              ByteBuffer& scratch,
+                                                              ByteCount maximum_record_bytes) {
     auto possible = core.EnsureCompletePayloadPossible(cell);
     if (!possible.has_value()) {
       return std::unexpected(std::move(possible.error()));
     }
+    if (cell.payload_size() > maximum_record_bytes) {
+      return std::unexpected(
+          MakeError(ErrorCode::kTooLarge, "B-tree record exceeds the requested size limit"));
+    }
+    if (cell.local_payload().size() == cell.payload_size().value()) {
+      return RecordPrefixView::Parse(cell.local_payload(), cell.payload_size(), requested_fields,
+                                     options);
+    }
     bool complete_chain_read = false;
     const auto fail_after_chain_validation =
-        [this, &cell, &complete_chain_read](Error error) -> Result<std::weak_ordering> {
+        [this, &cell, &complete_chain_read](Error error) -> Result<RecordPrefixView> {
       if (!complete_chain_read) {
         auto read =
             core.ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::kCompletePayload);
@@ -991,7 +1060,7 @@ struct IndexBtreeCursor::Impl {
     if (!record.has_value()) {
       return std::unexpected(std::move(record.error()));
     }
-    return compare(*record);
+    return *record;
   }
 
   [[nodiscard]] Result<std::weak_ordering> CompareCell(const BtreeCellView& cell,
@@ -1070,6 +1139,13 @@ Status TableBtreeCursor::ClearPosition() {
   }
   impl_->core.ClearPosition();
   return {};
+}
+
+Result<std::uint64_t> TableBtreeCursor::CountEntries() {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  return impl_->core.CountEntries();
 }
 
 Result<bool> TableBtreeCursor::First() {
@@ -1211,6 +1287,13 @@ Status IndexBtreeCursor::ClearPosition() {
   return {};
 }
 
+Result<std::uint64_t> IndexBtreeCursor::CountEntries() {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  return impl_->core.CountEntries();
+}
+
 Result<bool> IndexBtreeCursor::First() {
   if (impl_ == nullptr) {
     return std::unexpected(MovedFromCursor());
@@ -1292,6 +1375,22 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrentRecordPrefix(
   }
   ByteBuffer scratch;
   return impl_->CompareCellRecordPrefix(*cell, key, key_field_count, scratch);
+}
+
+Result<RecordPrefixView> IndexBtreeCursor::ReadRecordPrefix(std::size_t requested_fields,
+                                                            ByteBuffer& scratch,
+                                                            ByteCount maximum_record_bytes) {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  if (requested_fields == 0U) {
+    return std::unexpected(Misuse("index record prefix requires at least one requested field"));
+  }
+  auto cell = impl_->core.CurrentCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  return impl_->ReadCellRecordPrefix(*cell, requested_fields, scratch, maximum_record_bytes);
 }
 
 Result<BtreePayloadView> IndexBtreeCursor::payload() const {

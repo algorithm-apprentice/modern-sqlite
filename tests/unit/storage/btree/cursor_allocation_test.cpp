@@ -245,6 +245,62 @@ template <typename Cursor>
   return pager->EndRead().has_value() && correct;
 }
 
+[[nodiscard]] bool CheckCountAndBorrowedPrefixAllocations() {
+  using namespace modern_sqlite;
+  PosixVfs vfs;
+  auto pager = OpenNativeFixture(vfs);
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  bool correct = true;
+  {
+    auto table = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+    const auto expected = TakeValue(table.CountEntries());
+    correct = expected == 166U && !table.valid() && correct;
+    correct = ExhaustOwnedAllocations(
+                  "warm table page count", [&] { return table.CountEntries(); }, 0, std::nullopt) &&
+              correct;
+    auto index = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{102}, columns));
+    correct = TakeValue(index.CountEntries()) == expected && !index.valid() && correct;
+    correct = ExhaustOwnedAllocations(
+                  "warm index page count", [&] { return index.CountEntries(); }, 0, std::nullopt) &&
+              correct;
+    if (!TakeValue(index.First())) {
+      return false;
+    }
+    const ByteCount size = TakeValue(index.payload()).size();
+    const ByteBuffer warm = TakeValue(index.CopyPayload());
+    correct = warm.size() == size && correct;
+    correct = ExhaustOwnedAllocations(
+                  "borrowed overflow prefix",
+                  [&]() -> Status {
+                    ByteBuffer scratch;
+                    const auto prefix = index.ReadRecordPrefix(1, scratch, size);
+                    if (!prefix.has_value()) {
+                      return std::unexpected(prefix.error());
+                    }
+                    return {};
+                  },
+                  1, std::nullopt) &&
+              correct;
+    ByteBuffer scratch;
+    static_cast<void>(TakeValue(index.ReadRecordPrefix(1, scratch, size)));
+    correct = ExhaustOwnedAllocations(
+                  "reused overflow prefix",
+                  [&] { return index.ReadRecordPrefix(1, scratch, size); }, 0, std::nullopt) &&
+              correct;
+    correct = CheckDiagnostic(
+                  "zero borrowed prefix", [&] { return index.ReadRecordPrefix(0, scratch, size); },
+                  ErrorCode::kMisuse) &&
+              correct;
+    correct = CheckDiagnostic(
+                  "limited borrowed prefix",
+                  [&] { return index.ReadRecordPrefix(1, scratch, ByteCount{0}); },
+                  ErrorCode::kTooLarge) &&
+              correct;
+  }
+  return pager->EndRead().has_value() && correct;
+}
+
 void Write16(modern_sqlite::ByteBuffer& bytes, std::size_t offset, std::uint16_t value) {
   modern_sqlite::StoreBigEndian<std::uint16_t>(
       std::span<std::byte, 2>{bytes.mutable_view().data() + offset, 2}, value);
@@ -460,8 +516,9 @@ int main() try {
   }
   const bool opened = CheckOpenFailures();
   const bool copied = CheckPayloadCopyFailures();
+  const bool borrowed = CheckCountAndBorrowedPrefixAllocations();
   const bool diagnostics = CheckPageDiagnostics();
-  return opened && copied && diagnostics ? 0 : 1;
+  return opened && copied && borrowed && diagnostics ? 0 : 1;
 } catch (const std::exception& error) {
   std::fprintf(stderr, "cursor allocation fixture failure: %s\n", error.what());
   return 1;

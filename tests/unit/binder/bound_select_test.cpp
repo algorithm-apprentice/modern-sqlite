@@ -2458,6 +2458,19 @@ TEST(StatementBinder, ResolvesAnalyzeDatabaseTableAndIndexScopes) {
   ASSERT_EQ(1U, index.indexes().size());
   EXPECT_EQ(1U, index.indexes()[0].key_term_count);
   ASSERT_EQ(2U, index.indexes()[0].columns.size());
+  const auto catalog_index = catalog->FindIndex("idx_items_value");
+  ASSERT_TRUE(catalog_index.has_value());
+  EXPECT_EQ(catalog->index(*catalog_index).unique, index.indexes()[0].unique);
+  EXPECT_EQ(catalog->index(*catalog_index).unique_not_null, index.indexes()[0].unique_not_null);
+  EXPECT_FALSE(index.indexes()[0].primary_without_rowid);
+  bool found_primary = false;
+  for (const auto& analyzed : database.indexes()) {
+    if (analyzed.index_name == "wr") {
+      found_primary = true;
+      EXPECT_TRUE(analyzed.primary_without_rowid);
+    }
+  }
+  EXPECT_TRUE(found_primary);
 
   ExpectStatementBindError("ANALYZE missing", catalog, BindErrorCode::kNoSuchTable,
                            ErrorCode::kGeneric, "no such table or index");

@@ -1454,6 +1454,26 @@ int main() try {
     return 1;
   }
 
+  auto analyze_seed = index_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!analyze_seed.has_value() || analyze_seed->writer() == nullptr) {
+    return 1;
+  }
+  auto analyze_index = analyze_seed->writer()->OpenIndexBtree(index_root, index_columns);
+  if (!analyze_index.has_value()) {
+    return 1;
+  }
+  for (std::size_t row = 0; row < keys.size(); ++row) {
+    const std::array values{SqlValue::Text(keys[row]),
+                            SqlValue::Integer(static_cast<std::int64_t>(row) + 1)};
+    if (!analyze_index->Insert(values).has_value()) {
+      return 1;
+    }
+  }
+  if (!analyze_seed->Succeed().has_value()) {
+    return 1;
+  }
+  const ByteBuffer analyze_original = ByteBuffer::CopyOf(index_vfs.database_bytes());
   ProgramInput analyze_input;
   analyze_input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
   analyze_input.statement_kind = ProgramStatementKind::kAnalyze;
@@ -1488,29 +1508,69 @@ int main() try {
       HaltInstruction{},
   };
   auto analyze_program = BytecodeProgram::Create(analyze_input);
-  auto analyze_statement = index_coordinator->BeginStatement(TransactionStatementOptions{
-      .access = StatementAccess::kWrite,
-      .rollback = StatementRollbackMode::kStatement,
-  });
-  if (!analyze_program.has_value() || !analyze_statement.has_value() ||
-      analyze_statement->writer() == nullptr) {
+  if (!analyze_program.has_value() || !SweepVmCreation(*analyze_program)) {
     return 1;
   }
-  auto analyze_vm = Vm::Create(*analyze_program, VmEnvironment::Core());
-  if (!analyze_vm.has_value() ||
-      !analyze_vm->AttachExecutionContext(VmExecutionContext{*analyze_statement->writer(), 0})
-           .has_value()) {
+  const auto attempt_analyze =
+      [&](std::optional<std::size_t> failure) -> std::optional<std::size_t> {
+    auto statement_result = index_coordinator->BeginStatement(TransactionStatementOptions{
+        .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement});
+    auto runtime = Vm::Create(*analyze_program, VmEnvironment::Core());
+    if (!statement_result.has_value() || !runtime.has_value() ||
+        !runtime->AttachExecutionContext(VmExecutionContext{*statement_result->writer(), 0})
+             .has_value()) {
+      return std::nullopt;
+    }
+    allocation_index = 0;
+    failing_allocation = failure;
+    const auto stepped = runtime->Step();
+    const std::size_t count = allocation_index;
+    failing_allocation.reset();
+    if (failure.has_value()
+            ? stepped.has_value() || stepped.error().code() != ErrorCode::kOutOfMemory ||
+                  runtime->state() != VmState::kError
+            : !stepped.has_value() || *stepped != VmStep::kDone) {
+      return std::nullopt;
+    }
+    if (!runtime->DetachExecutionContext().has_value() ||
+        !statement_result->Rollback().has_value() ||
+        !std::ranges::equal(analyze_original.view(), index_vfs.database_bytes())) {
+      return std::nullopt;
+    }
+    return count;
+  };
+  if (!attempt_analyze(std::nullopt).has_value()) {
     return 1;
   }
-  fail_allocations = true;
-  const auto analyze_failure = analyze_vm->Step();
-  fail_allocations = false;
-  if (analyze_failure.has_value() || analyze_failure.error().code() != ErrorCode::kOutOfMemory) {
+  constexpr std::size_t kMaximumAnalyzeStepAllocations = 1024;
+  const std::optional<std::size_t> analyze_allocations = attempt_analyze(std::nullopt);
+  if (!analyze_allocations.has_value() || *analyze_allocations == 0U ||
+      *analyze_allocations > kMaximumAnalyzeStepAllocations) {
     return 1;
   }
-  if (!analyze_vm->DetachExecutionContext().has_value() ||
-      !analyze_statement->Rollback().has_value()) {
-    return 1;
+  for (std::size_t failure = 0; failure < *analyze_allocations; ++failure) {
+    if (!attempt_analyze(failure).has_value()) {
+      return 1;
+    }
+  }
+  {
+    VmLimits limits;
+    limits.maximum_value_bytes = 1024;
+    auto statement_result = index_coordinator->BeginStatement(TransactionStatementOptions{
+        .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement});
+    auto runtime = Vm::Create(*analyze_program, VmEnvironment::Core(), limits);
+    if (!statement_result.has_value() || !runtime.has_value() ||
+        !runtime->AttachExecutionContext(VmExecutionContext{*statement_result->writer(), 0})
+             .has_value()) {
+      return 1;
+    }
+    const auto limited = runtime->Step();
+    if (limited.has_value() || limited.error().code() != ErrorCode::kTooLarge ||
+        runtime->state() != VmState::kError || !runtime->DetachExecutionContext().has_value() ||
+        !statement_result->Rollback().has_value() ||
+        !std::ranges::equal(analyze_original.view(), index_vfs.database_bytes())) {
+      return 1;
+    }
   }
   return 0;
 } catch (...) {

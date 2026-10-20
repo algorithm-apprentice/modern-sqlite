@@ -1798,6 +1798,17 @@ TEST(BytecodeProgramTest, VerifiesTypedAnalyzeInstructions) {
   EXPECT_EQ("compute_index_stat1", InstructionKindName(InstructionKindOf(input.instructions[3])));
   EXPECT_EQ("compute_table_stat1", InstructionKindName(InstructionKindOf(input.instructions[4])));
 
+  for (const auto policy :
+       {Stat1IndexPolicy::Ordinary, Stat1IndexPolicy::UniqueNullable,
+        Stat1IndexPolicy::UniqueNotNull, Stat1IndexPolicy::PrimaryWithoutRowid}) {
+    std::get<ComputeIndexStat1Instruction>(input.instructions[3]).policy = policy;
+    EXPECT_TRUE(VerifyProgram(input).has_value());
+  }
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+  std::get<ComputeIndexStat1Instruction>(input.instructions[3]).policy =
+      static_cast<Stat1IndexPolicy>(255);
+  EXPECT_EQ(ProgramErrorCode::kInvalidEnumValue, VerifyError(input));
+  std::get<ComputeIndexStat1Instruction>(input.instructions[3]).policy = Stat1IndexPolicy::Ordinary;
   std::get<ClearStat1Instruction>(input.instructions[2]).scope =
       static_cast<Stat1ClearScope>(255);  // NOLINT
   EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));

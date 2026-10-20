@@ -8841,6 +8841,31 @@ TEST(AnalyzeLowering, CreatesStat1AndComputesIndexPrefixes) {
   EXPECT_EQ("4 2", TextBytes(stat_rows[0].second[2]));
 }
 
+TEST(AnalyzeLowering, PropagatesNativeIndexDistinctnessPolicies) {
+  struct Case {
+    std::string_view sql;
+    bool not_null;
+    Stat1IndexPolicy policy;
+  };
+  for (const Case& test : {
+           Case{"ANALYZE items_name", false, Stat1IndexPolicy::UniqueNullable},
+           Case{"ANALYZE items_name", true, Stat1IndexPolicy::UniqueNotNull},
+           Case{"ANALYZE items_score", false, Stat1IndexPolicy::Ordinary},
+       }) {
+    const BytecodeProgram program =
+        LowerMutationOrThrow(test.sql, IndexedMutationCatalog(test.not_null));
+    bool found = false;
+    for (const Instruction& instruction : program.instructions()) {
+      if (const auto* compute = std::get_if<ComputeIndexStat1Instruction>(&instruction);
+          compute != nullptr) {
+        found = true;
+        EXPECT_EQ(test.policy, compute->policy);
+      }
+    }
+    EXPECT_TRUE(found);
+  }
+}
+
 TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 

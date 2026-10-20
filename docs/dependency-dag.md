@@ -226,8 +226,12 @@ existing lowering producer.
 ADR-0121 follows the merged optimizer repair by translating sorter-backed
 CREATE INDEX, retained encoded append cursors, and native bulk balancing through those same
 storage and temporary-record mechanisms. Its closure retains the original
-36-allocation lowering contract; streaming ANALYZE remains the next ordered
-mechanism repair.
+36-allocation lowering contract.
+ADR-0122 translates streaming ANALYZE through native exact page counts,
+borrowed record prefixes, reusable retained fields, changed-suffix STAT1
+counters and UNIQUE/storage policies, preserving the original 37-allocation
+lowering contract. VM, function and preparation profile resolutions remain
+the next ordered prerequisites.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

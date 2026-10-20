@@ -8,8 +8,8 @@
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   90 production paths map to 36 mechanisms. Fourteen are reference-faithful,
-  sixteen are accepted architectural translations, one is an accepted
-  measured alternative, one requires repair, and four remain unresolved
+  seventeen are accepted architectural translations, one is an accepted
+  measured alternative, none requires repair, and four remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -87,8 +87,8 @@ infrastructure rather than production mechanisms.
 | Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 0 | 1 |
-| Writable session and SQL mechanisms | 2 | 5 | 0 | 4 | 0 | 1 | 0 |
-| **Total** | **90** | **36** | **14** | **16** | **1** | **1** | **4** |
+| Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
+| **Total** | **90** | **36** | **14** | **17** | **1** | **0** | **4** |
 
 ### Mechanism dispositions
 
@@ -128,7 +128,7 @@ infrastructure rather than production mechanisms.
 | `write-session-lifecycle` | Writable RAII session over compiler, VM, and coordinator | SQLite write statement and connection lifecycle | `architectural-translation` |
 | `write-dml-mutation` | Typed DML plans over one-pass cursors and index maintenance | `insert.c`, `update.c`, `delete.c`, and mutation opcodes | `architectural-translation` |
 | `write-create-index` | Canonical stable sorter, adjacent validation, and retained encoded bulk append | `build.c::sqlite3RefillIndex()` sorter and bulk ordered insertion | `architectural-translation` |
-| `write-analyze` | Monolithic VM scan with payload copy and owned decode per row | `analyze.c` retained `StatAccum`, `stat_push`, and `stat_get` | `repair-required` |
+| `write-analyze` | Native page count, borrowed prefixes, retained changed fields and STAT1 counters | `analyze.c` retained `StatAccum`, `stat_push`, and `stat_get` | `architectural-translation` |
 | `write-schema-ddl` | Typed schema-row mutation, cookie update, and catalog refresh | `build.c`, `prepare.c`, and schema VDBE operations | `architectural-translation` |
 
 ### Per-mechanism source maps and evidence
@@ -173,7 +173,7 @@ ordinal below, and its child ADR is created before production changes.
 | `write-session-lifecycle` — `implement-dml-ddl` | `prepare.c:703-1000`; `vdbeapi.c:105-174,834-1120`; `vdbeaux.c:3220-3510`; `main.c:1273-1408`. | Read session/transaction/VM; writable reset/rebind, changes, rowid, autocommit, rollback and schema-refresh traces. | `architectural-translation`; statement-journal admission remains ledger 8. |
 | `write-dml-mutation` — `implement-dml-ddl`, `optimize-one-pass-mutations`, `implement-index-planning` | `insert.c:888-1700`; `update.c:296-950`; `delete.c:288-859`; `vdbe.c:3577-3725,5744-6135,7203-7250`. | Binder/plans/VM/transaction/B-tree; model, crash, fuzz, one-pass, index-maintenance and interoperability evidence. | `architectural-translation`; remaining baseline gaps are assigned to lower ledger entries. |
 | `write-create-index` — `implement-index-planning`, `implement-advanced-sql` | `build.c:3851-3950`; `vdbesort.c:1065-1138,2880-2955`; `vdbe.c:6390-6440,6728-6775`; bulk balance/allocation source map in ADR-0121. | Canonical sorter/B-tree/schema owners; native page golden, raw serial forms, public-bytecode order guard, spill/OOM/rollback, compiler/fuzz/native and matched evidence. | `architectural-translation`; ADR-0121/ledger 10 translates the native pipeline and bulk state through typed boundaries; the public bytecode trust boundary additionally validates complete physical order. |
-| `write-analyze` — `implement-index-planning` | `analyze.c:166-250,695-945,977-1510,1523-1648` STAT1 table, `StatAccum`, scan, encode/load. | Index cursor/record/VM/schema refresh; STAT1 differential and index baseline evidence. | `repair-required`; ledger 11, child ADR pending. |
+| `write-analyze` — `implement-index-planning`, `implement-advanced-sql` | `analyze.c:265-460,695-895,1059-1455` accumulator, changed-suffix counters, UNIQUE policies and publication; `btree.c:10547-10616` page count; retained-field source map in ADR-0122. | Canonical cursor/record/VM/schema owners; native NULL/direction/UNIQUE/imported-index controls, callback retention, count/prefix/field allocation and OOM, compiler/fuzz/native and matched evidence. | `architectural-translation`; ADR-0122/PR #232 and `31e3ff5`, `9cb3134`, `c552e9f` translate count, retained fields and streaming accumulation without per-row owned decode. |
 | `write-schema-ddl` — `implement-dml-ddl`, `implement-index-planning` | `build.c:1265-1540,2716-2940,4020-4558`; `prepare.c:96-445`; schema opcodes in `vdbe.c:3577-3725,7203-7250`. | Catalog/transaction/B-tree; SQLite-readable schema rows, cookie/crash/no-op/reprepare tests. | `architectural-translation`; CREATE INDEX population is separately ledger 10. |
 
 ### Current matched performance evidence
@@ -199,6 +199,7 @@ greater than one mean Modern is slower.
 | Index | 6.41x CREATE INDEX; 5.40x unselective covering read; 3.67x noncovering range; 2.84x ANALYZE | `benchmarks/index-baseline-v1/aggregate.json` |
 | Index after ADR-0120 | 6.80x CREATE INDEX; 5.62x unselective covering read; 3.29x noncovering range; 2.81x ANALYZE | ADR-0120 `cc442a2` matched evidence; no execution-parity claim |
 | Index after ADR-0121 | 3.05x CREATE INDEX; 6.01x unselective covering read; 2.87x ANALYZE | ADR-0121 `0794a1d` matched evidence; all fifteen unchanged guards pass, no engine-wide parity claim |
+| ANALYZE after ADR-0122 | 1.88x wall and 1.96x CPU, down from 2.87x and 3.07x | ADR-0122 `c552e9f` matched evidence; all fifteen unchanged guards pass, all non-target diagnostic counters identical |
 
 The following fixed-work observations identify mechanism differences rather
 than timing noise:
@@ -229,8 +230,12 @@ than timing noise:
   from 85,565 to 46,437 allocations and from 105,193 to 9,041 cache hits.
   The added sorter-drain pipeline increases counted VM instructions from
   131,208 to 196,768; unrelated diagnostic work remains unchanged; and
-- ANALYZE performs 25,079 Modern allocations for 12,288 input rows because it
-  copies and fully decodes each index record.
+- historical ANALYZE performs 25,079 Modern allocations for 12,288 input
+  rows because it copies and fully decodes each index record. ADR-0122 removes
+  that mechanism: the fresh matched post-bulk-index count falls from 25,074
+  to 499 allocations and from 131,802 to 1,178 copied bytes. The native exact
+  count prepass raises cache hits from 15 to 57; all non-target diagnostic
+  counters remain unchanged.
 
 ### Blocking repair and resolution ledger
 
@@ -246,7 +251,7 @@ than timing noise:
 | 8 | `storage-transaction` | **Complete** | ADR-0119 translates compiler multi-write/ABORT effects, conditional anonymous savepoints, and error-class-aware completion; matched batch-INSERT allocations fall from 1,106,646 to 677,649. |
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
-| 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
+| 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
 | 12 | `execution-vm` | Resolve | Profile same-work covering-index, aggregate, and sorter controls; repair compact dispatch/register/cursor mechanisms if confirmed. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |

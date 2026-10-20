@@ -2199,6 +2199,116 @@ TEST(VmWriteTest, RejectsDuplicateRowidAndNotNullBeforePublishingChanges) {
   ExpectText(rows[0].second[1], "seed");
 }
 
+TEST(VmWriteTest, RetainsEquivalentAnalyzePrefixesAndNativeComparedWidths) {
+  class TraceCollation final : public Collation {
+   public:
+    explicit TraceCollation(std::string_view name) : name_(name) {}
+
+    [[nodiscard]] std::string_view name() const noexcept override { return name_; }
+
+    [[nodiscard]] std::weak_ordering Compare(Utf8View left,
+                                             Utf8View right) const noexcept override {
+      if (comparisons < arguments.size()) {
+        arguments[comparisons] = {left.bytes().empty() ? '\0' : left.bytes().front(),
+                                  right.bytes().empty() ? '\0' : right.bytes().front()};
+      }
+      ++comparisons;
+      return NoCaseCollation().Compare(left, right);
+    }
+
+    void Reset() const noexcept {
+      comparisons = 0;
+      arguments = {};
+    }
+
+    mutable std::size_t comparisons = 0;
+    mutable std::array<std::pair<char, char>, 2> arguments{};
+
+   private:
+    std::string_view name_;
+  };
+  const TraceCollation head{"STAT1_HEAD"};
+  const TraceCollation tail{"STAT1_TAIL"};
+  const std::array<const Collation*, 3> collations{&BinaryCollation(), &head, &tail};
+  const std::array<ScalarFunction, 1> functions{
+      ScalarFunction{"check_stat1", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone,
+                     [](const ScalarFunctionContext&,
+                        std::span<const SqlValue> arguments) -> Result<SqlValue> {
+                       ExpectText(arguments[0], "3 3 1");
+                       return SqlValue{};
+                     }},
+  };
+  const FunctionRegistry registry{functions};
+  test::WritePagerFixedVfs vfs{false};
+  PageNumber root{0};
+  {
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(statement.writer()->InitializeDatabase());
+    const std::array<IndexColumnOrder, 3> columns{IndexColumnOrder{head}, IndexColumnOrder{tail},
+                                                  IndexColumnOrder{BinaryCollation()}};
+    IndexBtreeWriter index = TakeValue(statement.writer()->CreateIndexBtree(columns));
+    root = index.root_page();
+    const std::array<std::pair<std::string_view, std::string_view>, 3> keys{
+        std::pair{"A", "x"}, std::pair{"a", "y"}, std::pair{"a", "z"}};
+    std::int64_t rowid = 0;
+    for (const auto& [first, second] : keys) {
+      const std::array values{SqlValue::Text(std::string{first}),
+                              SqlValue::Text(std::string{second}), SqlValue::Integer(++rowid)};
+      RequireStatus(index.Insert(values));
+    }
+    RequireStatus(statement.Succeed());
+  }
+  for (const Stat1IndexPolicy policy : {Stat1IndexPolicy::Ordinary, Stat1IndexPolicy::UniqueNotNull,
+                                        Stat1IndexPolicy::PrimaryWithoutRowid}) {
+    head.Reset();
+    tail.Reset();
+    ProgramInput input;
+    input.statement_kind = ProgramStatementKind::kAnalyze;
+    input.transaction_access = ProgramTransactionAccess::kWrite;
+    input.rollback_mode = ProgramRollbackMode::kStatement;
+    input.register_count = 2;
+    input.symbols = {"BINARY", "STAT1_HEAD", "STAT1_TAIL", "check_stat1"};
+    input.cursors.push_back(ReadCursorDescriptor{
+        .root_page = RootPageNumber(root.value()),
+        .storage = CursorStorageKind::kIndex,
+        .record_field_count = 3,
+        .fields = {},
+        .index_columns =
+            {
+                IndexColumnMetadata{.collation = Symbol(1), .order = BytecodeSortOrder::kAscending},
+                IndexColumnMetadata{.collation = Symbol(2), .order = BytecodeSortOrder::kAscending},
+                IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending},
+            },
+    });
+    input.instructions = {
+        ComputeIndexStat1Instruction{
+            .cursor = Cursor(0), .key_term_count = 2, .policy = policy, .output = Reg(0)},
+        CallScalarInstruction{.function = Symbol(3),
+                              .collation = Symbol(0),
+                              .first_argument = Reg(0),
+                              .argument_count = 1,
+                              .output = Reg(1)},
+        HaltInstruction{},
+    };
+    const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
+    TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+    TransactionStatement statement =
+        TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement}));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment{registry, collations}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(2U, head.comparisons);
+    EXPECT_EQ((std::array{std::pair{'A', 'a'}, std::pair{'A', 'a'}}), head.arguments);
+    EXPECT_EQ(policy == Stat1IndexPolicy::Ordinary ? 2U : 0U, tail.comparisons);
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+}
+
 TEST(VmWriteTest, PreflightsMaintainsAndValidatesIndexEntries) {
   test::WritePagerFixedVfs vfs{false};
   PageNumber index_root{0};

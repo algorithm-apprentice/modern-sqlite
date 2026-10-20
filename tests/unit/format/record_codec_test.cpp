@@ -67,6 +67,112 @@ template <typename Enum>
   return static_cast<Enum>(value);
 }
 
+TEST(RecordFieldView, RetainsValuesInReusableCallerStorageWithoutChangingLogicalBytes) {
+  const std::array values{
+      SqlValue::Text(std::string(256, 'a')),
+      SqlValue::Text(std::string{"b\0c", 3}),
+      SqlValue::Blob(Bytes({0x00, 0xff})),
+      SqlValue::Integer(-7),
+      SqlValue::Real(3.25),
+      SqlValue{},
+      SqlValue::Text(""),
+      SqlValue::Blob(ByteBuffer{}),
+  };
+  const auto encoded = EncodeRecord(values);
+  ASSERT_TRUE(encoded.has_value());
+  const auto record = RecordView::Parse(encoded->view());
+  ASSERT_TRUE(record.has_value());
+  ByteBuffer storage;
+  const std::byte* retained_address = nullptr;
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto field = record->field(index);
+    ASSERT_TRUE(field.has_value());
+    const auto retained = field->CopyTo(storage);
+    ASSERT_TRUE(retained.has_value());
+    EXPECT_EQ(values[index].type(), retained->type());
+    EXPECT_TRUE(CompareRecordFields(*field, *retained, BinaryCollation()) ==
+                std::weak_ordering::equivalent);
+    if (index == 0U) {
+      retained_address = storage.view().data();
+    }
+    EXPECT_EQ(retained_address, storage.view().data());
+    EXPECT_EQ(256U, storage.size().value());
+    if (const auto text = retained->text_value(); text.has_value()) {
+      ASSERT_TRUE(values[index].text_value().has_value());
+      EXPECT_EQ(values[index].text_value()->bytes(), text->bytes());
+      if (!text->bytes().empty()) {
+        EXPECT_NE(field->text_value()->data(), text->data());
+      }
+    }
+    if (const auto blob = retained->blob_value(); blob.has_value()) {
+      ASSERT_TRUE(values[index].blob_value().has_value());
+      EXPECT_TRUE(std::ranges::equal(*values[index].blob_value(), *blob));
+      if (!blob->empty()) {
+        EXPECT_NE(field->blob_value()->data(), blob->data());
+      }
+    }
+  }
+}
+
+TEST(RecordFieldView, RetainedBytesOutliveTheSourceRecord) {
+  ByteBuffer storage;
+  RecordFieldView retained;
+  {
+    const std::array values{SqlValue::Text("retained")};
+    const auto encoded = EncodeRecord(values);
+    ASSERT_TRUE(encoded.has_value());
+    const auto record = RecordView::Parse(encoded->view());
+    ASSERT_TRUE(record.has_value());
+    const auto field = record->field(0);
+    ASSERT_TRUE(field.has_value());
+    const auto copied = field->CopyTo(storage);
+    ASSERT_TRUE(copied.has_value());
+    retained = *copied;
+  }
+  ASSERT_TRUE(retained.text_value().has_value());
+  EXPECT_EQ("retained", retained.text_value()->bytes());
+}
+
+TEST(RecordFieldView, ComparesBorrowedFieldsThroughCanonicalCollationAndNumericRules) {
+  const std::array values{
+      SqlValue::Integer(9007199254740993LL),
+      SqlValue::Real(9007199254740992.0),
+      SqlValue::Text("Alpha"),
+      SqlValue::Text("alpha"),
+      SqlValue::Text("Alpha "),
+      SqlValue{},
+      SqlValue::Blob(Bytes({0x41})),
+  };
+  const auto encoded = EncodeRecord(values);
+  ASSERT_TRUE(encoded.has_value());
+  const auto record = RecordView::Parse(encoded->view());
+  ASSERT_TRUE(record.has_value());
+  auto cursor = record->cursor();
+  std::array<RecordFieldView, 7> fields;
+  for (auto& field : fields) {
+    const auto current = cursor.Next();
+    ASSERT_TRUE(current.has_value());
+    field = *current;
+  }
+  EXPECT_TRUE(CompareRecordFields(fields[0], fields[1], BinaryCollation()) ==
+              std::weak_ordering::greater);
+  EXPECT_TRUE(CompareRecordFields(fields[1], fields[0], BinaryCollation()) ==
+              std::weak_ordering::less);
+  EXPECT_TRUE(CompareRecordFields(fields[2], fields[3], NoCaseCollation()) ==
+              std::weak_ordering::equivalent);
+  EXPECT_TRUE(CompareRecordFields(fields[2], fields[3], BinaryCollation()) ==
+              std::weak_ordering::less);
+  EXPECT_TRUE(CompareRecordFields(fields[2], fields[4], RTrimCollation()) ==
+              std::weak_ordering::equivalent);
+  EXPECT_TRUE(CompareRecordFields(fields[5], fields[5], BinaryCollation()) ==
+              std::weak_ordering::equivalent);
+  EXPECT_TRUE(CompareRecordFields(fields[5], fields[2], BinaryCollation()) ==
+              std::weak_ordering::less);
+  EXPECT_TRUE(CompareRecordFields(fields[6], fields[2], BinaryCollation()) ==
+              std::weak_ordering::greater);
+}
+
 TEST(RecordSerialType, SelectsSmallestSQLiteIntegerWidth) {
   struct Vector {
     std::int64_t value;

@@ -270,6 +270,9 @@ struct BoundAnalyzeIndex {
   std::string index_name{};
   std::uint32_t key_term_count = 0;
   std::vector<BoundAnalyzeIndexColumn> columns{};
+  bool unique = false;
+  bool unique_not_null = false;
+  bool primary_without_rowid = false;
   bool partial = false;
 };
 
