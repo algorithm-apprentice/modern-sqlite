@@ -47,7 +47,8 @@ comparison reader rather than copying its algorithm. It accepts a nonzero
 field bound, caller-owned `ByteBuffer` scratch and an explicit maximum
 complete-record size. Fully local prefixes borrow the current page;
 nonlocal prefixes borrow that scratch. Views end before cursor movement or
-scratch replacement. No prefix/payload cache is added to the cursor.
+scratch modification, including reuse without reallocation. No prefix/payload
+cache is added to the cursor.
 
 Factor only the shared overflow-prefix acquisition from
 `CompareCellPrefix()`; preserve its local complete-record comparison path,
@@ -136,3 +137,16 @@ independent native controls are frozen separately. Capture a fresh matched
 after run, run native contracts early and close the actual final exact-head
 plan, required hosted gates and integrated review before merge. Ledger 12 and
 new SQL features remain blocked until this repair closes.
+
+## Cursor prerequisite slice evidence
+
+The focused count control first fails because `CountEntries()` is absent.
+The implemented shared page walk and borrowed prefix reader pass all 32
+affected cursor/prefix/allocation cases. A complete default development build
+precedes the passing 1,483 ordinary plus 92 isolated fast cases. Warm table
+and index counts allocate zero; an overflow prefix allocates once and reuses
+caller scratch without further allocation. Exhaustive allocation failures
+remain typed and leak-free. Deterministic read failures prove that page
+counting does not read overflow payloads, and existing full-chain comparison
+failure/format precedence remains unchanged. Retained-field and STAT1 VM
+integration slices have not begun.

@@ -62,6 +62,8 @@ class TableBtreeCursor final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] Status ClearPosition();
+  // Counts physical entries by page and invalidates the current row position.
+  [[nodiscard]] Result<std::uint64_t> CountEntries();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Last();
   [[nodiscard]] Result<bool> Next();
@@ -95,6 +97,8 @@ class IndexBtreeCursor final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] Status ClearPosition();
+  // Counts physical entries by page and invalidates the current row position.
+  [[nodiscard]] Result<std::uint64_t> CountEntries();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Last();
   [[nodiscard]] Result<bool> Next();
@@ -104,6 +108,10 @@ class IndexBtreeCursor final {
   // Returns the ordering of the current stored record relative to the encoded key prefix.
   [[nodiscard]] Result<std::weak_ordering> CompareCurrentRecordPrefix(const RecordView& key,
                                                                       std::size_t key_field_count);
+  // Borrows the current page or scratch until movement or scratch modification.
+  [[nodiscard]] Result<RecordPrefixView> ReadRecordPrefix(std::size_t requested_fields,
+                                                          ByteBuffer& scratch,
+                                                          ByteCount maximum_record_bytes);
 
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
