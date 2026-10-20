@@ -281,8 +281,8 @@ tightens the four affected lowering allocation counts from
 34/40/47/59 to 33/39/46/57; no allocation ceiling is raised.
 
 GPT-5.6 Sol approved the corrected second implementation slice with no
-significant unresolved issue. Integrated exact-head qualification and matched
-closing evidence remain required before ledger 9 closes.
+significant unresolved issue. Required integrated evidence is recorded below;
+same-head hosted checks remain a pull-request merge gate.
 
 At `47831dd`, all six isolated compiler/runtime selections and four bounded
 20,000-run fuzz campaigns passed. The native ORDER BY smoke contract then
@@ -294,3 +294,27 @@ and owned quality checks. Closing gates must use the corrected production
 head; the failed native-contract attempt is retained, not reported as green.
 GPT-5.6 Sol approved this integrated correction's design and implementation
 before its separate commit.
+
+## Closing evidence
+
+Production head `cc442a2491aa0e94f35be9f9e1c38beb958ef5c2`, tree
+`4e2a40bae9e26da11323b561b6ad0cfb342dc9a9`, passes the full generated
+verification plan: 27 reconciled shared checks; 1,596 isolated cases each
+in Debug, Release, ASan/UBSan, GNU Debug, and GNU Release; 1,613 instrumented
+cases; and 58 native contracts. All four unchanged SQL/database read/write
+fuzz campaigns complete 20,000 runs with seed 102. The original ten-second
+sanitizer correlated model passes in 1.26 seconds. Full production quality,
+formatting, discipline, and graph gates pass.
+
+The unchanged fifteen index workloads are retained at
+`build/evidence/where-path-index-after-v1`, against the frozen
+`where-path-index-before-v1` at `ce7217b`. Host, compiler/build flags, pinned
+SQLite options, workload/fixture hashes, and diagnostic logical work match;
+all existing guards pass. Covering equality drops from 1,920 to 1,664 Modern
+VM instructions over 128 probes, and multi-equality drops from 2,560 to 2,048.
+Unselective covering remains 8,200 Modern versus 8,201 SQLite VM instructions
+and a 5.62x wall ratio (previously 5.80x), so this is not execution-speed
+parity. CREATE INDEX remains 6.80x and ANALYZE 2.81x; their unchanged
+85,565/25,074 diagnostic allocations retain ledger 10/11 as the next repairs.
+Historical committed baselines, workloads, thresholds, and deadlines are
+unchanged.

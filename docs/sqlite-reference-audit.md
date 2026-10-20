@@ -8,8 +8,8 @@
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   90 production paths map to 36 mechanisms. Fourteen are reference-faithful,
-  fourteen are accepted architectural translations, one is an accepted
-  measured alternative, three require repair, and four remain unresolved
+  fifteen are accepted architectural translations, one is an accepted
+  measured alternative, two require repair, and four remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -86,9 +86,9 @@ infrastructure rather than production mechanisms.
 | Storage and transaction | 40 | 12 | 8 | 4 | 0 | 0 | 0 |
 | Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
-| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 4 | 0 | 1 | 1 |
+| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 0 | 1 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 3 | 0 | 2 | 0 |
-| **Total** | **90** | **36** | **14** | **14** | **1** | **3** | **4** |
+| **Total** | **90** | **36** | **14** | **15** | **1** | **2** | **4** |
 
 ### Mechanism dispositions
 
@@ -120,7 +120,7 @@ infrastructure rather than production mechanisms.
 | `binding-catalog-loader` | Acyclic scan, parse, derive, and publish pipeline | `prepare.c`, `build.c`, and `analyze.c` schema initialization | `architectural-translation` |
 | `binding-name-resolution` | Immutable bound arenas and lexical query owners | `resolve.c` NameContext walkers and `select.c` result processing | `unresolved` |
 | `execution-logical-plan` | Immutable semantic query-block DAG | `select.c` semantic phases before code generation | `architectural-translation` |
-| `execution-optimizer` | Local candidate selection in declared source order | `where.c` WhereLoop construction and path solving | `repair-required` |
+| `execution-optimizer` | Native LogEst costs, prerequisite-bearing loops, pruning, and bounded N-best paths through immutable plan owners | `where.c` WhereLoop construction and path solving | `architectural-translation` |
 | `execution-lowering` | Separate typed bytecode emission | `select.c`, `wherecode.c`, and `expr.c` schedules | `architectural-translation` |
 | `execution-bytecode` | Immutable typed instructions and separate verifier | Mutable `VdbeOp` emission/finalization | `architectural-translation` |
 | `execution-vm` | `std::variant`/`std::visit` dispatch with typed values and cursors | Compact `vdbe.c` opcode loop, `Mem`, and `VdbeCursor` | `unresolved` |
@@ -165,7 +165,7 @@ ordinal below, and its child ADR is created before production changes.
 | `binding-catalog-loader` — `implement-catalog-loader` | `prepare.c:96-203,225-445`; `build.c:1040-1120,1549-1960,2437-2555,4020-4620`; `analyze.c:1523-1648,1942-2008`. | Catalog/parser/B-tree/record; SQLite-created schema, malformed rows, DDL identity, STAT1, reload tests. | `architectural-translation`; recursive prepare is intentionally split. |
 | `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 are semantic authorities; matched preparation evidence is missing. |
 | `execution-logical-plan` — `implement-logical-plan`, `implement-advanced-sql` | `select.c:7709-7728,8371-8473,1224-1344,2573-2618`; `where.c:6948-6965`. | Binder/catalog; plan ownership, clause order, joins, compounds, aggregate and allocation tests. | `architectural-translation`; semantic phases only, no runtime resources. |
-| `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7120`; `wherecode.c:1680-2245`. | Logical plan/catalog/statistics; access choice, scaling, fixed-work, conditional/join audits. | `repair-required`; ledger 9, child ADR pending. Current source-order selector is not the WhereLoop/path solver. |
+| `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7130`; `wherecode.c:970-1008,1680-2245`. | Logical plan/catalog/statistics; native access/order/callback controls, search bounds, OOM, compiler/sanitizer/fuzz gates, and matched index evidence. | `architectural-translation`; ADR-0120/ledger 9 preserves native costs, loops, bounded paths, and predicate/key phases while separating immutable planning from emission. |
 | `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
 | `execution-bytecode` — `implement-bytecode` | `vdbeaux.c:271-363,598-658,876-975,1286-1355,2658-2890`; `vdbe.h:50-93`. | SQL values/results; builder/verifier dataflow, capability, malformed/OOM, size tests. | `architectural-translation`; runtime representation uncertainty is owned by `execution-vm`. |
 | `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbeapi.c:834-980`. | Bytecode/Pager/B-tree/functions/temp storage; complete semantic/lifecycle suites and all matched execution baselines. | `unresolved`; ledger 12. Profile identity precedes any compact-dispatch child ADR. |
@@ -197,6 +197,7 @@ greater than one mean Modern is slower.
 | Aggregate/grouping | 7.56x DISTINCT state; 6.91x sorted file grouping; 6.90x unique local ordering; 6.32x global functions | `benchmarks/aggregate-baseline-v1/aggregate.json` |
 | Aggregate after ADR-0116 | 6.12x wide file modifiers with 274,555 allocations; sorted file grouping remains 6.92x | ADR-0116 implementation evidence |
 | Index | 6.41x CREATE INDEX; 5.40x unselective covering read; 3.67x noncovering range; 2.84x ANALYZE | `benchmarks/index-baseline-v1/aggregate.json` |
+| Index after ADR-0120 | 6.80x CREATE INDEX; 5.62x unselective covering read; 3.29x noncovering range; 2.81x ANALYZE | ADR-0120 `cc442a2` matched evidence; no execution-parity claim |
 
 The following fixed-work observations identify mechanism differences rather
 than timing noise:
@@ -239,7 +240,7 @@ than timing noise:
 | 6 | `runtime-ephemeral-relation` | **Complete** | ADR-0117 uses the canonical ephemeral B-tree in memory and file modes, removes sorted-array insertion, and records page-limit, OOM, ownership, and fresh DISTINCT/compound evidence. |
 | 7 | `runtime-topn` | **Complete** | ADR-0118 reuses the ephemeral B-tree for logarithmic ORDER BY LIMIT admission, positioned maximum deletion, lazy OFFSET drain, cross-library allocation contracts, and fresh matched evidence. |
 | 8 | `storage-transaction` | **Complete** | ADR-0119 translates compiler multi-write/ABORT effects, conditional anonymous savepoints, and error-class-aware completion; matched batch-INSERT allocations fall from 1,106,646 to 677,649. |
-| 9 | `execution-optimizer` | Repair | ADR-0120 translates native LogEst costs and bounded WhereLoop/path solving for currently admitted accesses and join barriers; implementation and qualification remain pending. |
+| 9 | `execution-optimizer` | **Complete** | ADR-0120 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses; `cc442a2` passes full isolated/compiler/fuzz/native gates and matched unchanged-workload guards. Hosted checks remain the merge gate before ledger 10 begins. |
 | 10 | `write-create-index` | Repair | Reuse the repaired sorter and add ordered bulk index construction with adjacent UNIQUE checks. |
 | 11 | `write-analyze` | Repair | Stream borrowed index fields through a retained STAT1 accumulator without per-row record ownership. |
 | 12 | `execution-vm` | Resolve | Profile same-work covering-index, aggregate, and sorter controls; repair compact dispatch/register/cursor mechanisms if confirmed. |
